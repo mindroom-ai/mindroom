@@ -534,9 +534,21 @@ class TurnPolicy:
             for candidate in ([] if names_me else await self.responder_candidates_for_room(room, requester_user_id))
             if candidate.full_id in joined
         ]
-        desktop_agent = desktop_room_agent(config, self.deps.runtime_paths, room, requester_user_id)
-        if names_me or (command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name):
+        desktop_agent = (
+            desktop_room_agent(
+                config,
+                self.deps.runtime_paths,
+                room,
+                requester_user_id,
+                args_text=command.args.get("args_text", ""),
+            )
+            if command.type is CommandType.DESKTOP
+            else None
+        )
+        if names_me:
             aimed_at = [me]
+        elif command.type is CommandType.DESKTOP and desktop_agent is not None:
+            aimed_at = [me] if desktop_agent == self.deps.agent_name else []
         elif mentioned_agents:
             aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]
         else:

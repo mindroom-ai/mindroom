@@ -17,8 +17,12 @@ from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 import mindroom.tools  # noqa: F401
-from mindroom.commands.desktop_commands import DesktopCommandScope, handle_desktop_command
+from mindroom.commands.desktop_commands import DesktopCommandScope, desktop_room_agent, handle_desktop_command
+from mindroom.commands.handler import handle_command
+from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.main import Config
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.desktop.credentials import load_desktop_credentials, save_desktop_credentials
 from mindroom.desktop.identity import DesktopIdentityError
 from mindroom.desktop.pairing import (
     DesktopPairingError,
@@ -30,16 +34,33 @@ from mindroom.desktop.pairing import (
 from mindroom.desktop.pairing_client import send_desktop_pairing_claim
 from mindroom.desktop.pairing_receiver import DesktopPairingReceiver, register_desktop_pairing_receiver
 from mindroom.desktop.protocol import (
+    DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE,
+    DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
     DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
     DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+    DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+    DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE,
+    DESKTOP_SETUP_OFFER_EVENT_TYPE,
+    DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+    DesktopDisconnectConfirmed,
+    DesktopDisconnectRequest,
     DesktopPairingAccepted,
     DesktopPairingClaim,
+    DesktopPairingConfirm,
+    DesktopPairingConfirmed,
+    DesktopSetupOffer,
+    DesktopSetupRequest,
     desktop_pairing_verification,
 )
 from mindroom.matrix.device_identity import PinnedMatrixDevice
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.olm_to_device import OlmToDeviceError
-from tests.conftest import test_runtime_paths
+from mindroom.matrix.room_membership import ensure_room_membership_synced
+from mindroom.message_target import MessageTarget
+from tests.authorization_helpers import make_test_command_handler_context
+from tests.conftest import make_conversation_reader_mock, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -627,20 +648,50 @@ def test_desktop_command_contains_pairing_database_errors(
     assert "temporarily unavailable" in response
 
 
-def test_claim_rejects_different_matrix_account(tmp_path: Path) -> None:
-    """A Matrix account other than the initiating requester cannot claim a pairing code."""
+def test_claim_enforces_requester_account_for_olm_while_preserving_legacy_bridge_account(tmp_path: Path) -> None:
+    """Olm pairings strictly require the requester's Matrix account; legacy manual setup still supports dedicated bridge accounts."""
     runtime_paths = test_runtime_paths(tmp_path)
-    pairing = create_desktop_pairing(
+
+    # Legacy manual /desktop setup (initiator_device_id is None): dedicated bridge Matrix account succeeds.
+    legacy = create_desktop_pairing(
         runtime_paths,
         requester_id="@alice:example.org",
         agent_name="computer",
         now=100,
     )
+    legacy_claimed = claim_desktop_pairing(
+        runtime_paths,
+        token=legacy.token,
+        agent_name="computer",
+        device_user_id="@desktop-bridge:example.org",
+        device_id="BRIDGE",
+        device_ed25519="bridge-fingerprint",
+        now=101,
+    )
+    assert legacy_claimed.device_user_id == "@desktop-bridge:example.org"
+    legacy_confirmed = confirm_desktop_pairing(
+        runtime_paths,
+        token=legacy.token,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        verification=desktop_pairing_verification(legacy.token, "bridge-fingerprint"),
+        now=102,
+    )
+    assert legacy_confirmed.device_user_id == "@desktop-bridge:example.org"
 
+    # Olm-initiated pairing (initiator_device_id is set): another Matrix account is rejected.
+    olm = create_desktop_pairing(
+        runtime_paths,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        initiator_device_id="CHAT1",
+        initiator_ed25519="chat1-key",
+        now=100,
+    )
     with pytest.raises(DesktopPairingError, match="does not belong to this Matrix account"):
         claim_desktop_pairing(
             runtime_paths,
-            token=pairing.token,
+            token=olm.token,
             agent_name="computer",
             device_user_id="@mallory:example.org",
             device_id="MALLORY",
@@ -650,22 +701,518 @@ def test_claim_rejects_different_matrix_account(tmp_path: Path) -> None:
 
     claimed = claim_desktop_pairing(
         runtime_paths,
-        token=pairing.token,
+        token=olm.token,
         agent_name="computer",
         device_user_id="@alice:example.org",
-        device_id="ALICE",
-        device_ed25519="alice-fingerprint",
+        device_id="HELPER",
+        device_ed25519="helper-fingerprint",
         now=102,
     )
     assert claimed.device_user_id == "@alice:example.org"
-
-    with pytest.raises(DesktopPairingError, match="does not belong to this Matrix account"):
-        claim_desktop_pairing(
+    # Legacy /desktop confirm (without initiator_device_id) cannot confirm an Olm-initiated pairing.
+    with pytest.raises(DesktopPairingError, match="initiating device"):
+        confirm_desktop_pairing(
             runtime_paths,
-            token=pairing.token,
+            token=olm.token,
+            requester_id="@alice:example.org",
             agent_name="computer",
-            device_user_id="@mallory:example.org",
-            device_id="MALLORY",
-            device_ed25519="mallory-fingerprint",
+            verification=desktop_pairing_verification(olm.token, "helper-fingerprint"),
             now=103,
         )
+
+
+def test_pairing_db_migrates_legacy_schema_without_initiator_columns(tmp_path: Path) -> None:
+    """Opening an existing 7-column pairing database adds initiator columns without losing rows."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    db_path = runtime_paths.storage_root / "tracking" / "desktop_pairing.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE desktop_pairings (
+                token_hash TEXT PRIMARY KEY,
+                requester_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                device_user_id TEXT,
+                device_id TEXT,
+                device_ed25519 TEXT
+            )
+            """,
+        )
+
+    pairing = create_desktop_pairing(
+        runtime_paths,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        initiator_device_id="CHAT1",
+        initiator_ed25519="chat1-key",
+        now=100,
+    )
+    claimed = claim_desktop_pairing(
+        runtime_paths,
+        token=pairing.token,
+        agent_name="computer",
+        device_user_id="@alice:example.org",
+        device_id="HELPER",
+        device_ed25519="helper-key",
+        now=101,
+    )
+    assert (claimed.initiator_device_id, claimed.initiator_ed25519) == ("CHAT1", "chat1-key")
+
+
+def _olm_device(ed25519: str, curve25519: str = "curve-key", *, deleted: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(ed25519=ed25519, curve25519=curve25519, deleted=deleted, blacklisted=False)
+
+
+def _olm_event(
+    *,
+    sender: str,
+    device_id: str,
+    ed25519: str,
+    event_type: str,
+    content: dict[str, object],
+    curve25519: str = "curve-key",
+) -> AuthenticatedToDeviceEvent:
+    return AuthenticatedToDeviceEvent(
+        source={"content": content},
+        sender=sender,
+        type=event_type,
+        authenticated_sender=AuthenticatedDevice(sender, device_id, curve25519, ed25519),
+    )
+
+
+def _desktop_config(runtime_paths: object) -> Config:
+    return Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {"display_name": "Computer", "role": "Operate apps", "tools": ["desktop"]},
+                "notes": {"display_name": "Notes", "role": "Take notes", "tools": []},
+            },
+        },
+        runtime_paths,  # type: ignore[arg-type]
+    )
+
+
+def _olm_receiver(
+    runtime_paths: object,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    devices: dict[str, dict[str, SimpleNamespace]],
+    agent_name: str = "computer",
+    config: Config | None = None,
+) -> tuple[DesktopPairingReceiver, list[tuple[PinnedMatrixDevice, str, dict[str, object]]]]:
+    sent: list[tuple[PinnedMatrixDevice, str, dict[str, object]]] = []
+
+    async def capture_send(
+        _client: object,
+        target: PinnedMatrixDevice,
+        *,
+        event_type: str,
+        content: dict[str, object],
+    ) -> None:
+        sent.append((target, event_type, content))
+
+    monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", capture_send)
+    client = SimpleNamespace(olm=SimpleNamespace(device_store=devices))
+    receiver = DesktopPairingReceiver(
+        client=client,  # type: ignore[arg-type]
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,  # type: ignore[arg-type]
+        config=config if config is not None else _desktop_config(runtime_paths),
+    )
+    return receiver, sent
+
+
+async def _start_and_claim_olm_pairing(
+    receiver: DesktopPairingReceiver,
+    sent: list[tuple[PinnedMatrixDevice, str, dict[str, object]]],
+) -> tuple[DesktopSetupOffer, str]:
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="setup-nonce-01234567", agent_name="computer").to_content(),
+        ),
+    )
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice:example.org", "CHAT1", "chat1-key")
+    assert event_type == DESKTOP_SETUP_OFFER_EVENT_TYPE
+    offer = DesktopSetupOffer.from_content(content)
+    assert offer.eligible is True
+    assert offer.code is not None
+
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="HELPER1",
+            ed25519="helper1-key",
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(offer.code).to_content(),
+        ),
+    )
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice:example.org", "HELPER1", "helper1-key")
+    assert event_type == DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE
+    return offer, DesktopPairingAccepted.from_content(content).verification
+
+
+@pytest.mark.asyncio
+async def test_olm_pairing_happy_path_setup_claim_confirm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Olm setup_request -> pairing_claim -> pairing_confirm completes and saves scoped credentials."""
+    runtime_paths = replace(
+        test_runtime_paths(tmp_path),
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_DESKTOP_MATRIX_HOMESERVER": "https://matrix.example.org",
+            "MINDROOM_DESKTOP_CLOUDFLARE_ACCESS": "true",
+        },
+    )
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key"), "HELPER1": _olm_device("helper1-key")}}
+    config = _desktop_config(runtime_paths)
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices, config=config)
+
+    offer, verification = await _start_and_claim_olm_pairing(receiver, sent)
+    assert offer.homeserver == "https://matrix.example.org"
+    assert offer.user_id == "@alice:example.org"
+    assert offer.cloudflare_access is True
+    assert offer.code is not None
+
+    confirm_event = _olm_event(
+        sender="@alice:example.org",
+        device_id="CHAT1",
+        ed25519="chat1-key",
+        event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+        content=DesktopPairingConfirm(
+            nonce="confirm-nonce-012345",
+            token=offer.code,
+            verification=verification,
+            device_id="HELPER1",
+            device_ed25519="helper1-key",
+        ).to_content(),
+    )
+    await receiver.on_event(confirm_event)
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice:example.org", "CHAT1", "chat1-key")
+    assert event_type == DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE
+    assert DesktopPairingConfirmed.from_content(content) == DesktopPairingConfirmed(
+        nonce="confirm-nonce-012345",
+        agent_name="computer",
+        ok=True,
+    )
+    assert load_desktop_credentials(
+        get_runtime_credentials_manager(runtime_paths),
+        requester_id="@alice:example.org",
+        agent_name="computer",
+    ) == {"device_user_id": "@alice:example.org", "device_id": "HELPER1", "device_ed25519": "helper1-key"}
+
+    # Replaying confirmation fails because the token was consumed.
+    await receiver.on_event(confirm_event)
+    assert DesktopPairingConfirmed.from_content(sent.pop()[2]).ok is False
+
+    # Ineligible agent replies with eligible=False and no code.
+    ineligible_receiver, sent2 = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="notes",
+        config=config,
+    )
+    await ineligible_receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="inelig-nonce-0123456", agent_name="notes").to_content(),
+        ),
+    )
+    denied = DesktopSetupOffer.from_content(sent2.pop()[2])
+    assert denied.eligible is False
+    assert denied.code is None
+    assert denied.error is not None
+
+
+@pytest.mark.asyncio
+async def test_olm_pairing_confirm_rejects_different_chat_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second Chat device of the same user cannot confirm an Olm pairing initiated elsewhere."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    devices = {
+        "@alice:example.org": {
+            "CHAT1": _olm_device("chat1-key"),
+            "CHAT2": _olm_device("chat2-key"),
+            "HELPER1": _olm_device("helper1-key"),
+            "DELETED": _olm_device("deleted-key", deleted=True),
+        },
+    }
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices)
+    offer, verification = await _start_and_claim_olm_pairing(receiver, sent)
+    assert offer.code is not None
+
+    # Untrusted/deleted device is silently ignored.
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="DELETED",
+            ed25519="deleted-key",
+            event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+            content=DesktopPairingConfirm(
+                nonce="confirm-deleted-0123",
+                token=offer.code,
+                verification=verification,
+                device_id="HELPER1",
+                device_ed25519="helper1-key",
+            ).to_content(),
+        ),
+    )
+    assert sent == []
+
+    # Second trusted device gets ok=False and credentials are not saved.
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT2",
+            ed25519="chat2-key",
+            event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+            content=DesktopPairingConfirm(
+                nonce="confirm-chat2-012345",
+                token=offer.code,
+                verification=verification,
+                device_id="HELPER1",
+                device_ed25519="helper1-key",
+            ).to_content(),
+        ),
+    )
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice:example.org", "CHAT2", "chat2-key")
+    assert event_type == DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE
+    reply = DesktopPairingConfirmed.from_content(content)
+    assert reply.ok is False
+    assert reply.error is not None
+    assert (
+        load_desktop_credentials(
+            get_runtime_credentials_manager(runtime_paths),
+            requester_id="@alice:example.org",
+            agent_name="computer",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_olm_pairing_confirm_rejects_mismatched_device_key_or_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmation rejects mismatched device_id, device_ed25519, or verification without saving."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key"), "HELPER1": _olm_device("helper1-key")}}
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices)
+    offer, verification = await _start_and_claim_olm_pairing(receiver, sent)
+    assert offer.code is not None
+
+    for bad_confirm in (
+        DesktopPairingConfirm("nonce-bad-dev-012345", offer.code, verification, "OTHER_DEV", "helper1-key"),
+        DesktopPairingConfirm("nonce-bad-key-012345", offer.code, verification, "HELPER1", "wrong-key"),
+        DesktopPairingConfirm("nonce-bad-ver-012345", offer.code, "BADVERIFY", "HELPER1", "helper1-key"),
+    ):
+        await receiver.on_event(
+            _olm_event(
+                sender="@alice:example.org",
+                device_id="CHAT1",
+                ed25519="chat1-key",
+                event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+                content=bad_confirm.to_content(),
+            ),
+        )
+        _, event_type, content = sent.pop()
+        assert event_type == DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE
+        reply = DesktopPairingConfirmed.from_content(content)
+        assert reply.ok is False
+        assert reply.error is not None
+
+    assert (
+        load_desktop_credentials(
+            get_runtime_credentials_manager(runtime_paths),
+            requester_id="@alice:example.org",
+            agent_name="computer",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_olm_disconnect_deletes_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """disconnect_request.v1 deletes only the sender's scoped credentials and replies ok=True."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
+    save_desktop_credentials(
+        creds_manager,
+        {"device_user_id": "@alice:example.org", "device_id": "ALICE", "device_ed25519": "alice-key"},
+        requester_id="@alice:example.org",
+        agent_name="computer",
+    )
+    save_desktop_credentials(
+        creds_manager,
+        {"device_user_id": "@bob:example.org", "device_id": "BOB", "device_ed25519": "bob-key"},
+        requester_id="@bob:example.org",
+        agent_name="computer",
+    )
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key")}}
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices)
+
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
+            content=DesktopDisconnectRequest(nonce="disc-wrong-agent-123", agent_name="other").to_content(),
+        ),
+    )
+    assert DesktopDisconnectConfirmed.from_content(sent.pop()[2]).ok is False
+    assert load_desktop_credentials(creds_manager, requester_id="@alice:example.org", agent_name="computer") is not None
+
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
+            content=DesktopDisconnectRequest(nonce="disc-nonce-012345678", agent_name="computer").to_content(),
+        ),
+    )
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice:example.org", "CHAT1", "chat1-key")
+    assert event_type == DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE
+    assert DesktopDisconnectConfirmed.from_content(content) == DesktopDisconnectConfirmed(
+        nonce="disc-nonce-012345678",
+        agent_name="computer",
+        ok=True,
+    )
+    assert load_desktop_credentials(creds_manager, requester_id="@alice:example.org", agent_name="computer") is None
+    assert load_desktop_credentials(creds_manager, requester_id="@bob:example.org", agent_name="computer") is not None
+
+
+@pytest.mark.asyncio
+async def test_slash_desktop_setup_named_agent_in_multi_agent_room_and_rejects_other_human(
+    tmp_path: Path,
+) -> None:
+    """`/desktop setup <agent>` works in a multi-agent room with one human and refuses any second human."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "matrix_sync": {"mode": "classic"},
+            "defaults": {"tools": []},
+            "agents": {
+                "dev": {"display_name": "Dev", "role": "Develop", "tools": ["desktop"]},
+                "notes": {"display_name": "Notes", "role": "Notes", "tools": []},
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "mindroom_router", "dev": "mindroom_dev", "notes": "mindroom_notes"},
+    )
+    members = ["@mindroom_router:localhost", "@mindroom_dev:localhost", "@mindroom_notes:localhost", "@alice:localhost"]
+    room = nio.MatrixRoom(room_id="!multi:localhost", own_user_id="@mindroom_dev:localhost")
+    for user_id in members:
+        room.add_member(user_id, None, None)
+    client = AsyncMock()
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id, None, None) for user_id in members],
+        room_id=room.room_id,
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id="@alice:localhost")
+
+    # Unnamed /desktop is ambiguous in a multi-agent room; named dev works; non-desktop notes is refused.
+    assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text="setup") is None
+    assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text="setup notes") is None
+    for args_text in (
+        "setup dev",
+        "status dev",
+        "rotate dev",
+        "disconnect dev",
+        "disconnect dev confirm",
+        "confirm dev tok ver",
+    ):
+        assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text=args_text) == "dev"
+
+    controller = SimpleNamespace(user_id="@mindroom_dev:localhost", device_id="CLOUD", ed25519="cloud-key")
+    send_response = AsyncMock(return_value="$reply")
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=Mock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(room.room_id, None, "$event"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=send_response,
+        responder_candidates_for_room=AsyncMock(return_value=[MatrixID.parse("@mindroom_dev:localhost")]),
+        controller_identity=lambda _name: controller,
+    )
+
+    async def run_cmd(args_text: str) -> str:
+        send_response.reset_mock()
+        await handle_command(
+            context=context,
+            room=room,
+            event=SimpleNamespace(
+                sender="@alice:localhost",
+                event_id="$event",
+                body=f"!desktop {args_text}",
+                source={"content": {"body": f"!desktop {args_text}"}},
+            ),
+            command=Command(type=CommandType.DESKTOP, args={"args_text": args_text}, raw_text=f"!desktop {args_text}"),
+            requester_user_id="@alice:localhost",
+        )
+        return send_response.await_args.args[0]
+
+    setup_reply = await run_cmd("setup dev")
+    assert "Desktop pairing started" in setup_reply
+    token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_reply)
+    assert token_match is not None
+    token = token_match.group(1)
+    claim_desktop_pairing(
+        runtime_paths,
+        token=token,
+        agent_name="dev",
+        device_user_id="@alice:localhost",
+        device_id="ALICE",
+        device_ed25519="alice-key",
+    )
+    verification = desktop_pairing_verification(token, "alice-key")
+    assert "Desktop paired" in await run_cmd(f"confirm dev {token} {verification}")
+    assert "Desktop is configured" in await run_cmd("status dev")
+    assert "/desktop disconnect dev confirm" in await run_cmd("disconnect dev")
+    assert "Desktop disconnected" in await run_cmd("disconnect dev confirm")
+
+    # Adding a second human immediately causes /desktop setup dev to be refused.
+    members_with_bob = [*members, "@bob:localhost"]
+    room_with_bob = nio.MatrixRoom(room_id="!shared:localhost", own_user_id="@mindroom_dev:localhost")
+    for user_id in members_with_bob:
+        room_with_bob.add_member(user_id, None, None)
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id, None, None) for user_id in members_with_bob],
+        room_id=room_with_bob.room_id,
+    )
+    assert await ensure_room_membership_synced(client, room_with_bob, sender_id="@alice:localhost")
+    assert desktop_room_agent(config, runtime_paths, room_with_bob, "@alice:localhost", args_text="setup dev") is None
