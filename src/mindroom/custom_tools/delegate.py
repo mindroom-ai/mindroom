@@ -158,8 +158,9 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         )
         background = self._background_jobs_available()
         background_guidance = (
-            "Managed Matrix calls accept background_after (null waits or yields on newer user message; 0 returns a "
-            "Job ID immediately; >0 waits N seconds before backgrounding). "
+            "Managed Matrix calls accept background_after (null waits or yields the wait on a newer message you "
+            "answer while the child keeps working; 0 returns a Job ID immediately; >0 waits N seconds before "
+            "backgrounding). "
             if background
             else ""
         )
@@ -285,7 +286,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
     async def continue_subagent(self, subagent_id: str, message: str) -> str:
         """Send a follow-up to an existing subagent and wait for its answer.
 
-        Reuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.
+        Reuses history, tools, workspace, and memory; `subagent_id` belongs to this caller and conversation and persists across restarts (wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.
 
         Args:
             subagent_id: Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent.

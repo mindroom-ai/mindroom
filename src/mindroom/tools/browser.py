@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     display_name="Browser",
     description=(
         "Drive a live Chromium browser: open URLs or local HTML, inspect element snapshots, "
-        "click/type/fill forms, capture screenshots/PDFs, upload files (or target='desktop' to observe the user's browser)"
+        "click/type/fill forms, capture screenshots/PDFs, upload files (or target='desktop' to observe or open tabs in the user's browser)"
     ),
     category=ToolCategory.RESEARCH,
     file_access=ToolFileAccess.AGENT,

@@ -826,7 +826,7 @@ class BrowserTools(Toolkit):
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> str | ToolValue:
-        """Drive a live Chromium browser: open/navigate URLs or local HTML (`paths`), inspect pages via `action='snapshot'` (returns element refs), interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), capture screenshots/PDFs, upload files, and read console logs.
+        """Drive a live Chromium browser: open URLs (or local HTML via `paths`), navigate URLs, inspect pages via `action='snapshot'` (returns element refs), interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), capture screenshots/PDFs, upload files, and read console logs.
 
         `target='host'` uses MindRoom's worker browser (first call auto-shows the Computer panel if `chat_ui` is present; call `chat_ui.open_panel(panel='computer')` only to reopen it—never navigates or takes control). `target='desktop'` (when configured) observes/opens tabs in the user's local browser.
 

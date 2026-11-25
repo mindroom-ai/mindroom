@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     name="triggers",
     file_access=ToolFileAccess.NONE,
     display_name="Triggers",
-    description="Watch rooms, thread tags, shared event sources, and signed webhooks (with optional LLM triage) to wake agents automatically",
+    description="Watch rooms and shared event sources (with optional LLM triage), thread tags, or direct signed webhooks to wake agents automatically",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

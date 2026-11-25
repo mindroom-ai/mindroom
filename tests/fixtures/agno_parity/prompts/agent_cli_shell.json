@@ -89,7 +89,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -118,7 +118,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -150,7 +150,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -282,7 +282,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -314,7 +314,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -343,7 +343,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -371,7 +371,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -395,7 +395,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": []
@@ -425,7 +425,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -465,7 +465,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -518,7 +518,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -632,7 +632,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -673,7 +673,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -704,7 +704,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -736,7 +736,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save full output to file and return a receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [

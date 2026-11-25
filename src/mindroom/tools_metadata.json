@@ -10376,7 +10376,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Watch rooms, thread tags, shared event sources, and signed webhooks (with optional LLM triage) to wake agents automatically",
+      "description": "Watch rooms and shared event sources (with optional LLM triage), thread tags, or direct signed webhooks to wake agents automatically",
       "display_name": "Triggers",
       "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
@@ -11426,7 +11426,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Drive a live Chromium browser: open URLs or local HTML, inspect element snapshots, click/type/fill forms, capture screenshots/PDFs, upload files (or target='desktop' to observe the user's browser)",
+      "description": "Drive a live Chromium browser: open URLs or local HTML, inspect element snapshots, click/type/fill forms, capture screenshots/PDFs, upload files (or target='desktop' to observe or open tabs in the user's browser)",
       "display_name": "Browser",
       "docs_url": "https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser",
       "executes_code": false,

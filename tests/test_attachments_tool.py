@@ -514,7 +514,7 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["mindroom_output_path"]["default"] is None
-    assert "save full output to file" in schema["mindroom_output_path"]["description"]
+    assert "save full supported output to file" in schema["mindroom_output_path"]["description"]
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
 

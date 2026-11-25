@@ -220,11 +220,12 @@ class EgressCredentialsTools(Toolkit):
         """List Agent Keys egress services available to this agent, credential status, and `manage_url`.
 
         Call after `credential_not_configured` or before asking for credentials. Each service reports `configured`,
-        `active_source` (`key`|`oauth`|`github_app`), `source` (`config`|`user`), `oauth_reuse`, `oauth_access`
-        (`read`|`read_write`|null), `can_connect_account`/`provider` (when unconfigured), `github_app_repositories`
-        (repo access; takes no key), and `separate_account` (user account-only; selected via `X-Agent-Keys-Service`
-        header). Never ask the user to paste a key in chat—call `request_secret` for missing API keys (`manage_url`
-        is the fallback).
+        `active_source` (`key`|`oauth`|`github_app`), `source` (`config`|`user`), `oauth_reuse` (whether Agent Keys may
+        reuse the service's connected account), `oauth_access` (`read`|`read_write`|null),
+        `can_connect_account`/`provider` (when unconfigured), `github_app_repositories` (the only repositories a
+        `github_app` service covers; takes no key), and `separate_account` (user account-only; selected via
+        `X-Agent-Keys-Service` header). Never ask the user to paste a key in chat—call `request_secret` for missing API
+        keys (`manage_url` is the fallback).
         """
         settable = self._settable()
         link = manage_url(self._runtime_paths) if settable else None
