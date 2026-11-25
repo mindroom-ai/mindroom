@@ -15,7 +15,10 @@ if TYPE_CHECKING:
     name="update_awareness",
     file_access=ToolFileAccess.NONE,
     display_name="MindRoom Update Awareness",
-    description="Add daily-cached installed and latest MindRoom release information to the agent system prompt",
+    description=(
+        "Report installed and daily-cached latest MindRoom versions; "
+        "adds a prompt notice when an update is available or uncertain"
+    ),
     category=ToolCategory.INFORMATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

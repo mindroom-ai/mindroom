@@ -15,6 +15,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import (
     MARKDOWN_OUTPUT_FORMAT,
     MATRIX_MARKDOWN_OUTPUT_FORMAT,
+    MATRIX_TOOL_FOLDING_FORMAT,
     PromptSpec,
     render_instructions,
     render_system_messages,
@@ -194,6 +195,8 @@ def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
     plain_text = system_text(prompt_for_turn(plain_build))
 
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT in matrix_text
+    assert "add a language tag to fenced code blocks" in matrix_text
+    assert "GFM tables" in matrix_text
     assert "Mermaid fences (```mermaid)" in matrix_text
     assert "GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`)" in matrix_text
     assert "footnotes (`[^1]` / `[^1]: ...`)" in matrix_text
@@ -202,24 +205,30 @@ def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
     assert "<span data-mx-spoiler>...</span>" in matrix_text
     assert "<https://matrix.to/#/!room_id>" in matrix_text
     assert "<https://matrix.to/#/!room_id/$event_id>" in matrix_text
-    assert "never wrap links in backticks" in matrix_text
-    assert (
-        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away" in matrix_text
-    )
-    assert "self-contained final answer after your last tool call" in matrix_text
+    assert "unbackticked" in matrix_text
+    # Tool-less Matrix agents omit the tool-folding rule.
+    assert MATRIX_TOOL_FOLDING_FORMAT not in matrix_text
     assert MARKDOWN_OUTPUT_FORMAT in outside_text
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in outside_text
     assert "Mermaid fences" not in outside_text
     assert "<span data-mx-spoiler>" not in outside_text
     assert "<https://matrix.to/#/!room_id>" not in outside_text
-    assert (
-        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
-        not in outside_text
-    )
-    assert "self-contained final answer after your last tool call" not in outside_text
+    assert MATRIX_TOOL_FOLDING_FORMAT not in outside_text
     assert MARKDOWN_OUTPUT_FORMAT not in plain_text
-    assert (
-        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
-        not in plain_text
+    assert MATRIX_TOOL_FOLDING_FORMAT not in plain_text
+
+    config.agents["general"].tools = ["calculator"]
+    tool_build = create_agent(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        model=turn_model(config, runtime_paths, "general"),
+        knowledge=None,
+        plugins=plugins,
+        outside_matrix=False,
     )
+    tool_text = system_text(prompt_for_turn(tool_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in tool_text
+    assert MATRIX_TOOL_FOLDING_FORMAT in tool_text
     assert "self-contained final answer after your last tool call" not in plain_text

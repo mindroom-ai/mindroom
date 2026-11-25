@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, MATRIX_TOOL_FOLDING_FORMAT
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -135,3 +135,5 @@ def test_team_leader_and_members_use_matrix_markdown_format_only_inside_matrix(
             assert expected in text
         if absent is not None:
             assert absent not in text
+    assert (MATRIX_TOOL_FOLDING_FORMAT in leader_prompt) is (markdown and not outside_matrix)
+    assert MATRIX_TOOL_FOLDING_FORMAT not in member_prompt

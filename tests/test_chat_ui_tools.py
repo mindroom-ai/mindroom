@@ -106,23 +106,25 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
 
 
 def test_show_canvas_instructions_prefer_canvas_over_ascii_and_note_mermaid() -> None:
-    """Canvas instructions prefer show_canvas over ASCII art while noting ```mermaid for simple diagrams."""
-    default_instructions = ChatUITools().instructions
-    canvas_instructions = ChatUITools(enable_show_canvas=True).instructions
+    """Canvas tool description prefers show_canvas over ASCII art while noting ```mermaid for simple diagrams."""
+    default_toolkit = ChatUITools()
+    canvas_toolkit = ChatUITools(enable_show_canvas=True)
+    description = toolkit_offers(canvas_toolkit, "show_canvas").description or ""
 
-    assert "show_canvas(" not in default_instructions
-    assert "diagrams, charts" in canvas_instructions
-    assert "Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams." in canvas_instructions
+    assert "show_canvas" not in default_toolkit.functions
+    assert "show_canvas" not in default_toolkit.instructions
+    assert "charts, diagrams" in description
+    assert "Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams." in description
 
 
 def test_show_canvas_guidance_places_new_canvases_below_the_reply() -> None:
-    """Canvas instructions and docstring note that a new canvas renders below the reply text."""
+    """Canvas docstring notes that a new canvas renders below the reply text without duplicating in instructions."""
     default_instructions = ChatUITools().instructions
     toolkit = ChatUITools(enable_show_canvas=True)
     description = toolkit_offers(toolkit, "show_canvas").description or ""
 
     assert "below your reply text" not in default_instructions
-    assert "below your reply text" in toolkit.instructions
+    assert "below your reply text" not in toolkit.instructions
     assert "below your reply text" in description
 
 

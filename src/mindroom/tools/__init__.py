@@ -273,8 +273,7 @@ def _homeassistant_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Egress Credentials",
     description=(
-        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
-        "can use, and ask the user for a missing key"
+        "Opt this agent's shell and worker Python calls into Agent Keys, inspect available keys, and request missing ones"
     ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
@@ -302,8 +301,7 @@ def _egress_credentials_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Temporary Secrets",
     description=(
-        "Ask the user for a password, token or code with a card in the conversation; this agent's shell commands "
-        "receive it as an environment variable for as long as the user chose, and the agent never sees it"
+        "Request a temporary secret (password, token, or code) injected as a shell env var without exposing it."
     ),
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets",
     category=ToolCategory.INTEGRATIONS,

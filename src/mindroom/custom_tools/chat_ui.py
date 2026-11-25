@@ -84,39 +84,11 @@ _CANVAS_PAGE_MAX_BYTES = 4 * 1024 * 1024
 # Chat shares a canvas's state as this event, a reference to the canvas, so one relations call finds the newest.
 _CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
 _CANVAS_STATE_SCAN_LIMIT = 50
-# Added to the agent's instructions. The map lists only the functions the agent has (see
-# ChatUITools.instructions), so include_tools or exclude_tools never advertise a missing function.
+# Cross-function Chat UI rules; per-function details live on the function docstrings.
 _CHAT_UI_INSTRUCTIONS = (
-    "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and "
-    "none of them touches the user's own computer or browser. Side panels share one place on the screen, so "
-    "opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the "
-    "conversation: success means it was sent, not that the user saw it."
+    "chat_ui only affects MindRoom Chat (never the user's own computer or browser). "
+    "Side panels share one slot (opening one replaces the current panel)."
 )
-_FUNCTION_INSTRUCTIONS: dict[str, str] = {
-    "open_panel": (
-        "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
-        "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
-        "over, for example to log in. "
-        "open_panel(panel='members') shows the Members panel: the people and agents in this room."
-    ),
-    "show_canvas": (
-        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
-        "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
-        "the user choose or fill something in; their answer comes back as their next message. Prefer "
-        "show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a "
-        "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
-        "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
-        "stays open beside it. A new canvas is posted as a separate message; in normal replies it appears "
-        "below your reply text, so refer to it as below (or by title on quiet turns)."
-    ),
-    "read_canvas_state": (
-        "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
-        "share_state=True, such as a checklist, without them sending anything."
-    ),
-    "open_settings": (
-        "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
-    ),
-}
 
 
 # Added only when the agent has both show_canvas and open_panel.
@@ -206,9 +178,9 @@ class ChatUITools(Toolkit):
         return self.instructions_for(self.functions)
 
     def instructions_for(self, function_names: Collection[str]) -> str:
-        """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
+        """Return cross-function Chat UI rules and enabled dynamic hints for ``function_names``."""
         enabled = set(function_names)
-        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        lines: list[str] = []
         if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
         # Remote assets include the library source, and the libraries hint says no other source works.
@@ -216,6 +188,8 @@ class ChatUITools(Toolkit):
             lines.append(_CANVAS_REMOTE_ASSETS_HINT)
         elif "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
+        if not lines:
+            return _CHAT_UI_INSTRUCTIONS
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @staticmethod
@@ -473,8 +447,11 @@ class ChatUITools(Toolkit):
     ) -> str:
         """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
-        Use a canvas when seeing or clicking beats reading or typing. The page cannot
-        load any website, so it cannot show the user a real website. Pass the page as
+        Use a canvas when seeing or clicking beats reading or typing.
+        Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams.
+        For a quick choice between a few options, just ask in your reply.
+        The page cannot load any website, so it cannot show the user a real website.
+        Pass the page as
         ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
         ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
         supported. Only show pages you wrote: a canvas appears as yours and whatever

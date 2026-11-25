@@ -90,9 +90,7 @@ Model: {{model_provider}} (`{{model_id}}`).
 
 {_MATRIX_CONVERSATION_GUIDE}
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
-
-## Matrix Reply Targeting
-MindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
@@ -127,35 +125,22 @@ You are {display_name}, the MindRoom team exposed through the OpenAI-compatible 
 {team_purpose}{openai_compat_history_guidance}"""
 
 
-INTERACTIVE_QUESTION_PROMPT = """When the user needs to choose between options, include one fenced interactive JSON block:
-
+INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):
 ```interactive
-{
-    "question": "How would you like to proceed?",
-    "options": [
-        {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
-        {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
-    ]
-}
-```
+{"question": "How to proceed?", "options": [
+  {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
+  {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
+]}
+```"""
 
-Rules:
-- Write literal ```interactive on the same line; include only a single block.
-- Max 5 options with distinct emojis.
-- Omit preambles like "here are the options:" — MindRoom replaces the block with the formatted prompt and reaction buttons.
-"""
-
-SKILLS_TOOL_USAGE_PROMPT = """When using skills, use the skill tools (skill names are not callable functions):
-- `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.
-- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.
-- Do not open a global skill's `SKILL.md` directly with file tools.
-"""
+SKILLS_TOOL_USAGE_PROMPT = (
+    "Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); "
+    "do not read global `SKILL.md` files directly."
+)
 
 WORKSPACE_SKILL_AUTHORING_PROMPT = (
-    "To create or edit your own skills, write `skills/<skill-name>/SKILL.md` in your workspace "
-    "(with YAML frontmatter `name` and `description`, plus optional `scripts/` and `references/`). "
-    "Never write to bundled, plugin, or user skill dirs (e.g. `~/.mindroom/skills`); "
-    "workspace skills take precedence and load on your next run."
+    "Create or edit workspace skills at `skills/<skill-name>/SKILL.md` (YAML frontmatter `name` and `description`; "
+    "never write bundled, plugin, or user skill dirs); they load on the next run."
 )
 
 HIDDEN_TOOL_CALLS_PROMPT = (
@@ -163,17 +148,12 @@ HIDDEN_TOOL_CALLS_PROMPT = (
     '(e.g. "let me check").'
 )
 
-OUTPUT_REDIRECT_PROMPT = (
-    "Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. "
-    "In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python)."
-)
+OUTPUT_REDIRECT_PROMPT = ""
 
 DATETIME_CONTEXT_TEMPLATE = "Current date: {date_str} ({timezone_str}, {timezone_abbrev})."
 
 PERSONALITY_CONTEXT_SECTION_HEADING = (
-    "## Personality Context\n"
-    "Each section below is headed by the path of the file it was read from, inlined here automatically every turn. "
-    "Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted."
+    "## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated."
 )
 # It holds no count that changes as the file grows, so lines added past the cut leave the prompt byte-identical.
 PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
@@ -183,12 +163,10 @@ PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
 )
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
-These toolkits are available, but the definitions of their functions are not included:
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list the deferred functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
-Search before concluding that a capability is unavailable."""
+Use `tool_search(query)` to load matching schemas (or `tool_search()` to list names), then `call_tool(name, arguments)`. Search before concluding a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.
@@ -293,17 +271,13 @@ Examples:
 
 Return the mode and a one-sentence reason why."""
 
-MEMORY_CONTEXT_PROMPT_TEMPLATE = """[Automatically extracted {context_type} memories - may not be relevant to current context]
-Previous {context_type} memories that might be related:
-{memory_lines}"""
+MEMORY_CONTEXT_PROMPT_TEMPLATE = "[Recalled {context_type} memories — may not be relevant]\n{memory_lines}"
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
-    "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
-    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
-    "or when a marker says content was omitted."
+    "[File memory: `{memory_path}` — preloaded every turn; do not re-read what is shown here "
+    "unless editing or checking for newer/truncated content]"
 )
 FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
-    "This conversation keeps the copy it last loaded, so entries added from other conversations since then "
-    "may be missing; open the file to look for them."
+    "Kept from this conversation's last load; open the file to see edits from other conversations."
 )
 PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens (limit {trigger_tokens}). Each reaches your prompt only up to its first {max_file_chars} characters; files over that limit: {over_limit_files}.
 Files: {file_sizes}.
@@ -673,15 +647,10 @@ Avoid childish, sticker-like, or overly decorative designs.
 Make each room instantly recognizable at small sizes."""
 
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
-DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
+DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """Available subagents (`run_subagent` / `continue_subagent`):
 {agent_descriptions}
 
-Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
-Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
-In Matrix, a child tool that requires approval runs only once the user approves it.
-Other runtimes retain their approval restrictions.
-Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
-Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
+Max 3 nested subagent levels (follow-ups do not add depth)."""
 
 
 # What a subagent is sent when the runtime continues the turn a restart cut short, after that turn's own messages.
@@ -689,12 +658,11 @@ SUBAGENT_RESTART_CONTINUATION_PROMPT = (
     "[RUNTIME NOTE, NOT A USER MESSAGE] A restart interrupted your previous turn. Continue the task from where it "
     "stopped. Do not repeat tool calls with side effects that already finished."
 )
-DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
-A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
-Waiting neither restarts the child nor grants tool approval.
-To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
-Direct API calls and nested delegation wait within their existing execution owner.
-The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation."""
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = (
+    "Background subagent jobs: child tool approval pauses only the child's job (waiting neither restarts it nor "
+    "approves tools); cancel an active job before `continue_subagent` to redirect it. "
+    "Job ID = one turn; Subagent ID = reusable session."
+)
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(

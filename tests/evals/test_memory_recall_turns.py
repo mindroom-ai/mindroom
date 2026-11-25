@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -89,3 +90,34 @@ def test_turns_round_trip_through_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "turns.jsonl"
     write_turns(turns, path)
     assert read_turns(path) == turns
+
+
+def test_extracts_compact_recalled_header_turn(tmp_path: Path) -> None:
+    """Logs using the tightened `[Recalled ... memories — may not be relevant]` header extract identically."""
+    log_path = tmp_path / "compact.jsonl"
+    record = {
+        "timestamp": "2026-11-24T10:00:00-08:00",
+        "agent_id": "alpha",
+        "session_id": "sess-compact",
+        "body": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        'Current message:\n<msg from="@user:example.org"><![CDATA[Tea temp?]]></msg>'
+                        "<mindroom_transient_context>\n"
+                        "[Recalled agent file memories — may not be relevant]\n"
+                        "- Tea is brewed at 80 degrees.\n"
+                        "- Green tea needs 2 minutes.\n"
+                        "</mindroom_transient_context>"
+                    ),
+                },
+            ],
+        },
+    }
+    log_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    turns = extract_turns([log_path], {"alpha"})
+    assert len(turns) == 1
+    assert turns[0].query == '<msg from="@user:example.org"><![CDATA[Tea temp?]]></msg>'
+    assert turns[0].injected_hits == ("Tea is brewed at 80 degrees.", "Green tea needs 2 minutes.")
