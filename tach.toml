@@ -3368,6 +3368,7 @@ visibility = [
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
+    "mindroom.history.summary_fork",
     "mindroom.participation_hook",
 ]
 
@@ -3400,7 +3401,28 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.native_compaction",
 ]
-visibility = ["mindroom.execution_preparation", "mindroom.history.mid_turn_compaction"]
+visibility = [
+    "mindroom.execution_preparation",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+    "mindroom.history.summary_fork",
+]
+
+[[modules]]
+path = "mindroom.history.summary_fork"
+depends_on = [
+    "mindroom.history.policy",
+    "mindroom.history.request_messages",
+    "mindroom.history.summary_message",
+    "mindroom.history.types",
+    "mindroom.hooks.enrichment",
+    "mindroom.llm",
+]
+visibility = [
+    "mindroom.history.compaction",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+]
 
 [[modules]]
 path = "mindroom.history.summary_call"
