@@ -6,7 +6,9 @@ Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/
 
 The run calls `agent()` three times, one after the other: two copies of the Helper (the first in minimal mode),
 then the lobby's second agent.
-The backend is started again after the config edit, so the Helper has the toolkit before it is asked.
+The script also prepends an `auto_approve` rule for `run_shell_command` so the minimal agent's shell is not
+excluded by the stack's scripted shell-review rule.
+The backend is started again after the config edits, so the Helper has the toolkit and rule before it is asked.
 The second agent appends one line to a file with its shell tool and then sleeps, so it is still working when the
 script stops the backend with SIGTERM and starts it again.
 The third call starts after that restart, when the second agent's own bot may not have synced yet.
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import sys
 import time
@@ -56,7 +59,26 @@ def main(args):
     agent("Reply with the single word: three", name="third", agent="{room_agent}")
     return {{"report": "{report}"}}
 """
+_SHELL_AUTO_APPROVE = "    - match: run_shell_command\n      action: auto_approve\n"
 _EXPECTED = "lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1"
+
+
+def _with_shell_auto_approve(text: str) -> str:
+    """Return the config *text* with a rule, first in its list, that auto-approves `run_shell_command`."""
+    if _SHELL_AUTO_APPROVE in text:
+        return text
+    # The section's own lines: everything indented under its key, whatever else the section sets.
+    section = re.search(r"^tool_approval:\n((?:[ \t]+.*\n|\n)*(?:[ \t]+.+)?)", text, re.MULTILINE)
+    if section is None:
+        return text + f"\ntool_approval:\n  rules:\n{_SHELL_AUTO_APPROVE}"
+    if (empty := re.search(r"^  rules:[ \t]*\[\][ \t]*(?:\n|$)", section.group(1), re.MULTILINE)) is not None:
+        start, end = section.start(1) + empty.start(), section.start(1) + empty.end()
+        return text[:start] + f"  rules:\n{_SHELL_AUTO_APPROVE}" + text[end:]
+    if (rules := re.search(r"^  rules:\n", section.group(1), re.MULTILINE)) is not None:
+        # First in the list: the first rule that matches a call decides.
+        at = section.start(1) + rules.end()
+        return text[:at] + _SHELL_AUTO_APPROVE + text[at:]
+    return text[: section.start(1)] + f"  rules:\n{_SHELL_AUTO_APPROVE}" + text[section.start(1) :]
 
 
 def main() -> int:
@@ -75,8 +97,9 @@ def main() -> int:
     report = f"harbor{secrets.token_hex(6)}"
 
     backend = deployment.backend()
-    # A running backend reloads the edit some time later; one started after it has the toolkit before it is asked.
-    if deployment.give_workflow_toolkit(room_agent=True) or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
+    changed = [deployment.give_workflow_toolkit(room_agent=True), deployment.edit_config(_with_shell_auto_approve)]
+    # A running backend reloads the edit some time later; one started after it has the toolkit and rule before it is asked.
+    if any(changed) or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
         backend.stop()
         backend.start()
     until(f"the bot of {ROOM_AGENT} in the lobby", lambda: deployment.in_lobby(ROOM_AGENT), 240, 1)

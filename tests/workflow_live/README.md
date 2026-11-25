@@ -56,7 +56,7 @@ That failure is delivered once, no report is, and `resume_workflow(run_id, rerun
 Each script edits the slot's `config.yaml`: the Helper gets the `workflow` toolkit, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
 Every edit goes through `Deployment.edit_config`, and the script's exit writes the file back as the script found it, so no script meets the edit of another.
 A script that is killed with `SIGKILL` leaves its edit behind.
-`agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
+`agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room, and prepends an `auto_approve` rule for `run_shell_command` so the minimal agent's shell is not excluded by the stack's scripted shell-review rule.
 `large_result.py` also gives the Helper the `python` toolkit, whose `read_file` returns a file whole: `filesystem` and `shell` return 50 KiB at most.
 `approval_restart.py` also gives the Helper the `filesystem` toolkit and adds a `tool_approval` rule, first in the list of rules, that makes `write_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
 A script names a toolkit by its registered name: `tool("file", ...)` fails with `The requested tool is no longer available to this script run.` since `file` became another name of `filesystem`, and an approval rule that matches the retired `save_file` alone stops the backend from starting.
