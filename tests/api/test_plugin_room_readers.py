@@ -17,11 +17,11 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
+from mindroom import room_steward
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.matrix import rooms
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.orchestration import plugin_http_runtime
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from mindroom.plugin_http import ClientUser, RoomPower, RoomReader, client_rooms, require_room_reader
 
@@ -273,7 +273,7 @@ async def test_a_failed_power_read_answers_503_never_no_power() -> None:
 @pytest.mark.asyncio
 async def test_a_power_read_that_never_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A state read that hangs gives up after the lookup timeout with 503, never holding the request open."""
-    monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
     client.room_get_state = _never_answers
@@ -322,7 +322,7 @@ async def test_is_direct_follows_core_direct_message_rule(member_content: dict[s
 @pytest.mark.asyncio
 async def test_a_failed_direct_message_read_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A direct-message read that fails, raises or hangs is 503, never a guess."""
-    monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
     client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN")

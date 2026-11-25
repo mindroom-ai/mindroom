@@ -15,13 +15,13 @@ import nio
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
+from mindroom import room_steward
 from mindroom.api import main
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
-from mindroom.orchestration import plugin_http_runtime
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
@@ -152,7 +152,7 @@ async def test_a_member_list_the_client_refuses_for_a_membership_change_is_read_
 @pytest.mark.asyncio
 async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Matrix call that hangs gives up after the lookup timeout with 503, never holding the request open."""
-    monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client()
 
     async def never_answers(_room_id: str) -> None:

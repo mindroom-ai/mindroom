@@ -2216,13 +2216,13 @@ path = "mindroom.api.room_triggers"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.external_triggers",
     "mindroom.matrix.state",
     "mindroom.plugin_http",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
     "mindroom.room_steward",
-    "mindroom.thread_tags",
 ]
 
 [[modules]]

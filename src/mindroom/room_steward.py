@@ -7,16 +7,27 @@ Both answers come from the live bots and each bot's own room cache at the moment
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
+
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 
     import nio
 
     from mindroom.bot import AgentBot
+
+logger = get_logger(__name__)
+
+# A client can tell the condition that lasts until a bot joins the room from a failure worth retrying.
+NO_BOT_IN_ROOM = "No running MindRoom bot is in this room."
+# As long as the computers API waits for the same membership check.
+ROOM_READ_TIMEOUT_SECONDS = 20
 
 
 def _pick_steward(candidates: Iterable[tuple[str, float]]) -> str | None:
@@ -101,3 +112,28 @@ def room_poster(
     )
     poster = min(joined, key=lambda candidate: candidate[:2], default=None)
     return None if poster is None else poster[2]
+
+
+async def read_in_room[T](
+    bots: Mapping[str, AgentBot] | None,
+    room_id: str,
+    read: Callable[[nio.AsyncClient], Awaitable[T]],
+    failed: str,
+    *,
+    no_bot: str = NO_BOT_IN_ROOM,
+) -> T:
+    """Return ``read`` made through the client of the room's steward, else answer 503 with ``failed``.
+
+    It answers 503 too when no running bot is in the room, or when ``read`` raises or outlasts the lookup timeout.
+    """
+    steward = None if bots is None else room_steward(bots, room_id)
+    client = None if steward is None else steward.client
+    if client is None:
+        raise HTTPException(503, no_bot)
+    try:
+        async with asyncio.timeout(ROOM_READ_TIMEOUT_SECONDS):
+            return await read(client)
+    except Exception as error:
+        # A failed or timed-out read leaves the answer unknown, which must never pass for a yes or a no.
+        logger.warning("Room read failed", room_id=room_id, detail=failed, error_type=type(error).__name__)
+        raise HTTPException(503, failed) from None

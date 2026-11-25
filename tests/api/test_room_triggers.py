@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mindroom import room_steward
 from mindroom.api import config_lifecycle, room_triggers
 from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.client_sessions import client_session_store
@@ -452,5 +453,5 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
         return nio.RoomGetStateResponse([], ROOM_A)
 
     h.client.room_get_state = AsyncMock(side_effect=_hang)
-    monkeypatch.setattr(room_triggers, "_WATCH_TAG_READ_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503

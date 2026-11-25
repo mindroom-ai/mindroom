@@ -627,7 +627,7 @@ async def post_external_event_source(
         runtime_paths=runtime_paths,
     )
     if matched_rules > 0:
-        _notify_reactive_event_loop(request, source_id=source_id, event_id=event.event_id)
+        notify_reactive_event_loop(request, source_id=source_id, event_id=event.event_id)
     return ExternalEventSourceAcceptedResponse(
         accepted=True,
         source_id=source_id,
@@ -729,16 +729,12 @@ async def _fan_out_event_source_firings(
         raise HTTPException(status_code=503, detail="Reactive trigger store is not available") from exc
 
 
-def _notify_reactive_event_loop(request: Request, *, source_id: str, event_id: str) -> None:
+def notify_reactive_event_loop(request: Request, **context: object) -> None:
+    """Best-effort wake of the reactive trigger delivery loop bound on ``request.app``."""
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.on_reactive_event is None:
         return
     try:
         runtime.on_reactive_event()
     except Exception:
-        logger.warning(
-            "Failed to notify reactive trigger loop after event source enqueue",
-            source_id=source_id,
-            event_id=event_id,
-            exc_info=True,
-        )
+        logger.warning("Failed to notify reactive trigger loop", **context, exc_info=True)

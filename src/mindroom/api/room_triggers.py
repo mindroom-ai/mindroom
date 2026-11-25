@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
+from mindroom.api.external_triggers import notify_reactive_event_loop
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.matrix.state import resolve_room_id
 from mindroom.plugin_http import RoomReader, client_rooms, require_room_reader
@@ -24,8 +25,7 @@ from mindroom.reactive_triggers.management import (
 )
 from mindroom.reactive_triggers.models import ReactiveTriggerRecord, RoomMessageSourceSpec, ThreadTagSourceSpec
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
-from mindroom.room_steward import room_steward
-from mindroom.thread_tags import ThreadTagsError
+from mindroom.room_steward import read_in_room
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,8 +41,6 @@ _TriggerRelation = Literal["target", "watch"]
 _TriggerThreadMode = Literal["room", "thread", "new_thread", "origin"]
 _TriggerRecord = ExternalTriggerRecord | ReactiveTriggerRecord
 _MatchedTrigger = tuple[_TriggerRecord, _TriggerRelation, str]
-# Matches the bounded Matrix lookup deadline in orchestration/plugin_http_runtime.py.
-_WATCH_TAG_READ_TIMEOUT_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -130,17 +128,15 @@ async def update_room_trigger(
         isinstance(record, ReactiveTriggerRecord)
         and body.enabled
         and not record.enabled
-        and isinstance(record.source, ThreadTagSourceSpec)
+        and isinstance(source := record.source, ThreadTagSourceSpec)
     ):
-        bots = ensure_app_state(request.app).room_bots
-        steward = None if bots is None else room_steward(bots, resolve_room_id(record.source.room_id, runtime_paths))
-        if steward is None or steward.client is None:
-            raise HTTPException(503, "No running MindRoom bot is in the watched room.")
-        try:
-            async with asyncio.timeout(_WATCH_TAG_READ_TIMEOUT_SECONDS):
-                refreshed_tag_present = await read_thread_tag_present(steward.client, record.source)
-        except (ThreadTagsError, TimeoutError) as exc:
-            raise HTTPException(503, "Watched thread tags could not be read; try again.") from exc
+        refreshed_tag_present = await read_in_room(
+            ensure_app_state(request.app).room_bots,
+            resolve_room_id(source.room_id, runtime_paths),
+            lambda client: read_thread_tag_present(client, source),
+            "Watched thread tags could not be read; try again.",
+            no_bot="No running MindRoom bot is in the watched room.",
+        )
 
     updated = await _run_store(
         lambda: set_trigger_enabled_sync(
@@ -154,9 +150,7 @@ async def update_room_trigger(
         ),
     )
     if body.enabled and isinstance(updated, ReactiveTriggerRecord):
-        runtime = ensure_app_state(request.app).external_trigger_runtime
-        if runtime is not None and runtime.on_reactive_event is not None:
-            runtime.on_reactive_event()
+        notify_reactive_event_loop(request, trigger_id=trigger_id)
     return _build_trigger_row((updated, relation, resolved_target), can_manage=True, joined_target_rooms=set())
 
 
