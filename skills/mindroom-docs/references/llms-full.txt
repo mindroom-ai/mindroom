@@ -2097,7 +2097,7 @@ List these only if you trust everyone whose messages the agent hears.
 
 MindRoom holds a silent turn to a few lines of its own:
 
-- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `workflow` (and its deprecated alias `dynamic_workflow`), `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
 - The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
 - No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
 - A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
@@ -5653,6 +5653,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
 | `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `/answer [id] <answer>` | Answer a question a workflow run asked you in this thread, with an option's number or text; the ID is needed only when several questions are open | [Questions](https://docs.mindroom.chat/tools/workflows/#questions) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
 | `/compact [agent_or_team]` | Compact context now, after any in-progress reply (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |
@@ -5788,10 +5789,11 @@ They reach only accounts on the agents' homeserver; people on other homeservers 
 MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
 A reply that is stopped or ends with an error keeps the text of its last edit, so up to `update_interval` seconds of text MindRoom Chat showed live can disappear above the note.
 A homeserver relays them when its `/_matrix/client/versions` lists `io.mindroom.ephemeral_opt_in`, which the fork does unless its `mindroom_ephemeral_events_enabled` option is off; with any other homeserver every client sees the progressive edits below.
-MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](https://docs.mindroom.chat/tools/agent-orchestration/#running-subagents) and Dynamic Workflow participant with its text and tool calls as they happen, then how it ended.
+MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](https://docs.mindroom.chat/tools/agent-orchestration/#running-subagents) and [workflow](https://docs.mindroom.chat/tools/workflows/) agent with its text and tool calls as they happen, then how it ended.
 Tool call details appear there only when the reply that started the subagent shows its tool calls.
 It needs a homeserver that relays live updates, and is empty when they are off or the conversation is not in a Matrix room.
-Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below, and the Sub-agents panel shows nothing for subagents that start afterwards.
+The graph of a [workflow run](https://docs.mindroom.chat/tools/workflows/#the-run-in-the-room) is sent the same way, as `io.mindroom.workflow` frames from the run's agent, within the same budget as that agent's sub-agent frames in the room.
+Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below, the Sub-agents panel shows nothing for subagents that start afterwards, and a workflow run shows its card only.
 
 ## Configuration
 
@@ -7596,7 +7598,6 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
-| `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
 | `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
@@ -7886,7 +7887,7 @@ A reply that already started finishes on its model, so the reply that reaches th
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 When `fallback_model` names no [reasoning level](https://docs.mindroom.chat/configuration/models/#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
-This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
+This covers agent and team replies including every team member, delegated agents, workflow agent runs, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
@@ -8815,7 +8816,7 @@ Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent
 | `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
-It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `workflow` (and its deprecated alias `dynamic_workflow`), `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
@@ -9216,7 +9217,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, report publishing, config tools, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -10005,7 +10006,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `memory`, `self_config`, `skill_manage`, `slack`, and `workflow` toolkits are never available to scripts, even when the agent has them.
 - Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
@@ -10240,6 +10241,7 @@ A run that a MindRoom restart interrupts is resumed the same way on its own.
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
 Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
+Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
 
 ## Enable The Tool
 
@@ -10269,7 +10271,7 @@ background_tool_jobs:
 | `max_runtime_hours` | `72` | Working time one run may use, `0` for no limit; see [Working time](#working-time) |
 | `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run; a call above the rate waits for the minute to have room, it does not fail |
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
-| `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large; not used yet |
+| `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large, `0` for never by cost; see [Cost Limit](#cost-limit) |
 
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
@@ -10281,15 +10283,19 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 ## Functions
 
 ```text
-start_workflow(source=None, path=None, args=None, title=None, max_concurrent=16, resource_profile=None)
-get_workflow(run_id, nodes="active")
+start_workflow(source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
+get_workflow(run_id, nodes="active", messages=False)
 cancel_workflow(run_id)
-resume_workflow(run_id, source=None, path=None, rerun=None)
+resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
+list_workflow_runs()
+save_workflow(run_id, name, description=None)
 ```
 
-- `start_workflow` takes exactly one of `source` (inline Python) or `path` (a file in the agent's workspace) and returns `{job_id, run_id, status, title}` at once.
+- `start_workflow` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
   The report reaches the agent through the [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
+  `max_cost_usd` stops the run as `interrupted` at that cost so it can be resumed with a higher limit; see [Cost Limit](#cost-limit).
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
+  Pass `messages=True` to include the full, uncapped peer message history (`messages`) and shared state (`shared_state`).
   For a run that has ended it also returns `result`: the report, or why the run has none.
   See [Cost](#cost) for `usage`.
 - `cancel_workflow` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
@@ -10297,6 +10303,8 @@ resume_workflow(run_id, source=None, path=None, rerun=None)
   A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
   The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
 - `resume_workflow` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
+- `list_workflow_runs` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
+- `save_workflow` saves an owned run's script to `workflows/<name>.py` so `start_workflow(name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
 
 A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
@@ -10309,7 +10317,24 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
+from mindroom.workflow import (
+    PartialFailure,
+    agent,
+    ask_user,
+    foreach,
+    inbox,
+    log,
+    now,
+    parallel,
+    phase,
+    random,
+    run,
+    send,
+    shell,
+    spawn,
+    state,
+    tool,
+)
 
 def main(args):
     phase("Test")
@@ -10317,16 +10342,21 @@ def main(args):
     log(f"tests exited with {tests.exit_code}")
     if not tests.ok:
         return agent("Explain these test failures in five lines:\n\n" + tests.output)
-    return tool("file", "read_file", file_name="CHANGELOG.md")
+    return tool("filesystem", "read_file", path="CHANGELOG.md")
 ```
 
-- `agent(prompt)` runs one agent turn and returns its answer as text; see [Agents](#agents).
+- `agent(prompt)` runs one agent turn and returns its answer as text, or as parsed JSON with `schema`; see [Agents](#agents).
+- `s = spawn(name, **options)` creates an agent that keeps its conversation across `s.ask(message, *, schema=None, timeout=None)` turns; see [Sessions](#sessions).
+- `ask_user(question, options=None)` asks the run's requester in the thread and returns the answer; see [Questions](#questions).
+- `send(to, text)`, `inbox(wait_seconds=0)`, `state.get(key, default=None)` and `state.set(key, value)` exchange messages and shared state with the run's agents; see [Peer Messages And Shared State](#peer-messages-and-shared-state).
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
+  Name the toolkit as it is registered: another name of it, such as `file` for `filesystem`, is refused as a tool the run does not have.
   `tool("delegate", "run_subagent", ...)` and `tool("workflow", "start_workflow", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
+- `run(name, args=None)` executes the saved workflow `workflows/<name>.py` inline inside the current run and returns what its `main(args)` returns; see [Saved Workflows](#saved-workflows).
 - `now()` returns the current UTC time and `random()` a float in `[0, 1)`; both are saved, so a resumed run gets the same values again.
 - `shell(..., cached=False)` and `tool(..., cached=False)` run again on every resume; use it for a check of something outside the run.
 
@@ -10345,7 +10375,7 @@ Only a call that provably never reached its tool fails as safe to run again: a h
 ## Agents
 
 ```python
-agent(prompt, *, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
       profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
 ```
 
@@ -10355,13 +10385,14 @@ The options are those of `run_subagent` under shorter names.
 
 | Option | Meaning |
 |--------|---------|
+| `schema` | A JSON Schema; the call returns the parsed JSON value that matches it instead of text. See [Structured Output](#structured-output) |
 | `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
 | `name` | A label for the call; it does not pick an agent. Without it the label is the first line of the prompt. Every label is redacted and then cut to 80 characters; one that was cut ends in `... [truncated]` |
 | `model` | Any configured model name, such as `haiku` or `opus@high` |
 | `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do. `tools`, `skills` and `knowledge` narrow the copy only together with `system`, and an empty list gives it none |
 | `minimal` | Run the turn in minimal mode |
 | `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`. Time spent waiting for an approval does not count, and the work before an approval or a restart does. The turn is stopped on time also between two attempts of the run; the time MindRoom itself is down counts as work |
-| `output_path` | Also write the answer to this workspace file |
+| `output_path` | Also write the answer to this workspace file; not together with `schema` |
 | `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
@@ -10376,7 +10407,7 @@ Every call of a run takes the same check before it is saved or sent: the run's s
 That holds for `tool()`, for an agent behind `tool("delegate", ...)`, for `agent()`, and for each attempt.
 A call made while that access cannot be answered yet, for example while the bot is restarting, waits and is asked again.
 
-A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
+A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `schema`, `refused`, `interrupted`, or `indeterminate`.
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
 `tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
@@ -10397,7 +10428,156 @@ A message it sends with `matrix_message` and no other target lands in that threa
 The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
-`schema` is not available yet.
+
+### Structured Output
+
+```python
+check = agent("List factual problems in this report.\n\n" + draft,
+              schema={"type": "object", "required": ["problems"],
+                      "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
+if not check["problems"]:
+    ...
+```
+
+With `schema`, a JSON Schema as a dict, `agent()` returns the parsed JSON value instead of text; JSON `null` is a value like any other.
+It needs no special tool, so it works with every model, in standard and in minimal mode.
+
+- The schema is checked first.
+  One that is no valid JSON Schema fails the call with kind `schema` and `schema is not valid JSON Schema: <path>: <reason>.` before any agent starts.
+  A `$ref` or `$dynamicRef` must point inside the schema, as `#/$defs/name` does.
+  One that names a URL or a file, or nothing in the schema, fails the call the same way, and nothing is ever fetched.
+- The agent gets the prompt, then `End your answer with one fenced json block that matches this JSON Schema:` and the schema.
+- The value is the last fenced `json` block of the answer, or the whole answer when it has none.
+- An answer without a JSON value, or with one that does not match, is corrected by the same agent in a further turn: `Your answer did not match the schema: <error>. Reply with only the corrected fenced json block.`
+  The agent keeps its conversation, each turn is a job and a [cost](#cost) entry of its own, and the turns share the call's `timeout`.
+- After 5 turns the call raises `AgentError` with kind `schema`: `Agent '<name>' did not return JSON matching the schema after 5 attempts. Last error: <error>.`
+  A resume runs it again, unless one of its turns started a tool call: then the call is `indeterminate`, as any call that may have written.
+  The same holds when a further turn fails, is cancelled, times out or is cut off by a restart: what an earlier turn did still counts.
+- `schema` and `output_path` cannot be used together, since the file would hold an answer before it is checked.
+  Such a call fails with kind `schema` before any agent starts; return the value and write it from the script.
+- The schema is part of what the call is, so a resume with another schema runs the call again.
+
+## Sessions
+
+```python
+s = spawn(name, *, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+          profile=None, minimal=False, output_path=None, dedicated_worker=False, resource_profile=None)
+answer = s.ask(message, *, schema=None, timeout=None)
+```
+
+`spawn(name, **options)` creates a session node with the options of `agent()` (except `prompt`, `schema`, and `timeout`).
+Each `s.ask(message)` runs one turn of that agent and returns its answer (or parsed JSON when `schema` is given):
+
+```python
+from mindroom.workflow import shell, spawn
+
+def review_loop(task, test_command):
+    dev = spawn("dev")
+    reviewer = spawn("reviewer", system="Review diffs. Reply APPROVE or list problems.")
+    dev.ask(f"Implement and commit: {task}")
+    for _ in range(5):
+        tests, review = shell(test_command), reviewer.ask("Review `git diff main`.")
+        if tests.ok and review.startswith("APPROVE"):
+            return review
+        dev.ask(f"Fix and commit.\n\nTests:\n{tests.output}\n\nReview:\n{review}")
+    return "Not approved after 5 rounds:\n" + review
+```
+
+- Turn 1 launches a fresh child named after the session; later turns continue that same child with `continue_subagent` semantics (same child session, conversation history, model, and persona).
+- Each turn is its own background job and usage entry, and the graph shows turn nodes linked to their session node with a turn count.
+- A session handles one turn at a time: calling `s.ask(...)` while `s` is already in a turn fails with `Session '<name>' is already in a turn. Wait for it or spawn another agent.`.
+- Different sessions can run concurrently, for example `parallel([lambda: a.ask(x), lambda: b.ask(y)])`.
+- On resume, a turn whose message and earlier session history match its saved turn is reused from cache. A new turn after the last saved turn continues the saved child. If an earlier turn changed or reran as a new generation (in any lane), later turns of that session miss too; the first changed turn after saved turns starts a fresh child with an `Earlier conversation:` transcript of the saved turns before it, and later turns continue that fresh child.
+- Peer messages queued for a session between turns are placed in front of its next `s.ask(...)` message under `Messages received since your last turn:`.
+
+## Questions
+
+```python
+when = ask_user("When shall the report go out?")
+if ask_user("Deploy to production?", ["Yes", "No"]) == "Yes":
+    shell("make deploy")
+```
+
+`ask_user(question, options=None)` shows the question in the run's thread and returns the answer of the run's requester.
+With `options`, a list of strings, the answer is one of them; without, it is free text.
+Only the branch that asks waits: the other items of a `foreach` or `parallel` keep running, and the question holds none of the run's `max_concurrent` places.
+The run shows `waiting` once nothing else of it works, and that time is not charged to its [working time](#working-time).
+
+- The question is one card in the thread, a notice from the run's agent that carries `io.mindroom.workflow_question` with `run`, `node`, `question_id`, `requester`, `text`, `options`, `free_text`, `status` and `answer`.
+  `status` is `open`, `answered` or `cancelled`, and the card is edited when it changes.
+- Its text for other clients is `Question q3fa91c: <text> 1. Yes 2. No. Answer with !answer q3fa91c <number or text>.`
+- `!answer q3fa91c 2` answers with an option's number or its text, and `!answer q3fa91c after lunch` with free text.
+  Without the ID, `!answer` answers the requester's only open question in the thread; with several open it asks for the ID shown on the card and answers none.
+  An ID without an answer answers nothing, and neither does an ID that two open questions happen to share: answer that one on its card.
+- MindRoom Chat answers with the event `io.mindroom.workflow_answer`, `{"run", "node", "option"}` or `{"run", "node", "text"}`, sent in the run's thread as a reply to the card.
+- An answer counts only from the run's requester, in the run's room and thread, for the card as it is now, and only while the requester still has access to the run's agent there.
+  A question whose card could not be posted yet takes no answer.
+  Any other answer event changes nothing and gets `io.mindroom.workflow_answer_rejected` with `{"run", "node", "reason"}` as a reply: `not_for_you`, `wrong_place`, `no_longer_open`, `already_answered` or `not_an_option`.
+- The ID is `q` and six hex characters made from the run, the call and how often the call was asked, so two runs in one thread never share one, and neither do a question and the question that replaced it.
+- The question waits as long as it takes.
+  It stays open across a restart of MindRoom, the card is posted once, and an answer that comes while the script is not running is saved and returned when it runs again.
+- The answer is saved as the call's result, so a resume does not ask again.
+  A call whose question or options changed asks again, and the old card shows `cancelled`.
+- A run that ends closes its open questions: their cards show `cancelled`, and a cancelled `ask_user` raises `WorkflowError` with kind `cancelled`.
+- Options that are not a list of non-empty strings fail in the script with `options must be a list of strings, such as ['Yes', 'No'].`
+- A question takes at most 20 options of at most 200 bytes each, since an answer is an option's own text and the card must be one event.
+  More, or longer ones, fail the call with `A question takes at most 20 options of at most 200 bytes each.` before anything waits.
+- The card shows the first 2,000 characters of a long question, or fewer if the card would not be one event, and the first 500 of a long answer, each ending in `... [truncated]`.
+  The script gets the whole answer.
+- A card that could not be posted is posted again when the script asks again, and every ten seconds by the run itself.
+- Agents inside a workflow run can also ask the requester directly through `workflow_peers.ask_user(question, options=None)`.
+  It posts the same question card, releases the agent's concurrency slot while waiting, marks the agent `waiting` on `user` (with its job `awaiting_approval`), and returns the stored answer immediately if the same question is asked again after a restart.
+
+## Peer Messages And Shared State
+
+Every agent running inside a workflow automatically receives the run-scoped `workflow_peers` toolkit, which always resolves the run from the child agent's own binding:
+
+```text
+send_peer_message(to, text)        send to an agent's name, "*" (all unfinished agents), or "script"
+read_peer_messages(wait_seconds=0) return {messages: [{from, text, sent_at}], note?}; waits for the first one
+list_peers()                       return id, name, status and label of every current agent and session in the run
+get_shared_state(key=None)         read one shared-state key or all keys
+set_shared_state(key, value)       write a JSON value under key (last write wins)
+ask_user(question, options=None)   ask the run's requester with the same question card as the script
+```
+
+The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)` (returns `{messages: [{from, text, sent_at}], note?}`), `state.get(key, default=None)` and `state.set(key, value)`.
+
+```python
+from mindroom.workflow import agent, parallel
+
+def main(args):
+    fe, be = parallel([
+        lambda: agent(
+            "Build the frontend. Message 'backend' to agree on the API contract, "
+            "wait with read_peer_messages(wait_seconds=600) for their reply, then implement.",
+            name="frontend",
+        ),
+        lambda: agent(
+            "Build the backend. Wait for 'frontend' with read_peer_messages(wait_seconds=600), "
+            "agree on the API contract, then implement.",
+            name="backend",
+        ),
+    ])
+    return f"Frontend:\n{fe}\n\nBackend:\n{be}"
+```
+
+- **Addressing.** Mailboxes belong to names, not individual nodes.
+  A message sent to a name that no agent holds yet is held (`held: true`) and delivered when an agent with that name starts, so parallel start order does not matter.
+  When multiple agents share a name, each gets its own copy, and `"*"` reaches every unfinished agent other than the sender.
+  Sending to a name whose agents have all finished fails with `'<name>' has finished and will not read this. Use spawn() to keep an agent you want to talk to.`
+- **Exactly once.** Every peer message, read cursor update, and shared-state operation runs in a single transaction keyed by its operation ID.
+  A provider retry of the same tool call returns the saved result without sending twice or advancing the cursor twice; a reused call ID in a continued turn or with different arguments is a new operation.
+  Script `send`, `inbox`, `state.get` and `state.set` calls are saved as run nodes and replayed on resume like other SDK calls.
+- **Reruns.** When an agent runs again as a new generation, unread outgoing messages from its earlier generation are withdrawn, and the new generation starts its read cursor at 0 so it sees what its predecessor saw.
+- **Waiting.** `read_peer_messages(wait_seconds)` and `inbox(wait_seconds)` wake on the first message and end when mail arrives or after `wait_seconds`.
+  While waiting, the node releases its concurrency slot and shows `waiting` on `peer` (which does not mark the run as waiting for a person).
+  When `wait_seconds` runs out with no mail, both return `{"messages": [], "note": "No message arrived within <N> s."}`.
+  To avoid long idle waits, use a sensible `wait_seconds` and the run's own limits.
+- **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
+- **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
+  Graph frames and the finished run card carry only message-count `edges` (`{"from", "to", "kind": "message", "count"}`), never message text.
+  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `get_workflow(run_id, messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
 
@@ -10442,6 +10622,64 @@ A script can start agents and runs through `tool()` as well.
 - An agent whose turn had ended before a restart is counted for the attempt that started it, not for the one that read its answer.
 - Each call that asked a model shows its own `usage` in `nodes`.
 
+### Cost Limit
+
+Nothing caps what a run costs unless its start names a limit: `start_workflow(..., max_cost_usd=5)`.
+
+- When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further call starts.
+  Calls that already run finish, and once nothing of the run is working any more, the run ends `interrupted` with `Stopped at the cost limit ($X of $Y).` on its card and in its delivered report.
+  An amount under a cent is written with up to six decimal places.
+- A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
+  Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
+- To continue a run stopped at its cost limit, call `resume_workflow(run_id, max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
+  Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`, and an interrupted nested child continues under the parent's raised limit.
+  Calling `resume_workflow` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+  A card Resume control (`io.mindroom.workflow_control`) without `max_cost_usd` on a run stopped at its limit raises `max_cost_usd` to `spent + max_cost_usd` (one more allowance of the same size).
+- A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
+- The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
+  A further turn of a [`schema`](#structured-output) call is new spending too: at the limit it does not start, and the run ends `interrupted`.
+  The check reads what the run has spent from the store, so it holds after a resume and after a restart of MindRoom.
+
+A run is marked `large` once it has more than 25 agent calls, or once its projected cost passes the `large_run_notice_usd` of the agent's `workflow` tool entry (10 by default, 0 turns the cost test off).
+The mark is advisory: the run's log says `Large run: <n> agents, about $<projected> projected.`, its card is edited at once, and nothing is paused.
+
+## The Run In The Room
+
+A run that started shows one card in its thread: a notice from the run's agent that MindRoom edits as the run goes on.
+A run inside a run has no card; it is a group in the graph of the run around it.
+
+- The card's text is `Workflow "<title>" <status>: <n> done, <n> running, <n> waiting. Stop it with !cancel_job <job id>.`, and the last sentence is left out once the run has ended.
+- Its content carries `io.mindroom.workflow_run` with `run`, `job_id`, `requester`, `title`, `status`, `counts`, `usage`, `phases`, `attempt`, `started_at`, `ended_at`, `error` and `large`.
+  `counts` has `queued`, `running`, `waiting`, `completed`, `failed`, `indeterminate` and `cached`; a cancelled call counts as failed, and `cached` counts the completed calls whose saved result this attempt reused.
+  `usage` is that of [Cost](#cost) plus `projected_cost_usd`: what the run will have cost if every agent still to end costs what a finished turn cost on average.
+  `error` is the last line of what a run that did not complete ended with.
+  Every cost on the card, in `usage` and in the rows of `graph`, is a decimal string such as `"0.12"`, with six decimal places at most: a homeserver signs the card, and what it signs holds no float.
+  The frames below carry the same costs as numbers.
+- The card is edited at once when the run's status, its list of phases, or whether a call waits for a person changes, and when the run is marked large.
+  While only numbers change it is edited every ten minutes at most.
+- The last edit of an ended run adds `graph`: the run's calls, groups, phases and last log lines, cut down to what one event holds, with the counts of what was left out in `omitted`.
+- The card is posted once: a restart of MindRoom finds it again and edits it.
+- A card that could not be sent is sent again with the run's next view, every ten seconds while the run works.
+  The edit that says how the run ended is sent until the room took it, after 20 seconds, 40 seconds and so on up to every ten minutes, and again after a restart of MindRoom.
+- A row of a call whose agent still runs has no usage yet: its `run` names the sub-agent run whose own frames show what it used so far.
+
+While the run works, clients that show live updates get its graph as `io.mindroom.workflow` frames, see [Live Updates](https://docs.mindroom.chat/streaming/#live-updates).
+A frame is `{v, run, sid, seq, meta, snapshot}` or `{v, run, sid, seq, meta, delta}`.
+`meta` holds the run's agent, thread, title, status, attempt, times, `max_concurrent`, `max_cost_usd`, `large`, `counts` and `usage`.
+A snapshot holds `phases`, `groups`, `nodes`, `edges`, `omitted` and `log`, and a delta the rows that changed since the frame before it.
+Each row of `edges` is `{"from", "to", "kind": "message", "count"}` with counts only and no message text.
+A snapshot is sent first, every ten seconds, at the run's end, and whenever a row left the graph.
+A graph too large for one event keeps the calls that wait for a person first, then failed, running and queued ones, then the newest completed ones, and counts the rest in `omitted`.
+Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
+
+MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
+It resumes the run as `resume_workflow(run_id, max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
+For a run stopped at its cost limit, a Resume control without `max_cost_usd` raises the limit to `spent + current max_cost_usd` (one more allowance of the same size); an explicit `max_cost_usd` that is not above what the run spent changes nothing.
+The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
+The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
+Anything else, such as another person's event, another action, or a run that has not ended, changes nothing.
+A Stop that names the job of one agent of a run cancels that agent only; the script gets `AgentError` with kind `cancelled` for it.
+
 ## Fan-Out
 
 ```python
@@ -10466,7 +10704,7 @@ def main(args):
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
   The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
-  A call that waits for an approval holds no place, so the next queued call starts, and it takes a place again when its decision is in.
+  A call that waits for an approval keeps its concurrency place until it finishes, so queued calls wait for a free place.
   A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
   An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
   `foreach(items, fn, max_concurrent=4)` and `parallel(fns, max_concurrent=4)` hold one fan-out to fewer.
@@ -10523,6 +10761,7 @@ A call that may have written (a tool that raised, an agent that made tool calls)
   Check its effect, then name it in `rerun`, for example `resume_workflow(run_id, rerun=["n4"])`, to run it again; `get_workflow(run_id, nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
+- `max_cost_usd` sets the run's cost limit for the next attempt; when the run stopped at its cost limit, it must exceed what the run has spent.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
 - Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
 
@@ -10569,21 +10808,17 @@ A run whose script had already returned its report ends with that report and get
 - An agent that was waiting for an approval when MindRoom stopped keeps waiting: its job is not ended, its card stays open with the expiry it had, and a decision that was already given on another card of the same turn stands.
   Once MindRoom runs again the agent's paused turn is resumed with those decisions, so the agent is not sent its task again, no tool call it had finished is made again, and no call gets a second card.
   This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
-- When that paused turn cannot be resumed, the agent goes on in a new turn instead: it is sent its prompt and an account of the tool calls it had finished, its open cards are closed as `Superseded after a restart.`, and it asks again for the call that had waited, which had not run.
-  When neither is possible the call ends as that of an agent that cannot be continued does, and a tool call that was still waiting for its decision counts as not started.
+- When that paused turn cannot be resumed, for example because its saved paused run or approval metadata cannot be loaded, no follow-up turn is synthesized for it.
+  Instead, the call ends as that of an agent that cannot be continued does: `indeterminate` if its record is unreadable or it had started another tool call, or `failed` with kind `interrupted` if its record proves no tool call started (a call still waiting for its decision counts as not started), in which case the next attempt runs it again.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `start_workflow` call when MindRoom stopped is continued, and it is not asked to make the call again.
-  The call was saved with the run it started, in the same write, so the agent's job waits for that run and then sends the agent the run's report as the result of its call.
-  A run that ended meanwhile gives its stored report at once.
-  A run that another call resumed meanwhile gives the report its own attempt ended with, and is left to that other call.
-  This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
-  Stopping the agent while its job waits cancels the run inside.
-- The agent is not continued when that cannot be proven: the call reserved no run before MindRoom stopped, the script file it named has changed since, or a call of another tool was cut short in the same turn.
-  Its call then ends `indeterminate`, the run inside stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
+  The agent that was inside its `start_workflow` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `start_workflow` was cut short).
+  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `start_workflow` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
+  Stopping the agent while it waits, or cancelling the outer run, cancels the nested run.
+- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
   A script's own `tool("workflow", "start_workflow", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
 - A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
@@ -10612,6 +10847,28 @@ One script process runs for at most 30 days; a run with working time left then c
 - Without a worker backend, the script runs as a child process of MindRoom on Linux, only when `defaults.allow_shell_without_worker` is `true` or `MINDROOM_SANDBOX_EXECUTION_MODE` selects [local execution](https://docs.mindroom.chat/tools/background-scripts/#local-execution).
   Otherwise `start_workflow` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - The script never runs inside the MindRoom process itself.
+
+## Saved Workflows
+
+A saved workflow is a Python file at `workflows/<name>.py` in the agent's workspace, where `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
+Its description is the first line of its module docstring, and an optional top-level literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
+`list_workflow_runs()` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
+
+- `save_workflow(run_id, name, description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
+  When the script has no module docstring and `description` is given, MindRoom adds one.
+  Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
+- `start_workflow(name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
+- Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
+  Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash so calls after the group rerun, while unchanged calls before the first edit inside the child lane are still reused.
+  `run(name, args)` is an inline call inside the current run and adds no delegation depth.
+- `!workflows` (or `/workflows`) lists the caller's recent workflow runs in the current conversation and the saved workflows of workflow-enabled agents in the room.
+- Saved workflows are workspace code, like skills: anyone who can make that agent write workspace files can create or edit them, and agents that share a workspace share its `workflows/` directory.
+  MindRoom writes no run results into the workspace; stored run records and reports stay in MindRoom's workflow store behind the per-requester owner check.
+
+## Moving From Dynamic Workflows
+
+`dynamic_workflow` is now a deprecated alias for `workflow` (any legacy `allowed_tools` option is ignored because a workflow inherits its caller's tools).
+The old Dynamic Workflows YAML engine has been removed; rewrite any YAML workflow you want to keep as a Python script with `def main(args):` under `workflows/<name>.py` and rename `dynamic_workflow` to `workflow` in your config.
 
 # Worker Computer
 
@@ -16544,12 +16801,12 @@ agents:
 
 # Agent Orchestration
 
-These built-in tools let an agent hand tasks to other agents, build and run reusable Dynamic Workflows, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
+These built-in tools let an agent hand tasks to other agents, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
 
 ## Tools On This Page
 
 - [`delegate`](#delegate) - Run a configured agent as a fresh subagent and wait for its answer.
-- [`dynamic_workflow`](#dynamic_workflow) - Create, update, run, and inspect saved Dynamic Workflows.
+- [`dynamic_workflow`](#dynamic_workflow) - Deprecated alias for [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
 - [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
@@ -16683,7 +16940,7 @@ Common errors:
 - `Cannot delegate: the maximum delegation depth was reached.` - the chain of subagents is already 3 deep.
 - `Subagent ID prefix "<prefix>" matches several subagents in this conversation: <id1>, <id2>. Pass the full ID.` - the prefix matched more than one of this caller's subagents in the conversation.
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
-- `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
+- `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a legacy Dynamic Workflow snapshot stored before that engine was removed.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
 
 ### Dedicated Workers
@@ -16881,9 +17138,9 @@ A job with no useful output, or a cancelled one, still needs acknowledging.
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
-Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
-The agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
+Cancelled jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects them like any other. A silent schedule's ended jobs get a silent follow-up (still isolated from ordinary replies and capped at 20 without posting a visible pause notice), so the schedule stays silent unless there is something to report.
+Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them (a silent schedule's wait for its next silent run instead).
+For non-silent jobs, the agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -16950,150 +17207,24 @@ The configured large-output policy can save long text to a file before that limi
 
 ## [`dynamic_workflow`]
 
-`dynamic_workflow` lets an agent save a reusable multi-step workflow, publish new revisions, run it, and inspect run records.
-Add it to the `tools:` of each agent that should create and run workflows.
-
-```yaml
-agents:
-  coordinator:
-    display_name: Coordinator
-    role: Build and run reusable Dynamic Workflows
-    model: sonnet
-    tools:
-      - dynamic_workflow
-```
-
-The tool exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`, each returning JSON with a `status` field.
-`validate_workflow()` reports every validation error in a spec without saving it.
-Workflows belong to the calling agent.
-`update_workflow(workflow_id, patch, reason)` merges `patch` into the current spec: nested objects merge, but a list such as `workflow` or `participants` replaces the old list, so pass the complete list when changing one entry.
-Each `update_workflow()` publishes a new immutable revision, and each run uses the revision active when it starts.
-Saved workflows and run records live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
-A run completes inside the tool call and writes `report.md`, `report.html`, and `step_outputs.json`, which the run payload lists.
-Only the user who requested a run can read its record, publish it, or open its private report.
-When `MINDROOM_PUBLIC_URL` is set, run payloads include a private report URL under `/reports/private/...` that opens for that user in the dashboard.
-Use [`report_publishing`](#report_publishing) to share a completed run's report through a public link.
-
-### Spec Shape
-
-Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: workflow`.
-The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
-`description` is text or `null`.
-
-- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
-- **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
-  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
-    A [`mode: minimal`](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) participant's `shell` must run without approval, [pre-approved](#allowing-participant-tools) like any participant tool; leave `mode` unset for a participant that needs no tools.
-    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
-    It searches no knowledge bases, even when its profile lists `knowledge`.
-    Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
-    A participant used by several steps continues one session.
-    Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
-    A model with [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels) that is named without a level keeps the level that was its default when the run started.
-    Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
-  - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
-    It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
-- **`workflow`**: Up to 64 steps, each with a unique `id` and a `type`, run one at a time in order.
-  - `agent_step` sends its rendered `prompt` to the named `participant`.
-  - `transform_step` renders a `template` without calling a model.
-  - `report_step` renders Markdown from `body_template` or copies a prior step via `from_step`, with an optional `title`.
-  - Templates can reference `{input.<field>}` and earlier steps as `{steps.<step-id>}`.
-- **`outputs`**: Entries with `id`, `type`, and `from_step`, where `type` is `text`, `markdown`, `json`, or `html_report`.
-- **`permissions`**: Run limits and grants.
-  - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
-  - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
-  - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
-  - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit or `toolkit.function` a participant may name, inline or in its profile.
-    A `models` entry `name@level` admits only that model at that level, which a participant naming plain `name` runs at only while `level` is its default; an alias or model ID admits every level.
-  - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
-
-```python
-create_workflow(
-    spec={
-        "schema_version": 1,
-        "id": "brief-report",
-        "name": "Brief Report",
-        "description": "Create a short HTML report from one topic.",
-        "kind": "workflow",
-        "inputs": {
-            "type": "object",
-            "required": ["topic"],
-            "properties": {"topic": {"type": "string"}},
-        },
-        "participants": [
-            {
-                "id": "writer",
-                "kind": "subagent",
-                "system_prompt": "You write concise, well-cited research reports.",
-                "model": "claude-sonnet-5-5",
-                "tools": ["duckduckgo", "website"],
-            },
-        ],
-        "workflow": [
-            {
-                "id": "write",
-                "type": "agent_step",
-                "participant": "writer",
-                "prompt": "Research the web and write a concise cited report about {input.topic}.",
-            },
-        ],
-        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
-        "permissions": {
-            "max_runtime_seconds": 1800,
-            "max_concurrent_agents": 4,
-            "max_total_agents": 8,
-            "models": ["claude-sonnet-5-5"],
-            "tools": ["duckduckgo", "website"],
-            "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
-        },
-    },
-    reason="initial report workflow",
-)
-run_workflow("brief-report", {"topic": "Agno factories"})
-list_workflows()
-get_workflow_run("brief-report", "run_...")
-```
-
-### Allowing participant tools
-
-Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved.
-`validate_workflow()`, `create_workflow()`, and `update_workflow()` refuse a participant tool that is not pre-approved, and a run fails before any participant starts if a pre-approval was removed after the workflow was saved.
-Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
-Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
-
-```yaml
-agents:
-  builder:
-    display_name: Workflow Builder
-    tools:
-      - duckduckgo
-      - website
-      - dynamic_workflow:
-          allowed_tools: [duckduckgo, website]
-```
-
-Operator-authored [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first and the first match wins.
-A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
-A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly is refused the same way.
-The same holds for a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval for that participant.
-`allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
-Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
-A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.
+`dynamic_workflow` is a deprecated alias for [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
+The old Dynamic Workflows YAML engine has been removed; existing configs that still list `dynamic_workflow` automatically load `workflow` and log a one-line deprecation warning.
+Any legacy `allowed_tools` setting under `dynamic_workflow` is ignored because a `workflow` run inherits its caller's tools.
+Rename `dynamic_workflow` to `workflow` in `config.yaml` and write Python workflows under `workflows/<name>.py`.
 
 ## [`report_publishing`]
 
-`report_publishing` lets an agent publish a completed Dynamic Workflow report or a workspace static site through a revocable public link.
-Add it to the agent's `tools:`; it is often enabled next to `dynamic_workflow`.
+`report_publishing` lets an agent publish a completed [`workflow`](https://docs.mindroom.chat/tools/workflows/) run result or a workspace static site through a revocable public link.
+Add it to the agent's `tools:`; it is often enabled next to `workflow`.
 
 ```yaml
 agents:
   coordinator:
     display_name: Coordinator
-    role: Build workflows and publish report links
+    role: Run workflows and publish report links
     model: sonnet
     tools:
-      - dynamic_workflow
+      - workflow
       - report_publishing
 ```
 
@@ -17105,7 +17236,7 @@ To have a person approve each publication, add a [tool approval](https://docs.mi
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
-- **`dynamic_workflow_run`**: `source` takes `workflow_id` and `run_id`, and the run must be completed.
+- **`workflow_run`**: `source` takes `run_id` of a completed workflow run and an optional `title` (defaulting to the run's title or `Workflow Run <run_id>`). The run's result (string or JSON value) is rendered to a self-contained escaped HTML page.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
@@ -17117,8 +17248,8 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 
 ```python
 publish_report(
-    source_type="dynamic_workflow_run",
-    source={"workflow_id": "brief-report", "run_id": "run_..."},
+    source_type="workflow_run",
+    source={"run_id": "wf-...", "title": "Brief Report"},
     confirm_public=True,
 )
 publish_report(
@@ -17266,7 +17397,7 @@ Which functions an agent gets depends on what it is:
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
 `create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
-Scripts and workflow participants cannot call it, and it cannot be deferred.
+Background scripts cannot call it, and it cannot be deferred.
 
 ```python
 create_agent(
@@ -19198,7 +19329,7 @@ Do not report or "fix" these; they are deliberate.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
-- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
+- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a workflow `agent()` call, runs as its caller with the caller's tools, credentials, workspace, and approval rules; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, start time, and the subagent ID and run ID of a subagent job or the tool call ID of a tool job, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the owner account also publishes, while the API is on and the origin is usable, its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, also in an encrypted room.
   An agent or team publishes its configured `role` in the same state whenever it is set, also with the API off.
@@ -19913,7 +20044,7 @@ A call then needs approval when its own rules ask for it or when the `judged_as`
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
 Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
 When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
-In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
+In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script, a call asks whenever `judge` returns a call that no rule auto-approves or lets through.
 
 ### Dependencies
 
@@ -26515,7 +26646,7 @@ With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open t
 
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
-With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal, the OAuth callback, success, and reset pages, and [private Dynamic Workflow reports](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) keep their own access checks.
+With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
@@ -26754,7 +26885,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
 The client chart serves `/.well-known/matrix/client` only with MatrixRTC, bug reports, or a [server emoji room](https://docs.mindroom.chat/custom-emoji/) enabled; otherwise send it to Tuwunel as well.
-Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published reports](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing).
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
@@ -27340,7 +27471,7 @@ Calls past the budget fail with a tool error, and this event is logged once when
 
 | Field | Meaning |
 |-------|---------|
-| `entity` | Agent or team name; dynamic workflow `subagent` participants appear under the calling agent's name and `room_agent` participants under their own |
+| `entity` | Agent or team name |
 | `budget` | The run's tool-call budget |
 | `model_requests` | Model requests the run made before it was stopped |
 
@@ -27593,7 +27724,7 @@ Nothing saved for the old tools is translated, so before upgrading, change what 
 - A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` are removed and, where they were off, become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; remove `all`, and set `enable_delete_file: true` only if `all` had turned deletion on and you still want it; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
 - [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
 - Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you delete them, saving any you still want under `filesystem`; settings of the earlier `file` toolkit saved under `filesystem` stop it the same way.
-- A contact's tools, a `dynamic_workflow` `allowed_tools` entry, a saved workflow, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
+- A contact's tools, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
 - A `script` `allowed_tools` list that names `file` or `coding` makes every script launch fail until it names `filesystem`.
 - A background tool job that an agent started with `file` or `coding` does not resume after the upgrade, so let running jobs finish first.
 - Upgrade workers and the sandbox runner together with the primary.
