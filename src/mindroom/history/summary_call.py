@@ -64,6 +64,10 @@ class CompactionSummaryIncompleteError(RuntimeError):
     """Raised when a provider returns partial text without completing the summary."""
 
 
+class CompactionForkToolCallError(CompactionSummaryIncompleteError):
+    """Raised when a forked compaction call emits tool calls instead of summary text."""
+
+
 class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
@@ -246,30 +250,16 @@ async def _request_summary(
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
-async def generate_compaction_summary(
+async def request_compaction_summary(
     *,
     model: ModelProvider,
-    summary_input: str,
-    summary_prompt: str,
+    request: ModelRequest,
     timeout_seconds: float,
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
-    keep_thinking_setting: bool = False,
-    allow_transient_fallback: bool = False,
+    reject_tool_calls: bool = False,
 ) -> str:
-    """Bound the provider request, then persist returned usage before validating the summary text it returns.
-
-    ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
-    ``allow_transient_fallback`` lets a configured fallback chain take over on transient errors on the final retry.
-    """
+    """Bound one compaction summary request, persist returned usage, and validate the returned summary text."""
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    request = ModelRequest(
-        messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        overrides=replace(
-            _SUMMARY_OVERRIDES,
-            omit_thinking_setting=not keep_thinking_setting,
-            transient_retries="fallback" if allow_transient_fallback else "caller",
-        ),
-    )
     response_task = asyncio.create_task(
         _request_summary(model, request, provider_done, on_usage),
         name="compaction_summary_request",
@@ -285,6 +275,9 @@ async def generate_compaction_summary(
         _cancel_and_detach(response_task, reason="outer_cancellation")
         raise
 
+    if reject_tool_calls and (turn.tool_calls or turn.stop_reason == "tool_use"):
+        msg = "compaction fork attempted a tool call; refusing to persist summary"
+        raise CompactionForkToolCallError(msg)
     normalized_text = _normalize_compaction_summary_text(turn.content)
     if not normalized_text:
         message = turn.message
@@ -302,6 +295,37 @@ async def generate_compaction_summary(
         msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
         raise CompactionSummaryIncompleteError(msg)
     return normalized_text
+
+
+async def generate_compaction_summary(
+    *,
+    model: ModelProvider,
+    summary_input: str,
+    summary_prompt: str,
+    timeout_seconds: float,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+    keep_thinking_setting: bool = False,
+    allow_transient_fallback: bool = False,
+) -> str:
+    """Bound the provider request, then persist returned usage before validating the summary text it returns.
+
+    ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
+    ``allow_transient_fallback`` lets a configured fallback chain take over on transient errors on the final retry.
+    """
+    request = ModelRequest(
+        messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
+        overrides=replace(
+            _SUMMARY_OVERRIDES,
+            omit_thinking_setting=not keep_thinking_setting,
+            transient_retries="fallback" if allow_transient_fallback else "caller",
+        ),
+    )
+    return await request_compaction_summary(
+        model=model,
+        request=request,
+        timeout_seconds=timeout_seconds,
+        on_usage=on_usage,
+    )
 
 
 def _normalize_compaction_summary_text(raw_text: str) -> str:

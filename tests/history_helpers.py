@@ -64,7 +64,12 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
@@ -174,13 +179,19 @@ def checkpointed_answer(item: dict[str, object], basis: str) -> Message:
 
 
 def stamp_request_identity(answer: Message, model: ModelProvider, request: ModelRequest) -> None:
-    """Record on ``answer`` the identity of ``request``, the request ``model`` answered, as the model loop does.
+    """Record on ``answer`` the identity of ``request`` and any cache-routing digest, as the model loop does.
 
-    A request without an identity, such as one holding media at a URL, leaves ``answer`` unstamped.
+    A request without an identity, such as one holding media at a URL, leaves ``REQUEST_IDENTITY_KEY`` unstamped.
     """
+    base = answer.provider_data or {}
+    updated = base
     identity = request_prefixes(model, request)[-1]
     if identity is not None:
-        answer.provider_data = {**(answer.provider_data or {}), REQUEST_IDENTITY_KEY: identity}
+        updated = {**updated, REQUEST_IDENTITY_KEY: identity}
+    if (routing := cache_routing_digest(model.model_params)) is not None:
+        updated = {**updated, CACHE_ROUTING_KEY: routing}
+    if updated is not base:
+        answer.provider_data = updated
 
 
 def record_native_checkpoint(

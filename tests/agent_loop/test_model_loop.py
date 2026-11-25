@@ -44,7 +44,12 @@ from mindroom.llm.messages import (
 )
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
@@ -144,6 +149,60 @@ async def test_an_answer_to_another_request_than_the_loop_sent_records_no_reques
     await run_loop(spec(model), messages)
 
     assert messages[-1].provider_data == {
+        REWRITTEN_ATTEMPT_KEY: True,
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
+
+
+async def test_cache_routing_digest_stamping_in_model_loop() -> None:
+    """Answers on routed models record the cache-routing digest unless the attempt was rewritten."""
+    params = {"prompt_cache_key": "cache-alice", "session_id": "sess-alice"}
+    expected_digest = cache_routing_digest(params)
+    assert expected_digest is not None
+
+    normal_model = ScriptedModel([answer("ok", metrics=usage(10, 2))], model_params=params)
+    normal_messages = _prompt()
+    await run_loop(spec(normal_model), normal_messages)
+    [normal_request] = normal_model.requests
+    assert normal_messages[-1].provider_data == {
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        REQUEST_IDENTITY_KEY: request_prefixes(normal_model, normal_request)[-1],
+        CACHE_ROUTING_KEY: expected_digest,
+    }
+
+    # A pipeline stage (e.g. prompt hold) may pre-stamp REQUEST_IDENTITY_KEY; routing digest is still stamped.
+    prestamped_turn = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="held",
+            metrics=usage(10, 2),
+            provider_data={REQUEST_IDENTITY_KEY: "held-identity"},
+        ),
+        stop_reason="end",
+    )
+    held_model = ScriptedModel([[TextDelta("held"), prestamped_turn]], model_params=params)
+    held_messages = _prompt()
+    await run_loop(spec(held_model), held_messages)
+    assert held_messages[-1].provider_data == {
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        REQUEST_IDENTITY_KEY: "held-identity",
+        CACHE_ROUTING_KEY: expected_digest,
+    }
+
+    # A rewritten attempt records neither request identity nor cache routing digest.
+    rewritten_turn = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="rewritten",
+            metrics=usage(10, 2),
+            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+        ),
+        stop_reason="end",
+    )
+    rewritten_model = ScriptedModel([[TextDelta("rewritten"), rewritten_turn]], model_params=params)
+    rewritten_messages = _prompt()
+    await run_loop(spec(rewritten_model), rewritten_messages)
+    assert rewritten_messages[-1].provider_data == {
         REWRITTEN_ATTEMPT_KEY: True,
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
     }

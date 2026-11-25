@@ -29,6 +29,7 @@ from mindroom.history.runtime import (
     summarize_run_locally,
 )
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
+from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
     compaction_summary_message,
     compaction_summary_text,
@@ -36,6 +37,7 @@ from mindroom.history.summary_message import (
     is_scope_summary,
     mark_summary_follows,
 )
+from mindroom.history.types import owner_scope
 from mindroom.llm.messages import is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -63,7 +65,7 @@ if TYPE_CHECKING:
         ResolvedReplayPlan,
     )
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.run_storage import RunStorage
@@ -208,17 +210,26 @@ class _Policy:
 
 
 async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> None:
+    messages = state.messages
+    live_request = state.request()
+    scope_fold = compaction.scope_fold
+    if scope_fold is not None:
+        store, session = scope_fold
+        leading = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
+        remember_fork_frame(
+            (store.path, owner_scope(session).key, session.session_id),
+            live_request,
+            messages[:leading],
+        )
     if compaction.stopped:
         return
     policy = _policy(compaction)
     if policy is None:
         return
-    messages = state.messages
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
-    request_size = await asyncio.to_thread(policy.sizer.size, state.request())
+    request_size = await asyncio.to_thread(policy.sizer.size, live_request)
     if request_size.tokens <= policy.limit:
         return
-    scope_fold = compaction.scope_fold
     layout = _layout(messages, compaction.prompt_id, scoped=scope_fold is not None)
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
@@ -231,6 +242,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         state.record,
         scope_fold,
         request_size.tokens,
+        live_request,
         # The rewritten request replays no checkpoint, which the summary replaced.
         lambda rewritten: compaction.model.request_tokens(
             replace(state.request(rewritten), native_compaction=None),
@@ -259,6 +271,19 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         compaction.stopped = True
 
 
+def _mid_turn_fork(policy: _Policy, live_request: ModelRequest) -> SummaryFork | None:
+    plan = policy.inputs.execution_plan
+    if plan.compaction_context_window is None:
+        return None
+    return SummaryFork(
+        sizer=policy.sizer,
+        request=live_request,
+        context_window=plan.compaction_context_window,
+        reserve_tokens=plan.reserve_tokens,
+        mid_turn=True,
+    )
+
+
 async def _summarize(
     compaction: _MidTurnCompaction,
     policy: _Policy,
@@ -267,6 +292,7 @@ async def _summarize(
     record: AnyRunRecord,
     scope_fold: tuple[ConversationStore, ConversationSession] | None,
     request_tokens: int,
+    live_request: ModelRequest,
     size_request: Callable[[list[Message]], int],
 ) -> _Fold | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
@@ -279,14 +305,23 @@ async def _summarize(
     settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
     inputs = replace(policy.inputs, history_settings=settings)
     try:
+        # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
+        kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if scope_fold is None:
-            summary_message = await _summarize_run_locally(compaction, inputs, layout, record)
+            budget_limit = policy.limit if kept_tokens < policy.limit else policy.fit_limit
+            summary_message = await _summarize_run_locally(
+                compaction,
+                policy,
+                inputs,
+                layout,
+                record,
+                live_request,
+                max_summary_tokens=max(0, budget_limit - kept_tokens),
+            )
             _finish(messages, layout, summary_message, record)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
             return _Fold(summary_message, await asyncio.to_thread(size_request, messages))
         store, session = scope_fold
-        # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
-        kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if kept_tokens >= policy.limit:
             # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
             logger.warning(
@@ -296,11 +331,13 @@ async def _summarize(
             return None
         return await _compact_scope(
             compaction,
+            policy,
             inputs,
             layout,
             messages,
             record,
             request_tokens,
+            live_request,
             size_request,
             store=store,
             session=session,
@@ -318,11 +355,13 @@ def _finish(messages: list[Message], layout: _Layout, summary_message: Message, 
 
 async def _compact_scope(
     compaction: _MidTurnCompaction,
+    policy: _Policy,
     inputs: HistoryPreparationInputs,
     layout: _Layout,
     messages: list[Message],
     record: AnyRunRecord,
     request_tokens: int,
+    live_request: ModelRequest,
     size_request: Callable[[list[Message]], int],
     *,
     store: ConversationStore,
@@ -339,6 +378,24 @@ async def _compact_scope(
     if basis is None:
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
+    scope = owner_scope(session)
+    basis_matches = await asyncio.to_thread(
+        holds_fold_basis,
+        layout.history,
+        basis_summary=basis.summary,
+        basis_runs=basis.runs,
+        scope=scope,
+    )
+    fork = _mid_turn_fork(policy, live_request) if basis_matches else None
+    if not basis_matches:
+        logger.info(
+            "Mid-turn compaction fork skipped; falling back to XML summary",
+            run_id=record.run_id,
+            session_id=session.session_id,
+            scope=scope.key,
+            compaction_strategy="xml",
+            fork_skip_reason="fold_basis_mismatch",
+        )
     fold = _fold(record, layout)
     folded_calls = _folded_calls(fold)
     summary_messages: list[Message] = []
@@ -368,6 +425,7 @@ async def _compact_scope(
         on_commit=on_commit,
         # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
         rewritten_request_tokens=partial(size_request, messages),
+        fork=fork,
     )
     if outcome is None or not summary_messages:
         return None
@@ -552,9 +610,13 @@ def _prompt_context(prompt: Message, budget_tokens: int) -> Message:
 
 async def _summarize_run_locally(
     compaction: _MidTurnCompaction,
+    policy: _Policy,
     inputs: HistoryPreparationInputs,
     layout: _Layout,
     record: AnyRunRecord,
+    live_request: ModelRequest,
+    *,
+    max_summary_tokens: int,
 ) -> Message:
     # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges,
     # each message as a snapshot of its own.
@@ -567,6 +629,9 @@ async def _summarize_run_locally(
         config=compaction.config,
         runtime_paths=compaction.runtime_paths,
         on_usage=_summary_usage_recorder(compaction, record),
+        fork=_mid_turn_fork(policy, live_request),
+        max_summary_tokens=max_summary_tokens,
+        model=compaction.model,
     )
     return compaction_summary_message(summary, run_local=True)
 

@@ -12,21 +12,34 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import is_queued_notice_message, media_items, stable_serialize
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
 
-__all__ = ["REQUEST_IDENTITY_KEY", "message_digest", "request_prefixes"]
+__all__ = ["CACHE_ROUTING_KEY", "REQUEST_IDENTITY_KEY", "cache_routing_digest", "message_digest", "request_prefixes"]
 
 # ``Message.provider_data`` key holding the identity of the request an assistant message answered.
 REQUEST_IDENTITY_KEY = "mindroom_request"
+# ``Message.provider_data`` key holding the digest of cache-routing params (``prompt_cache_key``, ``session_id``).
+CACHE_ROUTING_KEY = "mindroom_cache_routing"
 # The message fields no route sends.
 _UNSENT_FIELDS = frozenset({"id", "created_at", "from_history", "metrics"})
+
+
+def cache_routing_digest(model_params: Mapping[str, Any]) -> str | None:
+    """Return the SHA-256 hex digest of ``(prompt_cache_key, session_id)`` when either is set, else ``None``."""
+    key = model_params.get("prompt_cache_key")
+    session_id = model_params.get("session_id")
+    if key is None and session_id is None:
+        return None
+    return hashlib.sha256(stable_serialize([key, session_id]).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def request_prefixes(

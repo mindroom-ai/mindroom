@@ -55,7 +55,12 @@ from mindroom.llm.provider import (
     TurnCompleted,
     answering_identity,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -514,14 +519,20 @@ def _stamp_answering_model(record: AnyRunRecord, identity: ModelIdentity, model_
 
 
 async def _stamp_request_identity(model: ModelProvider, request: ModelRequest, turn: TurnCompleted) -> None:
-    """Attach the request identity digest to ``turn`` unless a stage rewrote the request or already stamped it."""
+    """Attach the request identity and cache-routing digests unless a stage rewrote the request."""
     answered = turn.message.provider_data or {}
-    if answered.get(REWRITTEN_ATTEMPT_KEY) or REQUEST_IDENTITY_KEY in answered:
+    if answered.get(REWRITTEN_ATTEMPT_KEY):
         return
-    # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
-    request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
-    if request_identity is not None:
-        turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
+    updated = answered
+    if REQUEST_IDENTITY_KEY not in updated:
+        # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
+        request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
+        if request_identity is not None:
+            updated = {**updated, REQUEST_IDENTITY_KEY: request_identity}
+    if CACHE_ROUTING_KEY not in updated and (routing := cache_routing_digest(model.model_params)) is not None:
+        updated = {**updated, CACHE_ROUTING_KEY: routing}
+    if updated is not answered:
+        turn.message.provider_data = updated
 
 
 async def _stream_turn(

@@ -325,7 +325,8 @@ async def media_fallback_stream(
     def without_rejected_media(error: ProviderError) -> Retry | None:
         nonlocal failure, sent_broad, removed_kinds
         if (
-            sent_broad
+            request.overrides.transient_retries != "pipeline"
+            or sent_broad
             or not remaining
             or error.retryable
             or error.already_retried

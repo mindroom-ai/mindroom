@@ -3335,6 +3335,7 @@ visibility = [
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
+    "mindroom.history.summary_fork",
     "mindroom.participation_hook",
 ]
 
@@ -3347,6 +3348,7 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
+    "mindroom.history.summary_fork",
     "mindroom.history.summary_input",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -3367,7 +3369,28 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.native_compaction",
 ]
-visibility = ["mindroom.execution_preparation", "mindroom.history.mid_turn_compaction"]
+visibility = [
+    "mindroom.execution_preparation",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+]
+
+[[modules]]
+path = "mindroom.history.summary_fork"
+depends_on = [
+    "mindroom.history.policy",
+    "mindroom.history.request_messages",
+    "mindroom.history.summary_message",
+    "mindroom.history.types",
+    "mindroom.hooks.enrichment",
+    "mindroom.llm",
+    "mindroom.providers.names",
+]
+visibility = [
+    "mindroom.history.compaction",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -3594,8 +3617,10 @@ depends_on = [
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
+    "mindroom.history.request_size",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
+    "mindroom.history.summary_fork",
     "mindroom.history.types",
     "mindroom.failure_text",
     "mindroom.turn_model",
@@ -7500,6 +7525,7 @@ from = ["mindroom.memory._backend"]
 # Tested in tests/test_compaction_invariants.py and tests/test_history_summary_call.py.
 [[interfaces]]
 expose = [
+    "CompactionForkToolCallError",
     "CompactionSummaryIncompleteError",
     "CompactionSummaryOutputLimitError",
     "DEFAULT_SUMMARY_RETRY_POLICY",
@@ -7507,6 +7533,7 @@ expose = [
     "build_summary_request_messages",
     "generate_compaction_summary",
     "is_summary_timeout",
+    "request_compaction_summary",
 ]
 from = ["mindroom.history.summary_call"]
 
@@ -11128,7 +11155,9 @@ depends_on = [
     "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.history.storage",
+    "mindroom.history.summary_fork",
     "mindroom.history.summary_message",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",

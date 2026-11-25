@@ -173,6 +173,7 @@ class ResolvedHistoryExecutionPlan:
     unavailable_reason: CompactionAvailabilityReason | None = None
     compaction_fallback_model_name: str | None = None
     compaction_fallback_summary_input_budget_tokens: int | None = None
+    compaction_context_window: int | None = None
 
 
 @dataclass(frozen=True)
