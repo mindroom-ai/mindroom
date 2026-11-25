@@ -1534,23 +1534,20 @@ class TestCommandThreadContextRoomMode:
                 "event_id": "$event123",
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567890,
-                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes ping"},
+                "content": {"msgtype": "m.text", "body": "!list_schedules"},
             },
         )
         command = Command(
-            type=CommandType.SCHEDULE,
-            args={"full_text": "in 5 minutes ping"},
-            raw_text="!schedule in 5 minutes ping",
+            type=CommandType.LIST_SCHEDULES,
+            args={},
+            raw_text="!list_schedules",
         )
 
-        with (
-            patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], False, False)),
-            patch(
-                "mindroom.commands.handler.schedule_task",
-                new_callable=AsyncMock,
-                return_value="scheduled",
-            ) as mock_schedule,
-        ):
+        with patch(
+            "mindroom.commands.handler.list_scheduled_tasks",
+            new_callable=AsyncMock,
+            return_value="listed",
+        ) as mock_schedule:
             await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
@@ -1594,24 +1591,21 @@ class TestCommandThreadContextRoomMode:
                 "event_id": "$event123",
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567890,
-                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes ping"},
+                "content": {"msgtype": "m.text", "body": "!list_schedules"},
             },
         )
         command = Command(
-            type=CommandType.SCHEDULE,
-            args={"full_text": "in 5 minutes ping"},
-            raw_text="!schedule in 5 minutes ping",
+            type=CommandType.LIST_SCHEDULES,
+            args={},
+            raw_text="!list_schedules",
         )
         stable_target = MessageTarget.resolve("!room:localhost", "$stable_thread", "$event123")
 
-        with (
-            patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], False, False)),
-            patch(
-                "mindroom.commands.handler.schedule_task",
-                new_callable=AsyncMock,
-                return_value="scheduled",
-            ) as mock_schedule,
-        ):
+        with patch(
+            "mindroom.commands.handler.list_scheduled_tasks",
+            new_callable=AsyncMock,
+            return_value="listed",
+        ) as mock_schedule:
             await bot._command_turn_executor.execute(
                 room=room,
                 event=event,

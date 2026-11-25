@@ -105,14 +105,14 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     ]
 
 
-def test_show_canvas_instructions_prefer_canvas_over_ascii_and_mermaid() -> None:
-    """Canvas instructions tell agents to prefer show_canvas over ASCII art or Mermaid fences."""
+def test_show_canvas_instructions_prefer_canvas_over_ascii_and_note_mermaid() -> None:
+    """Canvas instructions prefer show_canvas over ASCII art while noting ```mermaid for simple diagrams."""
     default_instructions = ChatUITools().instructions
     canvas_instructions = ChatUITools(enable_show_canvas=True).instructions
 
     assert "show_canvas(" not in default_instructions
     assert "diagrams, charts" in canvas_instructions
-    assert "Prefer show_canvas over ASCII art or Mermaid fences" in canvas_instructions
+    assert "Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams." in canvas_instructions
 
 
 def test_show_canvas_guidance_places_new_canvases_below_the_reply() -> None:

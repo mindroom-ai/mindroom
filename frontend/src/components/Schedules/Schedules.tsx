@@ -73,21 +73,6 @@ type DateParts = {
   second: number;
 };
 
-function parseDateTimeInput(localDateTime: string): DateParts | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(localDateTime);
-  if (!match) return null;
-
-  const [, year, month, day, hour, minute] = match;
-  return {
-    year: Number(year),
-    month: Number(month),
-    day: Number(day),
-    hour: Number(hour),
-    minute: Number(minute),
-    second: 0,
-  };
-}
-
 function formatDateTimeInput(parts: DateParts): string {
   const year = String(parts.year).padStart(4, "0");
   const month = String(parts.month).padStart(2, "0");
@@ -178,16 +163,16 @@ function getTimezoneOffsetMs(date: Date, timezone: string): number | null {
 }
 
 function toUtcIso(localDateTime: string, timezone: string): string | null {
-  if (!localDateTime) return null;
-  const parsed = parseDateTimeInput(localDateTime);
-  if (!parsed) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(localDateTime);
+  if (!match) return null;
 
+  const [, year, month, day, hour, minute] = match;
   const wallClockAsUtc = Date.UTC(
-    parsed.year,
-    parsed.month - 1,
-    parsed.day,
-    parsed.hour,
-    parsed.minute,
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
     0,
   );
   let utcTimestamp = wallClockAsUtc;
@@ -227,14 +212,14 @@ function formatDateTime(isoDate: string | null, timezone: string): string {
   }
 }
 
-function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
+function toDraft(task: ScheduleTask): ScheduleDraft {
   return {
     task_id: task.task_id,
     room_id: task.room_id,
     message: task.message,
     description: task.description,
     schedule_type: task.schedule_type,
-    execute_at_input: toTimezoneDateTimeInput(task.execute_at, timezone),
+    execute_at_input: toTimezoneDateTimeInput(task.execute_at, task.timezone),
     cron_expression: task.cron_expression ?? "",
     silent: task.silent,
   };
@@ -313,10 +298,10 @@ export function Schedules() {
   }, [load]);
 
   useEffect(() => {
-    const saved = selectedTask ? toDraft(selectedTask, timezone) : null;
+    const saved = selectedTask ? toDraft(selectedTask) : null;
     setDraft(saved);
     setSavedDraft(saved);
-  }, [selectedTask, timezone]);
+  }, [selectedTask]);
 
   useEffect(() => {
     if (!selectedTaskId) return;
@@ -366,7 +351,7 @@ export function Schedules() {
   };
 
   const handleSave = async () => {
-    if (!draft || !selectedTask) return;
+    if (!draft || !savedDraft || !selectedTask) return;
 
     const message = draft.message.trim();
     const description = draft.description.trim();
@@ -380,36 +365,53 @@ export function Schedules() {
       return;
     }
 
+    const nextDescription = description || message;
+    const savedMessage = savedDraft.message.trim();
+    const savedDescription = savedDraft.description.trim() || savedMessage;
+
     const payload: UpdateScheduleRequest = {
       room_id: draft.room_id,
-      message,
-      description: description || message,
-      schedule_type: draft.schedule_type,
-      silent: draft.silent,
     };
 
+    if (message !== savedMessage) {
+      payload.message = message;
+    }
+    if (nextDescription !== savedDescription) {
+      payload.description = nextDescription;
+    }
+    if (draft.silent !== savedDraft.silent) {
+      payload.silent = draft.silent;
+    }
+
     if (draft.schedule_type === "once") {
-      const executeAtIso = toUtcIso(draft.execute_at_input, timezone);
-      if (!executeAtIso) {
-        toast({
-          title: "Time required",
-          description: "Set a valid date and time for one-time schedules.",
-          variant: "destructive",
-        });
-        return;
+      if (draft.execute_at_input !== savedDraft.execute_at_input) {
+        const executeAtIso = toUtcIso(
+          draft.execute_at_input,
+          selectedTask.timezone,
+        );
+        if (!executeAtIso) {
+          toast({
+            title: "Time required",
+            description: "Set a valid date and time for one-time schedules.",
+            variant: "destructive",
+          });
+          return;
+        }
+        payload.execute_at = executeAtIso;
       }
-      payload.execute_at = executeAtIso;
     } else {
       const cronExpression = draft.cron_expression.trim();
-      if (!cronExpression) {
-        toast({
-          title: "Cron required",
-          description: "Cron schedules require a cron expression.",
-          variant: "destructive",
-        });
-        return;
+      if (cronExpression !== savedDraft.cron_expression.trim()) {
+        if (!cronExpression) {
+          toast({
+            title: "Cron required",
+            description: "Cron schedules require a cron expression.",
+            variant: "destructive",
+          });
+          return;
+        }
+        payload.cron_expression = cronExpression;
       }
-      payload.cron_expression = cronExpression;
     }
 
     setIsSaving(true);
@@ -599,7 +601,7 @@ export function Schedules() {
             emptySubtitle={
               isLoading
                 ? "Fetching scheduled tasks from Matrix state"
-                : "Create one with !schedule in Matrix"
+                : "Ask an agent in Matrix to schedule a task"
             }
             searchFilter={(item, searchTerm) => {
               const term = searchTerm.toLowerCase();
@@ -728,7 +730,7 @@ export function Schedules() {
               {draft.schedule_type === "once" ? (
                 <FieldGroup
                   label="Run At"
-                  helperText={`One-time execution timestamp (${timezone})`}
+                  helperText={`One-time execution timestamp (${selectedTask.timezone})`}
                   htmlFor="schedule-once-time"
                 >
                   <Input
@@ -742,8 +744,13 @@ export function Schedules() {
                 </FieldGroup>
               ) : (
                 <FieldGroup
-                  label="Cron Expression"
-                  helperText="Format: minute hour day month weekday (for example: 0 9 * * 1-5)"
+                  label={`Cron Expression (${selectedTask.cron_timezone ?? "UTC (legacy)"})`}
+                  helperText={`${
+                    selectedTask.cron_description &&
+                    draft.cron_expression === selectedTask.cron_expression
+                      ? `${selectedTask.cron_description}. `
+                      : ""
+                  }Format: minute hour day month weekday (for example: 0 9 * * 1-5)`}
                   htmlFor="schedule-cron"
                 >
                   <Input
@@ -810,12 +817,9 @@ export function Schedules() {
                 <div className="flex items-start gap-2">
                   <CalendarClock className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    To create new schedules, use Matrix commands like
-                    <span className="font-mono">
-                      {" "}
-                      !schedule daily at 9am ...
-                    </span>
-                    .
+                    To create or edit schedules from chat, ask an agent in
+                    Matrix in natural language (for example, &ldquo;Remind me
+                    every weekday at 9am to check the deployment&rdquo;).
                   </p>
                 </div>
               </div>

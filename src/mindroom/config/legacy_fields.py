@@ -189,11 +189,19 @@ RETIRED_DEFAULTS_FIELDS = frozenset({"max_preload_chars"})
 # Handling: Drop them before validation, so a config that still overrides them loads and the next dashboard save
 #   removes them.
 # Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_cut_markers.
+#
+# LEGACY_COMPAT: Retired natural-language workflow schedule parser prompt.
+# Legacy format: prompts.WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE overrode the LLM prompt used to parse `!schedule`
+#   and `scheduler` natural-language strings into `ScheduledWorkflow` JSON.
+# Last legacy release: v2026.11.574; replacement: unreleased; structured scheduler tool calls parse no model prompt.
+# Handling: Drop it before validation, so a config that still overrides it loads and the next dashboard save removes it.
+# Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_schedule_parse_prompt.
 RETIRED_PROMPT_NAMES = frozenset(
     {
         "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     },
 )
 

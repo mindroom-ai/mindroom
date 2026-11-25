@@ -69,7 +69,6 @@ __all__ = [
     "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
-    "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     "WORKSPACE_SKILL_AUTHORING_PROMPT",
 ]
 
@@ -590,61 +589,6 @@ Write a plain-text summary in exactly this markdown structure:
 ## Critical Context
 """
 
-WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into a structured workflow.
-
-Current time (UTC): {current_time}
-Current time in the user's timezone ({user_timezone}): {current_time_local}
-Request: "{request}"
-{existing_task_context}
-Your task is to:
-1. Determine if this is a one-time task or recurring (cron)
-2. Extract the schedule/timing
-3. Create a message that mentions the appropriate agents or teams
-4. Set is_conditional=true only when the request is event-based or conditional
-5. Resolve history_limit using the conversation context rules below
-6. Resolve silent using the schedule visibility rules below
-
-Available agents and teams: {agent_list}
-
-IMPORTANT: Event-based and conditional requests:
-When the request depends on an external event or condition rather than a fixed time:
-1. Convert to an appropriate recurring (cron) schedule for polling
-2. Include BOTH the condition check AND the action in the message
-3. Choose polling frequency based on urgency and type
-4. Set is_conditional to true
-
-Conversation context (history_limit):
-- history_limit is the number of recent thread messages the responding agent sees each time the task fires
-- "with no history", "without context", or "context-free" -> history_limit=0
-- "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
-- On edits, "restore full history" or "use unlimited history" -> history_limit=null
-- On edits, keep the current history_limit unchanged when the request says nothing about context or history
-- For new schedules, leave history_limit unset (null) when the request says nothing about context or history
-- Remove context phrases like "with no history" from the message itself
-
-Schedule visibility (silent):
-- For new schedules, default silent=false when the request says nothing about visibility
-- Explicit quiet or silent wording sets silent=true
-- Explicit visible wording sets silent=false
-- On edits, preserve the current silent value when the request omits visibility
-
-Important rules:
-- Set is_conditional=false for normal time-based schedules
-- For conditional/event-based requests, ALWAYS include the check condition in the message
-- Mention relevant agents or teams with @ only when needed
-- Interpret times in the request as {user_timezone} wall-clock times unless the request names an explicit timezone
-- Convert the interpreted time to UTC for the schedule (execute_at and cron_schedule are in UTC), but DO NOT include times in the message
-- Remove time phrases like "in 15 seconds" from the message itself
-- If schedule_type is "once", you MUST provide execute_at as a UTC datetime with an explicit UTC offset (e.g. 2026-01-15T17:30:00Z)
-- If schedule_type is "cron", you MUST provide cron_schedule
-
-Examples of event/condition phrasing to include in the message (do not include times in these examples):
-- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.
-- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.
-- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.
-- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
-"""
-
 VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE = """You are a voice transcription normalizer for a Matrix chat bot system.
 Your task is to lightly normalize spoken transcriptions while preserving natural language and user intent.
 
@@ -831,9 +775,6 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation", "tag_vocabulary"}),
         "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE": frozenset(
             {"agent_list", "team_list", "transcription"},
-        ),
-        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
-            {"current_time", "current_time_local", "user_timezone", "request", "agent_list", "existing_task_context"},
         ),
     },
 )

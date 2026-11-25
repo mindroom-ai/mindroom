@@ -35,7 +35,6 @@ from mindroom.tool_jobs.client_cancel import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import make_conversation_reader_mock
 from tests.delegation_helpers import _runtime_paths
 from tests.tool_job_helpers import job_coordinator, job_owner, start_job, tool_job_runtime, wait_for_status
 
@@ -214,7 +213,6 @@ async def _command(
         config=config,
         runtime_paths=_runtime_paths(tmp_path),
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:test", thread, "$command"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
