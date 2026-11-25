@@ -33,12 +33,25 @@ def is_trigger_owner(actor_user_id: str, owner_user_id: str, config: Config, run
     return owner_user_id in equivalent_requester_ids(actor_user_id, config, runtime_paths)
 
 
+def _get_trigger_with_store(
+    runtime_paths: RuntimePaths,
+    trigger_id: str,
+) -> tuple[ExternalTriggerStore, ExternalTriggerRecord] | tuple[ReactiveTriggerStore, ReactiveTriggerRecord] | None:
+    external_store = ExternalTriggerStore(runtime_paths)
+    external = external_store.get_record(trigger_id)
+    if external is not None:
+        return external_store, external
+    reactive_store = ReactiveTriggerStore(runtime_paths)
+    reactive = reactive_store.get_trigger(trigger_id)
+    if reactive is not None:
+        return reactive_store, reactive
+    return None
+
+
 def get_trigger_record(runtime_paths: RuntimePaths, trigger_id: str) -> TriggerRecord | None:
     """Return one webhook or reactive trigger by ID, checking the external store first."""
-    external = ExternalTriggerStore(runtime_paths).get_record(trigger_id)
-    if external is not None:
-        return external
-    return ReactiveTriggerStore(runtime_paths).get_trigger(trigger_id)
+    loaded = _get_trigger_with_store(runtime_paths, trigger_id)
+    return None if loaded is None else loaded[1]
 
 
 async def read_thread_tag_present(client: nio.AsyncClient, source: ThreadTagSourceSpec) -> bool:
@@ -78,14 +91,15 @@ def _load_trigger_for_mutation(
     runtime_paths: RuntimePaths,
     trigger_id: str,
     authorize_reactive: Callable[[ReactiveTriggerRecord], None],
-) -> ExternalTriggerRecord | tuple[ReactiveTriggerStore, ReactiveTriggerRecord]:
-    record = get_trigger_record(runtime_paths, trigger_id)
-    if record is None:
-        raise _not_found(trigger_id)
-    if isinstance(record, ExternalTriggerRecord):
-        return record
-    authorize_reactive(record)
-    return ReactiveTriggerStore(runtime_paths), record
+) -> ExternalTriggerStore | tuple[ReactiveTriggerStore, ReactiveTriggerRecord]:
+    match _get_trigger_with_store(runtime_paths, trigger_id):
+        case None:
+            raise _not_found(trigger_id)
+        case (ExternalTriggerStore() as external_store, _):
+            return external_store
+        case (ReactiveTriggerStore() as reactive_store, ReactiveTriggerRecord() as record):
+            authorize_reactive(record)
+            return reactive_store, record
 
 
 def set_trigger_enabled_sync(
@@ -100,13 +114,8 @@ def set_trigger_enabled_sync(
 ) -> TriggerRecord:
     """Enable or disable a webhook or reactive trigger across both stores."""
     loaded = _load_trigger_for_mutation(runtime_paths, trigger_id, authorize_reactive)
-    if isinstance(loaded, ExternalTriggerRecord):
-        return ExternalTriggerStore(runtime_paths).set_enabled(
-            trigger_id,
-            enabled=enabled,
-            actor_user_id=actor_user_id,
-            config=config,
-        )
+    if isinstance(loaded, ExternalTriggerStore):
+        return loaded.set_enabled(trigger_id, enabled=enabled, actor_user_id=actor_user_id, config=config)
 
     reactive_store, record = loaded
     if enabled and not record.enabled:
@@ -132,8 +141,8 @@ def delete_trigger_sync(
 ) -> None:
     """Delete a webhook or reactive trigger across both stores."""
     loaded = _load_trigger_for_mutation(runtime_paths, trigger_id, authorize_reactive)
-    if isinstance(loaded, ExternalTriggerRecord):
-        ExternalTriggerStore(runtime_paths).delete_record(trigger_id, actor_user_id=actor_user_id, config=config)
+    if isinstance(loaded, ExternalTriggerStore):
+        loaded.delete_record(trigger_id, actor_user_id=actor_user_id, config=config)
         return
 
     reactive_store, record = loaded

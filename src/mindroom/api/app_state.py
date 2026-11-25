@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
@@ -136,6 +138,9 @@ def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
     return state
 
 
+logger = get_logger(__name__)
+
+
 def app_state(api_app: FastAPI) -> _MindroomAppState:
     """Return the :class:`_MindroomAppState` bound to ``api_app``."""
     state = getattr(api_app.state, "mindroom_app_state", None)
@@ -143,3 +148,14 @@ def app_state(api_app: FastAPI) -> _MindroomAppState:
         msg = "MindRoom app state is not initialized"
         raise TypeError(msg)
     return state
+
+
+def notify_reactive_event_loop(api_app: FastAPI, **context: object) -> None:
+    """Best-effort wake of the reactive trigger delivery loop bound on ``api_app``."""
+    runtime = app_state(api_app).external_trigger_runtime
+    if runtime is None or runtime.on_reactive_event is None:
+        return
+    try:
+        runtime.on_reactive_event()
+    except Exception:
+        logger.warning("Failed to notify reactive trigger loop", **context, exc_info=True)

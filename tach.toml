@@ -1873,6 +1873,7 @@ depends_on = [
 path = "mindroom.api.external_triggers"
 depends_on = [
     "mindroom.bounded_bytes",
+    "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
@@ -2216,13 +2217,11 @@ path = "mindroom.api.room_triggers"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
-    "mindroom.api.external_triggers",
     "mindroom.matrix.state",
     "mindroom.plugin_http",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
-    "mindroom.room_steward",
 ]
 
 [[modules]]
@@ -9644,7 +9643,7 @@ depends_on = [
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
-    "mindroom.room_steward",
+    "mindroom.plugin_http",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 

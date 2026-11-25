@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import notify_reactive_event_loop
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.config.external_trigger_policy import (
@@ -221,7 +222,8 @@ async def _claim_and_execute_trigger(
         ttl_seconds=_IN_PROGRESS_EVENT_ID_TTL_SECONDS,
     )
     if event_claim is DeliveryEventClaim.DELIVERED:
-        await _consume_single_use_trigger(snapshot, runtime_paths)
+        if snapshot.delivery_mode == "single_use":
+            await _consume_single_use_trigger(snapshot, runtime_paths)
         return ExternalTriggerAcceptedResponse(
             accepted=True,
             duplicate=True,
@@ -294,10 +296,7 @@ async def _claim_and_execute_trigger(
         now=delivered_at,
         ttl_seconds=_DELIVERED_EVENT_ID_TTL_SECONDS,
     )
-    if snapshot.delivery_mode == "single_use":
-        await _consume_single_use_trigger(snapshot, runtime_paths)
-    else:
-        await _record_external_trigger_fired(snapshot, runtime_paths, fired_at=delivered_at)
+    await _finalize_delivered_trigger(snapshot, runtime_paths, delivered_at=delivered_at)
     return ExternalTriggerAcceptedResponse(
         accepted=True,
         duplicate=False,
@@ -449,8 +448,6 @@ def _reusable_event_id(
 
 
 async def _consume_single_use_trigger(snapshot: TriggerDeliverySnapshot, runtime_paths: RuntimePaths) -> None:
-    if snapshot.delivery_mode != "single_use":
-        return
     try:
         await asyncio.to_thread(
             _trigger_store(runtime_paths).consume_single_use,
@@ -461,18 +458,21 @@ async def _consume_single_use_trigger(snapshot: TriggerDeliverySnapshot, runtime
         raise HTTPException(status_code=503, detail="Single-use trigger could not be consumed") from exc
 
 
-async def _record_external_trigger_fired(
+async def _finalize_delivered_trigger(
     snapshot: TriggerDeliverySnapshot,
     runtime_paths: RuntimePaths,
     *,
-    fired_at: int,
+    delivered_at: int,
 ) -> None:
+    if snapshot.delivery_mode == "single_use":
+        await _consume_single_use_trigger(snapshot, runtime_paths)
+        return
     try:
         await asyncio.to_thread(
             _trigger_store(runtime_paths).record_fired,
             snapshot.trigger_id,
             expected_uid=snapshot.uid,
-            fired_at=fired_at,
+            fired_at=delivered_at,
         )
     except (ExternalTriggerStoreError, OSError):
         logger.warning("Failed to record webhook last_fired_at", trigger_id=snapshot.trigger_id, exc_info=True)
@@ -627,7 +627,7 @@ async def post_external_event_source(
         runtime_paths=runtime_paths,
     )
     if matched_rules > 0:
-        notify_reactive_event_loop(request, source_id=source_id, event_id=event.event_id)
+        notify_reactive_event_loop(request.app, source_id=source_id, event_id=event.event_id)
     return ExternalEventSourceAcceptedResponse(
         accepted=True,
         source_id=source_id,
@@ -727,14 +727,3 @@ async def _fan_out_event_source_firings(
         return await asyncio.to_thread(_enqueue)
     except (ReactiveTriggerStoreError, sqlite3.Error) as exc:
         raise HTTPException(status_code=503, detail="Reactive trigger store is not available") from exc
-
-
-def notify_reactive_event_loop(request: Request, **context: object) -> None:
-    """Best-effort wake of the reactive trigger delivery loop bound on ``request.app``."""
-    runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
-    if runtime is None or runtime.on_reactive_event is None:
-        return
-    try:
-        runtime.on_reactive_event()
-    except Exception:
-        logger.warning("Failed to notify reactive trigger loop", **context, exc_info=True)

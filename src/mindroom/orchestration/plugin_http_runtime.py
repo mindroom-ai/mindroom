@@ -15,7 +15,7 @@ from mindroom.matrix.history_visibility import read_room_history
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.room_steward import read_in_room
+from mindroom.plugin_http import read_in_room
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -45,7 +45,7 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
 
     async def look_up(room_id: str) -> Mapping[str, str | None]:
         response = await read_in_room(
-            bots,
+            app,
             room_id,
             lambda client: read_joined_members(client, room_id),
             _LOOKUP_FAILED,
@@ -73,29 +73,29 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
 
     state = ensure_app_state(app)
     state.room_members = room_members
-    state.room_state = partial(_room_state, bots)
-    state.room_direct = partial(_room_direct, bots)
-    state.room_history = partial(_room_history, bots)
+    state.room_state = partial(_room_state, app)
+    state.room_direct = partial(_room_direct, app)
+    state.room_history = partial(_room_history, app)
     state.room_bots = bots
 
 
-async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSnapshot:
-    state = await read_in_room(bots, room_id, lambda client: read_room_state(client, room_id), _STATE_READ_FAILED)
+async def _room_state(app: FastAPI, room_id: str) -> RoomStateSnapshot:
+    state = await read_in_room(app, room_id, lambda client: read_room_state(client, room_id), _STATE_READ_FAILED)
     if state is None:
         raise HTTPException(503, _STATE_READ_FAILED)
     return state
 
 
-async def _room_direct(bots: Mapping[str, AgentBot], room_id: str) -> bool:
-    direct = await read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
+async def _room_direct(app: FastAPI, room_id: str) -> bool:
+    direct = await read_in_room(app, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
     if direct is None:
         raise HTTPException(503, _DIRECT_LOOKUP_FAILED)
     return direct
 
 
-async def _room_history(bots: Mapping[str, AgentBot], room_id: str, user_id: str) -> RoomHistory | None:
+async def _room_history(app: FastAPI, room_id: str, user_id: str) -> RoomHistory | None:
     return await read_in_room(
-        bots,
+        app,
         room_id,
         lambda client: read_room_history(client, room_id, user_id),
         _HISTORY_READ_FAILED,

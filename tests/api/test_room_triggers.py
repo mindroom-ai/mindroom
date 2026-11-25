@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import nio
 from fastapi.testclient import TestClient
 
-from mindroom import room_steward
+from mindroom import plugin_http
 from mindroom.api import room_triggers
 from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.main import app as main_app
@@ -417,5 +417,5 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
 
     h.client.room_get_state = _never_answers
-    monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
