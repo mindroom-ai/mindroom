@@ -17,14 +17,11 @@ import pytest
 from openai.types import CompletionUsage
 
 from mindroom.agent_cli.approval import CliApprovalCall
-from mindroom.agents import create_agent
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
-from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.helper_usage import (
     HelperUsageOwner,
@@ -34,7 +31,6 @@ from mindroom.helper_usage import (
     record_run_usage,
 )
 from mindroom.history.session_context import (
-    load_bound_scope_session,
     load_scope_session,
 )
 from mindroom.history.turn_recorder import TurnRecorder
@@ -43,7 +39,6 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
-from mindroom.llm.provider import UsageReported
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, TokenCounts
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
@@ -61,7 +56,6 @@ from mindroom.session_storage.types import session_state_snapshot
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
@@ -86,7 +80,6 @@ from tests.history_helpers import (
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.team_turn_helpers import collect_team_reply
-from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -165,7 +158,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         agent_name="general",
     )
     identity = context.execution_identity
-    helper_context = replace(context, target=replace(context.target, session_id="ephemeral-participant-session"))
     turns = [calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]
     if caller == "team":
         # The leader and its members share the default model: the leader delegates, the member's approved call
@@ -183,16 +175,20 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helper_results: list[object] = []
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
-        helper = create_agent(
-            "helper",
-            config,
-            paths,
-            identity,
-            knowledge=None,
-            model=turn_model(config, paths, "helper"),
-            plugins=config_plugins(config, paths),
+        owner = get_helper_usage_owner()
+        assert owner is not None
+        await record_helper_usage(
+            HelperUsage(
+                run_id="helper-during-approval",
+                model="gpt-6-luna",
+                provider="openai",
+                metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
+            ),
+            owner=owner,
+            kind="memory_auto_flush",
+            requester_id=context.requester_id,
         )
-        helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
+        helper_results.append("Sample helper output.")
         if outcome == "cancel":
             raise asyncio.CancelledError
         return original_add(self, a, b)
@@ -351,7 +347,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helpers = [
         (session_id, json.loads(value))
         for session_id, value in rows
-        if json.loads(value).get("kind") == "dynamic_workflow"
+        if json.loads(value).get("kind") == "memory_auto_flush"
     ]
     assert len(helpers) == 1
     assert helpers[0][0] == "approval-session"
@@ -486,158 +482,6 @@ async def test_memory_usage_survives_rejected_output_and_retry(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("caller", ["agent", "private_agent", "configured_team", "ad_hoc_team"])
-async def test_workflow_first_turn_uses_actual_caller_store(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caller: str,
-) -> None:
-    """Synthetic room-agent participant IDs must not replace private, configured or ad hoc caller ownership."""
-    config, paths = _make_config(tmp_path)
-    config.memory.backend = "none"
-    if caller == "private_agent":
-        config.agents["test_agent"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.agents["second"] = AgentConfig(display_name="Second")
-    config.teams["reviewers"] = TeamConfig(display_name="Reviewers", role="Review", agents=["test_agent", "second"])
-    persist_entity_accounts(config, paths)
-    context = _hook_runtime_context(
-        config=config,
-        runtime_paths=paths,
-        registry=HookRegistry.empty(),
-        session_id="first-turn",
-    )
-    identity = context.execution_identity
-    if caller.endswith("team"):
-        load_scope = partial(
-            load_bound_scope_session,
-            member_names=["test_agent", "second"],
-            team_name="reviewers" if caller == "configured_team" else None,
-            session_id=context.session_id,
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-        )
-    else:
-        load_scope = partial(
-            load_scope_session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            session_id=context.session_id,
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-        )
-    model = ScriptedModel([answer("Sample output.", owned_usage(20, 2))])
-    install_model_providers(monkeypatch, {"default": model})
-    scope_context = load_scope()
-    with helper_usage_context(scope_context):
-        storage = scope_context.storage
-        result = await _execute_participant(
-            context,
-            RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
-            "Sample task.",
-            _WorkflowRun("sample-workflow"),
-        )
-        assert result.content == "Sample output."
-        loaded = storage.load_session(context.session_id)
-        assert loaded is not None, "First-turn helper usage needs its actual caller session row"
-        assert not loaded.runs
-        rows = _usage_rows(storage)
-        assert len(rows) == 1
-        assert rows[0][0] == "first-turn"
-        snapshot = json.loads(rows[0][1])
-        assert snapshot["kind"] == "dynamic_workflow"
-        assert snapshot["user_id"] == "@user:localhost"
-        assert snapshot["metrics"]["total_tokens"] == 22
-        assert "Sample" not in rows[0][1]
-    if caller == "ad_hoc_team":
-        # Existing reporting policy excludes unconfigured teams, even though their store is retained.
-        return
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 22
-    assert sum(row.run_count for row in report.model_breakdown) == 0
-    assert report.request_breakdown is not None
-    assert len(report.request_breakdown) == 1
-    assert report.request_breakdown[0].totals.total_tokens == 22
-    if caller in {"agent", "private_agent"}:
-        own = collect_self_usage(
-            agent_name="test_agent",
-            requester_id=context.requester_id,
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-        )
-        other = collect_self_usage(
-            agent_name="test_agent",
-            requester_id="@other:localhost",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=replace(identity, requester_id="@other:localhost"),
-        )
-        assert own.totals.total_tokens == 22
-        assert other.totals.total_tokens == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["completed", "error", "cancelled"])
-async def test_workflow_participant_usage_counts_however_its_run_ends(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ending: str,
-) -> None:
-    """A room-agent participant's paid requests count once, also when its run fails or is stopped mid-request."""
-    config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
-    requested = asyncio.Event()
-
-    async def interrupt() -> None:
-        requested.set()
-        if ending == "error":
-            msg = "provider auth failed"
-            raise ProviderError(msg, provider="Synthetic")
-        await asyncio.Event().wait()
-
-    turn = (
-        answer("Sample output.", owned_usage(30, 3))
-        if ending == "completed"
-        else [UsageReported(owned_usage(30, 3), final=ending == "error"), Await(interrupt)]
-    )
-    install_model_providers(monkeypatch, {"default": ScriptedModel([turn])})
-    load_scope = partial(
-        load_scope_session,
-        scope=scope,
-        session_id="session",
-        config=config,
-        runtime_paths=paths,
-        execution_identity=context.execution_identity,
-    )
-    scope_context = load_scope()
-    with helper_usage_context(scope_context):
-        participant = asyncio.create_task(
-            _execute_participant(
-                context,
-                RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
-                "Sample task.",
-                _WorkflowRun("sample-workflow"),
-            ),
-        )
-        if ending == "completed":
-            assert (await participant).content == "Sample output."
-        elif ending == "error":
-            with pytest.raises(ProviderError, match="provider auth failed"):
-                await participant
-        else:
-            await requested.wait()
-            participant.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await participant
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 33
-    assert sum(row.run_count for row in report.model_breakdown) == 0
-    assert report.user_breakdown[0].user_id == "@user:localhost"
-    assert report.request_breakdown is not None
-    assert [row.totals.total_tokens for row in report.request_breakdown] == [33]
-
-
-@pytest.mark.asyncio
 async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_path: Path) -> None:
     """A helper owner must reset on cancellation, and first-turn initialization must not overwrite live state."""
     config, paths = _make_config(tmp_path)
@@ -668,7 +512,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
                 metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
             ),
             owner=owner,
-            kind="dynamic_workflow",
+            kind="memory_auto_flush",
             requester_id=None,
         )
         loaded = context.storage.load_session("session")

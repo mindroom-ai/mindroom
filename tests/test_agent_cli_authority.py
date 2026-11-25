@@ -233,6 +233,16 @@ def test_owner_factory_rejects_team_context_and_missing_turn(tmp_path: Path) -> 
         cli_turn_owner(replace(runtime, membership_turn_id=None), _turn_context())
 
 
+def test_owner_factory_falls_back_to_runtime_turn_id_when_membership_turn_id_is_missing(tmp_path: Path) -> None:
+    runtime = _runtime_context(tmp_path)
+
+    fallback = cli_turn_owner(replace(runtime, membership_turn_id=None, turn_id="child-turn-1"), _turn_context())
+    assert fallback.turn_id == "child-turn-1"
+
+    preferred = cli_turn_owner(replace(runtime, turn_id="child-turn-1"), _turn_context())
+    assert preferred.turn_id == "$driving:example.test"
+
+
 @pytest.mark.parametrize("revoke_first", [False, True])
 def test_bridge_cannot_issue_another_grant(tmp_path: Path, revoke_first: bool) -> None:
     owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())

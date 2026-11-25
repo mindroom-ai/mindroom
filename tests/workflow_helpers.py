@@ -32,6 +32,7 @@ from fastapi import FastAPI
 from nio.api import Api
 
 import mindroom.workflow as sdk
+from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.workflow_gateway import bind_workflow_engine
 from mindroom.api.workflow_gateway import router as workflow_router
@@ -776,6 +777,7 @@ class WorkflowStack:
         # in the rooms `bot_rooms` lists for it.
         orchestrator = SimpleNamespace(
             workflow_engine=self.engine,
+            agent_cli_registry=TurnToolRegistry(),
             running=True,
             budgets=None,
             knowledge_refresh_scheduler=None,

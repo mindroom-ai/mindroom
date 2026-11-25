@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 # The functions of an agent's skills toolkit; none has an owning toolkit.
-# All three only read a skill; Dynamic Workflow participants get get_skill_script only through an operator rule.
+# All three only read a skill; callers grant get_skill_script alongside the other skill tools when configured.
 SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
 SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
 _WORKSPACE_SKILLS_DIRNAME = "skills"

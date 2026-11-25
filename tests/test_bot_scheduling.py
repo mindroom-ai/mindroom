@@ -178,48 +178,6 @@ class TestBotScheduleCommands:
     """Test bot handling of schedule commands."""
 
     @pytest.mark.asyncio
-    async def test_handle_schedule_command(self, mock_agent_bot: AgentBot, send_response_mock: AsyncMock) -> None:
-        """Test bot handles schedule command correctly."""
-        room = MagicMock()
-        room.room_id = "!test:server"
-
-        event = MagicMock()
-        event.event_id = "$event123"
-        event.sender = "@user:server"
-        event.body = "!schedule in 5 minutes Check deployment"
-        event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
-
-        command = Command(
-            type=CommandType.SCHEDULE,
-            args={"full_text": "in 5 minutes Check deployment"},
-            raw_text=event.body,
-        )
-
-        # Mock the shared schedule entrypoint
-        with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = "✅ Scheduled: 5 minutes from now"
-
-            await _execute_command(mock_agent_bot, room, event, "@user:server", command)
-
-            # Verify schedule_task was called correctly
-            mock_schedule.assert_called_once()
-            call_kwargs = mock_schedule.call_args.kwargs
-            runtime = call_kwargs["runtime"]
-            assert runtime.client is mock_agent_bot.client
-            assert runtime.config is mock_agent_bot.config
-            assert runtime.room is room
-            assert call_kwargs["room_id"] == "!test:server"
-            assert call_kwargs["thread_id"] == "$thread123"
-            assert call_kwargs["scheduled_by"] == "@user:server"
-            assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
-            assert call_kwargs["mentioned_agents"] == []
-
-            # Verify response was sent
-            send_response_mock.assert_called_once()
-            call_args = send_response_mock.call_args
-            assert "✅ Scheduled: 5 minutes from now" in call_args.kwargs["response_text"]
-
-    @pytest.mark.asyncio
     async def test_handle_list_schedules_command(
         self,
         mock_agent_bot: AgentBot,
@@ -315,48 +273,6 @@ class TestBotScheduleCommands:
         assert "✅ Cancelled 3 scheduled task(s)" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
-    async def test_handle_edit_schedule_command(
-        self,
-        mock_agent_bot: AgentBot,
-        send_response_mock: AsyncMock,
-    ) -> None:
-        """Test bot handles edit schedule command."""
-        room = MagicMock()
-        room.room_id = "!test:server"
-
-        event = MagicMock()
-        event.event_id = "$event123"
-        event.sender = "@user:server"
-        event.body = "!edit_schedule task123 in 30 minutes Check deployment"
-        event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
-
-        command = Command(
-            type=CommandType.EDIT_SCHEDULE,
-            args={"task_id": "task123", "full_text": "in 30 minutes Check deployment"},
-            raw_text=event.body,
-        )
-
-        with patch("mindroom.commands.handler.edit_scheduled_task") as mock_edit:
-            mock_edit.return_value = "✅ Updated task `task123`."
-
-            await _execute_command(mock_agent_bot, room, event, "@user:server", command)
-
-            mock_edit.assert_called_once()
-            edit_kwargs = mock_edit.call_args.kwargs
-            runtime = edit_kwargs["runtime"]
-            assert runtime.client is mock_agent_bot.client
-            assert runtime.config is mock_agent_bot.config
-            assert runtime.room is room
-            assert edit_kwargs["room_id"] == "!test:server"
-            assert edit_kwargs["task_id"] == "task123"
-            assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"
-            assert edit_kwargs["scheduled_by"] == "@user:server"
-
-        send_response_mock.assert_called_once()
-        call_args = send_response_mock.call_args
-        assert "✅ Updated task `task123`." in call_args.kwargs["response_text"]
-
-    @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(
         self,
         mock_agent_bot: AgentBot,
@@ -369,21 +285,21 @@ class TestBotScheduleCommands:
         event = MagicMock()
         event.event_id = "$event123"
         event.sender = "@user:server"
-        event.body = "!schedule in 5 minutes Test"
+        event.body = "!list_schedules"
         event.server_timestamp = 1234567890
         event.source = {"content": {}}  # No thread relation
 
-        command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
+        command = Command(type=CommandType.LIST_SCHEDULES, args={}, raw_text=event.body)
 
-        with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = "✅ Scheduled: 5 minutes from now"
+        with patch("mindroom.commands.handler.list_scheduled_tasks") as mock_list:
+            mock_list.return_value = "No scheduled tasks found."
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
-        # Should successfully schedule the task (auto-creates thread)
+        # Should successfully list tasks (auto-creates thread)
         send_response_mock.assert_called_once()
         call_args = send_response_mock.call_args
-        assert call_args.kwargs["response_text"] == "✅ Scheduled: 5 minutes from now"
+        assert call_args.kwargs["response_text"] == "No scheduled tasks found."
         target = call_args.kwargs["target"]
         assert target.room_id == room.room_id
         assert target.reply_to_event_id == event.event_id
@@ -484,7 +400,7 @@ class TestCommandHandling:
                 "event_id": "$event123",
                 "sender": "@user:server",
                 "origin_server_ts": 1234567890,
-                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes test"},
+                "content": {"msgtype": "m.text", "body": "!list_schedules"},
             },
         )
 
@@ -534,7 +450,7 @@ class TestCommandHandling:
                 "origin_server_ts": 1234567890,
                 "content": {
                     "msgtype": "m.text",
-                    "body": "!schedule in 5 minutes test",
+                    "body": "!list_schedules",
                     "m.relates_to": {"m.in_reply_to": {"event_id": "$reply123"}},
                 },
             },

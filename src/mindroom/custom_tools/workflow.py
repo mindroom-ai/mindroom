@@ -123,7 +123,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   or "indeterminate" when one of its turns used a tool. schema and output_path cannot be used together.
   The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
   agent="other" runs that configured agent with its own tools. name is only a label and the address for messages; it does not pick an agent.
-  model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
+  model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you (require system).
   profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
   output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
   A failed turn raises AgentError.
