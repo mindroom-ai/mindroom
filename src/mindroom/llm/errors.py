@@ -109,6 +109,21 @@ def incomplete_stream_error(*, provider: str) -> ProviderUnavailable:
     return ProviderUnavailable(msg, provider=provider)
 
 
+def incomplete_turn_error(
+    *,
+    provider: str,
+    raw_stop_reason: str | None = None,
+    phase: str = "producing output",
+) -> ProviderUnavailable:
+    """Return the error of a turn that ended ``incomplete`` before finishing ``phase``; ``provider`` names the route.
+
+    It is retryable like a dropped connection, since the next attempt may complete normally.
+    """
+    detail = f" ({raw_stop_reason})" if raw_stop_reason else ""
+    msg = f"Model stopped with incomplete response{detail} before {phase}"
+    return ProviderUnavailable(msg, provider=provider, provider_code=raw_stop_reason)
+
+
 class ModelOutputLimitError(RuntimeError):
     """A run's model responses kept stopping at the output limit before their tool calls were complete."""
 
@@ -119,8 +134,27 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
     ``usage`` is the refused response's usage, for a caller that reads only the finished turn, such as ``complete``.
     """
 
-    def __init__(self, *, provider: str, usage: MessageMetrics) -> None:
-        super().__init__(MODEL_SAFEGUARD_REFUSAL_MESSAGE, provider=provider, code=SAFEGUARD_REFUSAL)
+    def __init__(
+        self,
+        *,
+        provider: str,
+        usage: MessageMetrics,
+        message: str | None = None,
+        provider_code: str | None = None,
+    ) -> None:
+        if message is None:
+            message = (
+                f"The model's safeguards blocked the response ({provider_code}). "
+                "Choose a different model or revise the prompt, then try again."
+                if provider_code
+                else MODEL_SAFEGUARD_REFUSAL_MESSAGE
+            )
+        super().__init__(
+            message,
+            provider=provider,
+            code=SAFEGUARD_REFUSAL,
+            provider_code=provider_code,
+        )
         self.usage = usage
 
 
@@ -142,4 +176,5 @@ __all__ = [
     "ProviderUnavailable",
     "RateLimited",
     "incomplete_stream_error",
+    "incomplete_turn_error",
 ]

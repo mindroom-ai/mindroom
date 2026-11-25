@@ -14,7 +14,7 @@ from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
-from mindroom.providers.assistant_turn import TurnTimer, finished_turn
+from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings, with_large_fields_untyped
 from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
@@ -251,6 +251,7 @@ class ResponsesAdapter:
             # The stream stopped before the response ended, so the turn did not finish.
             return
         parts = accumulator.finish()
+        stop_reason = responses_stop_reason(parts.status, parts.incomplete_reason, tool_calls=bool(parts.tool_calls))
         for event in finished_turn(
             self.identity,
             timer,
@@ -259,6 +260,7 @@ class ResponsesAdapter:
             tool_calls=parts.tool_calls,
             provider_data=parts.provider_data,
             usage=parts.usage,
-            stop_reason=responses_stop_reason(parts.status, parts.incomplete_reason, tool_calls=bool(parts.tool_calls)),
+            stop_reason=stop_reason,
+            raw_stop_reason=(parts.incomplete_reason or parts.status if stop_reason in ABNORMAL_STOP_REASONS else None),
         ):
             yield event

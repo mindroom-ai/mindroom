@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
@@ -29,6 +30,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
+from mindroom.providers.errors import GEMINI_FILTERED_FINISH_REASONS, MALFORMED_FUNCTION_CALL_FINISH_REASON
 from mindroom.providers.names import is_openrouter_gemini_model
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part, chat_video_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -54,6 +56,7 @@ __all__ = [
     "chat_body_parts",
     "chat_request_kwargs",
     "chat_stop_reason",
+    "chat_turn_error",
     "deepseek_request_thinks",
     "function_definition",
     "sdk_call_kwargs",
@@ -106,13 +109,41 @@ class ChatTurnParts:
     provider_data: dict[str, Any] = field(default_factory=dict)
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
+    native_finish_reason: str | None = None
 
 
-def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
-    """Map a Chat Completions ``finish_reason`` to the normalized stop vocabulary."""
+def chat_stop_reason(finish_reason: str | None, native_finish_reason: str | None = None) -> StopReason | None:
+    """Map a Chat Completions ``finish_reason`` and native reason to the normalized stop vocabulary."""
+    if native_finish_reason in GEMINI_FILTERED_FINISH_REASONS:
+        return "content_filter"
+    if native_finish_reason == "refusal":
+        return "refusal"
     if finish_reason is None:
         return None
     return _CHAT_STOP_REASONS.get(finish_reason, "incomplete")
+
+
+def chat_turn_error(parts: ChatTurnParts, *, provider: str) -> ProviderError | None:
+    """Return the provider error for an abnormal Chat Completions finish reason, or None."""
+    if parts.native_finish_reason == MALFORMED_FUNCTION_CALL_FINISH_REASON:
+        return ProviderError(
+            f"Generation ended with finish reason: {parts.native_finish_reason}",
+            provider=provider,
+            code=MALFORMED_TOOL_CALL,
+            provider_code=parts.native_finish_reason,
+        )
+    if (
+        parts.finish_reason == "error"
+        and parts.native_finish_reason not in GEMINI_FILTERED_FINISH_REASONS
+        and parts.native_finish_reason != "refusal"
+    ):
+        detail = f" ({parts.native_finish_reason})" if parts.native_finish_reason else ""
+        return ProviderUnavailable(
+            f"Provider ended stream with finish_reason=error{detail}",
+            provider=provider,
+            provider_code=parts.native_finish_reason or "error",
+        )
+    return None
 
 
 # --- Requests -------------------------------------------------------------------------------------------------
@@ -644,6 +675,9 @@ class ChatStream:
             choice = chunk.choices[0]
             if choice.finish_reason is not None:
                 self.parts.finish_reason = choice.finish_reason
+            native = _extra(choice).get("native_finish_reason")
+            if isinstance(native, str) and native:
+                self.parts.native_finish_reason = native
             if (delta := choice.delta) is not None:
                 events.extend(self._add_content(chunk, delta.content))
                 for position, call in enumerate(delta.tool_calls or ()):

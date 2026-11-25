@@ -1047,6 +1047,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         "room_id": ctx.room_id,
         "thread_id": None,
         "attachments": [first_attachment],
+        "suppress_push": False,
     }
     assert mock_send_attachments.await_args_list[1].args == (ctx,)
     assert mock_send_attachments.await_args_list[1].kwargs == {
@@ -1054,6 +1055,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         "thread_id": "$file_root",
         "attachments": [second_attachment],
         "known_latest_thread_event_id": "$file_root",
+        "suppress_push": False,
     }
 
 
@@ -1361,6 +1363,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         room_id=ctx.room_id,
         thread_id=None,
         attachments=[first_attachment],
+        suppress_push=False,
     )
 
 

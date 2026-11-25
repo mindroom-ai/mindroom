@@ -17,7 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
-from mindroom.memory import MemorySearchOutcome, search_agent_memories
+from mindroom.memory import MemoryNotFoundError, MemorySearchOutcome, search_agent_memories
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -722,16 +722,25 @@ class TestMemoryTools:
 
     @pytest.mark.asyncio
     async def test_update_memory_error(self, tools: MemoryTools) -> None:
-        """Test that update_memory handles errors gracefully."""
-        with patch(
-            "mindroom.custom_tools.memory.update_agent_memory",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("Not found"),
+        """Unexpected update failures return the error text and log a full exception."""
+        with (
+            patch(
+                "mindroom.custom_tools.memory.update_agent_memory",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("Not found"),
+            ),
+            patch("mindroom.custom_tools.memory.logger") as mock_logger,
         ):
             result = await tools.update_memory("abc-123", "new content")
 
-            assert "Failed to update memory" in result
-            assert "Not found" in result
+        assert result == "Failed to update memory: Not found"
+        mock_logger.exception.assert_called_once_with(
+            "Failed to update memory via tool",
+            error_type="RuntimeError",
+            agent="test_agent",
+            memory_id="abc-123",
+        )
+        mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_memory(self, tools: MemoryTools) -> None:
@@ -764,6 +773,32 @@ class TestMemoryTools:
 
             assert "Failed to delete memory" in result
             assert "Not found" in result
+
+    @pytest.mark.asyncio
+    async def test_memory_not_found_logs_warning_without_traceback(self, tools: MemoryTools) -> None:
+        """Missing memory IDs log a warning without a traceback and preserve the tool error text."""
+        cases = (
+            ("update", "update_agent_memory", lambda: tools.update_memory("missing-id", "new content")),
+            ("delete", "delete_agent_memory", lambda: tools.delete_memory("missing-id")),
+        )
+        for action, helper_name, invoke in cases:
+            with (
+                patch(
+                    f"mindroom.custom_tools.memory.{helper_name}",
+                    new_callable=AsyncMock,
+                    side_effect=MemoryNotFoundError("missing-id"),
+                ),
+                patch("mindroom.custom_tools.memory.logger") as mock_logger,
+            ):
+                assert await invoke() == f"Failed to {action} memory: No memory found with id=missing-id"
+            mock_logger.warning.assert_called_once_with(
+                f"Failed to {action} memory via tool",
+                error="No memory found with id=missing-id",
+                agent="test_agent",
+                memory_id="missing-id",
+            )
+            mock_logger.exception.assert_not_called()
+            mock_logger.error.assert_not_called()
 
 
 class TestMemoryToolRegistration:

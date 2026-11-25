@@ -23,8 +23,8 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToo
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
-from mindroom.workflow_runs import dispatch as dispatch_module
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.limits import WorkflowLimits, run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -89,7 +89,7 @@ async def _report(stack: WorkflowStack, run_id: str, result: object) -> None:
 
 async def _settled(stack: WorkflowStack, receipt: NodeReceipt) -> NodeReceipt:
     while receipt.state not in ("completed", "failed", "cancelled", "indeterminate"):
-        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await nodes_module.node_receipt(stack.engine, stack.attempt, receipt.id, wait=5)
     return receipt
 
 
@@ -167,7 +167,7 @@ async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: Workf
 
 def _lock_at_each_stop(stack: WorkflowStack, parent: str, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     """Return a list that gets, for each stop of a run that still runs, whether the lock of *parent* is held then."""
-    lock, cancel, locked = stack.engine.live.condition(parent), stack.engine.cancel, []
+    lock, cancel, locked = stack.engine.condition(parent), stack.engine.cancel, []
 
     async def recorded(run_id: str, **how: Any) -> WorkflowRun:  # noqa: ANN401 - as the engine's `cancel`.
         if stack.store.get_run(run_id).state is WorkflowRunState.RUNNING:
@@ -634,7 +634,7 @@ async def test_script_tool_delegate_above_the_rate_limit_waits_and_then_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gate of a delegated call is a tool call of the script: above the calls per minute it waits, as they do."""
-    monkeypatch.setattr(dispatch_module, "_RATE_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(nodes_module, "_RATE_WAIT_SECONDS", 0.02)
     stack.limits = WorkflowLimits(max_tool_calls_per_minute=1)
     await stack.start()
     assert await stack.result("@0", "tool", tool_args("counter", "text", size=1)) == "x"
@@ -661,12 +661,12 @@ async def test_gate_that_answers_just_after_its_run_ended_queues_no_agent(gated:
     run, node = gated.store.get_run(gated.run_id), gated.store.get_node(gated.run_id, "@0")
     await gated.engine.cancel(run.run_id, reason="Stopped.")
     assert node is not None
-    assert run.run_id not in gated.engine.live.places
+    assert gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None
 
     async def passed() -> Any:  # noqa: ANN401
         return SimpleNamespace(state=ScriptCallState.COMPLETED, grant=None, result=None, metadata=None)
 
-    await gated.engine.dispatch.start_gated(run, node, passed)
+    await nodes_module.start_gated(gated.engine, run, node, passed)
 
-    assert run.run_id not in gated.engine.live.places
+    assert gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None
     assert _agent_jobs(gated) == 0

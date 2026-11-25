@@ -203,7 +203,7 @@ async def test_cancel_that_a_launch_overtakes_stops_the_attempt_that_launch_star
     await _interrupt(stack)
     stack.access = "pending"
     assert await stack.maintain() == []
-    end_run, overtaken = stack.engine.endings.end_run, []
+    end_run, overtaken = stack.engine.end_run, []
 
     async def overtaken_once(run: WorkflowRun, *args: Any, **changes: Any) -> WorkflowRun:  # noqa: ANN401
         if not overtaken:
@@ -212,7 +212,7 @@ async def test_cancel_that_a_launch_overtakes_stops_the_attempt_that_launch_star
             overtaken.append(await stack.engine.launch(run.run_id))
         return await end_run(run, *args, **changes)
 
-    monkeypatch.setattr(stack.engine.endings, "end_run", overtaken_once)
+    monkeypatch.setattr(stack.engine, "end_run", overtaken_once)
 
     cancelled = await stack.engine.cancel(stack.run_id, reason="Cancelled by the agent.")
 
