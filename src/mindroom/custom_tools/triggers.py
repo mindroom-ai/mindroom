@@ -652,61 +652,21 @@ class TriggersTools(Toolkit):
         actor: str | None = None,
         sample_data: dict[str, Any] | None = None,
     ) -> str:
-        """Manage reactive triggers and direct signed webhooks.
+        """Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
 
-        Actions:
-        - watch_room: Watch room messages (needs prompt; once=False, include_bots=False).
-        - watch_thread: Watch a thread tag change (needs prompt; tag='resolved', transition='added', once=True).
-        - subscribe_event: Subscribe to an event source (needs source_id, kind, prompt; once=True).
-        - create: Create direct Ed25519 webhook /api/triggers/{trigger_id} (needs trigger_id, public_key).
-        - list: List triggers and authorized event_sources.
-        - update: Update a reactive rule in place (needs trigger_id; '' clears pattern/triage_instructions, [] clears senders).
-        - set_enabled: Toggle enabled state (needs trigger_id; enabled defaults False).
-        - delete: Delete a trigger (needs trigger_id).
-        - rotate_key: Rotate a direct trigger key (needs trigger_id, public_key).
-        - history: Recent reactive firings (optional trigger_id, limit 1..100).
-        - test: Dry-run matching and triage without side effects (needs trigger_id).
+        Actions (key params):
+        - watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
+        - watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
+        - subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
+        - create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
+        - list (optional `include_disabled`=True): list triggers and authorized `event_sources`.
+        - update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).
+        - set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).
+        - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
+        - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 
-        Args:
-            action: Operation to run.
-            trigger_id: Route-safe trigger ID (auto-generated if omitted on reactive create).
-            prompt: Wake-agent instruction.
-            description: Rule description.
-            room_id: Watched room (defaults to current).
-            thread_id: Watched thread root ID.
-            senders: Sender Matrix IDs for watch_room ([] clears on update).
-            pattern: Case-insensitive regex for watch_room ('' clears on update).
-            include_bots: Allow other bots/agents on watch_room (never target self).
-            tag: Thread tag name (default 'resolved').
-            transition: Tag transition ('added' or 'removed').
-            source_id: Event source ID from list's event_sources.
-            kind: Event kind (subscribe_event) or sample kind (test).
-            match: Exact-match event.data filter (dot-paths supported).
-            triage_instructions: Tool-less triage criteria ('' clears on update).
-            triage_model: Model alias (required when triage_provider='llm').
-            triage_provider: Triage backend ('llm', 'typesafe', 'openai_decisions').
-            triage_threshold: Classifier triage threshold (0..1).
-            target_agent: Agent/team to wake (defaults to current).
-            target_room_id: Target room (defaults to current).
-            target_thread_id: Target thread or 'origin' (same-room watch_room).
-            new_thread: Open fresh thread per firing.
-            thread_key: Grouping key for new_thread=True.
-            once: Auto-disable after one firing.
-            max_fires_per_hour: Hourly cap (default 10).
-            cooldown_seconds: Cooldown seconds (default 0).
-            expires_in_hours: Lifetime in hours (<=8760).
-            enabled: Enabled state for set_enabled (default False) or update.
-            include_disabled: Include disabled triggers in list.
-            public_key: Ed25519 public key (raw base64, OpenSSH, or PEM).
-            key_id: Signing key ID (default 'default').
-            allowed_kinds: Allowed payload kinds (direct create).
-            replay_window_seconds: Replay window (direct create).
-            max_body_bytes: Max body bytes (direct create).
-            limit: Max history rows (1..100, default 20).
-            text: Sample text (test).
-            actor: Sample actor (test).
-            sample_data: Sample event.data dict (test).
-
+        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`). Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
+        Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
         try:

@@ -163,8 +163,9 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Long-running tools with a `background_after` parameter can continue in the background; "
-                "manage them with `job`."
+                "Tools with `background_after` can continue as background jobs without cancelling: "
+                "omit/null waits until completion or a newer message you answer (or the tool's default cap), "
+                "0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
             ),
         )
 

@@ -32,13 +32,10 @@ logger = get_logger(__name__)
 
 OUTPUT_PATH_ARGUMENT = "mindroom_output_path"
 _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
-    "Optional workspace-relative path: save the full supported output there and return a short receipt."
+    "Optional workspace-relative path: save full supported output to file and return a receipt."
 )
 # Beside a workdir, the path is below the saved outputs, which tools working in the workdir open by absolute path.
-_WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
-    "Optional path under your saved tool outputs directory: save the full supported output there and return a short receipt "
-    "with its absolute path."
-)
+_WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = "Optional path under saved tool outputs dir: save full supported output and return a receipt with its absolute path."
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"

@@ -99,49 +99,36 @@ _SHELL_ARGS_ERROR = (
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 _WORKSPACE_CWD_NOTE = (
-    "The command runs in your agent workspace as its working directory. Always use relative paths or "
-    "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
-    "to the workspace, while local execution maps it to the host home."
+    "CWD is your agent workspace. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` instead of `~` "
+    "(worker-routed execution maps `~` to the workspace; local execution maps it to the host home)."
 )
 _WORKDIR_CWD_NOTE = (
-    "The command runs in the workdir as its working directory, so relative paths name files there. "
-    "`$MINDROOM_AGENT_WORKSPACE` is your agent workspace, which holds your skills, subagent profiles, saved tool "
-    "outputs, and delegation records; use it for files meant for the workspace."
+    "The command runs in the workdir as its working directory (relative paths resolve there). "
+    "Use `$MINDROOM_AGENT_WORKSPACE` for workspace files (skills, subagent profiles, saved outputs, delegation records)."
 )
 # Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
 # removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
 # reserialized edits, unverified renames, truncated reads).
 _WORKING_METHOD_NOTE = (
-    "Working method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead "
-    "of printing everything, but compute results over the full input. Match filters against the extracted field "
-    "value, not the whole line, and check them on a few sample records. When combining the lines or words of "
-    "several text files, do not concatenate them raw: a file may lack its final newline, which merges its last "
-    "word or record with the next file's first, so process each file separately or add a separator, and test "
-    "with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When "
-    "only one value must change, replace just that span and keep every other byte, including comments and "
-    "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
-    "available tests, and recheck suspicious results such as a zero count."
+    "Working method: sample large inputs first (head/tail/grep/wc) rather than dumping them, but compute over full "
+    "input. Filter on the extracted field value, not the whole line, and sanity-check samples. Never raw-concat text "
+    "files (missing trailing newlines merge boundary tokens/records): process separately or insert a separator and "
+    "test without trailing newlines (except byte-for-byte split chunks). For single-value edits, replace only that "
+    "span preserving all other bytes/comments/spacing. Verify outputs back, grep for leftover old names after "
+    "renames, run tests, and recheck suspicious results (e.g. zero counts)."
 )
 
 # How a call uses the named workers its agent may run, which `workers.named` owns and removes.
 _NAMED_WORKERS_NOTE = (
-    "Set `worker` to a short name to run the command in a worker of its own instead of your normal worker: a "
-    "separate pod with its own processes, ports, and /tmp that mounts the same workspace. The first call with a "
-    "name starts that worker, and later calls of this reply with the same name reach it, so several isolated "
-    "stacks or shards of one job can run side by side. Calls with `background_after` 0 start their workers at the "
-    "same time. Where `mindroom-agent` is available, a shell script does the same with "
-    "`mindroom-agent workers run NAME -- COMMAND`, which waits and exits with the command's exit code. A result "
-    "that starts with `[worker: NAME, started]` marks a new Deployment or startup MindRoom recorded, not a "
-    "pod or container restart within that Deployment. "
-    "Named workers are removed when this reply and its background jobs end, and one in which no command has run "
-    "for several minutes is removed sooner, so keep results in the workspace and run long work as the call's own "
-    "command, not detached from it. Give each worker its own output directory, and its own git worktree when it "
-    "changes a checkout. Build or install what every worker needs once in the workspace before fanning out, "
-    "because package caches start empty in each worker. Network access granted with `request_network_access` "
-    "does not reach named workers. Set `sandbox=true` (empty scratch) or `mount_dir` (one non-hidden "
-    "workspace-relative subdirectory, optionally with `mount_read_only=true`) on the first call for a name to run "
-    "that worker in isolated sandbox mode without shared directories, knowledge bases, credentials, env secrets, "
-    "or CLI grants."
+    "Named workers: pass `worker` (short name) for an isolated pod (own processes, ports, `/tmp`; same workspace), "
+    "started on first use and reused across calls in this reply (`background_after=0` fans out in parallel; scripts "
+    "can call `mindroom-agent workers run NAME -- COMMAND`). `[worker: NAME, started]` marks MindRoom-recorded "
+    "startup, not pod restarts. Removed when reply/jobs end or after several idle minutes—save outputs to workspace "
+    "and keep long work in the call itself (not detached). Give each worker its own output dir and git worktree; "
+    "pre-install shared deps in workspace (caches start empty). `request_network_access` does not apply to named "
+    "workers. Pass `sandbox=true` (scratch only) or `mount_dir` (non-hidden workspace subdir; optional "
+    "`mount_read_only=true`) on first call for sandboxed isolation (no shared dirs, KB, credentials, env secrets, "
+    "or CLI grants)."
 )
 _NO_NAMED_WORKERS_ERROR = (
     "Error: `worker` and `resource_profile` need a shell that runs in a worker on the kubernetes worker backend, "
@@ -586,52 +573,26 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             mount_dir: str | None = None,
             mount_read_only: bool | None = None,
         ) -> str | ToolOutputFileHandled:
-            """Runs a shell command and returns the output or error.
+            """Run a command via non-login Bash (prepared env; pass ``["bash", "-lc", cmd]`` only if login startup is needed).
 
-            The last ``tail`` lines of stdout, then of stderr, are returned; on
-            non-zero exit, all of stderr is kept. By default the call waits at
-            most 120 seconds in the foreground. A call with ``timeout`` <= 120
-            stops the command and the processes it started after ``timeout``
-            seconds and returns its output so far. When a command is still running
-            after 120 seconds: a call that accepts ``background_after`` (with it
-            unset) returns a job handle while the command runs on until
-            completion, its ``timeout``, or job cancellation; any other call
-            (including subagent calls) moves the command to the background,
-            returns its PID, live log path, and wait/stop commands, and stops it
-            automatically when ``timeout`` (if set) expires or when the turn ends.
-            Set ``timeout`` on a command that might not end on its own, such as a
-            watcher or a test run that can hang. Start a server or anything else
-            meant to outlive the turn detached with ``nohup cmd > out.log 2>&1 &``.
-            Wait for something inside one command, such as
-            ``until <check>; do sleep 10; done`` with a ``timeout``, not with
-            repeated ``sleep`` calls: every call is a model turn.
-
-            With ``mindroom_output_path``, capture the complete supported output
-            within the redirect byte limit instead of applying ``tail``; a managed
-            top-level job still saves it on completion, whereas a command stopped
-            or backgrounded in the current turn saves no file.
-
-            Command strings use non-login Bash with the prepared execution environment.
-            Use explicit ``["bash", "-lc", command]`` only when login startup is needed.
+            Returns last ``tail`` lines of stdout then stderr (all stderr on non-zero exit). Waits up to 120s in foreground:
+            ``timeout`` <= 120 stops the process group inline and returns output so far; if still running at 120s, calls
+            with ``background_after`` (unset) return a job handle (runs until done, ``timeout``, or cancel), while other
+            calls (including subagents) background with PID/log/wait/stop commands and stop at ``timeout`` or turn end.
+            Set ``timeout`` on commands that may hang; detach servers meant to outlive the turn via
+            ``nohup cmd > out.log 2>&1 &``; poll in one command (``until <check>; do sleep 10; done`` + ``timeout``)
+            instead of repeated ``sleep`` turns. With ``mindroom_output_path``, saves full output (up to byte limit)
+            ignoring ``tail`` (managed top-level jobs save on completion; stopped/in-turn-backgrounded calls save none).
 
             Args:
-                args: The command to run as a shell command string or a list of argv strings.
-                tail: The number of lines to return from the output.
-                timeout: Seconds after which the command and its process group are stopped.
-                    Values <= 120 stop the command inline; null or > 120 waits 120s in the
-                    foreground and then continues in the background (until completion,
-                    ``timeout``, or turn/job end).
-                worker: Name of a worker of its own to run the command in, 1 to 32 lowercase letters, digits, or
-                    hyphens; null runs it in your normal worker.
-                resource_profile: CPU and memory size of the named worker, small, standard, or large, set by the
-                    first call that names it; null gives it the normal worker size.
-                sandbox: Run the named worker in isolated sandbox mode (ephemeral scratch only unless mount_dir is
-                    set, without credentials, Agent Keys, env secrets, or mindroom-agent CLI grants).
-                mount_dir: Workspace-relative subdirectory to mount inside the sandboxed named worker (e.g.
-                    "scratch/job1"; workspace root "." and hidden dot-prefixed segments like ".mindroom" or ".git" are
-                    refused). Always enables sandbox mode. Writable mount_dir still allows modifying repo-local files
-                    such as .git/hooks if your normal worker later runs git there.
-                mount_read_only: Mount mount_dir read-only; requires mount_dir.
+                args: Shell command string or argv list of strings.
+                tail: Output lines to return.
+                timeout: Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s).
+                worker: Named worker (1-32 lowercase letters/digits/hyphens); null uses normal worker.
+                resource_profile: Named worker size (small/standard/large; set on first call; null = default).
+                sandbox: Run named worker in isolated sandbox (scratch only unless mount_dir set; no creds/secrets/CLI grants).
+                mount_dir: Non-hidden workspace subdir to mount in sandbox (e.g. "scratch/job1"; "." and dot-segments refused; implies sandbox; writable mounts can still edit repo-local files like .git/hooks).
+                mount_read_only: Mount mount_dir read-only (requires mount_dir).
 
             Returns:
                 The command output or an error message.

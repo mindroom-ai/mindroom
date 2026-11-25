@@ -95,7 +95,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -112,7 +112,7 @@
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to cancel (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -124,7 +124,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -156,7 +156,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -167,13 +167,13 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to edit (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "message": {
                 "anyOf": [
@@ -184,7 +184,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New trigger message posted when the schedule fires."
+                "description": "New trigger message."
               },
               "description": {
                 "anyOf": [
@@ -195,7 +195,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New short label for schedule listings."
+                "description": "New listing label."
               },
               "execute_at": {
                 "anyOf": [
@@ -206,7 +206,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+                "description": "New one-time ISO 8601 datetime with time."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -217,7 +217,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+                "description": "New one-time delay in seconds (>= 1)."
               },
               "cron": {
                 "anyOf": [
@@ -228,7 +228,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+                "description": "New 5-field cron in `timezone`."
               },
               "timezone": {
                 "anyOf": [
@@ -239,7 +239,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
+                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
               },
               "history_limit": {
                 "anyOf": [
@@ -250,11 +250,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
               },
               "clear_history_limit": {
                 "type": "boolean",
-                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
+                "description": "Set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -265,7 +265,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
+                "description": "Update quiet delivery mode."
               },
               "model": {
                 "anyOf": [
@@ -276,7 +276,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -288,7 +288,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -320,7 +320,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -349,7 +349,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -377,7 +377,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -416,7 +416,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -455,7 +455,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -483,7 +483,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -507,7 +507,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": []
@@ -537,7 +537,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -548,13 +548,13 @@
         },
         {
           "name": "run_scheduled_call",
-          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The scheduled task's ID from its message."
+                "description": "Task ID from the scheduled prompt."
               },
               "arguments_json": {
                 "anyOf": [
@@ -565,7 +565,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+                "description": "Replacement JSON object string (only when any arguments were approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -577,7 +577,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -587,17 +587,17 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
               "message": {
                 "type": "string",
-                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
+                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
               },
               "new_thread": {
                 "type": "boolean",
-                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
               },
               "execute_at": {
                 "anyOf": [
@@ -608,7 +608,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -619,7 +619,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
               },
               "cron": {
                 "anyOf": [
@@ -630,7 +630,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
               },
               "description": {
                 "anyOf": [
@@ -641,7 +641,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+                "description": "Short listing label (defaults to trimmed `message`)."
               },
               "timezone": {
                 "anyOf": [
@@ -652,7 +652,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
+                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -663,11 +663,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
+                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
               },
               "silent": {
                 "type": "boolean",
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
+                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -678,7 +678,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -690,7 +690,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -701,25 +701,25 @@
         },
         {
           "name": "schedule_tool_call",
-          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
           "parameters": {
             "type": "object",
             "properties": {
               "tool_name": {
                 "type": "string",
-                "description": "One of your tool functions, e.g. \"post_slack_message\"."
+                "description": "Your tool function name (e.g. \"post_slack_message\")."
               },
               "arguments_json": {
                 "type": "string",
-                "description": "The call's arguments as a JSON object string."
+                "description": "Arguments as a JSON object string."
               },
               "execute_at": {
                 "type": "string",
-                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
               },
               "description": {
                 "type": "string",
-                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+                "description": "Short action summary (guides execution if any arguments are approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -731,7 +731,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -849,7 +849,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -881,7 +881,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -957,7 +957,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -974,7 +974,7 @@
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to cancel (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -986,7 +986,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1018,7 +1018,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1029,13 +1029,13 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to edit (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "message": {
                 "anyOf": [
@@ -1046,7 +1046,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New trigger message posted when the schedule fires."
+                "description": "New trigger message."
               },
               "description": {
                 "anyOf": [
@@ -1057,7 +1057,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New short label for schedule listings."
+                "description": "New listing label."
               },
               "execute_at": {
                 "anyOf": [
@@ -1068,7 +1068,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+                "description": "New one-time ISO 8601 datetime with time."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -1079,7 +1079,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+                "description": "New one-time delay in seconds (>= 1)."
               },
               "cron": {
                 "anyOf": [
@@ -1090,7 +1090,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+                "description": "New 5-field cron in `timezone`."
               },
               "timezone": {
                 "anyOf": [
@@ -1101,7 +1101,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
+                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
               },
               "history_limit": {
                 "anyOf": [
@@ -1112,11 +1112,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
               },
               "clear_history_limit": {
                 "type": "boolean",
-                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
+                "description": "Set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -1127,7 +1127,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
+                "description": "Update quiet delivery mode."
               },
               "model": {
                 "anyOf": [
@@ -1138,7 +1138,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1150,7 +1150,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1182,7 +1182,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1211,7 +1211,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1239,7 +1239,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1278,7 +1278,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1317,7 +1317,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1345,7 +1345,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1369,7 +1369,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": []
@@ -1399,7 +1399,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1410,13 +1410,13 @@
         },
         {
           "name": "run_scheduled_call",
-          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The scheduled task's ID from its message."
+                "description": "Task ID from the scheduled prompt."
               },
               "arguments_json": {
                 "anyOf": [
@@ -1427,7 +1427,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+                "description": "Replacement JSON object string (only when any arguments were approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1439,7 +1439,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1449,17 +1449,17 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
               "message": {
                 "type": "string",
-                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
+                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
               },
               "new_thread": {
                 "type": "boolean",
-                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
               },
               "execute_at": {
                 "anyOf": [
@@ -1470,7 +1470,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -1481,7 +1481,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
               },
               "cron": {
                 "anyOf": [
@@ -1492,7 +1492,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
               },
               "description": {
                 "anyOf": [
@@ -1503,7 +1503,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+                "description": "Short listing label (defaults to trimmed `message`)."
               },
               "timezone": {
                 "anyOf": [
@@ -1514,7 +1514,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
+                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -1525,11 +1525,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
+                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
               },
               "silent": {
                 "type": "boolean",
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
+                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -1540,7 +1540,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1552,7 +1552,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1563,25 +1563,25 @@
         },
         {
           "name": "schedule_tool_call",
-          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
           "parameters": {
             "type": "object",
             "properties": {
               "tool_name": {
                 "type": "string",
-                "description": "One of your tool functions, e.g. \"post_slack_message\"."
+                "description": "Your tool function name (e.g. \"post_slack_message\")."
               },
               "arguments_json": {
                 "type": "string",
-                "description": "The call's arguments as a JSON object string."
+                "description": "Arguments as a JSON object string."
               },
               "execute_at": {
                 "type": "string",
-                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
               },
               "description": {
                 "type": "string",
-                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+                "description": "Short action summary (guides execution if any arguments are approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1593,7 +1593,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1711,7 +1711,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -1743,7 +1743,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [

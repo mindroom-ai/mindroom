@@ -162,4 +162,6 @@ def test_the_subagent_tool_description_lists_each_model_s_reasoning_levels(tmp_p
     description = toolkit_offers(tools, "run_subagent").description
 
     assert description is not None
-    assert "Available models: default, sol (levels: low, high; default low; write sol@<level>). " in description
+    assert (
+        "Available models (append @<level> for reasoning effort; * = default): default, sol[*low|high]. " in description
+    )
