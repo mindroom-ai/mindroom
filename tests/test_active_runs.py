@@ -29,7 +29,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
-from mindroom.reply_turn.request import ResponseRequest, response_typing_indicator, should_publish_active_run
+from mindroom.reply_turn.request import ResponseRequest, response_typing_indicator
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_runner import ResponseRunner, _LockedTurn, _TeamResponseRequest
 from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
@@ -985,7 +985,7 @@ async def test_response_runner_active_run_from_placeholder_through_finalization(
     """_run_locked_turn publishes before placeholder, shares lease with typing, and clears cleanly."""
     runner, client, publisher = _runner_with_publisher(tmp_path)
     req = _plain_request(_target(thread_id="$root"))
-    assert should_publish_active_run(req) is True
+    assert not req.quiet
     seen: list[object] = []
 
     async def send_placeholder(*_a: object, **_kw: object) -> str:
@@ -1066,8 +1066,8 @@ async def test_response_runner_active_run_gates_non_visible_and_unapproved_parti
         ),
     )
     contact_req = replace(req, contact=cast("Any", (SimpleNamespace(status="active"), "a")))
-    assert not should_publish_active_run(silent_req)
-    assert not should_publish_active_run(contact_req)
+    assert silent_req.quiet
+    assert contact_req.quiet
 
     with (
         patch.object(
@@ -1084,8 +1084,26 @@ async def test_response_runner_active_run_gates_non_visible_and_unapproved_parti
             await runner._run_locked_turn(gated, team=None, participation=None)
     assert client.puts == []
 
-    gate = ParticipationGate()
     part_req = replace(req, participation=ParticipationConfig())
+    declined_gate = ParticipationGate()
+
+    async def generate_declined(_turn: object) -> None:
+        async with response_typing_indicator(
+            cast("nio.AsyncClient", client),
+            part_req,
+            response_run_id="rp-decline",
+            participation=declined_gate,
+            active_runs=publisher,
+        ):
+            declined_gate.decline("stay_silent")
+            await asyncio.sleep(0.01)
+
+    with _patch_turn_prep(runner, part_req, _generate_and_settle=generate_declined):
+        await runner._run_locked_turn(part_req, team=None, participation=declined_gate)
+    await _wait_workers_done(publisher)
+    assert client.puts == []
+
+    gate = ParticipationGate()
 
     async def generate_participation(_turn: object) -> None:
         await asyncio.sleep(0.01)
@@ -1103,6 +1121,10 @@ async def test_response_runner_active_run_gates_non_visible_and_unapproved_parti
             await _wait_for_puts(client, 1)
             assert _threads_of(client.puts[-1]) == ["$root"]
             await _assert_pause_toggles(client, "$root")
+        puts_after_typing = len(client.puts)
+        await asyncio.sleep(0.01)
+        assert len(client.puts) == puts_after_typing
+        assert _threads_of(client.puts[-1]) == ["$root"]
 
     with _patch_turn_prep(runner, part_req, _generate_and_settle=generate_participation):
         await runner._run_locked_turn(part_req, team=None, participation=gate)
@@ -1297,7 +1319,11 @@ async def test_approval_continuation_tracks_active_run_from_refresh_through_sett
         patch.object(approvals.locked, "refresh_mid_turn_context_for_approval", new=fake_refresh),
         patch.object(approvals.locked, "run_and_settle_locked_response", new=fake_settle),
         patch.object(approvals, "_facts", new=AsyncMock()),
-        patch.object(approvals, "_run_step", new=AsyncMock(return_value=True)),
+        patch.object(
+            approvals,
+            "_run_step",
+            new=AsyncMock(side_effect=lambda *_a, **_kw: _threads_of(client.puts[-1]) == ["$root"]),
+        ),
         patch("mindroom.approval.continuation_runner.next_step", return_value=object()),
     ):
         assert await approvals._run_claimed_approval_lifecycle(claimed, target=target) == Completed()

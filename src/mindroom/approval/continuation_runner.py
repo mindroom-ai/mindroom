@@ -120,7 +120,6 @@ from mindroom.reply_turn.request import (
     merge_response_extra_content,
     reply_authorization_entity_names,
     response_typing_indicator,
-    should_publish_active_run,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -952,7 +951,7 @@ class ApprovalContinuationRunner:
         request = self.approval_response_request(claimed, target=target)
         lease_cm = (
             self.active_runs.track(request.room_id, request.thread_id)
-            if self.active_runs is not None and should_publish_active_run(request)
+            if self.active_runs is not None and not request.quiet
             else nullcontext()
         )
         async with lease_cm:
@@ -1003,27 +1002,27 @@ class ApprovalContinuationRunner:
                 ),
                 post_response_deps=lambda: self._approval_post_response_deps(claimed),
             )
-        ending = progress.ending
-        assert ending is not None, "a settled resume has its ending"
-        match ending:
-            case Completed():
-                step = next_step(await self._facts(post_effect_continuation, recover=True), Resumed("completed"))
-                if not await self._run_step(post_effect_continuation, step, target=target):
-                    msg = "Approval continuation final delivery was not durably acknowledged"
-                    raise RuntimeError(msg)
-            case Cancelled() | Failed() | Suppressed():
-                # A hook's suppression of a resumed answer fails the approval, as an error does.
-                step = next_step(
-                    await self._facts(post_effect_continuation, recover=True),
-                    Resumed("failed", approval_failure(ending)),
-                )
-                await self._run_step(
-                    post_effect_continuation,
-                    step,
-                    target=continuation_target(post_effect_continuation),
-                )
-            case AwaitingApproval() | Owed():
-                pass
+            ending = progress.ending
+            assert ending is not None, "a settled resume has its ending"
+            match ending:
+                case Completed():
+                    step = next_step(await self._facts(post_effect_continuation, recover=True), Resumed("completed"))
+                    if not await self._run_step(post_effect_continuation, step, target=target):
+                        msg = "Approval continuation final delivery was not durably acknowledged"
+                        raise RuntimeError(msg)
+                case Cancelled() | Failed() | Suppressed():
+                    # A hook's suppression of a resumed answer fails the approval, as an error does.
+                    step = next_step(
+                        await self._facts(post_effect_continuation, recover=True),
+                        Resumed("failed", approval_failure(ending)),
+                    )
+                    await self._run_step(
+                        post_effect_continuation,
+                        step,
+                        target=continuation_target(post_effect_continuation),
+                    )
+                case AwaitingApproval() | Owed():
+                    pass
         return ending
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:

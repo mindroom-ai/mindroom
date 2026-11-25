@@ -119,7 +119,6 @@ from mindroom.reply_turn.request import (
     merge_response_extra_content,
     requester_remains_authorized,
     response_typing_indicator,
-    should_publish_active_run,
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
@@ -1608,19 +1607,35 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> AsyncIterator[Callable[[ParticipationGate | None], None]]:
         """Bind one turn-level active-run lease that activates idempotently once visible progress starts."""
-        if self.active_runs is None or not should_publish_active_run(request):
+        if self.active_runs is None or request.quiet:
             yield _noop_activate_run
             return
         async with (
             self.active_runs.track(request.room_id, request.thread_id, active=False) as lease,
             self.active_runs.deferred_activation(lease) as activate_lease,
         ):
+            approval_watcher: asyncio.Task[None] | None = None
 
             def activate_if_visible(participation: ParticipationGate | None) -> None:
+                nonlocal approval_watcher
                 if participation is None or participation.approved:
                     activate_lease()
+                    return
+                if approval_watcher is None:
 
-            yield activate_if_visible
+                    async def watch_approval() -> None:
+                        if await participation.wait_for_approval():
+                            activate_lease()
+
+                    approval_watcher = asyncio.create_task(watch_approval())
+
+            try:
+                yield activate_if_visible
+            finally:
+                if approval_watcher is not None:
+                    approval_watcher.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await approval_watcher
 
     async def _run_locked_turn(
         self,
