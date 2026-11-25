@@ -29,7 +29,7 @@ from mindroom.history.runtime import (
     summarize_run_locally,
 )
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
-from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
+from mindroom.history.summary_fork import SummaryFork, cache_routing_key, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
     compaction_summary_message,
     compaction_summary_text,
@@ -220,6 +220,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             (store.path, owner_scope(session).key, session.session_id),
             live_request,
             messages[:leading],
+            routing_key=cache_routing_key(compaction.model.model_params),
         )
     if compaction.stopped:
         return
@@ -305,14 +306,23 @@ async def _summarize(
     settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
     inputs = replace(policy.inputs, history_settings=settings)
     try:
+        # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
+        kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if scope_fold is None:
-            summary_message = await _summarize_run_locally(compaction, policy, inputs, layout, record, live_request)
+            budget_limit = policy.limit if kept_tokens < policy.limit else policy.fit_limit
+            summary_message = await _summarize_run_locally(
+                compaction,
+                policy,
+                inputs,
+                layout,
+                record,
+                live_request,
+                max_summary_tokens=max(0, budget_limit - kept_tokens),
+            )
             _finish(messages, layout, summary_message, record)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
             return _Fold(summary_message, await asyncio.to_thread(size_request, messages))
         store, session = scope_fold
-        # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
-        kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if kept_tokens >= policy.limit:
             # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
             logger.warning(
@@ -370,7 +380,13 @@ async def _compact_scope(
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
     scope = owner_scope(session)
-    basis_matches = holds_fold_basis(layout.history, basis_summary=basis.summary, basis_runs=basis.runs, scope=scope)
+    basis_matches = await asyncio.to_thread(
+        holds_fold_basis,
+        layout.history,
+        basis_summary=basis.summary,
+        basis_runs=basis.runs,
+        scope=scope,
+    )
     fork = _mid_turn_fork(policy, live_request) if basis_matches else None
     if not basis_matches:
         logger.info(
@@ -600,6 +616,8 @@ async def _summarize_run_locally(
     layout: _Layout,
     record: AnyRunRecord,
     live_request: ModelRequest,
+    *,
+    max_summary_tokens: int,
 ) -> Message:
     # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges,
     # each message as a snapshot of its own.
@@ -613,6 +631,8 @@ async def _summarize_run_locally(
         runtime_paths=compaction.runtime_paths,
         on_usage=_summary_usage_recorder(compaction, record),
         fork=_mid_turn_fork(policy, live_request),
+        max_summary_tokens=max_summary_tokens,
+        model=compaction.model,
     )
     return compaction_summary_message(summary, run_local=True)
 

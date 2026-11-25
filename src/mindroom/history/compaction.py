@@ -544,7 +544,6 @@ async def _rewrite_working_session_for_compaction(
             working_summary=working_session.summary,
             previous_summary=previous_summary,
             remaining=remaining,
-            allow_fork=compacted_run_count == 0,
             max_summary_tokens=max_summary_tokens,
             model=model,
         )
@@ -997,12 +996,17 @@ async def _summarize_working_pass(
     working_summary: ScopeSummary | None,
     previous_summary: str | None,
     remaining: Sequence[AnyRunRecord],
-    allow_fork: bool,
     max_summary_tokens: int | None,
     model: ModelProvider,
 ) -> _SummaryChunk | None:
-    if allow_fork and summarizer.scope_fork_source is not None:
-        fork = build_scope_fork(summarizer.scope_fork_source, scope=scope, summary=working_summary, runs=remaining)
+    if summarizer.scope_fork_source is not None:
+        fork = await asyncio.to_thread(
+            build_scope_fork,
+            summarizer.scope_fork_source,
+            scope=scope,
+            summary=working_summary,
+            runs=remaining,
+        )
         fork_summary, summarizer = await _try_fork_summary(
             summarizer,
             fork,

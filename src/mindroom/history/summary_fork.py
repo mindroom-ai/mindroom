@@ -28,8 +28,9 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 type WarmFrameKey = tuple[Path, str, str]
+type CacheRoutingKey = tuple[object, object]
 
-_STANDARD_CACHE_TTL_SECONDS = 300.0
+_STANDARD_CACHE_TTL_SECONDS = 240.0
 _EXTENDED_CACHE_TTL_SECONDS = 3300.0
 _MAX_WARM_FRAMES = 64
 _DEFAULT_ON_SEND = ModelRequest(messages=()).on_send
@@ -44,7 +45,7 @@ _EXTENDED_CACHE_PROVIDERS = frozenset(
 _OPENROUTER_ANTHROPIC_PREFIXES = ("anthropic/", "~anthropic/")
 
 _WARM_FRAMES_LOCK = threading.Lock()
-_WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...]]] = OrderedDict()
+_WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...], CacheRoutingKey]] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,10 +95,21 @@ def warm_cache_ttl_seconds(
     return _STANDARD_CACHE_TTL_SECONDS
 
 
-def remember_fork_frame(key: WarmFrameKey, template: ModelRequest, system_messages: Sequence[Message]) -> None:
-    """Store a message-free request template and leading system messages in a bounded LRU for live ``/compact``."""
+def cache_routing_key(model_params: Mapping[str, Any]) -> CacheRoutingKey:
+    """Return the provider cache-routing identity tuple ``(prompt_cache_key, session_id)``."""
+    return (model_params.get("prompt_cache_key"), model_params.get("session_id"))
+
+
+def remember_fork_frame(
+    key: WarmFrameKey,
+    template: ModelRequest,
+    system_messages: Sequence[Message],
+    *,
+    routing_key: CacheRoutingKey = (None, None),
+) -> None:
+    """Store a message-free request template, leading system messages, and cache routing key for live ``/compact``."""
     clean = replace(template, messages=(), retry_budget=None, on_send=_DEFAULT_ON_SEND, prompt_hold_pin=None)
-    entry = (clean, tuple(system_messages))
+    entry = (clean, tuple(system_messages), routing_key)
     with _WARM_FRAMES_LOCK:
         _WARM_FRAMES[key] = entry
         _WARM_FRAMES.move_to_end(key)
@@ -105,13 +117,20 @@ def remember_fork_frame(key: WarmFrameKey, template: ModelRequest, system_messag
             _WARM_FRAMES.popitem(last=False)
 
 
-def lookup_fork_frame(key: WarmFrameKey) -> tuple[ModelRequest, tuple[Message, ...]] | None:
-    """Return the remembered ``(template, system_messages)`` for ``key``, or ``None`` if absent."""
+def lookup_fork_frame(
+    key: WarmFrameKey,
+    *,
+    routing_key: CacheRoutingKey | None = None,
+) -> tuple[ModelRequest, tuple[Message, ...]] | None:
+    """Return ``(template, system_messages)`` for ``key`` when present and matching ``routing_key``."""
     with _WARM_FRAMES_LOCK:
         entry = _WARM_FRAMES.get(key)
-        if entry is not None:
-            _WARM_FRAMES.move_to_end(key)
-        return entry
+        if entry is None:
+            return None
+        if routing_key is not None and entry[2] != routing_key:
+            return None
+        _WARM_FRAMES.move_to_end(key)
+        return (entry[0], entry[1])
 
 
 def clear_fork_frames() -> None:
@@ -191,6 +210,12 @@ def build_fork_compaction_prompt(summary_prompt: str, *, mid_turn: bool) -> str:
         "SYSTEM DIRECTIVE — CONTEXT COMPACTION (DO NOT REPLY TO THE USER OR CALL ANY TOOLS)\n\n"
         "Stop normal task execution for this single turn. Do NOT invoke any tools, do NOT continue the task, "
         "and do NOT address the user. Return ONLY the plain-text handoff summary.\n\n"
+        "Scope and exclusions:\n"
+        "- Summarize ONLY the user/assistant conversation and tool calls/results.\n"
+        "- System instructions, workspace/memory files in the system prompt, tool definitions, "
+        "`<mindroom_transient_context>`, `<mindroom_message_context>`, retrieved memory blocks, and "
+        "approval/runtime notices are NOT conversation events or durable user constraints; do NOT copy them "
+        "into the handoff summary.\n\n"
         "Mapping to the instructions below:\n"
         "- Any earlier `<compacted_history>...</compacted_history>` message above is `<previous_summary>`.\n"
         "- The conversation messages and tool activity after it (excluding this compaction directive) are `<new_conversation>`.\n"
@@ -201,21 +226,21 @@ def build_fork_compaction_prompt(summary_prompt: str, *, mid_turn: bool) -> str:
 
 def _static_skip_reason(fork: SummaryFork, summary_model_identity: ModelIdentity) -> str | None:
     identity = fork.sizer.model.identity
-    if identity != summary_model_identity:
-        return "different_model"
     configured = fork.sizer.configured_provider
-    if identity.provider in _CLAUDE_CODE_PROVIDERS or (
-        configured is not None and provider_route(configured) == "claude_code"
-    ):
-        return "unsupported_provider"
     base = fork.request
-    if base.native_compaction is not None:
-        return "native_compaction_active"
-    if base.output_schema is not None:
-        return "output_schema_set"
-    if base.tool_choice is not None:
-        return "tool_choice_set"
-    return None
+    checks = (
+        (identity != summary_model_identity, "different_model"),
+        (
+            identity.provider in _CLAUDE_CODE_PROVIDERS
+            or (configured is not None and provider_route(configured) == "claude_code"),
+            "unsupported_provider",
+        ),
+        (fork.sizer.model.model_params.get("cache_system_prompt") is False, "prompt_cache_disabled"),
+        (base.native_compaction is not None, "native_compaction_active"),
+        (base.output_schema is not None, "output_schema_set"),
+        (base.tool_choice is not None, "tool_choice_set"),
+    )
+    return next((reason for failed, reason in checks if failed), None)
 
 
 def _fits_context_window(tokens: int, *, context_window: int, reserve_tokens: int) -> bool:
@@ -283,11 +308,13 @@ def prepare_fork_request(
 
 
 __all__ = [
+    "CacheRoutingKey",
     "ScopeForkSource",
     "SummaryFork",
     "WarmFrameKey",
     "build_fork_compaction_prompt",
     "build_scope_fork",
+    "cache_routing_key",
     "clear_fork_frames",
     "holds_fold_basis",
     "lookup_fork_frame",

@@ -20,7 +20,7 @@ from mindroom.history.compaction import (
     scope_usage_recorder,
     summarize_runs,
 )
-from mindroom.history.native import configure_native_history, native_history_route
+from mindroom.history.native import configure_native_history, native_history_route, with_native_history
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
@@ -43,7 +43,13 @@ from mindroom.history.storage import (
     set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
-from mindroom.history.summary_fork import ScopeForkSource, SummaryFork, lookup_fork_frame, remember_fork_frame
+from mindroom.history.summary_fork import (
+    ScopeForkSource,
+    SummaryFork,
+    cache_routing_key,
+    lookup_fork_frame,
+    remember_fork_frame,
+)
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
@@ -87,14 +93,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _remember_scope_frame(scope_context: ScopeSessionContext | None, frame: RequestFrame) -> None:
+def _remember_scope_frame(
+    scope_context: ScopeSessionContext | None,
+    frame: RequestFrame,
+    native_history: NativeHistory | None,
+    model: ModelProvider,
+) -> None:
     if scope_context is None:
         return
     session_id = scope_context.session.session_id if scope_context.session is not None else scope_context.session_id
+    fork_native = native_history.without_native_compaction() if native_history is not None else None
     remember_fork_frame(
         (scope_context.storage.path, scope_context.scope.key, session_id),
-        frame.template,
+        with_native_history(frame.template, fork_native),
         frame.system_messages,
+        routing_key=cache_routing_key(model.model_params),
     )
 
 
@@ -237,13 +250,14 @@ async def prepare_scope_history(
         allowed=allow_native_compaction,
         static_tokens=static_tokens,
     )
-    _remember_scope_frame(scope_context, frame)
     if scope_context is None or scope_context.session is None:
+        native_history = configure_native(session=None, runs=())
+        _remember_scope_frame(scope_context, frame, native_history, model)
         return PreparedScopeHistory(
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
-            native_history=configure_native(session=None, runs=()),
+            native_history=native_history,
             model=model,
             static_tokens=static_tokens,
         )
@@ -261,6 +275,7 @@ async def prepare_scope_history(
     native_history = configure_native(session=session, runs=visible_runs)
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
+    _remember_scope_frame(scope_context, frame, native_history, model)
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     history = prompt_visible_history(session, resolved_inputs.history_settings)
     request = partial(frame.request, summary=session.summary, history=history)
@@ -328,7 +343,7 @@ async def prepare_scope_history(
         history_tokens = max(0, request_size.tokens - static_tokens)
         scope_fork_source = _scope_fork_source(
             sizer,
-            frame.template,
+            with_native_history(frame.template, native_history),
             frame.system_messages,
             execution_plan,
         )
@@ -400,7 +415,10 @@ async def compact_scope_now(
         model=model,
     )
     plan = inputs.execution_plan
-    frame = lookup_fork_frame((context.storage.path, context.scope.key, session.session_id))
+    frame = lookup_fork_frame(
+        (context.storage.path, context.scope.key, session.session_id),
+        routing_key=cache_routing_key(model.model_params),
+    )
     scope_fork_source = (
         _scope_fork_source(request_sizer(model, config, plan.compaction_model_name), frame[0], frame[1], plan)
         if frame is not None
@@ -628,6 +646,8 @@ async def summarize_run_locally(
     runtime_paths: RuntimePaths,
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
     fork: SummaryFork | None = None,
+    max_summary_tokens: int | None = None,
+    model: ModelProvider | None = None,
 ) -> str:
     """Summarize one run's own folded messages, oldest first, with the scope's summary model, storing nothing."""
     summarizer = load_summarizer(
@@ -640,7 +660,13 @@ async def summarize_run_locally(
         on_usage=on_usage,
         fork=fork,
     )
-    summary, _ = await summarize_runs(summarizer, previous_summary, snapshots)
+    summary, _ = await summarize_runs(
+        summarizer,
+        previous_summary,
+        snapshots,
+        max_summary_tokens=max_summary_tokens,
+        model=model,
+    )
     return summary
 
 
