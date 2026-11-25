@@ -403,15 +403,7 @@ class DesktopTools(Toolkit):
             return _error_result(action, str(exc))
 
     def _credential_scope(self, context: ToolRuntimeContext | None) -> tuple[str, str] | None:
-        if context is not None:
-            target_agent_name = self._worker_target.routing_agent_name if self._worker_target is not None else None
-            return context.requester_id, target_agent_name or context.agent_name
-        target = self._worker_target
-        identity = target.execution_identity if target is not None else None
-        agent_name = target.routing_agent_name if target is not None else None
-        if identity is None or identity.requester_id is None or agent_name is None:
-            return None
-        return identity.requester_id, agent_name
+        return desktop_credential_scope(context, self._worker_target)
 
     def _current_configuration(
         self,
@@ -419,17 +411,46 @@ class DesktopTools(Toolkit):
         credential_scope: tuple[str, str] | None = None,
     ) -> DesktopConfigurationState:
         resolved_scope = credential_scope or self._credential_scope(None)
-        if self._credentials_manager is None or resolved_scope is None:
-            return desktop_configuration_state({"timeout_seconds": self._authored_timeout_seconds})
-        requester_id, agent_name = resolved_scope
-        credentials = load_desktop_credentials(
+        return desktop_configuration_for_scope(
             self._credentials_manager,
-            requester_id=requester_id,
-            agent_name=agent_name,
+            resolved_scope,
+            default_timeout_seconds=self._authored_timeout_seconds,
         )
-        values = dict(credentials or {})
-        values.setdefault("timeout_seconds", self._authored_timeout_seconds)
-        return desktop_configuration_state(values)
+
+
+def desktop_credential_scope(
+    context: ToolRuntimeContext | None,
+    worker_target: ResolvedWorkerTarget | None,
+) -> tuple[str, str] | None:
+    """Return the (requester_id, agent_name) scope for paired Desktop credentials."""
+    if context is not None:
+        target_agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        return context.requester_id, target_agent_name or context.agent_name
+    identity = worker_target.execution_identity if worker_target is not None else None
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    if identity is None or identity.requester_id is None or agent_name is None:
+        return None
+    return identity.requester_id, agent_name
+
+
+def desktop_configuration_for_scope(
+    credentials_manager: CredentialsManager | None,
+    credential_scope: tuple[str, str] | None,
+    *,
+    default_timeout_seconds: float,
+) -> DesktopConfigurationState:
+    """Load and validate one requester-agent paired Desktop configuration."""
+    if credentials_manager is None or credential_scope is None:
+        return desktop_configuration_state({"timeout_seconds": default_timeout_seconds})
+    requester_id, agent_name = credential_scope
+    credentials = load_desktop_credentials(
+        credentials_manager,
+        requester_id=requester_id,
+        agent_name=agent_name,
+    )
+    values = dict(credentials or {})
+    values.setdefault("timeout_seconds", default_timeout_seconds)
+    return desktop_configuration_state(values)
 
 
 async def _tool_result_from_response(
@@ -1050,4 +1071,4 @@ def _ok_result(action: str, result: dict[str, object]) -> ToolValue:
     return ToolValue(content=custom_tool_payload("desktop", "ok", action=action, result=result))
 
 
-__all__ = ["DesktopTools"]
+__all__ = ["DesktopTools", "desktop_configuration_for_scope", "desktop_credential_scope"]

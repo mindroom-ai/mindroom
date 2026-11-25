@@ -139,3 +139,44 @@ def test_resolve_rejects_fallback_input_on_incomplete_or_unstable_observations(
         cache.resolve(fallback)
     # Retained semantic element actions remain valid on truncated states.
     assert cache.resolve(COMMAND) == COMMAND
+
+
+@pytest.mark.parametrize(
+    ("state_updates", "tree_captured"),
+    [
+        ({"truncated": True, "stability": "truncated"}, True),
+        ({"truncated": False, "stability": "unstable"}, True),
+        ({"elements": (), "truncated": False, "stability": "stable"}, False),
+    ],
+)
+def test_screenshot_backed_observation_allows_fallback_while_screenshotless_rejects(
+    state_updates: dict[str, object],
+    tree_captured: bool,
+) -> None:
+    """Delivered screenshots unlock coordinate/keyboard fallback; missing screenshots fail closed."""
+    cache = DesktopObservations()
+    degraded = replace(STATE, **state_updates)
+    cache.remember(degraded, COMMAND, screenshot_captured=True, tree_captured=tree_captured)
+    assert cache.screenshot_captured("snapshot-1") is True
+    for action, params in (
+        ("click", {"x": 100, "y": 100, "button": "left"}),
+        ("type_text", {"text": "hello"}),
+        ("keypress", {"keys": ["enter"]}),
+    ):
+        fallback = replace(
+            COMMAND,
+            action=action,
+            parameters={"app": "com.example.Editor", "state_id": "snapshot-1", **params},
+        )
+        assert cache.resolve(fallback) == fallback
+
+    no_shot = replace(degraded, state_id="snapshot-no-shot")
+    cache.remember(no_shot, COMMAND, screenshot_captured=False, tree_captured=tree_captured)
+    assert cache.screenshot_captured("snapshot-no-shot") is False
+    rejected = replace(
+        COMMAND,
+        action="click",
+        parameters={"app": "com.example.Editor", "state_id": "snapshot-no-shot", "x": 100, "y": 100, "button": "left"},
+    )
+    with pytest.raises(DesktopProtocolError, match="stable complete observation"):
+        cache.resolve(rejected)

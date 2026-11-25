@@ -212,3 +212,13 @@ def test_release_workflow_publishes_signed_desktop_helper_tarball_and_sha256() -
     assert "dist/macos/MindRoom.zip" in upload_tokens
     assert "dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz" in upload_tokens
     assert "dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz.sha256" in upload_tokens
+
+
+def test_macos_app_resources_declare_apple_events_entitlement_and_usage_description() -> None:
+    """App entitlements and Info.plist declare AppleEvents automation consistently with the helper spec."""
+    resources = Path(__file__).resolve().parents[1] / "macos" / "MindRoom" / "Resources"
+    entitlements = plistlib.loads((resources / "MindRoom.entitlements").read_bytes())
+    info = plistlib.loads((resources / "Info.plist").read_bytes())
+
+    assert entitlements["com.apple.security.automation.apple-events"] is True
+    assert info["NSAppleEventsUsageDescription"] == "MindRoom controls only the applications you explicitly allow."

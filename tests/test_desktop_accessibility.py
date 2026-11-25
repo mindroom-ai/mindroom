@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import OrderedDict, UserList
 from dataclasses import replace
 from types import SimpleNamespace
@@ -27,14 +28,55 @@ from mindroom.desktop.accessibility import (
 )
 
 
+class FakeOpenConfiguration:
+    """Minimal NSWorkspaceOpenConfiguration test double."""
+
+    def __init__(self) -> None:
+        self.activates: bool | None = None
+        self.hides: bool | None = None
+        self.creates_new_instance: bool | None = None
+
+    @classmethod
+    def configuration(cls) -> FakeOpenConfiguration:
+        return cls()
+
+    def setActivates_(self, value: bool) -> None:
+        self.activates = value
+
+    def setHides_(self, value: bool) -> None:
+        self.hides = value
+
+    def setCreatesNewApplicationInstance_(self, value: bool) -> None:
+        self.creates_new_instance = value
+
+
+def _install_fake_appkit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "AppKit",
+        SimpleNamespace(NSWorkspaceOpenConfiguration=FakeOpenConfiguration),
+    )
+
+
 class FakeRunningApplication:
     """Small NSRunningApplication-compatible test object."""
 
-    def __init__(self, pid: int = 42, *, active: bool = True) -> None:
+    def __init__(
+        self,
+        pid: int = 42,
+        *,
+        active: bool = True,
+        hidden: bool = False,
+        bundle_url: object | None = "file:///Applications/Editor.app",
+    ) -> None:
         self.pid = pid
         self.active = active
+        self.hidden = hidden
+        self.bundle_url = bundle_url
+        self.unhide_calls = 0
         self.activation_hook: Callable[[], None] | None = None
         self.activation_options: list[int] = []
+        self.activate_returns = True
 
     def bundleIdentifier(self) -> str:
         return "com.example.Editor"
@@ -48,6 +90,17 @@ class FakeRunningApplication:
     def isActive(self) -> bool:
         return self.active
 
+    def isHidden(self) -> bool:
+        return self.hidden
+
+    def unhide(self) -> bool:
+        self.unhide_calls += 1
+        self.hidden = False
+        return True
+
+    def bundleURL(self) -> object | None:
+        return self.bundle_url
+
     def activationPolicy(self) -> int:
         return 0  # Regular: has a Dock icon.
 
@@ -55,17 +108,37 @@ class FakeRunningApplication:
         self.activation_options.append(options)
         if self.activation_hook is not None:
             self.activation_hook()
-        return True
+        return self.activate_returns
 
 
 class FakeWorkspace:
-    """Mutable app list used to simulate process replacement."""
+    """Mutable app list and NSWorkspace launch surface for deterministic activation tests."""
 
     def __init__(self, application: FakeRunningApplication) -> None:
         self.applications = [application]
+        self.installed_urls: dict[str, object | None] = {"com.example.Editor": "file:///Applications/Editor.app"}
+        self.url_queries: list[str] = []
+        self.open_calls: list[tuple[object, FakeOpenConfiguration]] = []
+        self.open_hook: Callable[[object, FakeOpenConfiguration, Callable[[object, object], None]], None] | None = None
 
     def runningApplications(self) -> list[FakeRunningApplication]:
         return self.applications
+
+    def URLForApplicationWithBundleIdentifier_(self, bundle_identifier: str) -> object | None:
+        self.url_queries.append(bundle_identifier)
+        return self.installed_urls.get(bundle_identifier)
+
+    def openApplicationAtURL_configuration_completionHandler_(
+        self,
+        url: object,
+        configuration: FakeOpenConfiguration,
+        completion_handler: Callable[[object, object], None],
+    ) -> None:
+        self.open_calls.append((url, configuration))
+        if self.open_hook is not None:
+            self.open_hook(url, configuration, completion_handler)
+            return
+        completion_handler(None, None)
 
 
 class FakeMacServices:
@@ -75,6 +148,7 @@ class FakeMacServices:
     kAXFocusedWindowAttribute = "focused_window"
     kAXFocusedAttribute = "focused"
     kAXFocusedUIElementAttribute = "focused_element"
+    kAXFrontmostAttribute = "frontmost"
     kAXWindowsAttribute = "windows"
     kAXMinimizedAttribute = "minimized"
     kAXPositionAttribute = "position"
@@ -130,6 +204,9 @@ class FakeMacServices:
         self.actions = {"button": UserList(["AXPress", "Name:Unsafe\nTarget:0x0"])}
         self.apply_value_updates = True
         self.performed_actions: list[tuple[object, str]] = []
+        self.frontmost_calls: list[tuple[str, int]] = []
+        self.frontmost_error = 0
+        self.frontmost_hook: Callable[[], None] | None = None
 
     @staticmethod
     def AXIsProcessTrusted() -> bool:
@@ -179,6 +256,11 @@ class FakeMacServices:
         return 0
 
     def AXUIElementSetAttributeValue(self, reference: object, attribute: str, value: object) -> int:
+        if isinstance(reference, tuple) and reference[0] == "app" and attribute == self.kAXFrontmostAttribute:
+            self.frontmost_calls.append(reference)
+            if self.frontmost_hook is not None:
+                self.frontmost_hook()
+            return self.frontmost_error
         if self.apply_value_updates:
             self.attributes[reference][attribute] = value
             if attribute == self.kAXFocusedAttribute and value is True:
@@ -446,8 +528,8 @@ def test_mac_fallback_rejects_dynamic_content_after_foregrounding_app() -> None:
 def test_mac_activation_must_reach_foreground_before_input(monkeypatch: pytest.MonkeyPatch) -> None:
     """An OS-accepted but incomplete activation fails before any app input."""
     backend, services, workspace = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
-    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", lambda _app_id: None)
     workspace.applications[0].active = False
     state = backend.get_app_state("com.example.Editor")
     button = next(element for element in state.elements if element.name == "Save")
@@ -455,71 +537,116 @@ def test_mac_activation_must_reach_foreground_before_input(monkeypatch: pytest.M
     with pytest.raises(AccessibilityError, match="did not become active"):
         backend.click_element(state.app_id, state.state_id, button.index)
 
+    assert services.frontmost_calls == [("app", 42)]
+    assert len(workspace.open_calls) == 1
     assert services.performed_actions == []
 
 
-def test_mac_activation_uses_bounded_apple_event_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The local bridge can foreground an allowed app when direct CLI activation is ignored."""
+def test_mac_activation_uses_unhide_ax_frontmost_and_nsworkspace_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activation unhides hidden apps, tries AXFrontmost before NSWorkspace, and configures NSWorkspace safely."""
     backend, services, workspace = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
     application = workspace.applications[0]
     application.active = False
-    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
-    calls: list[str] = []
-
-    def activate_app(app_id: str) -> None:
-        calls.append(app_id)
-        application.active = True
-
-    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", activate_app)
+    application.hidden = True
     state = backend.get_app_state("com.example.Editor")
     button = next(element for element in state.elements if element.name == "Save")
 
+    # Tier 2 (AXFrontmost) succeeds without invoking NSWorkspace openApplication.
+    services.frontmost_hook = lambda: setattr(application, "active", True)
     backend.click_element(state.app_id, state.state_id, button.index)
+    assert application.unhide_calls == 1
+    assert services.frontmost_calls == [("app", 42)]
+    assert workspace.open_calls == []
+    assert services.performed_actions == [("button", "AXPress")]
 
-    assert calls == ["com.example.Editor"]
+    # Tier 3 (NSWorkspace) runs only when both direct activation and AXFrontmost leave the app inactive.
+    application.active = False
+    application.bundle_url = None
+    services.frontmost_hook = None
+    services.performed_actions.clear()
+
+    def activate_via_workspace(
+        _url: object,
+        _config: FakeOpenConfiguration,
+        handler: Callable[[object, object], None],
+    ) -> None:
+        application.active = True
+        handler(application, None)
+
+    workspace.open_hook = activate_via_workspace
+    backend.click_element(state.app_id, state.state_id, button.index)
+    assert workspace.url_queries == ["com.example.Editor"]
+    assert len(workspace.open_calls) == 1
+    opened_url, config = workspace.open_calls[0]
+    assert opened_url == "file:///Applications/Editor.app"
+    assert (config.activates, config.hides, config.creates_new_instance) == (True, False, False)
     assert services.performed_actions == [("button", "AXPress")]
 
 
 def test_mac_launches_only_the_exact_allowlisted_bundle_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stopped allowlisted app can be launched without exposing arbitrary application names."""
+    """A stopped allowlisted app launches via NSWorkspace openApplication with resolved bundle URL."""
     backend, _, workspace = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
     workspace.applications = []
     launched = FakeRunningApplication()
-    calls: list[str] = []
 
-    def launch(app_id: str) -> None:
-        calls.append(app_id)
+    def launch(_url: object, _config: FakeOpenConfiguration, handler: Callable[[object, object], None]) -> None:
         workspace.applications.append(launched)
+        handler(launched, None)
 
-    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", launch)
+    workspace.open_hook = launch
 
     backend.launch_app("com.example.Editor")
 
-    assert calls == ["com.example.Editor"]
+    assert workspace.url_queries == ["com.example.Editor"]
+    assert len(workspace.open_calls) == 1
+    url, config = workspace.open_calls[0]
+    assert url == "file:///Applications/Editor.app"
+    assert (config.activates, config.hides, config.creates_new_instance) == (True, False, False)
     assert launched.activation_options == [0]
 
 
-def test_mac_launch_rejects_invalid_bundle_id_before_request() -> None:
-    """Invalid allowlist entries fail definitively before any launch side effect."""
+def test_mac_launch_rejects_invalid_and_uninstalled_bundle_id_before_request() -> None:
+    """Invalid or uninstalled bundle IDs fail definitively before any NSWorkspace launch side effect."""
     backend, _, workspace = _fake_mac_backend()
-    backend._allowed_app_ids = frozenset({"invalid_app"})
+    backend._allowed_app_ids = frozenset({"invalid_app", "com.example.Missing"})
     workspace.applications = []
 
     with pytest.raises(AccessibilityError, match="invalid bundle identifier") as exc_info:
         backend.launch_app("invalid_app")
-
     assert type(exc_info.value) is AccessibilityError
 
+    with pytest.raises(AccessibilityError, match="not installed") as missing_exc:
+        backend.launch_app("com.example.Missing")
+    assert type(missing_exc.value) is AccessibilityError
+    assert workspace.open_calls == []
 
-def test_mac_launch_timeout_has_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An accepted launch request that never appears cannot be presented as safe to repeat."""
+
+def test_mac_launch_timeout_and_open_error_have_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An accepted NSWorkspace launch that never finishes or never appears reports unknown outcome."""
     backend, _, workspace = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
     workspace.applications = []
-    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", lambda _app_id: None)
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
         backend.launch_app("com.example.Editor")
+
+    # Open completion handler timeout also stays bounded and reports unknown outcome on launch.
+    monkeypatch.setattr("mindroom.desktop.accessibility._OPEN_APPLICATION_TIMEOUT_SECONDS", 0.01)
+    workspace.open_hook = lambda _url, _cfg, _handler: None
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
+        backend.launch_app("com.example.Editor")
+
+    # Open completion handler error during _activate fails before input.
+    application = FakeRunningApplication(active=False)
+    workspace.applications = [application]
+    workspace.open_hook = lambda _url, _cfg, handler: handler(None, RuntimeError("launch services error"))
+    state = backend.get_app_state("com.example.Editor")
+    with pytest.raises(AccessibilityError, match="activation request failed"):
+        backend.prepare_fallback(state.app_id, state.state_id)
 
 
 @pytest.mark.parametrize("already_running", [False, True])
@@ -529,14 +656,16 @@ def test_mac_launch_activation_timeout_has_unknown_outcome(
 ) -> None:
     """A failed foreground wait stays unknown after either launch or direct activation was requested."""
     backend, _, workspace = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
     application = FakeRunningApplication(active=False)
     workspace.applications = [application] if already_running else []
 
-    def request_activation(_app_id: str) -> None:
+    def open_app(_url: object, _config: FakeOpenConfiguration, handler: Callable[[object, object], None]) -> None:
         if not already_running:
             workspace.applications.append(application)
+        handler(application, None)
 
-    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", request_activation)
+    workspace.open_hook = open_app
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
@@ -1129,3 +1258,137 @@ def test_mac_flatten_deduplicates_shared_table_cells_on_enqueue() -> None:
 
     assert stored.public.truncated is False
     assert [el.name for el in stored.public.elements] == ["Editor", "Save"]
+
+
+def test_mac_get_app_state_without_elements_skips_tree_walk_and_stabilization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_elements=False resolves only the running window without walking AX or sleeping."""
+    backend, services, _ = _fake_mac_backend()
+    sleeps: list[float] = []
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        backend,
+        "_flatten_tree",
+        lambda _root: pytest.fail("_flatten_tree must not run when include_elements=False"),
+    )
+
+    state = backend.get_app_state("com.example.Editor", include_elements=False)
+
+    assert state.elements == ()
+    assert state.truncated is False
+    assert state.stability == "stable"
+    assert state.window == DesktopRect(10, 20, 800, 600)
+    assert services.collection_count == 1
+    assert sleeps == []
+    assert backend._states[state.state_id].tree_captured is False
+    # Window-bound screenshot capture still works on that state_id.
+    capture = backend.prepare_capture(state.app_id, state.state_id)
+    assert (capture.state.state_id, capture.process_id) == (state.state_id, 42)
+
+
+@pytest.mark.parametrize("kind", ["screenshot_only", "truncated", "unstable"])
+def test_mac_window_fallback_revalidates_before_and_after_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """Screenshot-backed fallback uses window revalidation around activation and still rejects window drift."""
+    backend, services, workspace = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+
+    if kind == "screenshot_only":
+        state = backend.get_app_state("com.example.Editor", include_elements=False)
+    elif kind == "truncated":
+        children = UserList([f"button-{index}" for index in range(128)])
+        services.attributes["window-1"]["children"] = children
+        for child in children:
+            services.attributes[child] = {"role": "AXButton", "title": child}
+        state = backend.get_app_state("com.example.Editor")
+        assert state.truncated is True
+    else:
+        services.collection_hook = lambda count: services.attributes["button"].update(title=f"Save {count}")
+        state = backend.get_app_state("com.example.Editor")
+        assert state.stability == "unstable"
+        services.collection_hook = None
+
+    # Without allow_window_fallback, fallback stays strictly rejected.
+    with pytest.raises(AccessibilityError, match="stable complete observation"):
+        backend.prepare_fallback(state.app_id, state.state_id)
+    with pytest.raises(AccessibilityError, match="stable complete observation"):
+        backend.prepare_keyboard(state.app_id, state.state_id)
+
+    # With allow_window_fallback=True, dynamic AX content changes during activation do not block fallback.
+    workspace.applications[0].activation_hook = lambda: services.attributes["button"].update(value="changed")
+    monkeypatch.setattr(
+        backend,
+        "_flatten_tree",
+        lambda _root: pytest.fail("window-level fallback must not walk AX"),
+    )
+    capture = backend.prepare_fallback(state.app_id, state.state_id, allow_window_fallback=True)
+    assert (capture.state.state_id, capture.process_id) == (state.state_id, 42)
+    guard = backend.prepare_keyboard(state.app_id, state.state_id, allow_window_fallback=True)
+    guard()
+
+    # Window geometry change during activation is caught by the post-activation window check.
+    workspace.applications[0].activation_hook = lambda: services.attributes["window-1"].update(
+        size=SimpleNamespace(width=900, height=600),
+    )
+    with pytest.raises(AccessibilityError, match="window geometry changed"):
+        backend.prepare_fallback(state.app_id, state.state_id, allow_window_fallback=True)
+
+    # Window change before activation (minimized) is rejected before touching activation.
+    services.attributes["window-1"]["size"] = SimpleNamespace(width=800, height=600)
+    workspace.applications[0].activation_hook = None
+    fresh = backend.get_app_state("com.example.Editor", include_elements=False)
+    services.attributes["window-1"]["minimized"] = True
+    workspace.applications[0].activation_options.clear()
+    with pytest.raises(AccessibilityError, match="minimized"):
+        backend.prepare_fallback(fresh.app_id, fresh.state_id, allow_window_fallback=True)
+    assert workspace.applications[0].activation_options == []
+
+
+def test_mac_flatten_discounts_unnamed_wrappers_up_to_raw_depth_cap() -> None:
+    """Unnamed Chromium-style AXGroup wrappers do not burn semantic depth, while raw depth stays hard-capped."""
+    backend, services, _ = _fake_mac_backend()
+
+    # 20 unnamed AXGroup wrappers -> button still reached at semantic depth 1 without truncation.
+    parent = "window-1"
+    for index in range(20):
+        node = f"wrapper-{index}"
+        services.attributes[parent]["children"] = UserList([node])
+        services.attributes[node] = {"role": "AXGroup"}
+        parent = node
+    services.attributes[parent]["children"] = UserList(["button"])
+
+    state = backend.get_app_state("com.example.Editor")
+    assert state.truncated is False
+    assert [(el.role, el.depth, el.parent_index) for el in state.elements] == [
+        ("AXWindow", 0, None),
+        ("AXButton", 1, 0),
+    ]
+
+    # 45 unnamed wrappers exceed _MAX_RAW_ACCESSIBILITY_DEPTH (40) -> bounded and marked truncated.
+    parent = "window-1"
+    for index in range(45):
+        node = f"deep-{index}"
+        services.attributes[parent]["children"] = UserList([node])
+        services.attributes[node] = {"role": "AXGroup"}
+        parent = node
+    services.attributes[parent]["children"] = UserList(["button"])
+
+    deep_state = backend.get_app_state("com.example.Editor")
+    assert deep_state.truncated is True
+    assert [el.role for el in deep_state.elements] == ["AXWindow"]
+
+    # Named semantic containers still cap at _MAX_ACCESSIBILITY_DEPTH (12).
+    parent = "window-1"
+    for index in range(13):
+        node = f"named-{index}"
+        services.attributes[parent]["children"] = UserList([node])
+        services.attributes[node] = {"role": "AXGroup", "title": f"Level {index}"}
+        parent = node
+    services.attributes[parent]["children"] = UserList(["button"])
+
+    semantic_state = backend.get_app_state("com.example.Editor")
+    assert semantic_state.truncated is True
+    assert max(el.depth for el in semantic_state.elements) == 12

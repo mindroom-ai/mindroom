@@ -19,6 +19,8 @@ class _Observation:
     state: AccessibilityState
     scope: tuple[str, str, str, str]
     expires_at: float
+    screenshot_captured: bool = False
+    tree_captured: bool = True
 
 
 @dataclass
@@ -28,7 +30,15 @@ class DesktopObservations:
     clock: Callable[[], float] = time.monotonic
     _states: OrderedDict[str, _Observation] = field(default_factory=OrderedDict, init=False)
 
-    def remember(self, state: AccessibilityState, command: DesktopCommand, *, controller_key: str = "") -> None:
+    def remember(
+        self,
+        state: AccessibilityState,
+        command: DesktopCommand,
+        *,
+        controller_key: str = "",
+        screenshot_captured: bool = False,
+        tree_captured: bool = True,
+    ) -> None:
         """Retain an observed state without extending existing reference lifetimes."""
         self._prune()
         scope = _scope(command, controller_key)
@@ -38,7 +48,13 @@ class DesktopObservations:
                 msg = "Desktop observation reused a state ID with a different scope or content."
                 raise DesktopProtocolError(msg)
             return
-        self._states[state.state_id] = _Observation(state, scope, self.clock() + STATE_TTL_SECONDS)
+        self._states[state.state_id] = _Observation(
+            state,
+            scope,
+            self.clock() + STATE_TTL_SECONDS,
+            screenshot_captured=screenshot_captured,
+            tree_captured=tree_captured,
+        )
         while len(self._states) > MAX_RETAINED_STATES:
             self._states.popitem(last=False)
 
@@ -62,8 +78,10 @@ class DesktopObservations:
                     msg = "Desktop element index is unknown in this observation."
                     raise DesktopProtocolError(msg)
                 return command
-            if command.action in DESKTOP_CONTROL_ACTIONS and (
-                observed.state.truncated or observed.state.stability != "stable"
+            if (
+                command.action in DESKTOP_CONTROL_ACTIONS
+                and not observed.screenshot_captured
+                and (not observed.tree_captured or observed.state.truncated or observed.state.stability != "stable")
             ):
                 msg = "Accessibility fallback requires a stable complete observation; request get_app_state again."
                 raise DesktopProtocolError(msg)
@@ -87,6 +105,13 @@ class DesktopObservations:
             raise DesktopProtocolError(msg)
         parameters = {key: value for key, value in command.parameters.items() if key != "element_ref"}
         return replace(command, parameters={**parameters, "element_index": index})
+
+    def screenshot_captured(self, state_id: object) -> bool:
+        """Return whether a screenshot was delivered to the caller for this retained state."""
+        if not isinstance(state_id, str):
+            return False
+        observed = self._states.get(state_id)
+        return observed is not None and observed.screenshot_captured
 
     def _prune(self) -> None:
         now = self.clock()

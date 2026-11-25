@@ -29,12 +29,15 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.browser.call_limit import HOST_CALL_TIMEOUT_SECONDS, HostCallTimeLimitError
 from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser.profile_locks import clear_stale_singleton_locks
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
+from mindroom.custom_tools.desktop import desktop_configuration_for_scope, desktop_credential_scope
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
 )
 from mindroom.desktop.client import desktop_response_router
+from mindroom.desktop.configuration import DesktopConfigurationStatus
 from mindroom.desktop.media import download_encrypted_screenshot
 from mindroom.desktop.playwright_mcp import SUPPORTED_BROWSER_ACTIONS, browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
@@ -56,6 +59,7 @@ from mindroom.tool_system.tool_function import (
     ToolValue,  # noqa: TC001 - The schema reads the tool's annotations at runtime.
 )
 from mindroom.tool_system.tool_schema import tool_parameters
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget  # noqa: TC001 - runtime constructor reflection
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
@@ -72,6 +76,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 _DEFAULT_PROFILE = "mindroom"
@@ -642,12 +647,16 @@ class BrowserTools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
         agent_state_root: Path | None = None,
+        credentials_manager: CredentialsManager | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
     ) -> None:
         super().__init__(name="browser")
         self._runtime_paths = runtime_paths
         # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
         # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
         self._agent_state_root = agent_state_root
+        self._credentials_manager = credentials_manager
+        self._worker_target = worker_target
         self._profiles_root = ((agent_state_root or runtime_paths.storage_root) / "browser-profiles").resolve()
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
@@ -656,7 +665,7 @@ class BrowserTools(Toolkit):
             device_id=device_id,
             device_ed25519=device_ed25519,
         )
-        if self._default_target == "desktop" and self._desktop_target is None:
+        if self._default_target == "desktop" and self._desktop_target is None and self._credentials_manager is None:
             msg = "Browser default_target=desktop requires device_user_id, device_id, and device_ed25519."
             raise ValueError(msg)
         if isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= MAX_COMMAND_TTL_MS / 1000:
@@ -1107,6 +1116,34 @@ class BrowserTools(Toolkit):
         assert device_ed25519 is not None
         return PinnedMatrixDevice(user_id=device_user_id, device_id=device_id, ed25519=device_ed25519)
 
+    def _resolve_desktop_target(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        credential_scope: tuple[str, str] | None = None,
+    ) -> PinnedMatrixDevice:
+        scope = (
+            credential_scope if credential_scope is not None else desktop_credential_scope(context, self._worker_target)
+        )
+        if self._credentials_manager is not None and scope is not None:
+            configuration = desktop_configuration_for_scope(
+                self._credentials_manager,
+                scope,
+                default_timeout_seconds=self._timeout_seconds,
+            )
+            if configuration.status is DesktopConfigurationStatus.READY and configuration.target is not None:
+                return configuration.target
+            if configuration.status is DesktopConfigurationStatus.INVALID:
+                msg = configuration.error or "Desktop configuration is invalid."
+                raise ValueError(msg)
+        if self._desktop_target is not None:
+            return self._desktop_target
+        msg = (
+            "Browser target=desktop requires a paired Desktop device (`/desktop setup`) "
+            "or configured Matrix desktop device identity."
+        )
+        raise ValueError(msg)
+
     async def _desktop_browser(
         self,
         *,
@@ -1123,14 +1160,20 @@ class BrowserTools(Toolkit):
         return_attachment: bool,
         level: str | None,
     ) -> str | ToolValue:
-        target = self._desktop_target
-        if target is None:
-            msg = "Browser target=desktop requires configured Matrix desktop device identity."
+        if self._desktop_target is None and self._credentials_manager is None:
+            msg = (
+                "Browser target=desktop requires a paired Desktop device (`/desktop setup`) "
+                "or configured Matrix desktop device identity."
+            )
             raise ValueError(msg)
         context = get_tool_runtime_context()
         if context is None:
             msg = "Browser target=desktop requires a live Matrix runtime context."
             raise ValueError(msg)
+        credential_scope = desktop_credential_scope(context, self._worker_target)
+        assert credential_scope is not None
+        requester_id, agent_name = credential_scope
+        target = self._resolve_desktop_target(context, credential_scope=credential_scope)
         # URL validation resolves requester-chosen hostnames, which must not block the event loop.
         parameters = await run_browser_tool_url_check(
             _desktop_browser_parameters,
@@ -1155,8 +1198,8 @@ class BrowserTools(Toolkit):
             issued_at_ms=now_ms,
             expires_at_ms=now_ms + round(self._timeout_seconds * 1000),
             action="browser_control" if browser_action_requires_control(action) else "browser_observe",
-            requester_id=context.requester_id,
-            agent_name=context.agent_name,
+            requester_id=requester_id,
+            agent_name=agent_name,
             parameters={"browser_action": action, "browser_parameters": parameters},
         )
         response = await desktop_response_router(context.client).request(

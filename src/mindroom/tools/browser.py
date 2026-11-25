@@ -38,6 +38,8 @@ if TYPE_CHECKING:
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
         ToolManagedInitArg.AGENT_STATE_ROOT,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[
         ConfigField(
