@@ -16884,7 +16884,7 @@
     "functions": [
       {
         "name": "matrix_message",
-        "description": "Send, read, edit, or react to Matrix messages.\n`send` and `read` use the current conversation. Set new_thread=True to start a separate thread, thread_id to continue another thread, or thread_id=\"room\" for the room timeline. Another room never inherits the current thread.\n\nSet recipient to an agent/team name from matrix_room(action=\"agents\") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.\n\nSend text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.\n\nedit/react require event_id; react uses message as emoji (default 👍). message_extras adds optional collapsible sections to send/edit. Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.",
+        "description": "Send, read, edit, or react to Matrix messages.\n`send` and `read` use the current conversation. Set new_thread=True to start a separate thread, thread_id to continue another thread, or thread_id=\"room\" for the room timeline. Another room never inherits the current thread.\n\nSet recipient to an agent/team name from matrix_room(action=\"agents\") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.\n\nSend text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.\n\nedit/react require event_id; react uses message as emoji (default 👍). Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -16970,52 +16970,6 @@
                 }
               ],
               "description": "Ordered att_* IDs or workspace file paths; send only, maximum 5."
-            },
-            "message_extras": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "additionalProperties": false,
-                    "description": "Model-facing fields for one optional collapsible section.",
-                    "properties": {
-                      "title": {
-                        "title": "Title",
-                        "type": "string"
-                      },
-                      "content": {
-                        "title": "Content",
-                        "type": "string"
-                      },
-                      "content_type": {
-                        "default": "text/markdown",
-                        "enum": [
-                          "text/plain",
-                          "text/markdown",
-                          "text/html"
-                        ],
-                        "title": "Content Type",
-                        "type": "string"
-                      },
-                      "collapsed": {
-                        "default": true,
-                        "title": "Collapsed",
-                        "type": "boolean"
-                      }
-                    },
-                    "required": [
-                      "title",
-                      "content"
-                    ],
-                    "title": "MatrixMessageExtra",
-                    "type": "object"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Collapsible sections with title/content; optional content_type and collapsed."
             },
             "limit": {
               "anyOf": [

@@ -16,7 +16,7 @@ def _matrix_message_function() -> ToolFunction:
     return toolkit_offers(MatrixMessageTools(), "matrix_message")
 
 
-def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> None:
+def test_matrix_message_schema_exposes_four_actions_and_ten_arguments() -> None:
     """Agents should only see supported actions and the consolidated targeting contract."""
     function = _matrix_message_function()
     properties = function.parameters["properties"]
@@ -29,23 +29,12 @@ def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> No
         "new_thread",
         "event_id",
         "attachments",
-        "message_extras",
         "limit",
         "idempotency_key",
     }
     assert properties["action"]["enum"] == ["send", "read", "edit", "react"]
     assert function.parameters["required"] == []
     assert all(field["description"] for field in properties.values())
-
-
-def test_matrix_message_extras_schema_exposes_section_fields() -> None:
-    """An agent must be able to construct a valid extra section from its JSON schema."""
-    properties = _matrix_message_function().parameters["properties"]
-    array = next(item for item in properties["message_extras"]["anyOf"] if item["type"] == "array")
-    section = array["items"]
-    assert set(section["properties"]) == {"title", "content", "content_type", "collapsed"}
-    assert set(section["required"]) == {"title", "content"}
-    assert section["properties"]["content_type"]["enum"] == ["text/plain", "text/markdown", "text/html"]
 
 
 def test_matrix_message_description_stays_compact() -> None:

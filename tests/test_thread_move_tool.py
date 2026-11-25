@@ -220,11 +220,6 @@ def test_plan_copies_only_allowlisted_keys() -> None:
     [
         {"msgtype": "m.location", "body": "Office", "geo_uri": "geo:52.37,4.89"},
         {
-            "msgtype": "m.text",
-            "body": "Report ready",
-            "com.mindroom.message_extras": {"version": 2, "sections": [{"title": "Logs", "content": "ok"}]},
-        },
-        {
             "msgtype": "m.audio",
             "body": "voice.ogg",
             "url": "mxc://example.org/voice",
@@ -234,7 +229,7 @@ def test_plan_copies_only_allowlisted_keys() -> None:
     ],
 )
 def test_plan_keeps_fields_clients_need_to_render_the_copy(content: dict[str, Any]) -> None:
-    """Locations keep their map, collapsible sections stay, and voice notes still play as voice notes."""
+    """Locations keep their map and voice notes still play as voice notes."""
     [copy] = _plan(_message(CODE_ID, content))
 
     assert {key: copy[key] for key in content} == content
@@ -906,20 +901,25 @@ async def test_move_thread_accepts_a_long_message_sent_with_its_full_text_attach
 
 
 @pytest.mark.asyncio
-async def test_move_thread_stops_when_collapsible_sections_were_dropped(tmp_path: Path) -> None:
-    """A short message whose large sections could not be attached would lose them, so the move stops there."""
+async def test_move_thread_stops_when_formatted_body_was_dropped(tmp_path: Path) -> None:
+    """A short message whose large formatted body could not be attached would lose it, so the move stops there."""
     move = _move(tmp_path)
     history = _thread(move)
     history[1] = _message(
         move.ids["code"],
-        {"msgtype": "m.text", "body": "Report", "com.mindroom.message_extras": {"version": 2, "sections": []}},
+        {
+            "msgtype": "m.text",
+            "body": "Report",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>Report</p>",
+        },
         "$code:localhost",
     )
     sends = _delivered_sends()
 
     async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
         delivered = await sends(client, room_id, content, **kwargs)
-        plain = {key: value for key, value in content.items() if key != "com.mindroom.message_extras"}
+        plain = {key: value for key, value in content.items() if key != "formatted_body"}
         return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=plain)
 
     with _matrix(move, history, send=AsyncMock(side_effect=send)):
