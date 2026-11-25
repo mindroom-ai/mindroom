@@ -40,7 +40,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope,
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import seen_event_ids, source_event_ids
+from mindroom.session_storage.store import ConversationStore, seen_event_ids, source_event_ids
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -49,7 +49,6 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
-    from mindroom.session_storage.store import ConversationStore
 
 
 # The only field of the owner's history state, left out of the stored value at its default.
@@ -60,14 +59,14 @@ async def record_summary_usage(
     model: ModelIdentity,
     usage: MessageMetrics,
     *,
-    storage: ConversationStore,
+    storage: ConversationStore | Callable[[], ConversationStore],
     session_id: str,
     requester_id: str | None,
     initial_session: ConversationSession | None = None,
 ) -> None:
     """Record a summary response's counters even when the summary is rejected or later cancelled."""
     await run_session_storage_operation(
-        lambda: storage,
+        (lambda store=storage: store) if isinstance(storage, ConversationStore) else storage,
         partial(
             save_compaction_usage,
             session_id=session_id,

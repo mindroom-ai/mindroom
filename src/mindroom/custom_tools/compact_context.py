@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.main import Config  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
-from mindroom.history.manual import request_compaction_before_next_reply
+from mindroom.history.manual import schedule_compaction_before_next_reply
 from mindroom.history.types import HistoryScope
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -47,7 +47,7 @@ class CompactContextTools(Toolkit):
         if session_id is None:
             return "Error: No active session available. Cannot determine session."
 
-        return await request_compaction_before_next_reply(
+        unavailable = await schedule_compaction_before_next_reply(
             scope=scope,
             agent_name=self._agent_name,
             session_id=session_id,
@@ -57,3 +57,6 @@ class CompactContextTools(Toolkit):
             active_model_name=runtime_context.active_model_name if runtime_context is not None else None,
             room_id=runtime_context.room_id if runtime_context is not None else None,
         )
+        if unavailable is not None:
+            return f"Error: Compaction is unavailable for this scope because {unavailable}."
+        return "Compaction will run before the next reply in this conversation scope."

@@ -34,7 +34,7 @@ from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_S
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
-from mindroom.history.runtime import _run_scope_compaction_with_lifecycle
+from mindroom.history.runtime import run_scope_compaction_with_lifecycle
 from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionOutcome,
@@ -388,7 +388,7 @@ async def test_a_note_that_ends_a_compacting_reply_carries_its_compaction(
             await asyncio.Event().wait()
             raise AssertionError
 
-        await _run_scope_compaction_with_lifecycle(
+        await run_scope_compaction_with_lifecycle(
             mode="auto",
             session_id="session-1",
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
