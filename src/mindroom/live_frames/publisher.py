@@ -11,12 +11,19 @@ from typing import TYPE_CHECKING
 from mindroom.live_frames.frames import (
     LIVE_EVENT_TYPE,
     LiveDocs,
-    fitted_tools,
+    ToolFitCache,
     live_delta,
     live_frame,
     new_publisher_id,
 )
-from mindroom.live_frames.transport import RETRY_BACKOFF_SECONDS, LiveSendOutcome, frame_fits, send_live_frame
+from mindroom.live_frames.transport import (
+    RETRY_BACKOFF_SECONDS,
+    LiveSendOutcome,
+    frame_fits,
+    frame_plaintext_size,
+    plaintext_size_fits,
+    send_live_frame,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -48,6 +55,9 @@ class LivePublisher:
     # How many of the oldest tool entries frames show without previews, so snapshots fit the size limit. Only a
     # snapshot raises it, so the deltas between snapshots stay small.
     bare: int = 0
+    _tool_fit: ToolFitCache = field(default_factory=ToolFitCache, init=False, repr=False)
+    _last_sent_source: LiveDocs | None = field(default=None, init=False, repr=False)
+    _last_sent_bare: int = field(default=0, init=False, repr=False)
 
     def checkpoint(self) -> dict[str, object] | None:
         """Return the watermark a durable write carries: every frame up to it is no newer than that write."""
@@ -59,11 +69,15 @@ class LivePublisher:
         """Send one frame when the documents changed or a snapshot is due; return the outcome, None when none was due."""
         now = time.monotonic()
         snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
-        shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
-        if not snapshot_due and shown == self.last_sent:
-            return None
+        frame, shown = None, docs
+        if not snapshot_due:
+            if docs is self._last_sent_source and self.bare == self._last_sent_bare:
+                return None
+            shown = replace(docs, tools=self._tool_fit.fit(docs.tools, bare=self.bare))
+            if shown == self.last_sent:
+                self._last_sent_source, self._last_sent_bare = docs, self.bare
+                return None
         self.seq += 1
-        frame = None
         if not snapshot_due and self.last_sent is not None:
             frame = live_frame(
                 reply_event_id=reply_event_id,
@@ -73,8 +87,8 @@ class LivePublisher:
             )
         if frame is None or not self._fits(frame):
             bare = self.bare
-            snapshot, fitted = self._fitted_snapshot(reply_event_id, docs)
-            if frame is None or self._fits(snapshot):
+            snapshot, fitted, snapshot_fits = self._fitted_snapshot(reply_event_id, docs)
+            if frame is None or snapshot_fits:
                 snapshot_due, frame, shown = True, snapshot, fitted
             else:
                 # The size check is an estimate; a delta it rejects may still go out, where no snapshot fits it.
@@ -86,11 +100,11 @@ class LivePublisher:
             transaction_id=f"{self.publisher_id}.{self.seq}",
         )
         if outcome is LiveSendOutcome.SENT:
-            self.last_sent = shown
+            self.last_sent, self._last_sent_source, self._last_sent_bare = shown, docs, self.bare
             if snapshot_due:
                 self.last_snapshot_at = now
         elif outcome is LiveSendOutcome.RETRY:
-            self.last_sent = None
+            self.last_sent = self._last_sent_source = None
         else:
             self.running = False
         return outcome
@@ -98,7 +112,7 @@ class LivePublisher:
     def _fits(self, frame: dict[str, object]) -> bool:
         return frame_fits(self.client, self.room_id, frame, event_type=LIVE_EVENT_TYPE)
 
-    def _fitted_snapshot(self, reply_event_id: str, docs: LiveDocs) -> tuple[dict[str, object], LiveDocs]:
+    def _fitted_snapshot(self, reply_event_id: str, docs: LiveDocs) -> tuple[dict[str, object], LiveDocs, bool]:
         """Return a snapshot frame within the size limit, without the previews of the fewest more oldest tool entries.
 
         When even no previews do not fit, as when the Markdown alone is too big, the transport refuses the frame and
@@ -106,7 +120,7 @@ class LivePublisher:
         """
 
         def built(bare: int) -> tuple[dict[str, object], LiveDocs]:
-            shown = replace(docs, tools=fitted_tools(docs.tools, bare=bare))
+            shown = replace(docs, tools=self._tool_fit.fit(docs.tools, bare=bare))
             frame = live_frame(
                 reply_event_id=reply_event_id,
                 publisher_id=self.publisher_id,
@@ -117,10 +131,27 @@ class LivePublisher:
 
         count = len(docs.tools)
         self.bare = min(self.bare, count)
-        if not self._fits(built(self.bare)[0]):
-            fitting = bisect_left(range(count + 1), True, lo=self.bare + 1, key=lambda bare: self._fits(built(bare)[0]))
-            self.bare = min(fitting, count)
-        return built(self.bare)
+        frame, shown = built(self.bare)
+        if "_fits" not in self.__dict__ and type(self)._fits is LivePublisher._fits:
+            plaintext_size, encrypted = frame_plaintext_size(
+                self.client,
+                self.room_id,
+                frame,
+                event_type=LIVE_EVENT_TYPE,
+            )
+            bare = self.bare
+            while bare < count and not plaintext_size_fits(plaintext_size, encrypted=encrypted):
+                plaintext_size -= self._tool_fit.bare_savings(bare)
+                bare += 1
+            if bare != self.bare:
+                self.bare = bare
+                frame, shown = built(self.bare)
+            return frame, shown, plaintext_size_fits(plaintext_size, encrypted=encrypted)
+        if self._fits(frame):
+            return frame, shown, True
+        fitting = bisect_left(range(count + 1), True, lo=self.bare + 1, key=lambda bare: self._fits(built(bare)[0]))
+        self.bare = min(fitting, count)
+        return *built(self.bare), fitting <= count
 
     async def run(
         self,

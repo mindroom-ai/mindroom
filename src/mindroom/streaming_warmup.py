@@ -84,10 +84,13 @@ class WorkerWarmupState:
     active_warmups: dict[str, _ActiveWarmup] = field(default_factory=dict)
     last_send_had_warmup_suffix: bool = False
     needs_warmup_clear_edit: bool = False
+    version: int = field(default=0, init=False, repr=False)
 
     def clear_for_terminal_transition(self) -> None:
         """Drop any warmup suffix state before terminal finalization."""
-        self.active_warmups.clear()
+        if self.active_warmups:
+            self.active_warmups.clear()
+            self.version += 1
         self.last_send_had_warmup_suffix = False
         self.needs_warmup_clear_edit = False
 
@@ -101,8 +104,10 @@ class WorkerWarmupState:
         failed_worker_keys = [
             worker_key for worker_key, warmup in self.active_warmups.items() if warmup.last_event.phase == "failed"
         ]
-        for worker_key in failed_worker_keys:
-            self.active_warmups.pop(worker_key, None)
+        if failed_worker_keys:
+            for worker_key in failed_worker_keys:
+                self.active_warmups.pop(worker_key, None)
+            self.version += 1
 
     def _clear_failed_retry_duplicates(
         self,
@@ -141,6 +146,7 @@ class WorkerWarmupState:
                 return False
             if not self.active_warmups and self.last_send_had_warmup_suffix:
                 self.needs_warmup_clear_edit = True
+            self.version += 1
             return True
 
         tool_label = f"{event.tool_name}.{event.function_name}"
@@ -158,10 +164,12 @@ class WorkerWarmupState:
                 tool_labels=[tool_label],
                 last_event=progress,
             )
+            self.version += 1
             return True
 
         if tool_label not in warmup.tool_labels:
             warmup.tool_labels.append(tool_label)
         warmup.backend_name = progress.backend_name
         warmup.last_event = progress
+        self.version += 1
         return True

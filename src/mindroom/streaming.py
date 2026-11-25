@@ -57,7 +57,7 @@ from mindroom.tool_system.events import (
     append_stream_text,
     complete_pending_tool_block,
     remap_visible_tool_marker_indices,
-    serialize_tool_trace,
+    serialize_tool_trace_entry,
     strip_visible_tool_markers,
     tool_markers_match_trace,
 )
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.events import ToolTraceEntry, _PendingStreamingTool
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
 
 logger = get_logger(__name__)
@@ -294,6 +294,7 @@ class _CommittedDeliveryState:
     stream_status: str
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
+    tool_trace_version: int = 0
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -322,7 +323,20 @@ def _tool_traces_match(
     right: list[ToolTraceEntry] | tuple[ToolTraceEntry, ...],
 ) -> bool:
     """Compare trace presentation and continuation identity together."""
-    return tuple(map(_tool_trace_identity, left)) == tuple(map(_tool_trace_identity, right))
+    return len(left) == len(right) and all(
+        _tool_trace_identity(a) == _tool_trace_identity(b) for a, b in zip(left, right, strict=True)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveStateKey:
+    event_id: str
+    accumulated_text: str
+    reasoning_text: str
+    segment_count: int
+    activity_key: tuple[int, bool]
+    compactions_key: tuple[ReplyCompactions | None, int]
+    tools_key: tuple[bool, int, int]
 
 
 def interactive_response_for_visible_body(
@@ -388,6 +402,7 @@ class _StreamingDeliverySnapshot:
     chars_since_last_update: int
     untransformed_text: str | None = None
     suppress_push: bool = False
+    tool_trace_version: int = 0
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -501,6 +516,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             interactive_metadata=interactive_metadata,
             stream_status=snapshot.stream_status,
             untransformed_text=snapshot.untransformed_text,
+            tool_trace_version=snapshot.tool_trace_version,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
         chars_since_last_update=snapshot.chars_since_last_update,
@@ -638,8 +654,6 @@ class StreamingResponse:
         repr=False,
     )
     _last_delivered_text: str = field(default="", init=False, repr=False)
-    # The accumulated text the last live frame rendered and its Markdown, so a tick of an unchanged reply skips both.
-    _live_markdown: tuple[str, str] | None = field(default=None, init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
@@ -666,6 +680,15 @@ class StreamingResponse:
     _reasoning_segments: list[dict[str, int]] = field(default_factory=list, init=False, repr=False)
     # The latest output each running tool call reported, by call ID; only live frames show it.
     tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _tool_trace_version: int = field(default=0, init=False, repr=False)
+    _last_delivered_tool_trace_version: int = field(default=0, init=False, repr=False)
+    _live_tools_version: int = field(default=0, init=False, repr=False)
+    _live_tool_cache: list[tuple[tuple[object, ...], dict[str, object]]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+    _live_state_cache: tuple[_LiveStateKey, LiveDocs] | None = field(default=None, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
     live: LivePublisher | None = field(default=None, init=False, repr=False)
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
@@ -739,40 +762,122 @@ class StreamingResponse:
             and self.event_id is not None
         )
 
+    def append_tool_trace(self, entry: ToolTraceEntry) -> None:
+        """Append one tool trace entry and bump trace versions."""
+        self.tool_trace.append(entry)
+        self._tool_trace_version += 1
+        self._live_tools_version += 1
+
+    def complete_tool_trace(
+        self,
+        tool_tracker: StreamingToolTracker,
+        pending_tool: _PendingStreamingTool,
+        completed_trace: ToolTraceEntry,
+    ) -> bool:
+        """Update one visible trace slot upon completion and bump trace versions."""
+        if not tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace):
+            return False
+        self._tool_trace_version += 1
+        self._live_tools_version += 1
+        return True
+
+    def replace_tool_trace(self, entries: list[ToolTraceEntry]) -> None:
+        """Replace the tool trace and bump trace versions."""
+        self.tool_trace = list(entries)
+        self._tool_trace_version += 1
+        self._live_tools_version += 1
+
+    def set_tool_progress(self, tool_call_id: str, text: str) -> None:
+        """Set one running tool's live progress text if it changed."""
+        if self.tool_progress.get(tool_call_id) == text:
+            return
+        self.tool_progress[tool_call_id] = text
+        self._live_tools_version += 1
+
+    def clear_tool_progress(self, tool_call_id: str | None) -> None:
+        """Drop one tool's live progress text if present."""
+        if tool_call_id is not None and self.tool_progress.pop(tool_call_id, None) is not None:
+            self._live_tools_version += 1
+
+    def replace_tool_progress(self, incoming: dict[str, str]) -> None:
+        """Replace live tool progress if any entry changed."""
+        if incoming == self.tool_progress:
+            return
+        self.tool_progress = dict(incoming)
+        self._live_tools_version += 1
+
+    def _sync_live_tools(self) -> tuple[dict[str, object], ...]:
+        if not self.show_tool_calls:
+            return ()
+        cache, trace, progress_map = self._live_tool_cache, self.tool_trace, self.tool_progress
+        del cache[len(trace) :]
+        for index, entry in enumerate(trace):
+            progress = progress_map.get(entry.tool_call_id) if entry.tool_call_id is not None else None
+            key = (_tool_trace_identity(entry), progress)
+            if index < len(cache) and cache[index][0] == key:
+                continue
+            event = serialize_tool_trace_entry(entry)
+            if progress is not None:
+                event["progress"] = progress
+            if index < len(cache):
+                cache[index] = (key, event)
+            else:
+                cache.append((key, event))
+        return tuple(event for _, event in cache)
+
     def live_state(self) -> tuple[str, LiveDocs] | None:
         """Return the reply's event id and what a live frame shows now, or None while frames must wait."""
         if not self.live_active:
             return None
         assert self.event_id is not None
-        if self._live_markdown is None or self._live_markdown[0] is not self.accumulated_text:
+        key = _LiveStateKey(
+            event_id=self.event_id,
+            accumulated_text=self.accumulated_text,
+            reasoning_text=self.reasoning_text,
+            segment_count=len(self._reasoning_segments),
+            activity_key=(self._warmup_state.version, self.show_tool_calls),
+            compactions_key=(self.compactions, self.compactions.version if self.compactions is not None else 0),
+            tools_key=(self.show_tool_calls, self._live_tools_version, len(self.tool_trace)),
+        )
+        cached = self._live_state_cache
+        if cached is not None and cached[0] == key:
+            return self.event_id, cached[1]
+        if cached is not None and cached[0].accumulated_text == key.accumulated_text:
+            md = cached[1].md
+        else:
             display_text, _ = _visible_text(self.accumulated_text, in_progress=True)
             md = (
                 ""
                 if display_text == _PROGRESS_PLACEHOLDER
                 else visible_markdown(self.config, self.runtime_paths, display_text)
             )
-            self._live_markdown = (self.accumulated_text, md)
-        md = self._live_markdown[1]
-        warmup_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
-        tools = serialize_tool_trace(self.tool_trace) if self.show_tool_calls else ()
-        if tools and self.tool_progress:
-            tools = tuple(
-                {**entry, "progress": self.tool_progress[trace.tool_call_id]}
-                if trace.tool_call_id in self.tool_progress
-                else entry
-                for trace, entry in zip(self.tool_trace, tools, strict=True)
-            )
-        return self.event_id, LiveDocs(
+        docs = LiveDocs(
             md=md,
             reasoning=self.reasoning_text,
-            tools=tools,
+            tools=cached[1].tools
+            if cached is not None and cached[0].tools_key == key.tools_key
+            else self._sync_live_tools(),
             status=self._resolve_stream_status(is_final=False),
-            activity="\n".join(line.text for line in warmup_lines),
-            segments=tuple(
-                {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
+            activity=(
+                cached[1].activity
+                if cached is not None and cached[0].activity_key == key.activity_key
+                else "\n".join(
+                    line.text for line in self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+                )
             ),
-            compactions=tuple(self.compactions.content() or ()) if self.compactions is not None else (),
+            segments=(
+                cached[1].segments
+                if cached is not None and cached[0].segment_count == key.segment_count
+                else tuple({"start": seg["start"], "after_tool": seg["after_tool"]} for seg in self._reasoning_segments)
+            ),
+            compactions=(
+                cached[1].compactions
+                if cached is not None and cached[0].compactions_key == key.compactions_key
+                else (tuple(self.compactions.content() or ()) if self.compactions is not None else ())
+            ),
         )
+        self._live_state_cache = (key, docs)
+        return self.event_id, docs
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
         """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
@@ -781,6 +886,8 @@ class StreamingResponse:
             *self.tool_trace[:resumed_count],
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
+        self._tool_trace_version += 1
+        self._live_tools_version += 1
 
     def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
         """Append additive streaming text regardless of snapshot replacement mode; a tool ``marker`` is a paragraph."""
@@ -1218,6 +1325,7 @@ class StreamingResponse:
             interactive_source_event_id=self.interactive_source_event_id,
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
+            tool_trace_version=self._tool_trace_version,
         )
 
     def _active_model_payload(self) -> dict[str, str] | None:
@@ -1330,6 +1438,7 @@ class StreamingResponse:
         """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
+        self._last_delivered_tool_trace_version = committed_state.tool_trace_version
         self._last_delivered_presentation_state = deepcopy(committed_state.presentation_state)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
@@ -1371,15 +1480,22 @@ class StreamingResponse:
         self.presentation_state = deepcopy(self._last_delivered_presentation_state)
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
+        self._tool_trace_version += 1
+        self._live_tools_version += 1
+        self._last_delivered_tool_trace_version = self._tool_trace_version
 
     def has_uncommitted_presentation(self) -> bool:
         """Return whether buffered ordered presentation state has not reached Matrix."""
-        return (
-            _normalize_stream_accumulated_text(self.accumulated_text)
-            != _normalize_stream_accumulated_text(self._last_delivered_text)
-            or not _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
-            or self.presentation_state != self._last_delivered_presentation_state
-        )
+        text_changed = self.accumulated_text != self._last_delivered_text and _normalize_stream_accumulated_text(
+            self.accumulated_text,
+        ) != _normalize_stream_accumulated_text(self._last_delivered_text)
+        if text_changed or self.presentation_state != self._last_delivered_presentation_state:
+            return True
+        if self._tool_trace_version == self._last_delivered_tool_trace_version and len(self.tool_trace) == len(
+            self._last_delivered_tool_trace,
+        ):
+            return False
+        return not _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
 
     async def record_live_presentation(self) -> None:
         """Record what live frames showed past the last progress edit, once a stream that ends early stopped them.
@@ -1766,7 +1882,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 continue
             if isinstance(chunk, ToolProgress):
                 # Only live frames show a running call's output; no write carries it.
-                streaming.tool_progress[chunk.tool_call_id] = chunk.text
+                streaming.set_tool_progress(chunk.tool_call_id, chunk.text)
                 continue
             streaming.end_reasoning_segment()
             if isinstance(chunk, str):
@@ -1810,7 +1926,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 tool_index = len(streaming.tool_trace) + 1
                 text_chunk, trace_entry = tool_tracker.start(chunk.call, tool_index=tool_index, origin=chunk.origin)
                 if trace_entry is not None:
-                    streaming.tool_trace.append(trace_entry)
+                    streaming.append_tool_trace(trace_entry)
                 await _apply_visible_text_chunk(
                     streaming,
                     delivery_queue,
@@ -1823,7 +1939,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 )
                 continue
             elif isinstance(chunk, ToolCompleted):
-                streaming.tool_progress.pop(chunk.call.tool_call_id, None)
+                streaming.clear_tool_progress(chunk.call.tool_call_id)
                 tool_name = chunk.call.tool_name
                 pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
                 if not streaming.show_tool_calls:
@@ -1847,7 +1963,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 text_changed = streaming.accumulated_text != previous_text
                 if text_changed:
                     streaming._mark_nonadditive_text_mutation()
-                if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
+                if not streaming.complete_tool_trace(tool_tracker, pending_tool, completed_trace):
                     logger.warning(
                         "Missing tool trace slot in streaming response for completion",
                         tool_name=tool_name,
@@ -2526,11 +2642,11 @@ async def stream_progress_edits(
                 return
             if chunk.tool_progress is not None:
                 # Only live frames show it; no write carries it.
-                streaming.tool_progress = dict(chunk.tool_progress)
+                streaming.replace_tool_progress(chunk.tool_progress)
             trace_changed = False
             if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
                 # Callers keep mutating their trace entries; hold the published state.
-                streaming.tool_trace = deepcopy(chunk.tool_trace)
+                streaming.replace_tool_trace(deepcopy(chunk.tool_trace))
                 trace_changed = True
             if not published:
                 published = True
