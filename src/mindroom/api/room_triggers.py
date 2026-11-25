@@ -18,7 +18,9 @@ from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTrig
 from mindroom.matrix.state import resolve_room_id
 from mindroom.plugin_http import RoomReader, client_rooms, require_room_reader
 from mindroom.reactive_triggers.management import (
+    TriggerRecord,
     delete_trigger_sync,
+    get_trigger_record,
     is_trigger_owner,
     read_thread_tag_present,
     set_trigger_enabled_sync,
@@ -39,8 +41,7 @@ _Room = Annotated[RoomReader, Depends(require_room_reader)]
 _TriggerKind = Literal["webhook", "room_message", "thread_tag", "external_event"]
 _TriggerRelation = Literal["target", "watch"]
 _TriggerThreadMode = Literal["room", "thread", "new_thread", "origin"]
-_TriggerRecord = ExternalTriggerRecord | ReactiveTriggerRecord
-_MatchedTrigger = tuple[_TriggerRecord, _TriggerRelation, str]
+_MatchedTrigger = tuple[TriggerRecord, _TriggerRelation, str]
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,7 @@ async def list_room_triggers(request: Request, room: _Room, room_id: str) -> dic
     config, runtime_paths = _require_trigger_runtime(request)
 
     def _load() -> list[_MatchedTrigger]:
-        records: list[_TriggerRecord] = [
+        records: list[TriggerRecord] = [
             *ExternalTriggerStore(runtime_paths).list_records(),
             *ReactiveTriggerStore(runtime_paths).list_triggers(include_disabled=True),
         ]
@@ -190,7 +191,7 @@ async def _run_store[T](call: Callable[[], T]) -> T:
         raise HTTPException(503, "Trigger store is not available.") from exc
 
 
-def _match_trigger_to_room(record: _TriggerRecord, room_id: str, runtime_paths: RuntimePaths) -> _MatchedTrigger | None:
+def _match_trigger_to_room(record: TriggerRecord, room_id: str, runtime_paths: RuntimePaths) -> _MatchedTrigger | None:
     resolved_target = resolve_room_id(record.target.room_id, runtime_paths)
     if resolved_target == room_id:
         return (record, "target", resolved_target)
@@ -211,9 +212,7 @@ async def _require_owned_room_trigger(
     user_id: str,
 ) -> _MatchedTrigger:
     def _find() -> _MatchedTrigger | None:
-        record: _TriggerRecord | None = ExternalTriggerStore(runtime_paths).get_record(
-            trigger_id,
-        ) or ReactiveTriggerStore(runtime_paths).get_trigger(trigger_id)
+        record = get_trigger_record(runtime_paths, trigger_id)
         return None if record is None else _match_trigger_to_room(record, room_id, runtime_paths)
 
     matched = await _run_store(_find)

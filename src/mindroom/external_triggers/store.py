@@ -432,16 +432,15 @@ class ExternalTriggerStore:
             records.triggers.pop(trigger_id)
             self._write_records(records)
 
-    def record_fired(self, trigger_id: str, *, expected_uid: str, fired_at: int | None = None) -> None:
+    def record_fired(self, trigger_id: str, *, expected_uid: str, fired_at: int) -> None:
         """Record one successful, non-duplicate delivery timestamp if the same trigger still exists."""
-        timestamp = int(time.time()) if fired_at is None else fired_at
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = records.triggers.get(trigger_id)
             if record is None or record.uid != expected_uid:
                 return
             records.triggers[trigger_id] = _validate_record_update(
-                record.model_copy(update={"last_fired_at": timestamp}),
+                record.model_copy(update={"last_fired_at": fired_at}),
             )
             self._write_records(records)
 
@@ -461,8 +460,7 @@ class ExternalTriggerStore:
 
     def is_current_replay_scope(self, trigger_id: str, replay_scope: str) -> bool:
         """Return whether ``replay_scope`` still authenticates deliveries for ``trigger_id``."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
-            record = self._read_records().triggers.get(trigger_id)
+        record = self.get_record(trigger_id)
         return record is not None and _replay_scope(record) == replay_scope
 
     def delivery_snapshot(
@@ -473,8 +471,7 @@ class ExternalTriggerStore:
         config_generation: int,
     ) -> TriggerDeliverySnapshot | None:
         """Return one delivery snapshot after revalidating against current config."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
-            record = self._read_records().triggers.get(trigger_id)
+        record = self.get_record(trigger_id)
         if record is None:
             return None
         try:

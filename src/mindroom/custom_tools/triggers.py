@@ -46,6 +46,7 @@ from mindroom.reactive_triggers.external_sources import (
 )
 from mindroom.reactive_triggers.management import (
     delete_trigger_sync,
+    get_trigger_record,
     is_trigger_owner,
     read_thread_tag_present,
     refresh_reactive_state_on_reenable,
@@ -541,13 +542,9 @@ class TriggersTools(Toolkit):
         *,
         verb: str = "changed",
     ) -> None:
-        if not is_trigger_owner(
-            context.requester_id,
-            record.owner_user_id,
-            context.config,
-            context.runtime_paths,
-        ) and not cls._is_admin(
-            context,
+        if not (
+            is_trigger_owner(context.requester_id, record.owner_user_id, context.config, context.runtime_paths)
+            or cls._is_admin(context)
         ):
             msg = f"trigger can only be {verb} by its owner or an external trigger admin"
             raise ReactiveTriggerStoreError(msg)
@@ -992,8 +989,7 @@ class TriggersTools(Toolkit):
                 direct_error="In-place update is only supported for reactive triggers.",
             ),
         )
-        actor_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-        if existing.owner_user_id not in actor_ids:
+        if not is_trigger_owner(context.requester_id, existing.owner_user_id, context.config, context.runtime_paths):
             msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
             raise ReactiveTriggerStoreError(msg)
 
@@ -1029,16 +1025,12 @@ class TriggersTools(Toolkit):
         target_enabled = False if args["enabled"] is None else args["enabled"]
         refreshed_tag_present: bool | None = None
         if target_enabled:
-            reactive_record = await run_blocking_until_complete(
-                lambda: (
-                    None
-                    if _has_external_trigger(ExternalTriggerStore(context.runtime_paths), resolved_trigger_id)
-                    else ReactiveTriggerStore(context.runtime_paths).get_trigger(resolved_trigger_id)
-                ),
+            record = await run_blocking_until_complete(
+                partial(get_trigger_record, context.runtime_paths, resolved_trigger_id),
             )
-            if reactive_record is not None and not reactive_record.enabled:
-                self._require_reactive_owner_or_admin(context, reactive_record)
-                refreshed_tag_present = await _read_reenable_tag_state(context, reactive_record, enabling=True)
+            if isinstance(record, ReactiveTriggerRecord) and not record.enabled:
+                self._require_reactive_owner_or_admin(context, record)
+                refreshed_tag_present = await _read_reenable_tag_state(context, record, enabling=True)
         updated = await run_blocking_until_complete(
             partial(
                 set_trigger_enabled_sync,
@@ -1077,15 +1069,10 @@ class TriggersTools(Toolkit):
         resolved_key_id = "default" if args["key_id"] is None else args["key_id"]
 
         def _rotate() -> str:
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
-            if (
-                not _has_external_trigger(external_store, resolved_trigger_id)
-                and reactive_store.get_trigger(resolved_trigger_id) is not None
-            ):
+            if isinstance(get_trigger_record(context.runtime_paths, resolved_trigger_id), ReactiveTriggerRecord):
                 msg = "Key rotation applies only to direct signed external triggers."
                 raise ExternalTriggerStoreError(msg)
-            record = external_store.rotate_key(
+            record = ExternalTriggerStore(context.runtime_paths).rotate_key(
                 resolved_trigger_id,
                 public_key=resolved_public_key,
                 key_id=resolved_key_id,
@@ -1352,7 +1339,7 @@ def _load_reactive_or_error(
     record = reactive_store.get_trigger(trigger_id)
     if record is not None:
         return record
-    if _has_external_trigger(external_store, trigger_id):
+    if external_store.get_record(trigger_id) is not None:
         raise ReactiveTriggerStoreError(direct_error)
     msg = f"Reactive trigger not found: {trigger_id}"
     raise ReactiveTriggerStoreError(msg)
@@ -1756,10 +1743,6 @@ async def _read_reenable_tag_state(
     return await _read_thread_tag_present(context, record.source, preferred_agent=record.target.agent)
 
 
-def _has_external_trigger(external_store: ExternalTriggerStore, trigger_id: str) -> bool:
-    return external_store.get_record(trigger_id) is not None
-
-
 def _validate_optional_trigger_id(trigger_id: str | None) -> str | None:
     if trigger_id is None:
         return None
@@ -1789,14 +1772,14 @@ def _resolve_unique_reactive_trigger_id(
         if not stripped or TRIGGER_ID_PATTERN.fullmatch(stripped) is None:
             msg = "trigger_id must match ^[A-Za-z0-9_-]{1,64}$"
             raise ValueError(msg)
-        if _has_external_trigger(external_store, stripped) or reactive_store.get_trigger(stripped) is not None:
+        if external_store.get_record(stripped) is not None or reactive_store.get_trigger(stripped) is not None:
             msg = f"Trigger already exists: {stripped}"
             raise ReactiveTriggerDuplicateError(msg)
         return stripped
 
     for _ in range(10):
         candidate = generate_trigger_id()
-        if not _has_external_trigger(external_store, candidate) and reactive_store.get_trigger(candidate) is None:
+        if external_store.get_record(candidate) is None and reactive_store.get_trigger(candidate) is None:
             return candidate
     msg = "Failed to generate a unique trigger_id."
     raise ReactiveTriggerStoreError(msg)
