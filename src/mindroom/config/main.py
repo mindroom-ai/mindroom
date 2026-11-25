@@ -60,6 +60,7 @@ from mindroom.config.legacy_fields import (
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_dynamic_workflow_approval_error,
     retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
@@ -686,7 +687,7 @@ class Config(BaseModel):
             *self.defaults.tools,
             *(entry for agent in self.agents.values() for entry in agent.tools),
         )
-        aliased = [entry for entry in entries if "dynamic_workflow" in entry.spellings]
+        aliased = [entry for entry in entries if entry.aliased_from_dynamic_workflow]
         return bool(aliased), any(entry.ignored_legacy_allowed_tools for entry in aliased)
 
     @model_validator(mode="after")
@@ -1227,6 +1228,9 @@ class Config(BaseModel):
         config._personal_agent_instances = expansion.instances
         config._personal_agent_call_templates = expansion.call_templates
         config._personal_agent_call_agents = expansion.call_agents
+        alias_usage = [config._dynamic_workflow_alias_usage()]
+        if probe_config is not None:
+            alias_usage.append(probe_config._dynamic_workflow_alias_usage())
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
         generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
@@ -1245,6 +1249,7 @@ class Config(BaseModel):
             config._personal_agent_instances = expansion.instances
             config._personal_agent_call_templates = expansion.call_templates
             config._personal_agent_call_agents = expansion.call_agents
+            alias_usage.append(config._dynamic_workflow_alias_usage())
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
         # authored_model_dump drops generated agents while they match these dumps.
         config._generated_agent_dumps = {
@@ -1254,8 +1259,6 @@ class Config(BaseModel):
         config._personal_agents_added_agents_section = (
             bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
         )
-        checked_configs = (config, probe_config) if probe_config is not None else (config,)
-        alias_usage = [checked._dynamic_workflow_alias_usage() for checked in checked_configs]
         if any(used for used, _ignored in alias_usage):
             logger.warning(
                 dynamic_workflow_deprecation_warning(
@@ -1630,6 +1633,18 @@ class Config(BaseModel):
             is not None
         ):
             raise ToolConfigOverrideError(trigger_error)
+        if (
+            any(entry.name == "workflow" for _, entry in entries)
+            and (
+                workflow_error := retired_dynamic_workflow_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
+            is not None
+        ):
+            raise ToolConfigOverrideError(workflow_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

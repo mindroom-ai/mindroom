@@ -638,3 +638,5 @@ Its description is the first line of its module docstring, and an optional top-l
 
 `dynamic_workflow` is now a deprecated alias for `workflow` (any legacy `allowed_tools` option is ignored because a workflow inherits its caller's tools).
 The old Dynamic Workflows YAML engine has been removed; rewrite any YAML workflow you want to keep as a Python script with `def main(args):` under `workflows/<name>.py` and rename `dynamic_workflow` to `workflow` in your config.
+
+- Old Dynamic Workflow runs and revisions are no longer queryable, while previously published public report links remain usable if their artifacts still exist.

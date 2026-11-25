@@ -16,6 +16,7 @@ from mindroom.budgets.spend import collect_monthly_spend
 from mindroom.config.contacts import ContactsConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import ModelPricing
+from mindroom.config.personal_agents import GeneratedAgentEdits, PersonalAgentRoster, PersonalAgentRosterEntry
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -36,17 +37,55 @@ from tests.conftest import persist_entity_accounts, persist_runs, test_runtime_p
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
 
-def _base_config(**extra: object) -> dict[str, object]:
-    return {
+_WF_2 = {"workflow": {"max_concurrent_runs": 2}}
+_WF_2_DEFER = {"workflow": {"max_concurrent_runs": 2, "defer": True}}
+_DW_ALLOWED = {"dynamic_workflow": {"allowed_tools": ["*"]}}
+
+
+def _paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+
+def _cfg(
+    *,
+    agent_tools: list[object] | None = None,
+    default_tools: list[object] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    planner: dict[str, object] = {"display_name": "Planner"}
+    if agent_tools is not None:
+        planner["tools"] = agent_tools
+    data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-        "agents": {"planner": {"display_name": "Planner"}},
+        "agents": {"planner": planner},
         **extra,
     }
+    if default_tools is not None:
+        data["defaults"] = {"tools": default_tools}
+    return data
 
 
-def _warning_events(logs: list[dict[str, object]]) -> list[str]:
-    return [str(entry["event"]) for entry in logs if entry.get("log_level") == "warning"]
+def _load_with_warnings(
+    tmp_path: Path,
+    data: dict[str, object],
+    *,
+    roster: PersonalAgentRoster | None = None,
+) -> tuple[Config, list[str]]:
+    with capture_logs() as logs:
+        config = Config.validate_with_runtime(data, _paths(tmp_path), roster=roster)
+    return config, [str(entry["event"]) for entry in logs if entry.get("log_level") == "warning"]
+
+
+def _assert_single_alias_warning(warnings: list[str], *, expect_allowed_tools: bool) -> None:
+    assert len(warnings) == 1
+    assert "\n" not in warnings[0]
+    assert "dynamic_workflow" in warnings[0]
+    assert "workflow" in warnings[0]
+    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools
+    if expect_allowed_tools:
+        assert "inherits its caller's tools" in warnings[0]
 
 
 def test_dynamic_workflow_alias_table() -> None:
@@ -56,257 +95,90 @@ def test_dynamic_workflow_alias_table() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tools_config", "layer"),
-    [
-        ({"agents": {"planner": {"display_name": "Planner", "tools": ["dynamic_workflow"]}}}, "agent"),
-        ({"defaults": {"tools": ["dynamic_workflow"]}}, "defaults"),
-    ],
+    ("kwargs", "layer"),
+    [({"agent_tools": ["dynamic_workflow"]}, "agent"), ({"default_tools": ["dynamic_workflow"]}, "defaults")],
 )
 def test_dynamic_workflow_bare_agent_and_defaults_alias_with_warning(
     tmp_path: Path,
-    tools_config: dict[str, object],
+    kwargs: dict[str, list[object]],
     layer: str,
 ) -> None:
     """Bare `dynamic_workflow` in agent or default tools loads as `workflow` with a one-line warning."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
-
-    if layer == "agent":
-        assert [entry.name for entry in config.agents["planner"].tools] == ["workflow"]
-    else:
-        assert [entry.name for entry in config.defaults.tools] == ["workflow"]
+    config, warnings = _load_with_warnings(tmp_path, _cfg(**kwargs))
+    entries = config.agents["planner"].tools if layer == "agent" else config.defaults.tools
+    assert [entry.name for entry in entries] == ["workflow"]
     assert "workflow" in config.resolve_agent("planner").tools.tool_names
-
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert "\n" not in warnings[0]
-    assert "dynamic_workflow" in warnings[0]
-    assert "workflow" in warnings[0]
-    assert "allowed_tools" not in warnings[0]
-
-
-def test_dynamic_workflow_with_defer_loads_as_workflow_and_warns(tmp_path: Path) -> None:
-    """`{"dynamic_workflow": {"defer": true}}` loads as `workflow` with `defer=True` and warns."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(
-            _base_config(
-                agents={"planner": {"display_name": "Planner", "tools": [{"dynamic_workflow": {"defer": True}}]}},
-            ),
-            runtime_paths,
-        )
-
-    [entry] = config.agents["planner"].tools
-    assert entry.name == "workflow"
-    assert entry.defer is True
-    assert entry.overrides == {}
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert "\n" not in warnings[0]
-    assert "dynamic_workflow" in warnings[0]
-    assert "workflow" in warnings[0]
+    _assert_single_alias_warning(warnings, expect_allowed_tools=False)
 
 
 @pytest.mark.parametrize(
-    ("authored_entry", "expected_defer"),
+    ("authored_entry", "expected_defer", "expect_allowed_tools"),
     [
-        ({"dynamic_workflow": {"allowed_tools": ["shell", "filesystem"]}}, False),
-        ({"dynamic_workflow": {"defer": True, "allowed_tools": ["*"]}}, True),
+        ({"dynamic_workflow": {"defer": True}}, True, False),
+        ({"dynamic_workflow": {"allowed_tools": ["shell", "filesystem"]}}, False, True),
+        ({"dynamic_workflow": {"defer": True, "allowed_tools": ["*"]}}, True, True),
     ],
 )
 def test_dynamic_workflow_strips_allowed_tools_and_warns(
     tmp_path: Path,
     authored_entry: dict[str, object],
     expected_defer: bool,
+    expect_allowed_tools: bool,
 ) -> None:
-    """`allowed_tools` on the `dynamic_workflow` alias is ignored and noted in the one-line warning."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(
-            _base_config(agents={"planner": {"display_name": "Planner", "tools": [authored_entry]}}),
-            runtime_paths,
-        )
-
+    """`defer` is preserved and legacy `allowed_tools` is stripped with a one-line warning."""
+    config, warnings = _load_with_warnings(tmp_path, _cfg(agent_tools=[authored_entry]))
     [entry] = config.agents["planner"].tools
     assert entry.name == "workflow"
     assert entry.defer is expected_defer
     assert entry.overrides == {}
-
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert "\n" not in warnings[0]
-    assert "allowed_tools" in warnings[0]
-    assert "inherits its caller's tools" in warnings[0]
+    _assert_single_alias_warning(warnings, expect_allowed_tools=expect_allowed_tools)
 
 
 @pytest.mark.parametrize(
-    ("tools_config", "expect_allowed_tools_note"),
+    ("agent_tools", "default_tools", "expect_allowed_tools"),
     [
-        (
-            {"agents": {"planner": {"display_name": "Planner", "tools": ["dynamic_workflow", "workflow"]}}},
-            False,
-        ),
-        (
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"dynamic_workflow": {"allowed_tools": ["*"]}}, "workflow"],
-                    },
-                },
-            },
-            True,
-        ),
-        (
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": ["workflow", {"dynamic_workflow": {"allowed_tools": ["*"]}}],
-                    },
-                },
-            },
-            True,
-        ),
-        (
-            {
-                "defaults": {"tools": ["dynamic_workflow"]},
-                "agents": {"planner": {"display_name": "Planner", "tools": ["workflow"]}},
-            },
-            False,
-        ),
+        (["dynamic_workflow", "workflow"], None, False),
+        ([_DW_ALLOWED, "workflow"], None, True),
+        (["workflow", _DW_ALLOWED], None, True),
+        (["workflow"], ["dynamic_workflow"], False),
     ],
 )
 def test_dynamic_workflow_deduplicates_with_workflow(
     tmp_path: Path,
-    tools_config: dict[str, object],
-    expect_allowed_tools_note: bool,
+    agent_tools: list[object],
+    default_tools: list[object] | None,
+    expect_allowed_tools: bool,
 ) -> None:
     """Combining `dynamic_workflow` and `workflow` keeps `workflow` once and logs one warning."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
-
+    config, warnings = _load_with_warnings(tmp_path, _cfg(agent_tools=agent_tools, default_tools=default_tools))
     assert config.agents["planner"].tool_names == ["workflow"]
     assert config.resolve_agent("planner").tools.tool_names.count("workflow") == 1
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert "\n" not in warnings[0]
-    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
+    _assert_single_alias_warning(warnings, expect_allowed_tools=expect_allowed_tools)
 
 
 @pytest.mark.parametrize(
-    ("tools_config", "expected_defer", "expect_allowed_tools_note"),
+    ("default_tools", "agent_tools", "expected_defer", "expect_allowed_tools"),
     [
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": ["dynamic_workflow", {"workflow": {"max_concurrent_runs": 2, "defer": True}}],
-                    },
-                },
-            },
-            True,
-            False,
-            id="same-layer-bare-then-configured",
-        ),
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"workflow": {"max_concurrent_runs": 2, "defer": True}}, "dynamic_workflow"],
-                    },
-                },
-            },
-            True,
-            False,
-            id="same-layer-configured-then-bare",
-        ),
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [
-                            {"dynamic_workflow": {"allowed_tools": ["*"]}},
-                            {"workflow": {"max_concurrent_runs": 2, "defer": True}},
-                        ],
-                    },
-                },
-            },
-            True,
-            True,
-            id="same-layer-allowed-tools-then-configured",
-        ),
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [
-                            {"workflow": {"max_concurrent_runs": 2, "defer": True}},
-                            {"dynamic_workflow": {"allowed_tools": ["*"]}},
-                        ],
-                    },
-                },
-            },
-            True,
-            True,
-            id="same-layer-configured-then-allowed-tools",
-        ),
-        pytest.param(
-            {
-                "defaults": {"tools": ["dynamic_workflow"]},
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"workflow": {"max_concurrent_runs": 2, "defer": True}}],
-                    },
-                },
-            },
-            True,
-            False,
-            id="defaults-bare-agent-configured",
-        ),
-        pytest.param(
-            {
-                "defaults": {"tools": [{"workflow": {"max_concurrent_runs": 2}}]},
-                "agents": {"planner": {"display_name": "Planner", "tools": ["dynamic_workflow"]}},
-            },
-            False,
-            False,
-            id="defaults-configured-agent-bare",
-        ),
-        pytest.param(
-            {
-                "defaults": {"tools": [{"workflow": {"max_concurrent_runs": 2}}]},
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"dynamic_workflow": {"allowed_tools": ["*"]}}],
-                    },
-                },
-            },
-            False,
-            True,
-            id="defaults-configured-agent-allowed-tools",
-        ),
+        pytest.param(None, ["dynamic_workflow", _WF_2_DEFER], True, False, id="same-bare-then-configured"),
+        pytest.param(None, [_WF_2_DEFER, "dynamic_workflow"], True, False, id="same-configured-then-bare"),
+        pytest.param(None, [_DW_ALLOWED, _WF_2_DEFER], True, True, id="same-allowed-then-configured"),
+        pytest.param(None, [_WF_2_DEFER, _DW_ALLOWED], True, True, id="same-configured-then-allowed"),
+        pytest.param(["dynamic_workflow"], [_WF_2_DEFER], True, False, id="defaults-bare-agent-configured"),
+        pytest.param([_WF_2], ["dynamic_workflow"], False, False, id="defaults-configured-agent-bare"),
+        pytest.param([_WF_2], [_DW_ALLOWED], False, True, id="defaults-configured-agent-allowed"),
+        pytest.param(["workflow"], ["dynamic_workflow", _WF_2], False, False, id="defaults-wf-agent-merged-dw-cfg"),
+        pytest.param([_WF_2], ["workflow", "dynamic_workflow"], False, False, id="defaults-cfg-wf-agent-merged-wf-dw"),
     ],
 )
 def test_dual_tool_plain_dynamic_workflow_merges_with_configured_workflow(
     tmp_path: Path,
-    tools_config: dict[str, object],
+    default_tools: list[object] | None,
+    agent_tools: list[object],
     expected_defer: bool,
-    expect_allowed_tools_note: bool,
+    expect_allowed_tools: bool,
 ) -> None:
-    """A plain (or allowed_tools-only) `dynamic_workflow` merges cleanly with a configured `workflow` across layers."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        config = Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
-
+    """A plain (or allowed_tools-only) `dynamic_workflow` merges cleanly with `workflow` within and across layers."""
+    config, warnings = _load_with_warnings(tmp_path, _cfg(default_tools=default_tools, agent_tools=agent_tools))
     candidates = [
         entry
         for entry in resolve_agent_tools(config, "planner", builtin_tool_registry()).candidates()
@@ -315,103 +187,44 @@ def test_dual_tool_plain_dynamic_workflow_merges_with_configured_workflow(
     assert len(candidates) == 1
     assert candidates[0].tool_config_overrides == {"max_concurrent_runs": 2}
     assert candidates[0].defer is expected_defer
-
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
+    _assert_single_alias_warning(warnings, expect_allowed_tools=expect_allowed_tools)
 
 
 @pytest.mark.parametrize(
-    "tools_config",
+    ("default_tools", "agent_tools"),
     [
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"dynamic_workflow": {"defer": True}}, "workflow"],
-                    },
-                },
-            },
-            id="same-layer-defer-conflict",
-        ),
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [
-                            {"dynamic_workflow": {"defer": False}},
-                            {"workflow": {"defer": True}},
-                        ],
-                    },
-                },
-            },
-            id="same-layer-explicit-defer-false-conflict",
-        ),
-        pytest.param(
-            {
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [
-                            {"dynamic_workflow": {"max_concurrent_runs": 1}},
-                            {"workflow": {"max_concurrent_runs": 2}},
-                        ],
-                    },
-                },
-            },
-            id="same-layer-override-conflict",
-        ),
-        pytest.param(
-            {
-                "defaults": {"tools": [{"dynamic_workflow": {"max_concurrent_runs": 1}}]},
-                "agents": {
-                    "planner": {
-                        "display_name": "Planner",
-                        "tools": [{"workflow": {"max_concurrent_runs": 2}}],
-                    },
-                },
-            },
-            id="cross-layer-override-conflict",
-        ),
+        pytest.param(None, [{"dynamic_workflow": {"defer": True}}, "workflow"], id="same-defer-conflict"),
+        pytest.param(None, [{"dynamic_workflow": {"defer": False}}, {"workflow": {"defer": True}}], id="defer-false"),
+        pytest.param(None, [{"dynamic_workflow": {"max_concurrent_runs": 1}}, _WF_2], id="same-override-conflict"),
+        pytest.param([{"dynamic_workflow": {"max_concurrent_runs": 1}}], [_WF_2], id="cross-override-conflict"),
     ],
 )
 def test_dual_tool_conflicting_dynamic_workflow_settings_still_rejected(
     tmp_path: Path,
-    tools_config: dict[str, object],
+    default_tools: list[object] | None,
+    agent_tools: list[object],
 ) -> None:
     """Conflicting settings or lazy flags between `dynamic_workflow` and `workflow` are still rejected."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     with pytest.raises((ValidationError, ConfigRuntimeValidationError), match="both select workflow"):
-        Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
+        Config.validate_with_runtime(_cfg(default_tools=default_tools, agent_tools=agent_tools), _paths(tmp_path))
 
 
 def test_workflow_direct_allowed_tools_still_rejected(tmp_path: Path) -> None:
     """`allowed_tools` on `workflow` (not the legacy alias) is rejected as an unknown override."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     with pytest.raises(ConfigRuntimeValidationError, match="allowed_tools"):
-        Config.validate_with_runtime(
-            _base_config(
-                agents={"planner": {"display_name": "Planner", "tools": [{"workflow": {"allowed_tools": ["*"]}}]}},
-            ),
-            runtime_paths,
-        )
+        Config.validate_with_runtime(_cfg(agent_tools=[{"workflow": {"allowed_tools": ["*"]}}]), _paths(tmp_path))
 
 
 def test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow(tmp_path: Path) -> None:
     """Dashboard-saved `allowed_tools` under service `dynamic_workflow` is ignored; other stored keys still fail."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    config = Config.validate_with_runtime(
-        _base_config(agents={"planner": {"display_name": "Planner", "tools": ["workflow"]}}),
-        runtime_paths,
-    )
-    manager = get_runtime_credentials_manager(runtime_paths)
+    paths = _paths(tmp_path)
+    config = Config.validate_with_runtime(_cfg(agent_tools=["workflow"]), paths)
+    manager = get_runtime_credentials_manager(paths)
     manager.save_credentials("dynamic_workflow", {"_source": "ui", "allowed_tools": ["*"]})
 
     toolkit = get_tool_by_name(
         "workflow",
-        runtime_paths,
+        paths,
         runtime_config=config,
         tools=builtin_tool_registry(),
         worker_target=None,
@@ -420,60 +233,133 @@ def test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow
 
     manager.save_credentials("dynamic_workflow", {"_source": "ui", "allowed_tools": ["*"], "unexpected": True})
     with pytest.raises(ToolConfigOverrideError, match="settings stored under 'dynamic_workflow' no longer apply"):
-        get_tool_by_name(
-            "workflow",
-            runtime_paths,
-            runtime_config=config,
-            tools=builtin_tool_registry(),
-            worker_target=None,
-        )
+        get_tool_by_name("workflow", paths, runtime_config=config, tools=builtin_tool_registry(), worker_target=None)
 
 
 @pytest.mark.parametrize(
-    ("data_extra", "expect_allowed_tools_note"),
+    ("default_tools", "template_tools", "expect_allowed_tools"),
     [
-        pytest.param(
-            {
-                "defaults": {"tools": ["dynamic_workflow"]},
-                "personal_agents": {
-                    "helper": {"agent": {"display_name": "{user_display_name}'s Helper"}},
-                },
-            },
-            False,
-            id="defaults-with-unowned-template",
-        ),
-        pytest.param(
-            {
-                "defaults": {"tools": []},
-                "personal_agents": {
-                    "helper": {
-                        "agent": {
-                            "display_name": "{user_display_name}'s Helper",
-                            "tools": [{"dynamic_workflow": {"allowed_tools": ["*"]}}],
-                        },
-                    },
-                },
-            },
-            True,
-            id="unowned-template-only-with-allowed-tools",
-        ),
+        pytest.param(["dynamic_workflow"], None, False, id="defaults-with-unowned-template"),
+        pytest.param([], [_DW_ALLOWED], True, id="unowned-template-only"),
     ],
 )
 def test_validate_with_runtime_logs_deprecation_warning_once_with_unowned_personal_agent_template(
     tmp_path: Path,
-    data_extra: dict[str, object],
-    expect_allowed_tools_note: bool,
+    default_tools: list[object],
+    template_tools: list[object] | None,
+    expect_allowed_tools: bool,
 ) -> None:
-    """`Config.validate_with_runtime` logs the deprecation warning exactly once even when probing personal_agents."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    with capture_logs() as logs:
-        Config.validate_with_runtime(_base_config(**data_extra), runtime_paths)
+    """`Config.validate_with_runtime` logs the deprecation warning once when probing unowned `personal_agents`."""
+    template: dict[str, object] = {"display_name": "{user_display_name}'s Helper"}
+    if template_tools is not None:
+        template["tools"] = template_tools
+    _, warnings = _load_with_warnings(
+        tmp_path,
+        _cfg(default_tools=default_tools, personal_agents={"helper": {"agent": template}}),
+    )
+    _assert_single_alias_warning(warnings, expect_allowed_tools=expect_allowed_tools)
 
-    warnings = _warning_events(logs)
-    assert len(warnings) == 1
-    assert "\n" not in warnings[0]
-    assert "dynamic_workflow" in warnings[0]
-    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
+
+def test_validate_with_runtime_preserves_deprecation_warning_across_pass_two_edits(tmp_path: Path) -> None:
+    """Owner edits triggering pass 2 `generated_data` validation keep the pass 1 deprecation warning."""
+    roster = PersonalAgentRoster(
+        entries=[
+            PersonalAgentRosterEntry(
+                template="helper",
+                user_id="@alice:localhost",
+                username="alice",
+                agent_name="helper_alice",
+                matrix_username=None,
+                user_display_name="Alice",
+                source_room_id="!lobby:localhost",
+                edits=GeneratedAgentEdits(display_name="Alice's Custom Helper"),
+            ),
+        ],
+    )
+    data = _cfg(
+        default_tools=[],
+        personal_agents={
+            "helper": {
+                "agent": {
+                    "display_name": "{user_display_name}'s Helper",
+                    "tools": [{"dynamic_workflow": {"allowed_tools": ["calculator"]}}],
+                },
+            },
+        },
+    )
+    config, warnings = _load_with_warnings(tmp_path, data, roster=roster)
+    assert config.agents["helper_alice"].display_name == "Alice's Custom Helper"
+    assert config.agents["helper_alice"].tool_names == ["workflow"]
+    _assert_single_alias_warning(warnings, expect_allowed_tools=True)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "approval", "expected_match"),
+    [
+        pytest.param(
+            "dynamic_workflow",
+            {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
+            "start_workflow",
+            id="run-workflow-alias",
+        ),
+        pytest.param(
+            "workflow",
+            {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
+            "start_workflow",
+            id="run-workflow-canonical",
+        ),
+        pytest.param(
+            "dynamic_workflow",
+            {"rules": [{"match": "create_workflow", "action": "require_approval"}]},
+            "save_workflow",
+            id="create-workflow",
+        ),
+        pytest.param(
+            "workflow",
+            {"default": "require_approval", "rules": [{"match": "start_*", "action": "auto_approve"}]},
+            "start_workflow",
+            id="broad-glob-weakening-default",
+        ),
+    ],
+)
+def test_retired_dynamic_workflow_approval_rules_fail(
+    tmp_path: Path,
+    tool_name: str,
+    approval: dict[str, object],
+    expected_match: str,
+) -> None:
+    """Approval rules that stop deciding retired `dynamic_workflow` functions fail naming the replacement."""
+    with pytest.raises(ConfigRuntimeValidationError, match=expected_match):
+        Config.validate_with_runtime(_cfg(agent_tools=[tool_name], tool_approval=approval), _paths(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("agent_tools", "rules"),
+    [
+        pytest.param(
+            ["dynamic_workflow"],
+            [
+                {"match": "run_workflow", "action": "require_approval"},
+                {"match": "start_workflow", "action": "require_approval"},
+                {"match": "resume_workflow", "action": "require_approval"},
+            ],
+            id="explicit-exact-replacements",
+        ),
+        pytest.param(["workflow"], [{"match": "*_workflow*", "action": "require_approval"}], id="wildcard"),
+        pytest.param(["calculator"], [{"match": "run_workflow", "action": "require_approval"}], id="without-workflow"),
+    ],
+)
+def test_retired_dynamic_workflow_approval_rules_allowed(
+    tmp_path: Path,
+    agent_tools: list[object],
+    rules: list[dict[str, object]],
+) -> None:
+    """Exact replacement rules, matching wildcards, and configs without `workflow` load cleanly."""
+    config = Config.validate_with_runtime(
+        _cfg(agent_tools=agent_tools, tool_approval={"rules": rules}),
+        _paths(tmp_path),
+    )
+    assert len(config.tool_approval.rules) == len(rules)
 
 
 @pytest.mark.parametrize("tool_name", ["workflow", "dynamic_workflow"])
@@ -508,12 +394,7 @@ def test_legacy_dynamic_workflow_usage_row_is_preserved(tmp_path: Path) -> None:
     assert extracted.kind == "dynamic_workflow"
 
     paths = test_runtime_paths(tmp_path)
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-            "agents": {"planner": {"display_name": "Planner"}},
-        },
-    )
+    config = Config.model_validate(_cfg())
     persist_entity_accounts(config, paths)
     storage = create_agent_state_storage("planner", paths.storage_root / "agents" / "planner")
     live_run = RunRecord(
@@ -534,9 +415,7 @@ def test_legacy_dynamic_workflow_usage_row_is_preserved(tmp_path: Path) -> None:
             ("session-1", "dynamic_workflow:deadbeef", json.dumps(legacy_row)),
         )
 
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 172
-
+    assert collect_admin_usage(config=config, runtime_paths=paths, include_requests=True).totals.total_tokens == 172
     spend = collect_monthly_spend(
         config=config,
         runtime_paths=paths,

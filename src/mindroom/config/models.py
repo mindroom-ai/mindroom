@@ -256,6 +256,7 @@ class ToolConfigEntry(BaseModel):
     # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
     _spellings: tuple[str, ...] = PrivateAttr(default=())
     _ignored_allowed_tools: bool = PrivateAttr(default=False)
+    _aliased_from_dynamic_workflow: bool = PrivateAttr(default=False)
 
     @property
     def spellings(self) -> tuple[str, ...]:
@@ -266,6 +267,11 @@ class ToolConfigEntry(BaseModel):
     def ignored_legacy_allowed_tools(self) -> bool:
         """Return whether retired `allowed_tools` was stripped from a legacy `dynamic_workflow` spelling."""
         return self._ignored_allowed_tools
+
+    @property
+    def aliased_from_dynamic_workflow(self) -> bool:
+        """Return whether this entry (or a merged duplicate) was authored under `dynamic_workflow`."""
+        return self._aliased_from_dynamic_workflow
 
     @model_validator(mode="before")
     @classmethod
@@ -350,23 +356,39 @@ def validate_unique_tool_entries(
         normalized = entry.model_copy(update={"overrides": cleaned_overrides}) if stripped_allowed_tools else entry
         name = canonical_tool_name(normalized.name)
         first = kept.get(name)
+        merged_plain_dynamic_workflow = False
         if first is not None:
             reject_unmergeable_spellings(first, normalized, scope=f"{scope_name} tools")
-            preferred = _plain_dynamic_workflow_pair(first, normalized) or first
+            plain_pair = _plain_dynamic_workflow_pair(first, normalized)
+            if plain_pair is not None:
+                preferred = plain_pair
+                merged_plain_dynamic_workflow = True
+            else:
+                preferred = first
         else:
             preferred = normalized
-        spellings = (*(first.spellings if first is not None else ()), normalized.name)
+        spellings: tuple[str, ...] = (
+            ("workflow",)
+            if merged_plain_dynamic_workflow
+            else tuple(dict.fromkeys((*(first.spellings if first is not None else ()), *normalized.spellings)))
+        )
         ignored_allowed_tools = (
             (first._ignored_allowed_tools if first is not None else False)
             or entry._ignored_allowed_tools
             or stripped_allowed_tools
         )
-        if spellings == (name,) and not ignored_allowed_tools:
+        aliased_from_dynamic_workflow = (
+            (first._aliased_from_dynamic_workflow if first is not None else False)
+            or entry._aliased_from_dynamic_workflow
+            or "dynamic_workflow" in normalized.spellings
+        )
+        if spellings == (name,) and not ignored_allowed_tools and not aliased_from_dynamic_workflow:
             kept[name] = normalized
         else:
             merged = preferred.model_copy(update={"name": name})
             merged._spellings = spellings
             merged._ignored_allowed_tools = ignored_allowed_tools
+            merged._aliased_from_dynamic_workflow = aliased_from_dynamic_workflow
             kept[name] = merged
     return list(kept.values())
 
