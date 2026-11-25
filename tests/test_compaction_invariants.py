@@ -30,9 +30,9 @@ from mindroom.history.compaction import (
     Summarizer,
     SummaryModel,
     _summarize_chunk,
-    clear_manual_compaction_request,
     compact_scope_history,
 )
+from mindroom.history.runtime import clear_manual_compaction_request
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
@@ -179,7 +179,7 @@ async def _compact(
     return await compact_scope_history(
         storage=storage,
         session=session,
-        state=read_scope_state(session),
+        mode=read_scope_state(session).compaction_mode,
         summarizer=summarizer,
         available_history_budget=None,
         max_summary_tokens=None,
@@ -1279,7 +1279,8 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     assert persisted.summary.text == previous_summary
     assert "TAIL-FACT-MUST-SURVIVE" in persisted.summary.text
     assert [run.run_id for run in persisted.runs] == ["run-1"]
-    assert read_scope_state(persisted) == HistoryScopeState()
+    # compact_scope_history does not own force-flag clearing; runtime preparation clears it below.
+    assert read_scope_state(persisted) == HistoryScopeState(force_compact_before_next_run=True)
 
     runtime_generate_summary = AsyncMock()
     install_model_providers(monkeypatch, {"default": summary_model()})

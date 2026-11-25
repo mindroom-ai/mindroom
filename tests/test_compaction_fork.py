@@ -47,7 +47,7 @@ from mindroom.history.summary_fork import (
     warm_cache_ttl_seconds,
 )
 from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary
-from mindroom.history.types import HistoryPreparationInputs, HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryPreparationInputs, ScopeSummary
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
@@ -1521,7 +1521,7 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
         await compact_scope_history(
             storage=storage,
             session=loaded,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=summarizer,
             available_history_budget=50_000,
             max_summary_tokens=50_000,

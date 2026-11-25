@@ -158,7 +158,7 @@ async def test_history_sizing_allows_loop_progress(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(force_compact_before_next_run=True),
+            mode="manual",
             summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
             available_history_budget=1000,
             max_summary_tokens=None,
@@ -202,7 +202,7 @@ async def test_history_storage_work_allows_loop_progress(
     outcome = await compact_scope_history(
         storage=storage,
         session=session,
-        state=HistoryScopeState(force_compact_before_next_run=True),
+        mode="manual",
         summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
         available_history_budget=1000,
         max_summary_tokens=None,

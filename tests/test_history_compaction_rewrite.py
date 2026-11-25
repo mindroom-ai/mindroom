@@ -37,7 +37,6 @@ from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryScope,
-    HistoryScopeState,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -123,14 +122,13 @@ async def _rewrite_single_run(
     seed_session(storage, working_session)
     report = AsyncMock()
 
-    async def after_persist(chunk: _SummaryChunk, _compacted_run_count: int, _runs_remaining: int) -> None:
+    async def after_persist(chunk: _SummaryChunk, _compacted_run_count: int, _remaining: object) -> None:
         if served_models is not None:
             served_models.append(chunk.summarizer.model.name)
 
     await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
-        working_session=working_session,
         summarizer=_summarizer(
             summary_model,
             summary_input_budget,
@@ -1294,7 +1292,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             available_history_budget=1,
             max_summary_tokens=None,
@@ -1337,7 +1335,7 @@ async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_th
         await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(summary_model(summary), 50_000),
             available_history_budget=1,
             max_summary_tokens=2_000,
@@ -1376,7 +1374,7 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
     outcome = await compact_scope_history(
         storage=storage,
         session=session,
-        state=HistoryScopeState(),
+        mode="auto",
         summarizer=_summarizer(model, summary_input_budget),
         available_history_budget=1,
         max_summary_tokens=estimate_summary_text_tokens(short_summary, ScriptedModel([])),
@@ -1860,7 +1858,6 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
         await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=working_session,
-            working_session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             runs=list(working_session.runs),
             max_summary_tokens=None,
@@ -1962,7 +1959,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             available_history_budget=1,
             max_summary_tokens=None,
@@ -2057,7 +2054,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
             storage=storage,
             session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
-            state=HistoryScopeState(),
+            mode="auto",
             available_history_budget=1,
             max_summary_tokens=None,
             before_tokens=estimate_prompt_visible_history_tokens(
@@ -2179,7 +2176,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(force_compact_before_next_run=True),
+            mode="manual",
             summarizer=_summarizer(input_budget_tokens=6_000, fallback=fallback),
             available_history_budget=None,
             max_summary_tokens=None,

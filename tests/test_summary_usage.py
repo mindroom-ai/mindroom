@@ -19,7 +19,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.history.compaction import _summarize_chunk, compact_scope_history, scope_usage_recorder
 from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
-from mindroom.history.types import HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
@@ -100,7 +99,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
         operation = compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(force_compact_before_next_run=True),
+            mode="manual",
             summarizer=_summarizer(
                 model,
                 10_000,

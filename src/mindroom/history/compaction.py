@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -26,7 +25,6 @@ from mindroom.history.storage import (
     append_fold,
     read_chunk_basis,
     record_summary_usage,
-    set_force_compaction,
 )
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
@@ -47,11 +45,11 @@ from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
-    HistoryScopeState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ScopeSummary,
     owner_scope,
+    replayed_summary_text,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, TranscriptLine, emit
 from mindroom.llm.errors import AuthenticationFailed, ContextWindowExceeded, ModelSafeguardRefusal, ProviderError
@@ -61,7 +59,6 @@ from mindroom.native_compaction import checkpoint_summary, checkpoint_tail, repl
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.names import provider_route
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
 from mindroom.token_counting.counts import count
 from mindroom.tool_system.runtime_context import (
@@ -77,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.history.summary_fork import SummaryFork
+    from mindroom.history.types import CompactionMode
     from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
@@ -274,23 +272,6 @@ class _SummaryChunk:
     summarizer: Summarizer
 
 
-async def clear_manual_compaction_request(
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    state: HistoryScopeState,
-) -> None:
-    """Clear the manual compaction request this run read in ``state``, if it read one.
-
-    The request is one flag, so a request written after this run read it clears with it.
-    """
-    if state.force_compact_before_next_run:
-        await run_session_storage_operation(
-            lambda: storage,
-            partial(set_force_compaction, session=session, forced=False),
-        )
-
-
 def _transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
     """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
     return tuple(
@@ -348,7 +329,7 @@ async def compact_scope_history(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    state: HistoryScopeState,
+    mode: CompactionMode,
     summarizer: Summarizer,
     available_history_budget: int | None,
     max_summary_tokens: int | None,
@@ -361,21 +342,16 @@ async def compact_scope_history(
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
-    The caller decided the reply needs it. ``max_summary_tokens`` is the most history the reply can replay; no chunk
-    whose summary exceeds it, as ``model``'s route sizes it, is stored. ``available_history_budget`` and
-    ``before_tokens`` are the history's budget and size the notices show; ``before_tokens`` is also the size the
-    ``compaction:before`` hook receives. ``progress`` receives the progress after each stored chunk that leaves runs
-    to replay, and ``complete`` the outcome after the last stored chunk.
+    ``max_summary_tokens`` is the most history the reply can replay; no chunk whose summary exceeds it, as ``model``'s
+    route sizes it, is stored. ``progress`` receives progress after each stored chunk that leaves runs to replay, and
+    ``complete`` receives the outcome after the last stored chunk.
     """
     scope = owner_scope(session)
     history_settings = summarizer.history_settings
     visible_runs = scope_visible_runs(session)
     if not visible_runs:
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
-    mode = state.compaction_mode
-    working_session = deepcopy(session)
     hooks_registered = _compaction_hooks_registered()
     compacted_transcript: list[TranscriptLine] = []
 
@@ -388,14 +364,23 @@ async def compact_scope_history(
             token_count_before=before_tokens,
         )
 
-    async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
+    async def after_persist(
+        chunk: _SummaryChunk,
+        compacted_run_count: int,
+        remaining_runs: Sequence[AnyRunRecord],
+    ) -> None:
         if hooks_registered:
             compacted_transcript.extend(_transcript(chunk.included_runs))
-        if progress is None or not scope_visible_runs(working_session):
+        if progress is None or not remaining_runs:
             return
+        snapshot = replace(
+            session,
+            summary=ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC)),
+            runs=list(remaining_runs),
+        )
         after_tokens = await asyncio.to_thread(
             estimate_prompt_visible_history_tokens,
-            session=working_session,
+            session=snapshot,
             history_settings=history_settings,
             model=model,
         )
@@ -410,7 +395,7 @@ async def compact_scope_history(
                 history_budget_tokens=available_history_budget,
                 runs_before=len(visible_runs),
                 compacted_run_count=compacted_run_count,
-                runs_remaining=runs_remaining,
+                runs_remaining=len(remaining_runs),
                 threshold_tokens=threshold_tokens,
             ),
         )
@@ -419,7 +404,6 @@ async def compact_scope_history(
 
     async def report(chunk: _SummaryChunk, compacted_run_count: int) -> None:
         nonlocal outcome
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         summary_model = chunk.summarizer.model
         logger.info(
             "Compaction summary generated",
@@ -460,7 +444,6 @@ async def compact_scope_history(
         await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=session,
-            working_session=working_session,
             summarizer=summarizer,
             runs=visible_runs,
             max_summary_tokens=max_summary_tokens,
@@ -473,8 +456,6 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
-    if outcome is None:
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
     return outcome
 
 
@@ -483,13 +464,12 @@ async def _rewrite_working_session_for_compaction(
     *,
     storage: ConversationStore,
     persisted_session: ConversationSession,
-    working_session: ConversationSession,
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
     max_summary_tokens: int | None,
     model: ModelProvider,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
-    after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
+    after_persist: Callable[[_SummaryChunk, int, Sequence[AnyRunRecord]], Awaitable[None]],
     report: Callable[[_SummaryChunk, int], Coroutine[object, object, None]],
 ) -> None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
@@ -499,9 +479,10 @@ async def _rewrite_working_session_for_compaction(
     """
     scope = owner_scope(persisted_session)
     last_chunk = None
+    previous_summary = current_summary_text(persisted_session)
     remaining = list(runs)
 
-    async def persist(chunk: _SummaryChunk, basis: ChunkBasis, runs_remaining: int) -> bool:
+    async def persist(chunk: _SummaryChunk, basis: ChunkBasis, remaining_after: Sequence[AnyRunRecord]) -> bool:
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
         if not await run_session_storage_operation(
             lambda: storage,
@@ -514,16 +495,13 @@ async def _rewrite_working_session_for_compaction(
             ),
         ):
             return False
-        working_session.summary = ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC))
-        working_session.runs = runs_without(working_session.runs, compacted_run_ids)
-        await after_persist(chunk, len(runs) - runs_remaining, runs_remaining)
-        if not runs_remaining:
+        await after_persist(chunk, len(runs) - len(remaining_after), remaining_after)
+        if not remaining_after:
             await report(chunk, len(runs))
         return True
 
     while remaining:
         compacted_run_count = len(runs) - len(remaining)
-        previous_summary = current_summary_text(working_session)
         basis = await run_blocking_until_complete(
             partial(
                 read_chunk_basis,
@@ -558,14 +536,15 @@ async def _rewrite_working_session_for_compaction(
             _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
         await before_persist(chunk.included_runs)
-        runs_remaining = len(remaining) - len(chunk.included_runs)
-        commit = persist(chunk, basis, runs_remaining)
+        remaining_after = remaining[len(chunk.included_runs) :]
+        commit = persist(chunk, basis, remaining_after)
         # Once the final append starts, finish reporting before propagating cancellation.
-        if not await (commit if runs_remaining else run_coroutine_until_complete(commit)):
+        if not await (commit if remaining_after else run_coroutine_until_complete(commit)):
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
         last_chunk = chunk
-        summarizer, remaining = chunk.summarizer, remaining[len(chunk.included_runs) :]
+        previous_summary = replayed_summary_text(chunk.summary)
+        summarizer, remaining = chunk.summarizer, remaining_after
     if remaining and last_chunk is not None:
         await run_coroutine_until_complete(report(last_chunk, len(runs) - len(remaining)))
 
@@ -651,18 +630,14 @@ async def compact_running_turn(
     max_summary_tokens: int,
     model: ModelProvider,
     on_commit: Callable[[str], None],
-    rewritten_request_tokens: Callable[[], int],
+    rewritten_request_tokens: Callable[[str], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
 ) -> CompactionOutcome:
     """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row storing ``fold``.
 
-    Nothing is written until every chunk has been summarized. The append leaves ``session`` holding what the store
-    does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
-    is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
-    failed. ``before_tokens`` sizes the request that triggered the fold, and ``rewritten_request_tokens`` sizes it
-    after ``on_commit`` rewrote it, so the report compares one request before and after. Raises, writing nothing,
-    when the summary, sized by the reply's ``model``, exceeds ``max_summary_tokens`` or the conversation
-    changed since ``basis`` was read.
+    Nothing is written until every chunk is summarized and ``rewritten_request_tokens(summary)`` succeeds off the
+    event loop. Once the append starts, ``on_commit`` applies the prepared rewrite and the compaction is reported
+    even under cancellation, with no fallible tokenizer call after commit.
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
@@ -677,6 +652,8 @@ async def compact_running_turn(
     summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, model, upper_bound=True)
     if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
         raise error
+    # Size the prospective rewritten request before emitting hooks or committing, so sizing errors leave state untouched.
+    after_tokens = await asyncio.to_thread(rewritten_request_tokens, summary)
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
     # requester and metadata, which decide who said each message.
     folded_run = RunRecord(
@@ -711,8 +688,6 @@ async def compact_running_turn(
         if not appended:
             raise ConversationChangedError
         on_commit(summary)
-        # Sizing can tokenize the whole request, so it stays off the event loop.
-        after_tokens = await asyncio.to_thread(rewritten_request_tokens)
         outcome = CompactionOutcome(
             mode="auto",
             session_id=session.session_id,
@@ -1106,7 +1081,6 @@ __all__ = [
     "ConversationChangedError",
     "Summarizer",
     "SummaryModel",
-    "clear_manual_compaction_request",
     "compact_running_turn",
     "compact_scope_history",
     "load_summarizer",

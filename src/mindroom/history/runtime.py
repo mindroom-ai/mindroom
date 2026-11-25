@@ -13,7 +13,6 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
-    clear_manual_compaction_request,
     compact_scope_history,
     load_summarizer,
     scope_usage_recorder,
@@ -374,6 +373,23 @@ async def prepare_scope_history(
     )
 
 
+async def clear_manual_compaction_request(
+    *,
+    storage: ConversationStore,
+    session: ConversationSession,
+    state: HistoryScopeState,
+) -> None:
+    """Clear the manual compaction request this run read in ``state``, if it read one.
+
+    The request is one flag, so a request written after this run read it clears with it.
+    """
+    if state.force_compact_before_next_run:
+        await run_session_storage_operation(
+            lambda: storage,
+            partial(set_force_compaction, session=session, forced=False),
+        )
+
+
 async def compact_scope_now(
     context: ScopeSessionContext,
     inputs: HistoryPreparationInputs,
@@ -381,14 +397,22 @@ async def compact_scope_now(
     lifecycle: CompactionLifecycle,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    state: HistoryScopeState | None = None,
 ) -> bool:
     """Fold a live manual request; return whether it had nothing left to compact."""
     session = context.session
-    if session is None or not (state := read_scope_state(session)).force_compact_before_next_run:
+    if session is None:
+        return False
+    scope_state = state if state is not None else read_scope_state(session)
+    if not scope_state.force_compact_before_next_run:
         return False
     runs = scope_visible_runs(session)
     if not runs:
-        await clear_manual_compaction_request(storage=context.storage, session=session, state=state)
+        await run_session_storage_operation(
+            lambda: context.storage,
+            partial(set_force_compaction, session=session, forced=False),
+        )
         return True
     model = await run_blocking_until_complete(build_model)
     limit = inputs.execution_plan.limit_tokens
@@ -419,7 +443,7 @@ async def compact_scope_now(
         model,
         config,
         runtime_paths,
-        state=state,
+        state=scope_state,
         history_budget=cap,
         max_summary_tokens=cap,
         before_tokens=before,
@@ -585,11 +609,15 @@ async def _compact_stored_scope(
     assert session is not None
 
     async def compact(progress: _Progress | None, complete: _Complete) -> CompactionOutcome | None:
+        async def clear_and_complete(outcome: CompactionOutcome) -> CompactionOutcome:
+            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+            return await complete(outcome)
+
         try:
-            return await compact_scope_history(
+            outcome = await compact_scope_history(
                 storage=storage,
                 session=session,
-                state=state,
+                mode=state.compaction_mode,
                 summarizer=load_summarizer(
                     plan,
                     resolved_inputs.history_settings,
@@ -606,7 +634,7 @@ async def _compact_stored_scope(
                 replay_window_tokens=plan.replay_window_tokens,
                 threshold_tokens=plan.trigger_threshold_tokens,
                 progress=progress,
-                complete=complete,
+                complete=clear_and_complete,
                 model=model,
             )
         except ConversationChangedError:
@@ -616,6 +644,9 @@ async def _compact_stored_scope(
             # A failing manual compaction must not retry on every reply.
             await clear_manual_compaction_request(storage=storage, session=session, state=state)
             raise
+        if outcome is None:
+            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+        return outcome
 
     return await run_scope_compaction_with_lifecycle(
         mode=state.compaction_mode,

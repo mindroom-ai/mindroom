@@ -212,10 +212,11 @@ def without_run_usage(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
 
 @dataclass(frozen=True)
 class _Fold:
-    """A fold's summary message and the estimated size of the request it rewrote."""
+    """A fold's summary message, estimated rewritten size, and optional deferred commit callback."""
 
     summary_message: Message
     rewritten_tokens: int
+    commit: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,9 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     if fold is None:
         compaction.stopped = True
         return
+    _require_fit(policy, fold.rewritten_tokens, fold.summary_message)
+    if fold.commit is not None:
+        fold.commit()
     if state.request_template.native_compaction is not None:
         # The provider's own compaction could not keep this request within the window.
         logger.warning(
@@ -278,7 +282,6 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
         # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
         state.request_template = replace(state.request_template, native_compaction=None)
-    _require_fit(policy, fold.rewritten_tokens, fold.summary_message)
     if fold.rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
         # would only summarize each new tool result before the model ever saw it.
@@ -350,9 +353,14 @@ async def _summarize(
                 model=compaction.model,
             )
             summary_message = compaction_summary_message(summary, run_local=True)
-            _finish(messages, layout, summary_message, record)
+            rewritten, prompt_to_mark = _rewritten_messages(messages, layout, summary_message)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
-            return _Fold(summary_message, await asyncio.to_thread(size_request, messages))
+            rewritten_tokens = await asyncio.to_thread(size_request, rewritten)
+            return _Fold(
+                summary_message,
+                rewritten_tokens,
+                commit=partial(_apply_rewrite, messages, rewritten, prompt_to_mark, layout, record),
+            )
         store, session = scope_fold
         if kept_tokens >= policy.limit:
             # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
@@ -378,11 +386,6 @@ async def _summarize(
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
         return None
-
-
-def _finish(messages: list[Message], layout: _Layout, summary_message: Message, record: AnyRunRecord) -> None:
-    _rewrite(messages, layout, summary_message)
-    carry_request_usage(record, layout.folded)
 
 
 async def _compact_scope(
@@ -430,15 +433,25 @@ async def _compact_scope(
         )
     fold = _fold(record, layout)
     folded_calls = _folded_calls(fold)
-    summary_messages: list[Message] = []
+    prepared: tuple[Message, list[Message], Message | None] | None = None
+    committed_summary: list[Message] = []
 
-    def on_commit(summary: str) -> None:
-        # Runs together with the row's commit, so a stopped or failed reply's record leaves the folded calls out.
+    def size_rewritten(summary: str) -> int:
+        nonlocal prepared
         summary_message = compaction_summary_message(summary, run_local=False)
-        summary_messages.append(summary_message)
+        rewritten, prompt_to_mark = _rewritten_messages(messages, layout, summary_message)
+        after_tokens = size_request(rewritten)
+        prepared = (summary_message, rewritten, prompt_to_mark)
+        return after_tokens
+
+    def on_commit(_summary: str) -> None:
+        # Runs together with the row's commit, so a stopped or failed reply's record leaves the folded calls out.
+        assert prepared is not None
+        summary_message, rewritten, prompt_to_mark = prepared
+        committed_summary.append(summary_message)
         if compaction.turn_recorder is not None:
             compaction.turn_recorder.record_folded_tool_calls(folded_calls)
-        _finish(messages, layout, summary_message, record)
+        _apply_rewrite(messages, rewritten, prompt_to_mark, layout, record)
 
     plan = inputs.execution_plan
     snapshots = _snapshots(record, layout, inputs)
@@ -477,8 +490,8 @@ async def _compact_scope(
             max_summary_tokens=max_summary_tokens,
             model=compaction.model,
             on_commit=on_commit,
-            # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
-            rewritten_request_tokens=partial(size_request, messages),
+            # Size the prospective rewritten request before SQLite commit.
+            rewritten_request_tokens=size_rewritten,
             complete=complete,
         )
 
@@ -493,9 +506,9 @@ async def _compact_scope(
         compaction_lifecycle=compaction.lifecycle,
         compact=compact,
     )
-    if result.outcome is None or not summary_messages:
+    if result.outcome is None or not committed_summary:
         return None
-    return _Fold(summary_messages[0], result.outcome.after_tokens)
+    return _Fold(committed_summary[0], result.outcome.after_tokens)
 
 
 def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
@@ -674,18 +687,30 @@ def _summary_usage_recorder(
     )
 
 
-def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message) -> None:
-    """Replace the folded history and the turn's exchanges with the summary, keeping the kept messages in order.
-
-    The summary follows the current prompt, where the turn's folded work was: a model that reads the prompt last can
-    start the request over even when the summary records it finished. The prompt is marked so that a resume and later
-    turns replay the scope's summary in the same place; a run-local summary is stored in place with its run.
-    """
-    leading = messages[: layout.leading]
+def _rewritten_messages(
+    messages: Sequence[Message],
+    layout: _Layout,
+    summary_message: Message,
+) -> tuple[list[Message], Message | None]:
+    """Build the rewritten message list without mutating ``messages``, plus the prompt to mark on commit if any."""
     after_prompt = next((index + 1 for index, message in enumerate(layout.kept) if message is layout.prompt), 0)
-    if after_prompt and is_scope_summary(summary_message):
-        mark_summary_follows(layout.kept[after_prompt - 1])
-    messages[:] = [*leading, *layout.kept[:after_prompt], summary_message, *layout.kept[after_prompt:]]
+    prompt_to_mark = layout.kept[after_prompt - 1] if after_prompt and is_scope_summary(summary_message) else None
+    rewritten = [*messages[: layout.leading], *layout.kept[:after_prompt], summary_message, *layout.kept[after_prompt:]]
+    return rewritten, prompt_to_mark
+
+
+def _apply_rewrite(
+    messages: list[Message],
+    rewritten: list[Message],
+    prompt_to_mark: Message | None,
+    layout: _Layout,
+    record: AnyRunRecord,
+) -> None:
+    """Apply a prepared rewrite to live ``messages`` and ``record`` after validation/commit succeeds."""
+    if prompt_to_mark is not None:
+        mark_summary_follows(prompt_to_mark)
+    messages[:] = rewritten
+    carry_request_usage(record, layout.folded)
 
 
 __all__ = ["mid_turn_compaction_hook", "without_run_usage"]

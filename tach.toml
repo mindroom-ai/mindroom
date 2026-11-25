@@ -3342,7 +3342,6 @@ visibility = [
 path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",
