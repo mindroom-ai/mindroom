@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -13,8 +14,11 @@ from pydantic import ValidationError
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.reactive_triggers.models import (
+    DisabledReason,
     ExternalEventSourceSpec,
     FiringRecord,
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -32,7 +36,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _DB_FILENAME = "reactive_triggers.db"
 _TRIGGER_ID_LOCK_FILENAME = ".trigger_id_creation.lock"
 _FINISHED_FIRING_STATUSES = ("triaged_no", "delivered", "failed", "skipped")
@@ -145,6 +149,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY (trigger_id, thread_key)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS github_pr_checkpoints (
+        trigger_id TEXT PRIMARY KEY REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+        head_sha TEXT,
+        pr_state TEXT NOT NULL DEFAULT 'open',
+        seeded INTEGER NOT NULL DEFAULT 0,
+        next_poll_at REAL NOT NULL DEFAULT 0.0,
+        consecutive_errors INTEGER NOT NULL DEFAULT 0,
+        state_json TEXT NOT NULL DEFAULT '{}',
+        updated_at REAL NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_owner ON reactive_triggers(owner_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_source_type ON reactive_triggers(source_type, enabled)",
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_source_room ON reactive_triggers(source_room_id)",
@@ -155,6 +171,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         "ON trigger_firings(trigger_id, status, claimed_at, updated_at)"
     ),
     "CREATE INDEX IF NOT EXISTS idx_trigger_firings_updated ON trigger_firings(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_github_pr_checkpoints_due ON github_pr_checkpoints(next_poll_at)",
 )
 
 
@@ -182,7 +199,9 @@ class ReactiveTriggerStore:
         *,
         initial_cursor: RoomCursor | None = None,
         initial_checkpoint: ThreadCheckpoint | None = None,
+        initial_github_pr_checkpoint: GitHubPRCheckpoint | None = None,
         max_per_owner: int | None = None,
+        max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord:
         """Atomically enforce quota, insert a trigger, and optionally initialize cursor or checkpoint."""
         source_room_id, source_id = _source_index_fields(record)
@@ -206,6 +225,17 @@ class ReactiveTriggerStore:
                 )
                 if owner_count >= max_per_owner:
                     msg = f"Owner {record.owner_user_id} reached reactive trigger limit ({max_per_owner})"
+                    raise ReactiveTriggerLimitError(msg)
+
+            if max_github_pr_per_owner is not None and record.source.source_type == "github_pr":
+                github_pr_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM reactive_triggers WHERE owner_user_id = ? AND source_type = 'github_pr'",
+                        (record.owner_user_id,),
+                    ).fetchone()[0],
+                )
+                if github_pr_count >= max_github_pr_per_owner:
+                    msg = f"Owner {record.owner_user_id} reached GitHub PR watch limit ({max_github_pr_per_owner})"
                     raise ReactiveTriggerLimitError(msg)
 
             conn.execute(
@@ -248,6 +278,9 @@ class ReactiveTriggerStore:
                     state_event_id=initial_checkpoint.state_event_id,
                     updated_at=initial_checkpoint.updated_at,
                 )
+
+            if initial_github_pr_checkpoint is not None:
+                _upsert_github_pr_checkpoint(conn, record.trigger_id, initial_github_pr_checkpoint)
 
         return record
 
@@ -522,6 +555,160 @@ class ReactiveTriggerStore:
                 msg = f"Cannot update checkpoint for unknown trigger: {trigger_id}"
                 raise ReactiveTriggerStoreError(msg) from exc
 
+    def get_github_pr_checkpoint(self, trigger_id: str) -> GitHubPRCheckpoint | None:
+        """Return the persisted GitHub PR checkpoint for a trigger, or None."""
+        with self._read_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT head_sha, pr_state, seeded, next_poll_at, consecutive_errors, state_json, updated_at
+                FROM github_pr_checkpoints
+                WHERE trigger_id = ?
+                """,
+                (trigger_id,),
+            ).fetchone()
+        return _github_pr_checkpoint_from_row(row) if row is not None else None
+
+    def upsert_github_pr_checkpoint(
+        self,
+        trigger_id: str,
+        checkpoint: GitHubPRCheckpoint,
+        *,
+        expected_rule_uid: str | None = None,
+    ) -> bool:
+        """Upsert a GitHub PR checkpoint for an existing trigger; return False if expected_rule_uid mismatches."""
+        with self._write_transaction() as conn:
+            if expected_rule_uid is not None:
+                live_uid = _live_rule_uid(conn, trigger_id)
+                if live_uid != expected_rule_uid:
+                    return False
+            try:
+                _upsert_github_pr_checkpoint(conn, trigger_id, checkpoint)
+            except sqlite3.IntegrityError as exc:
+                msg = f"Cannot update GitHub PR checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg) from exc
+            return True
+
+    def update_github_pr_checkpoint_and_enqueue(
+        self,
+        trigger_id: str,
+        checkpoint: GitHubPRCheckpoint,
+        *,
+        dedupe_key: str | None = None,
+        event: TriggerEvent | None = None,
+        disable_reason: DisabledReason | None = None,
+        expected_rule_uid: str | None = None,
+        now: float | None = None,
+    ) -> bool:
+        """Atomically upsert a GitHub PR checkpoint, optionally enqueue a firing, or disable immediately."""
+        if (dedupe_key is None) != (event is None):
+            msg = "dedupe_key and event must either both be provided or both be None"
+            raise ValueError(msg)
+        if disable_reason is not None and dedupe_key is not None:
+            msg = "disable_reason cannot be set when enqueuing a firing"
+            raise ValueError(msg)
+
+        current_time = time.time() if now is None else now
+        with self._write_transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
+                (trigger_id,),
+            ).fetchone()
+            live_uid = str(row["rule_uid"]) if row is not None else None
+            if expected_rule_uid is not None:
+                if live_uid != expected_rule_uid:
+                    return False
+            elif live_uid is None:
+                msg = f"Cannot update GitHub PR checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg)
+            assert row is not None
+            assert live_uid is not None
+
+            try:
+                _upsert_github_pr_checkpoint(conn, trigger_id, checkpoint)
+                if dedupe_key is not None and event is not None:
+                    return _insert_pending_firing(
+                        conn,
+                        trigger_id=trigger_id,
+                        rule_uid=live_uid,
+                        dedupe_key=dedupe_key,
+                        event=event,
+                        now=current_time,
+                    )
+                if disable_reason is not None:
+                    disabled_record = _record_from_row(row).model_copy(
+                        update={
+                            "enabled": False,
+                            "disabled_reason": disable_reason,
+                            "updated_at": current_time,
+                        },
+                    )
+                    conn.execute(
+                        """
+                        UPDATE reactive_triggers
+                        SET enabled = 0,
+                            disabled_reason = ?,
+                            spec_json = ?,
+                            updated_at = ?
+                        WHERE trigger_id = ? AND rule_uid = ?
+                        """,
+                        (
+                            disable_reason,
+                            disabled_record.model_dump_json(),
+                            current_time,
+                            trigger_id,
+                            live_uid,
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                msg = f"Cannot update GitHub PR checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg) from exc
+            else:
+                return False
+
+    def list_due_github_pr_triggers(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 50,
+    ) -> list[tuple[ReactiveTriggerRecord, GitHubPRCheckpoint | None]]:
+        """Return enabled, unexpired poll-backed github_pr triggers due for polling."""
+        if limit <= 0:
+            return []
+        current_time = time.time() if now is None else now
+        with self._read_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT rt.*,
+                       cp.trigger_id AS cp_trigger_id,
+                       cp.head_sha AS cp_head_sha,
+                       cp.pr_state AS cp_pr_state,
+                       cp.seeded AS cp_seeded,
+                       cp.next_poll_at AS cp_next_poll_at,
+                       cp.consecutive_errors AS cp_consecutive_errors,
+                       cp.state_json AS cp_state_json,
+                       cp.updated_at AS cp_updated_at
+                FROM reactive_triggers rt
+                LEFT JOIN github_pr_checkpoints cp ON cp.trigger_id = rt.trigger_id
+                WHERE rt.source_type = 'github_pr'
+                  AND rt.enabled = 1
+                  AND (rt.expires_at IS NULL OR rt.expires_at > ?)
+                  AND (cp.trigger_id IS NULL OR cp.next_poll_at <= ?)
+                  AND json_extract(rt.spec_json, '$.source.webhook_source_id') IS NULL
+                ORDER BY COALESCE(cp.next_poll_at, 0.0) ASC, rt.trigger_id ASC
+                LIMIT ?
+                """,
+                (current_time, current_time, limit),
+            ).fetchall()
+
+        results: list[tuple[ReactiveTriggerRecord, GitHubPRCheckpoint | None]] = []
+        for row in rows:
+            record = _record_from_row(row)
+            if not isinstance(record.source, GitHubPRSourceSpec) or record.source.webhook_source_id is not None:
+                continue
+            checkpoint = _github_pr_checkpoint_from_joined_row(row)
+            results.append((record, checkpoint))
+        return results
+
     def enqueue_firing(
         self,
         trigger_id: str,
@@ -717,7 +904,7 @@ class ReactiveTriggerStore:
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
             firing = conn.execute(
-                "SELECT id, trigger_id, rule_uid, status FROM trigger_firings WHERE id = ?",
+                "SELECT id, trigger_id, rule_uid, status, event_json FROM trigger_firings WHERE id = ?",
                 (firing_id,),
             ).fetchone()
             if firing is None or str(firing["status"]) != "pending":
@@ -725,12 +912,7 @@ class ReactiveTriggerStore:
 
             trigger_id = str(firing["trigger_id"])
             trigger = conn.execute(
-                """
-                SELECT rule_uid, enabled, disabled_reason, once, expires_at,
-                       max_fires_per_hour, cooldown_seconds, last_fired_at
-                FROM reactive_triggers
-                WHERE trigger_id = ?
-                """,
+                "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (trigger_id,),
             ).fetchone()
             if trigger is None:
@@ -787,12 +969,35 @@ class ReactiveTriggerStore:
                 """,
                 (triage_reason, current_time, current_time, firing_id),
             )
+            record = _record_from_row(trigger)
+            is_terminal_pr_close = False
+            if isinstance(record.source, GitHubPRSourceSpec) and record.source.auto_disable_on_close:
+                try:
+                    event_payload = json.loads(str(firing["event_json"]))
+                    event_data = event_payload.get("data") if isinstance(event_payload, dict) else None
+                    is_terminal_pr_close = isinstance(event_data, dict) and event_data.get("terminal") is True
+                except (ValueError, TypeError):
+                    is_terminal_pr_close = False
+
             if bool(trigger["once"]):
                 new_enabled = 0
-                new_disabled_reason: str | None = "once_consumed"
+                new_disabled_reason: DisabledReason | None = "once_consumed"
+            elif is_terminal_pr_close:
+                new_enabled = 0
+                new_disabled_reason = "pr_closed"
             else:
                 new_enabled = int(trigger["enabled"])
                 new_disabled_reason = trigger["disabled_reason"]
+
+            updated_record = record.model_copy(
+                update={
+                    "fire_count": int(trigger["fire_count"]) + 1,
+                    "last_fired_at": current_time,
+                    "enabled": bool(new_enabled),
+                    "disabled_reason": new_disabled_reason,
+                    "updated_at": current_time,
+                },
+            )
             conn.execute(
                 """
                 UPDATE reactive_triggers
@@ -800,10 +1005,18 @@ class ReactiveTriggerStore:
                     last_fired_at = ?,
                     enabled = ?,
                     disabled_reason = ?,
+                    spec_json = ?,
                     updated_at = ?
                 WHERE trigger_id = ?
                 """,
-                (current_time, new_enabled, new_disabled_reason, current_time, trigger_id),
+                (
+                    current_time,
+                    new_enabled,
+                    new_disabled_reason,
+                    updated_record.model_dump_json(),
+                    current_time,
+                    trigger_id,
+                ),
             )
             return "claimed"
 
@@ -1059,6 +1272,8 @@ class ReactiveTriggerStore:
             row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
+            elif int(row["version"]) == 1:
+                conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
             elif int(row["version"]) != _SCHEMA_VERSION:
                 msg = f"Unsupported reactive triggers schema version: {row['version']}"
                 raise ReactiveTriggerStoreError(msg)
@@ -1104,6 +1319,8 @@ def _source_index_fields(record: ReactiveTriggerRecord) -> tuple[str | None, str
         return source.room_id, None
     if isinstance(source, ExternalEventSourceSpec):
         return None, source.source_id
+    if isinstance(source, GitHubPRSourceSpec):
+        return None, source.repo.lower()
     return None, None
 
 
@@ -1150,6 +1367,69 @@ def _upsert_thread_checkpoint(
             updated_at = excluded.updated_at
         """,
         (trigger_id, 1 if tag_present else 0, state_event_id, updated_at),
+    )
+
+
+def _upsert_github_pr_checkpoint(
+    conn: sqlite3.Connection,
+    trigger_id: str,
+    checkpoint: GitHubPRCheckpoint,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO github_pr_checkpoints (
+            trigger_id, head_sha, pr_state, seeded, next_poll_at,
+            consecutive_errors, state_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trigger_id) DO UPDATE SET
+            head_sha = excluded.head_sha,
+            pr_state = excluded.pr_state,
+            seeded = excluded.seeded,
+            next_poll_at = excluded.next_poll_at,
+            consecutive_errors = excluded.consecutive_errors,
+            state_json = excluded.state_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            trigger_id,
+            checkpoint.head_sha,
+            checkpoint.pr_state,
+            1 if checkpoint.seeded else 0,
+            checkpoint.next_poll_at,
+            checkpoint.consecutive_errors,
+            json.dumps(checkpoint.state, sort_keys=True),
+            checkpoint.updated_at,
+        ),
+    )
+
+
+def _github_pr_checkpoint_from_row(row: sqlite3.Row) -> GitHubPRCheckpoint:
+    raw_state = json.loads(str(row["state_json"]))
+    state = raw_state if isinstance(raw_state, dict) else {}
+    return GitHubPRCheckpoint(
+        head_sha=row["head_sha"],
+        pr_state=row["pr_state"],
+        seeded=bool(row["seeded"]),
+        next_poll_at=float(row["next_poll_at"]),
+        consecutive_errors=int(row["consecutive_errors"]),
+        state=state,
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def _github_pr_checkpoint_from_joined_row(row: sqlite3.Row) -> GitHubPRCheckpoint | None:
+    if row["cp_trigger_id"] is None:
+        return None
+    raw_state = json.loads(str(row["cp_state_json"]))
+    state = raw_state if isinstance(raw_state, dict) else {}
+    return GitHubPRCheckpoint(
+        head_sha=row["cp_head_sha"],
+        pr_state=row["cp_pr_state"],
+        seeded=bool(row["cp_seeded"]),
+        next_poll_at=float(row["cp_next_poll_at"]),
+        consecutive_errors=int(row["cp_consecutive_errors"]),
+        state=state,
+        updated_at=float(row["cp_updated_at"]),
     )
 
 

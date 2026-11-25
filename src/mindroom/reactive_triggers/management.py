@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.reactive_triggers.models import (
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -67,7 +69,7 @@ def refresh_reactive_state_on_reenable(
     now: float,
     refreshed_tag_present: bool | None,
 ) -> None:
-    """Refresh room cursor or thread tag checkpoint before re-enabling a disabled reactive trigger."""
+    """Refresh cursor or checkpoint before re-enabling a disabled reactive trigger."""
     if isinstance(record.source, RoomMessageSourceSpec):
         reactive_store.advance_room_cursor(
             record.trigger_id,
@@ -79,6 +81,33 @@ def refresh_reactive_state_on_reenable(
             record.trigger_id,
             tag_present=refreshed_tag_present,
             state_event_id=None,
+            expected_rule_uid=record.rule_uid,
+        )
+    elif isinstance(record.source, GitHubPRSourceSpec):
+        existing = reactive_store.get_github_pr_checkpoint(record.trigger_id)
+        refreshed = (
+            existing.model_copy(
+                update={
+                    "seeded": False,
+                    "next_poll_at": now,
+                    "consecutive_errors": 0,
+                    "updated_at": now,
+                },
+            )
+            if existing is not None
+            else GitHubPRCheckpoint(
+                head_sha=None,
+                pr_state="open",
+                seeded=False,
+                next_poll_at=now,
+                consecutive_errors=0,
+                state={},
+                updated_at=now,
+            )
+        )
+        reactive_store.upsert_github_pr_checkpoint(
+            record.trigger_id,
+            refreshed,
             expected_rule_uid=record.rule_uid,
         )
 

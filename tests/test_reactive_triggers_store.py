@@ -33,6 +33,8 @@ from mindroom.dispatch_source import (
 from mindroom.reactive_triggers import (
     ExternalEventSourceSpec,
     FiringRecord,
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerDuplicateError,
     ReactiveTriggerLimitError,
     ReactiveTriggerRecord,
@@ -384,7 +386,9 @@ def test_store_requires_control_state_and_initializes_wal_schema(tmp_path: Path)
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert str(journal_mode).lower() == "wal"
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 1
+        assert version == 2
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "github_pr_checkpoints" in tables
 
 
 def test_trigger_crud_filtering_quota_and_cascade_delete(tmp_path: Path) -> None:
@@ -1067,3 +1071,179 @@ def test_update_trigger_preserves_live_enabled_and_disabled_reason_by_default(tm
     reenabled = store.update_trigger(stale_update, expected_rule_uid=rec.rule_uid, update_enabled=True)
     assert reenabled is not None
     assert (reenabled.enabled, reenabled.disabled_reason) == (True, None)
+
+
+def test_schema_v1_migrates_to_v2_preserving_rows_and_rejects_unknown_version(tmp_path: Path) -> None:
+    """Opening a schema v1 DB upgrades it cleanly to v2 without losing existing triggers or firings."""
+    paths = _runtime_paths(tmp_path)
+    assert paths.control_state_root is not None
+    db_path = paths.control_state_root / "reactive_triggers.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_rec = _make_record(trigger_id="legacy_msg")
+    existing_event = _make_event(event_id="$legacy1")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version (version) VALUES (1);
+            CREATE TABLE reactive_triggers (
+                trigger_id TEXT PRIMARY KEY,
+                rule_uid TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_room_id TEXT,
+                source_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                disabled_reason TEXT,
+                once INTEGER NOT NULL DEFAULT 0,
+                expires_at REAL,
+                max_fires_per_hour INTEGER NOT NULL,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+                fire_count INTEGER NOT NULL DEFAULT 0,
+                last_fired_at REAL,
+                spec_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE room_cursors (
+                trigger_id TEXT PRIMARY KEY REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+                created_ts INTEGER NOT NULL,
+                logical_event_id TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE thread_checkpoints (
+                trigger_id TEXT PRIMARY KEY REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+                tag_present INTEGER NOT NULL,
+                state_event_id TEXT,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE trigger_firings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_id TEXT NOT NULL REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+                rule_uid TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                triage_reason TEXT,
+                matrix_event_id TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at REAL,
+                error_message TEXT,
+                claimed_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(trigger_id, dedupe_key)
+            );
+            CREATE TABLE trigger_thread_keys (
+                trigger_id TEXT NOT NULL REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+                thread_key TEXT NOT NULL,
+                thread_root_id TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (trigger_id, thread_key)
+            );
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO reactive_triggers (
+                trigger_id, rule_uid, owner_user_id, source_type, source_room_id, source_id,
+                enabled, disabled_reason, once, expires_at, max_fires_per_hour, cooldown_seconds,
+                fire_count, last_fired_at, spec_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'room_message', ?, NULL, 1, NULL, 0, NULL, 10, 0, 0, NULL, ?, 1000.0, 1000.0)
+            """,
+            (
+                existing_rec.trigger_id,
+                existing_rec.rule_uid,
+                existing_rec.owner_user_id,
+                "!room:example.org",
+                existing_rec.model_dump_json(),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO trigger_firings (
+                trigger_id, rule_uid, dedupe_key, status, event_json, attempt_count, created_at, updated_at
+            ) VALUES (?, ?, '$legacy1', 'pending', ?, 0, 1000.0, 1000.0)
+            """,
+            (existing_rec.trigger_id, existing_rec.rule_uid, existing_event.model_dump_json()),
+        )
+        conn.commit()
+
+    store = ReactiveTriggerStore(paths)
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "github_pr_checkpoints" in tables
+
+    loaded = store.get_trigger("legacy_msg")
+    assert loaded is not None
+    assert loaded.rule_uid == existing_rec.rule_uid
+    firings = store.list_firings(trigger_id="legacy_msg")
+    assert [f.dedupe_key for f in firings] == ["$legacy1"]
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("UPDATE schema_version SET version = 99")
+        conn.commit()
+    with pytest.raises(ReactiveTriggerStoreError, match="Unsupported reactive triggers schema version: 99"):
+        ReactiveTriggerStore(paths)
+
+
+def test_github_pr_checkpoint_terminal_claim_and_owner_quota(tmp_path: Path) -> None:
+    """Terminal github_pr claim sets disabled_reason='pr_closed' in columns and spec_json; quota enforces limit."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    source = GitHubPRSourceSpec(repo="MindRoom-AI/mindroom", number=42)
+    rec = ReactiveTriggerRecord(
+        trigger_id="gh_pr_42",
+        owner_user_id=_OWNER,
+        source=source,
+        target=TriggerTargetSpec(agent="dev", room_id="!room:example.org", prompt="Handle PR"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    cp = GitHubPRCheckpoint(head_sha="abc123", seeded=True, next_poll_at=1100.0, updated_at=1000.0)
+    store.create_trigger(rec, initial_github_pr_checkpoint=cp, max_github_pr_per_owner=1)
+
+    assert [r.trigger_id for r in store.list_triggers(source_type="github_pr", source_id="mindroom-ai/mindroom")] == [
+        "gh_pr_42",
+    ]
+    assert store.get_github_pr_checkpoint("gh_pr_42") == cp
+
+    second = rec.model_copy(update={"trigger_id": "gh_pr_43", "source": GitHubPRSourceSpec(repo="org/repo", number=43)})
+    with pytest.raises(ReactiveTriggerLimitError, match="GitHub PR watch limit"):
+        store.create_trigger(second, max_github_pr_per_owner=1)
+
+    merged_event = TriggerEvent(
+        source_type="github_pr",
+        source_id="mindroom-ai/mindroom",
+        kind="github_pr.merged",
+        event_id="deliv_merge",
+        timestamp=1200.0,
+        data={"repo": "MindRoom-AI/mindroom", "number": 42, "terminal": True, "state": "merged", "merged": True},
+    )
+    merged_cp = cp.model_copy(update={"pr_state": "merged", "updated_at": 1200.0})
+    assert store.update_github_pr_checkpoint_and_enqueue(
+        "gh_pr_42",
+        merged_cp,
+        dedupe_key="deliv_merge",
+        event=merged_event,
+        expected_rule_uid=rec.rule_uid,
+        now=1200.0,
+    )
+    before_claim = store.get_trigger("gh_pr_42")
+    assert before_claim is not None
+    assert before_claim.enabled is True
+
+    firing = store.list_due_firings(now=1200.0)[0]
+    assert store.claim_firing(firing.id, now=1201.0) == "claimed"
+    after_claim = store.get_trigger("gh_pr_42")
+    assert after_claim is not None
+    assert (after_claim.enabled, after_claim.disabled_reason) == (False, "pr_closed")
+    with store._read_connection() as conn:
+        raw_spec = conn.execute(
+            "SELECT spec_json FROM reactive_triggers WHERE trigger_id = ?",
+            ("gh_pr_42",),
+        ).fetchone()
+    assert raw_spec is not None
+    parsed_spec = ReactiveTriggerRecord.model_validate_json(str(raw_spec["spec_json"]))
+    assert (parsed_spec.enabled, parsed_spec.disabled_reason) == (False, "pr_closed")

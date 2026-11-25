@@ -2754,6 +2754,28 @@
           "description": "Named shared external event sources keyed by source_id",
           "title": "Event Sources",
           "type": "object"
+        },
+        "github_pr_polling_enabled": {
+          "default": true,
+          "description": "Whether outbound GitHub REST polling is enabled for github_pr triggers",
+          "title": "Github Pr Polling Enabled",
+          "type": "boolean"
+        },
+        "min_github_pr_poll_interval_seconds": {
+          "default": 60,
+          "description": "Minimum allowed poll interval in seconds for poll-backed github_pr triggers",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Min Github Pr Poll Interval Seconds",
+          "type": "integer"
+        },
+        "max_github_pr_watches_per_owner": {
+          "default": 20,
+          "description": "Maximum github_pr trigger records one owner may create",
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Max Github Pr Watches Per Owner",
+          "type": "integer"
         }
       },
       "title": "ExternalTriggerPolicyConfig",
@@ -6709,7 +6731,10 @@
         "reactive_enabled": true,
         "max_reactive_triggers_per_owner": 50,
         "max_fires_per_hour": 60,
-        "event_sources": {}
+        "event_sources": {},
+        "github_pr_polling_enabled": true,
+        "min_github_pr_poll_interval_seconds": 60,
+        "max_github_pr_watches_per_owner": 20
       },
       "description": "Global policy for tool-managed signed external triggers"
     },

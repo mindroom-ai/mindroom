@@ -21,6 +21,8 @@ from mindroom.config.main import Config
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers.models import (
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -155,6 +157,7 @@ class _Harness:
         ts = float(extra.pop("created_at", 1_764_000_100.0))
         cursor: RoomCursor | None = extra.pop("initial_cursor", None)
         checkpoint: ThreadCheckpoint | None = extra.pop("initial_checkpoint", None)
+        gh_checkpoint: GitHubPRCheckpoint | None = extra.pop("initial_github_pr_checkpoint", None)
         target = TriggerTargetSpec(
             agent=agent,
             room_id=target_room,
@@ -172,7 +175,12 @@ class _Harness:
             updated_at=ts,
             **extra,
         )
-        return self.reactive_store.create_trigger(record, initial_cursor=cursor, initial_checkpoint=checkpoint)
+        return self.reactive_store.create_trigger(
+            record,
+            initial_cursor=cursor,
+            initial_checkpoint=checkpoint,
+            initial_github_pr_checkpoint=gh_checkpoint,
+        )
 
     def req(
         self,
@@ -428,3 +436,49 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
     h.client.room_get_state = _never_answers
     monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
+
+
+def test_github_pr_trigger_projects_with_pr_closed_reopen_on_fire_and_reenable_reseeds(tmp_path: Path) -> None:
+    """Room triggers API surfaces github_pr rows cleanly and re-enabling resets seeded=False on the checkpoint."""
+    h = _Harness(tmp_path)
+    h.add_reactive(
+        "tr_pr_42",
+        GitHubPRSourceSpec(repo="matrix-org/synapse", number=42),
+        description="Watch PR matrix-org/synapse#42",
+        prompt="Inspect PR #42 update",
+        thread_id="$thread_root",
+        reopen_on_fire=True,
+        enabled=False,
+        disabled_reason="pr_closed",
+        initial_github_pr_checkpoint=GitHubPRCheckpoint(
+            head_sha="deadbeef",
+            pr_state="closed",
+            seeded=True,
+            next_poll_at=9_999_999_999.0,
+            consecutive_errors=3,
+            updated_at=1_764_000_100.0,
+        ),
+    )
+
+    resp = h.req("GET", ROOM_A, ALICE)
+    assert resp.status_code == 200
+    rows = resp.json()["triggers"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["trigger_id"] == "tr_pr_42"
+    assert row["kind"] == "github_pr"
+    assert row["relation"] == "target"
+    assert row["reopen_on_fire"] is True
+    assert row["enabled"] is False
+    assert row["disabled_reason"] == "pr_closed"
+    assert row["target_thread_id"] == "$thread_root"
+
+    reenable = h.req("PATCH", ROOM_A, ALICE, "tr_pr_42", {"enabled": True})
+    assert reenable.status_code == 200
+    assert (reenable.json()["enabled"], reenable.json()["disabled_reason"]) == (True, None)
+    cp = h.reactive_store.get_github_pr_checkpoint("tr_pr_42")
+    assert cp is not None
+    assert cp.seeded is False
+    assert cp.consecutive_errors == 0
+    assert cp.next_poll_at <= time.time() + 1.0
+    assert h.wake_reactive.call_count == 1

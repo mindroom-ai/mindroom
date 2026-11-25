@@ -44,6 +44,11 @@ from mindroom.reactive_triggers.external_sources import (
     is_source_subscriber_allowed,
     validate_subscription_against_source,
 )
+from mindroom.reactive_triggers.github_pr import (
+    find_covering_github_webhook_source,
+    is_ignored_activity_actor,
+    seed_github_pr_watch,
+)
 from mindroom.reactive_triggers.management import (
     delete_trigger_sync,
     get_trigger_record,
@@ -57,6 +62,9 @@ from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
     ExternalEventSourceSpec,
     FiringRecord,
+    GitHubPRCheckpoint,
+    GitHubPREventType,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -64,6 +72,7 @@ from mindroom.reactive_triggers.models import (
     ThreadTagSourceSpec,
     TriageSpec,
     TriggerEvent,
+    TriggerSourceSpec,
     TriggerTargetSpec,
     generate_trigger_id,
 )
@@ -197,7 +206,7 @@ class TriggersTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name=self._TOOL_NAME,
-            tools=[self.triggers],
+            tools=[self.triggers, self.watch_pr],
         )
 
     @classmethod
@@ -491,19 +500,9 @@ class TriggersTools(Toolkit):
             room_access_cache[resolved_room_id] = True
             return True
 
-        source_config = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
-        if source_config is None or not is_source_subscriber_allowed(
-            source_config,
-            context.requester_id,
-            context.config,
-            context.runtime_paths,
-        ):
-            return False
-        try:
-            validate_subscription_against_source(source_config, kind=rule.source.kind, match=rule.source.match)
-        except ValueError:
-            return False
-        return True
+        if isinstance(rule.source, GitHubPRSourceSpec):
+            return _has_github_pr_source_access(context, rule.source, user_id=context.requester_id)
+        return _has_external_event_source_access(context, rule.source)
 
     @staticmethod
     def _firing_allowed_for_history(
@@ -513,6 +512,8 @@ class TriggersTools(Toolkit):
     ) -> bool:
         if firing.rule_uid != rule.rule_uid:
             return False
+        if isinstance(rule.source, GitHubPRSourceSpec):
+            return _has_github_pr_source_access(context, rule.source, user_id=rule.owner_user_id)
         if not isinstance(rule.source, ExternalEventSourceSpec):
             return True
         return (
@@ -580,12 +581,14 @@ class TriggersTools(Toolkit):
         *,
         policy: ExternalTriggerPolicyConfig,
         common: tuple[str | None, TriageSpec | None, float | None, int, int],
-        source: RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec,
+        source: TriggerSourceSpec,
         target: TriggerTargetSpec,
         default_once: bool,
         now: float,
         initial_cursor: RoomCursor | None = None,
         initial_checkpoint: ThreadCheckpoint | None = None,
+        initial_github_pr_checkpoint: GitHubPRCheckpoint | None = None,
+        max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord:
         validated_trigger_id, triage, expires_at, max_fires_per_hour, cooldown_seconds = common
         external_store = ExternalTriggerStore(context.runtime_paths)
@@ -616,12 +619,145 @@ class TriggersTools(Toolkit):
                     record,
                     initial_cursor=initial_cursor,
                     initial_checkpoint=initial_checkpoint,
+                    initial_github_pr_checkpoint=initial_github_pr_checkpoint,
                     max_per_owner=policy.max_reactive_triggers_per_owner,
+                    max_github_pr_per_owner=max_github_pr_per_owner,
                 )
 
         created = await run_blocking_until_complete(_create)
         self._notify_reactive_service(context)
         return created
+
+    async def watch_pr(
+        self,
+        repo: str,
+        number: int,
+        events: list[Literal["activity", "ci", "merge", "close"]] | None = None,
+        prompt: str | None = None,
+        description: str | None = None,
+        ignore_actors: list[str] | None = None,
+        ignore_bots: bool = True,
+        auto_disable_on_close: bool = True,
+        reopen_on_fire: bool = True,
+        poll_interval_seconds: int | None = None,
+        target_agent: str | None = None,
+        target_room_id: str | None = None,
+        target_thread_id: str | None = None,
+        new_thread: bool = False,
+        once: bool = False,
+        expires_in_hours: float | None = 720.0,
+        trigger_id: str | None = None,
+    ) -> str:
+        """Watch one open GitHub PR for activity, CI failures/all-green, merge, or close.
+
+        Automatically binds to an authorized shared GitHub webhook event source when one covers `repo` and `events`,
+        or falls back to ETag-backed GitHub REST polling (using the requester's connected GitHub credentials if any).
+        Auto-reopens resolved target threads by default (`reopen_on_fire=True`) and auto-disables on PR merge/close.
+        """
+        try:
+            context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
+            policy = self._require_reactive_policy(context)
+            now = time.time()
+            validated_trigger_id = _validate_optional_trigger_id(trigger_id)
+            expires_at = _validate_expires_in_hours(expires_in_hours, now=now)
+            if poll_interval_seconds is not None and isinstance(poll_interval_seconds, bool):
+                msg = "poll_interval_seconds must be an integer."
+                raise ValueError(msg)
+            raw_poll = 300 if poll_interval_seconds is None else poll_interval_seconds
+            clamped_poll = max(policy.min_github_pr_poll_interval_seconds, min(raw_poll, 86400))
+            resolved_events: list[GitHubPREventType] = (
+                ["activity", "ci", "merge", "close"] if events is None else list(events)
+            )
+            candidate_source = GitHubPRSourceSpec(
+                repo=repo,
+                number=number,
+                events=resolved_events,
+                ignore_actors=list(ignore_actors or ()),
+                ignore_bots=ignore_bots,
+                auto_disable_on_close=auto_disable_on_close,
+                poll_interval_seconds=clamped_poll,
+            )
+            resolved_prompt = (
+                f"GitHub PR {candidate_source.repo}#{candidate_source.number} had new activity. "
+                "Inspect the event data below and take any needed action."
+                if prompt is None
+                else _require_non_empty_arg(prompt, "prompt", "watch_pr")
+            )
+            resolved_description = (
+                f"Watch PR {candidate_source.repo}#{candidate_source.number}" if description is None else description
+            )
+            target_args: _TriggerParams = {
+                "target_agent": target_agent,
+                "target_room_id": target_room_id,
+                "target_thread_id": target_thread_id,
+                "new_thread": new_thread,
+                "thread_key": None,
+                "reopen_on_fire": reopen_on_fire,
+                "description": resolved_description,
+                "once": once,
+            }
+            current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
+            current_thread_id = context.resolved_thread_id or context.thread_id
+            target = await self._resolve_reactive_target(
+                context,
+                target_args,
+                prompt=resolved_prompt,
+                default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
+                allow_origin=False,
+            )
+            webhook_source_id, coverage_notes = find_covering_github_webhook_source(
+                context.requester_id,
+                candidate_source.repo,
+                candidate_source.events,
+                context.config,
+                context.runtime_paths,
+            )
+            if webhook_source_id is None and not policy.github_pr_polling_enabled:
+                msg = (
+                    "GitHub PR polling is disabled by configuration and no covering GitHub webhook source "
+                    f"is available for {candidate_source.repo}."
+                )
+                raise ReactiveTriggerStoreError(msg)
+
+            seeded = await seed_github_pr_watch(
+                candidate_source.repo,
+                candidate_source.number,
+                candidate_source.events,
+                owner_user_id=context.requester_id,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                poll_interval_seconds=clamped_poll,
+                now=now,
+                webhook_only=webhook_source_id is not None,
+            )
+            all_notes = [*coverage_notes, *seeded.notes]
+            source = candidate_source.model_copy(update={"webhook_source_id": webhook_source_id})
+            common = (validated_trigger_id, None, expires_at, min(10, policy.max_fires_per_hour), 0)
+            created = await self._create_reactive_rule(
+                context,
+                target_args,
+                policy=policy,
+                common=common,
+                source=source,
+                target=target,
+                default_once=False,
+                now=now,
+                initial_github_pr_checkpoint=seeded.checkpoint,
+                max_github_pr_per_owner=policy.max_github_pr_watches_per_owner,
+            )
+            return self._payload(
+                "ok",
+                action="watch_pr",
+                trigger=self._reactive_record_payload(created),
+                delivery_mode="webhook" if webhook_source_id is not None else "poll",
+                webhook_source_id=webhook_source_id,
+                auth_mode=seeded.auth_mode,
+                pr_state=seeded.pr_state,
+                head_sha=seeded.head_sha,
+                coverage_notes=all_notes,
+            )
+        except _TOOL_ERRORS as exc:
+            return self._payload("error", message=str(exc))
 
     async def triggers(
         self,
@@ -1502,7 +1638,7 @@ def _resolve_updated_source(
     *,
     existing: ReactiveTriggerRecord,
     args: _TriggerParams,
-) -> RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec:
+) -> TriggerSourceSpec:
     if any(args[name] is not None for name in ("pattern", "senders", "include_bots")) and not isinstance(
         existing.source,
         RoomMessageSourceSpec,
@@ -1673,6 +1809,15 @@ def _build_dry_run_event_and_match(
         )
         return event, matches_external_event(rule.source, event), None
 
+    if isinstance(rule.source, GitHubPRSourceSpec):
+        return _build_github_pr_dry_run_event_and_match(
+            source=rule.source,
+            args=args,
+            extra_data=extra_data,
+            raw_kind=raw_kind,
+            now=now,
+        )
+
     raw_tag_val = extra_data.get("tag")
     raw_tag = raw_tag_val if isinstance(raw_tag_val, str) else rule.source.tag
     sample_tag = _normalize_watch_thread_tag(raw_tag)
@@ -1710,6 +1855,110 @@ def _build_dry_run_event_and_match(
         and sample_transition == rule.source.transition
     )
     return event, matched, None
+
+
+def _has_github_pr_source_access(
+    context: ToolRuntimeContext,
+    source: GitHubPRSourceSpec,
+    *,
+    user_id: str,
+) -> bool:
+    if source.webhook_source_id is None:
+        return True
+    gh_source = context.config.external_trigger_policy.event_sources.get(source.webhook_source_id)
+    return (
+        isinstance(gh_source, GitHubEventSourceConfig)
+        and is_source_subscriber_allowed(gh_source, user_id, context.config, context.runtime_paths)
+        and any(allowed.lower() == source.repo.lower() for allowed in gh_source.allowed_repos)
+    )
+
+
+def _has_external_event_source_access(
+    context: ToolRuntimeContext,
+    source: ExternalEventSourceSpec,
+) -> bool:
+    source_config = context.config.external_trigger_policy.event_sources.get(source.source_id)
+    if source_config is None or not is_source_subscriber_allowed(
+        source_config,
+        context.requester_id,
+        context.config,
+        context.runtime_paths,
+    ):
+        return False
+    try:
+        validate_subscription_against_source(source_config, kind=source.kind, match=source.match)
+    except ValueError:
+        return False
+    return True
+
+
+def _build_github_pr_dry_run_event_and_match(
+    *,
+    source: GitHubPRSourceSpec,
+    args: _TriggerParams,
+    extra_data: dict[str, Any],
+    raw_kind: str | None,
+    now: float,
+) -> tuple[TriggerEvent, bool, str | None]:
+    normalized_kind = raw_kind.strip() if raw_kind and raw_kind.strip() else None
+    event_type = _classify_github_pr_dry_run_type(source, normalized_kind, extra_data)
+    sample_actor = args["actor"]
+    actor_type = extra_data.get("actor_type")
+    sample_actor_type = actor_type if isinstance(actor_type, str) else None
+    event_kind = normalized_kind or (
+        "github_pr.merged"
+        if event_type == "merge"
+        else ("github_pr.closed" if event_type == "close" else "github_pr.update")
+    )
+    event = TriggerEvent(
+        source_type="github_pr",
+        source_id=source.repo.lower(),
+        kind=event_kind,
+        event_id="dry_run",
+        timestamp=now,
+        actor=sample_actor,
+        title=f"{source.repo}#{source.number}",
+        text=args["text"],
+        data={
+            "repo": source.repo,
+            "number": source.number,
+            "terminal": event_type in {"merge", "close"},
+            **extra_data,
+        },
+    )
+    if event_type not in source.events:
+        return event, False, None
+    if event_type == "activity" and is_ignored_activity_actor(
+        source,
+        actor=sample_actor,
+        actor_type=sample_actor_type,
+    ):
+        return (
+            event,
+            False,
+            "Dry run only (no state changed or message sent); activity from this actor is ignored by ignore_actors/ignore_bots.",
+        )
+    return event, True, None
+
+
+def _classify_github_pr_dry_run_type(
+    source: GitHubPRSourceSpec,
+    normalized_kind: str | None,
+    extra_data: Mapping[str, Any],
+) -> GitHubPREventType:
+    if normalized_kind is None:
+        raw_cat = extra_data.get("category")
+        if raw_cat in {"activity", "ci", "merge", "close"}:
+            return raw_cat
+        return source.events[0]
+    lower = normalized_kind.lower()
+    if lower in {"merge", "github_pr.merged", "pull_request.merged"}:
+        return "merge"
+    if lower in {"close", "github_pr.closed", "pull_request.closed"}:
+        return "close"
+    if lower in {"ci", "check_run", "check_suite"} or lower.startswith(("ci.", "check_run.", "check_suite.")):
+        return "ci"
+    return "activity"
 
 
 async def _read_thread_tag_present(

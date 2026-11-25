@@ -25,10 +25,10 @@ from mindroom.external_triggers.auth import (
     verify_trigger_request,
 )
 from mindroom.external_triggers.models import ExternalTriggerPayload
-from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.policy import is_source_subscriber_allowed
+from mindroom.reactive_triggers.github_pr import match_github_webhook_to_pr_rule
 from mindroom.reactive_triggers.matching import lookup_data_key, matches_external_event
-from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEvent
-from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.reactive_triggers.models import ExternalEventSourceSpec, GitHubPRSourceSpec, TriggerEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -73,23 +73,6 @@ def event_source_replay_store(runtime_paths: RuntimePaths) -> DeliveryReplayStor
         msg = "Event source replay store requires primary control state"
         raise ExternalSourceUnavailableError(msg)
     return DeliveryReplayStore(root=control_root / "event_source_replay")
-
-
-def is_source_subscriber_allowed(
-    source: ExternalEventSourceConfig,
-    owner_user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether owner_user_id may subscribe to or receive events from source."""
-    if is_external_trigger_administrator(config, runtime_paths, owner_user_id):
-        return True
-    owner_ids = {owner_user_id, *equivalent_requester_ids(owner_user_id, config, runtime_paths)}
-    for subscriber in source.subscribers:
-        subscriber_ids = {subscriber, *equivalent_requester_ids(subscriber, config, runtime_paths)}
-        if owner_ids & subscriber_ids:
-            return True
-    return False
 
 
 def validate_subscription_against_source(
@@ -391,6 +374,61 @@ def fan_out_external_event(
         if not matches_external_event(rule.source, event):
             continue
         if store.enqueue_firing(rule.trigger_id, event.event_id, event, expected_rule_uid=rule.rule_uid):
+            matched_count += 1
+
+    if isinstance(source, GitHubEventSourceConfig) and event.kind != "ping":
+        matched_count += _fan_out_github_pr_event(
+            source_id=source_id,
+            source=source,
+            event=event,
+            store=store,
+            config=config,
+            runtime_paths=runtime_paths,
+            current_time=current_time,
+        )
+    return matched_count
+
+
+def _fan_out_github_pr_event(
+    *,
+    source_id: str,
+    source: GitHubEventSourceConfig,
+    event: TriggerEvent,
+    store: ReactiveTriggerStore,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    current_time: float,
+) -> int:
+    repo = event.data.get("repo")
+    if not isinstance(repo, str) or not repo:
+        return 0
+    pr_rules = store.list_triggers(include_disabled=False, source_type="github_pr", source_id=repo.lower())
+    allowed_events = frozenset(source.allowed_events)
+    matched_count = 0
+    for rule in pr_rules:
+        if rule.expires_at is not None and rule.expires_at <= current_time:
+            continue
+        if not isinstance(rule.source, GitHubPRSourceSpec) or rule.source.webhook_source_id != source_id:
+            continue
+        if not is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths):
+            continue
+        match_result = match_github_webhook_to_pr_rule(
+            rule,
+            store.get_github_pr_checkpoint(rule.trigger_id),
+            event,
+            allowed_events=allowed_events,
+        )
+        if not match_result.matched or match_result.checkpoint is None:
+            continue
+        if store.update_github_pr_checkpoint_and_enqueue(
+            rule.trigger_id,
+            match_result.checkpoint,
+            dedupe_key=match_result.dedupe_key,
+            event=match_result.event,
+            disable_reason="pr_closed" if match_result.disable_immediately else None,
+            expected_rule_uid=rule.rule_uid,
+            now=current_time,
+        ):
             matched_count += 1
     return matched_count
 

@@ -10382,7 +10382,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "triggers"
+        "triggers",
+        "watch_pr"
       ],
       "helper_text": null,
       "icon": "Webhook",

@@ -674,7 +674,7 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
     meta = registry.entries["triggers"]
     assert meta.requires_primary_runtime is True
     assert meta.requires_room_context is True
-    assert meta.function_names == ("triggers",)
+    assert meta.function_names == ("triggers", "watch_pr")
 
     runtime_paths = _runtime_paths(tmp_path)
     built_by_alias = get_tool_by_name(
@@ -1101,7 +1101,7 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
     _record_rooms(tmp_path)
     tool = TriggersTools()
     adapted = adapt_toolkit(tool)
-    assert [fn.name for fn in adapted.functions] == ["triggers"]
+    assert [fn.name for fn in adapted.functions] == ["triggers", "watch_pr"]
     serialized_schema = json.dumps(
         {
             "name": adapted.functions[0].name,

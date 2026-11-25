@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     icon="Webhook",
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/external-triggers/",
-    function_names=("triggers",),
+    function_names=("triggers", "watch_pr"),
 )
 def triggers_tools() -> type[TriggersTools]:
     """Return unified trigger management tools."""
