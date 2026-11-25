@@ -6,7 +6,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.history.policy import fork_input_limit_tokens
 from mindroom.history.request_messages import request_layout, scope_history_messages
@@ -16,10 +16,9 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_digest, message_digest
-from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.history.request_size import RequestSizer
@@ -29,19 +28,8 @@ if TYPE_CHECKING:
 
 type WarmFrameKey = tuple[Path, str, str]
 
-_STANDARD_CACHE_TTL_SECONDS = 240.0
-_EXTENDED_CACHE_TTL_SECONDS = 3300.0
 _MAX_WARM_FRAMES = 64
 _DEFAULT_ON_SEND = ModelRequest(messages=()).on_send
-_CLAUDE_CODE_PROVIDERS = frozenset({"claude_code", ROUTE_PROVIDERS["claude_code"]})
-_EXTENDED_CACHE_PROVIDERS = frozenset(
-    {
-        ROUTE_PROVIDERS["anthropic"],
-        ROUTE_PROVIDERS["bedrock_claude"],
-        ROUTE_PROVIDERS["vertexai_claude"],
-    },
-)
-_OPENROUTER_ANTHROPIC_PREFIXES = ("anthropic/", "~anthropic/")
 
 _WARM_FRAMES_LOCK = threading.Lock()
 _WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...]]] = OrderedDict()
@@ -58,41 +46,28 @@ class SummaryFork:
     mid_turn: bool
 
 
-def _supports_extended_cache(identity: ModelIdentity | None) -> bool:
-    if identity is None:
-        return True
-    if identity.provider in _EXTENDED_CACHE_PROVIDERS:
-        return True
-    return identity.provider == ROUTE_PROVIDERS["openrouter"] and identity.id.startswith(
-        _OPENROUTER_ANTHROPIC_PREFIXES,
-    )
-
-
-def warm_cache_ttl_seconds(
-    model_params: Mapping[str, Any],
-    *,
-    identity: ModelIdentity | None = None,
-) -> float:
-    """Return the warm prompt-cache lifetime in seconds for ``model_params``."""
-    if (
-        model_params.get("extended_cache_time") is True
-        and model_params.get("cache_system_prompt") is True
-        and _supports_extended_cache(identity)
-    ):
-        return _EXTENDED_CACHE_TTL_SECONDS
-    return _STANDARD_CACHE_TTL_SECONDS
+def warm_frame_key(storage_path: Path, scope: HistoryScope, session_id: str) -> WarmFrameKey:
+    """Return the warm-frame lookup key for one scope session."""
+    return (storage_path, scope.key, session_id)
 
 
 def remember_fork_frame(
     key: WarmFrameKey,
-    template: ModelRequest,
-    system_messages: Sequence[Message],
+    request: ModelRequest,
+    system_messages: Sequence[Message] | None = None,
 ) -> None:
-    """Store a message-free request template and leading system messages for live ``/compact``."""
-    clean = replace(template, messages=(), retry_budget=None, on_send=_DEFAULT_ON_SEND, prompt_hold_pin=None)
-    entry = (clean, tuple(system_messages))
+    """Store a message-free request template and leading system messages for live ``/compact``.
+
+    When ``system_messages`` is omitted, extracts leading ``role == "system"`` messages from ``request.messages``.
+    """
+    if system_messages is None:
+        leading = next((i for i, msg in enumerate(request.messages) if msg.role != "system"), len(request.messages))
+        system = tuple(request.messages[:leading])
+    else:
+        system = tuple(system_messages)
+    clean = replace(request, messages=(), retry_budget=None, on_send=_DEFAULT_ON_SEND, prompt_hold_pin=None)
     with _WARM_FRAMES_LOCK:
-        _WARM_FRAMES[key] = entry
+        _WARM_FRAMES[key] = (clean, system)
         _WARM_FRAMES.move_to_end(key)
         while len(_WARM_FRAMES) > _MAX_WARM_FRAMES:
             _WARM_FRAMES.popitem(last=False)
@@ -206,17 +181,11 @@ def build_fork_compaction_prompt(summary_prompt: str, *, mid_turn: bool) -> str:
 
 
 def _static_skip_reason(fork: SummaryFork, summary_model_identity: ModelIdentity) -> str | None:
-    identity = fork.sizer.model.identity
-    configured = fork.sizer.configured_provider
+    model = fork.sizer.model
     base = fork.request
     checks = (
-        (identity != summary_model_identity, "different_model"),
-        (
-            identity.provider in _CLAUDE_CODE_PROVIDERS
-            or (configured is not None and provider_route(configured) == "claude_code"),
-            "unsupported_provider",
-        ),
-        (fork.sizer.model.model_params.get("cache_system_prompt") is False, "prompt_cache_disabled"),
+        (model.identity != summary_model_identity, "different_model"),
+        (model.capabilities.prompt_cache_ttl_seconds is None, "prompt_cache_disabled"),
         (base.native_compaction is not None, "native_compaction_active"),
         (base.output_schema is not None, "output_schema_set"),
         (base.tool_choice is not None, "tool_choice_set"),
@@ -262,7 +231,8 @@ def prepare_fork_request(
 
     size = fork.sizer.size(fork_request)
     current_time = time.time() if now is None else now
-    ttl = warm_cache_ttl_seconds(fork.sizer.model.model_params, identity=fork.sizer.model.identity)
+    ttl = fork.sizer.model.capabilities.prompt_cache_ttl_seconds
+    assert ttl is not None
     expected_routing = cache_routing_digest(fork.sizer.model.model_params)
     recorded_routing = (base.messages[newest_assistant_index].provider_data or {}).get(CACHE_ROUTING_KEY)
     dynamic_checks = (
@@ -289,5 +259,5 @@ __all__ = [
     "lookup_fork_frame",
     "prepare_fork_request",
     "remember_fork_frame",
-    "warm_cache_ttl_seconds",
+    "warm_frame_key",
 ]

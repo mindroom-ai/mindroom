@@ -42,6 +42,7 @@ from mindroom.history.summary_fork import (
     build_scope_fork,
     lookup_fork_frame,
     remember_fork_frame,
+    warm_frame_key,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -91,10 +92,9 @@ def _remember_scope_frame(
     if scope_context is None:
         return
     session_id = scope_context.session.session_id if scope_context.session is not None else scope_context.session_id
-    fork_native = native_history.without_native_compaction() if native_history is not None else None
     remember_fork_frame(
-        (scope_context.storage.path, scope_context.scope.key, session_id),
-        with_native_history(frame.template, fork_native),
+        warm_frame_key(scope_context.storage.path, scope_context.scope, session_id),
+        with_native_history(frame.template, native_history),
         frame.system_messages,
     )
 
@@ -106,8 +106,21 @@ async def _build_scope_fork(
     plan: ResolvedHistoryExecutionPlan,
     session: ConversationSession,
     runs: Sequence[AnyRunRecord],
+    *,
+    native_compaction_active: bool = False,
 ) -> SummaryFork | None:
     if not runs or plan.compaction_context_window is None:
+        return None
+    if native_compaction_active or template.native_compaction is not None:
+        logger.info(
+            "Compaction fork skipped",
+            session_id=session.session_id,
+            scope=owner_scope(session).key,
+            model_name=plan.compaction_model_name,
+            mid_turn=False,
+            compaction_strategy="xml",
+            fork_skip_reason="native_compaction_active",
+        )
         return None
     return await asyncio.to_thread(
         build_scope_fork,
@@ -261,6 +274,7 @@ async def prepare_scope_history(
     )
     visible_runs = scope_visible_runs(session)
     native_history = configure_native(session=session, runs=visible_runs)
+    prior_native_compaction = native_history_route(native_history) is not None
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
     _remember_scope_frame(scope_context, frame, native_history)
@@ -330,6 +344,7 @@ async def prepare_scope_history(
             execution_plan,
             session,
             visible_runs,
+            native_compaction_active=prior_native_compaction,
         )
         compaction_result = await _compact_stored_scope(
             scope_context,
@@ -373,7 +388,7 @@ async def prepare_scope_history(
     )
 
 
-async def clear_manual_compaction_request(
+async def _clear_manual_compaction_request(
     *,
     storage: ConversationStore,
     session: ConversationSession,
@@ -424,7 +439,7 @@ async def compact_scope_now(
         model=model,
     )
     plan = inputs.execution_plan
-    frame = lookup_fork_frame((context.storage.path, context.scope.key, session.session_id))
+    frame = lookup_fork_frame(warm_frame_key(context.storage.path, context.scope, session.session_id))
     fork = (
         await _build_scope_fork(
             request_sizer(model, config, plan.active_model_name),
@@ -610,7 +625,7 @@ async def _compact_stored_scope(
 
     async def compact(progress: _Progress | None, complete: _Complete) -> CompactionOutcome | None:
         async def clear_and_complete(outcome: CompactionOutcome) -> CompactionOutcome:
-            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+            await _clear_manual_compaction_request(storage=storage, session=session, state=state)
             return await complete(outcome)
 
         try:
@@ -642,10 +657,10 @@ async def _compact_stored_scope(
             raise
         except Exception:
             # A failing manual compaction must not retry on every reply.
-            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+            await _clear_manual_compaction_request(storage=storage, session=session, state=state)
             raise
         if outcome is None:
-            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+            await _clear_manual_compaction_request(storage=storage, session=session, state=state)
         return outcome
 
     return await run_scope_compaction_with_lifecycle(

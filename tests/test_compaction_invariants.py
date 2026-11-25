@@ -27,7 +27,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.history.compaction import compact_scope_history
-from mindroom.history.runtime import clear_manual_compaction_request
+from mindroom.history.runtime import _clear_manual_compaction_request
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
@@ -245,7 +245,7 @@ async def test_a_reply_that_read_no_request_leaves_one_made_meanwhile(tmp_path: 
     assert concurrent_session is not None
     storage.update_metadata(concurrent_session, with_force_compaction)
 
-    await clear_manual_compaction_request(storage=storage, session=session, state=HistoryScopeState())
+    await _clear_manual_compaction_request(storage=storage, session=session, state=HistoryScopeState())
 
     assert has_queued_force_compaction(storage, "session-1")
 

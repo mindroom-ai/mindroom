@@ -3395,7 +3395,6 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks.enrichment",
     "mindroom.llm",
-    "mindroom.providers.names",
 ]
 visibility = [
     "mindroom.history.mid_turn_compaction",

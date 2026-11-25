@@ -45,7 +45,7 @@ from mindroom.history.summary_fork import (
     lookup_fork_frame,
     prepare_fork_request,
     remember_fork_frame,
-    warm_cache_ttl_seconds,
+    warm_frame_key,
 )
 from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary
 from mindroom.history.types import HistoryPreparationInputs, ScopeSummary
@@ -62,6 +62,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import (
+    Capabilities,
     ModelIdentity,
     ModelRequest,
     NativeCompactionReplay,
@@ -447,19 +448,101 @@ async def test_request_compaction_summary_warns_on_usage_error_and_propagates_ti
         await task
 
 
-def test_warm_cache_ttl_seconds() -> None:
-    ext = {"extended_cache_time": True, "cache_system_prompt": True}
-    for identity, expected in [
-        (None, 3300.0),
-        (ModelIdentity(id="claude-sonnet-5", provider="Anthropic"), 3300.0),
-        (ModelIdentity(id="anthropic/claude-sonnet-5", provider="OpenRouter"), 3300.0),
-        (ModelIdentity(id="openai/gpt-5", provider="OpenRouter"), 240.0),
-        (ModelIdentity(id="deepseek-chat", provider="DeepSeek"), 240.0),
-    ]:
-        assert warm_cache_ttl_seconds(ext, identity=identity) == expected
-    assert warm_cache_ttl_seconds({"extended_cache_time": True, "cache_system_prompt": False}) == 240.0
-    assert warm_cache_ttl_seconds({"extended_cache_time": False, "cache_system_prompt": True}) == 240.0
-    assert warm_cache_ttl_seconds({}) == 240.0
+def test_provider_capabilities_prompt_cache_ttl_seconds(tmp_path: Path) -> None:
+    from mindroom.config.models import ModelConfig  # noqa: PLC0415
+    from mindroom.providers.claude_code.builder import build_provider as build_claude_code  # noqa: PLC0415
+
+    client = httpx2.AsyncClient(transport=httpx2_transport(lambda _req: sse_reply([])))
+
+    def _dummy_resp(_req: Any) -> httpx.Response:  # noqa: ANN401
+        pytest.fail("provider build must not send HTTP requests")
+
+    with isolated_provider_environment():
+        for idx, (spec, expected) in enumerate(
+            [
+                ({"provider": "anthropic", "id": "claude-sonnet-5", "extra_kwargs": {"api_key": "k"}}, 3300.0),
+                (
+                    {
+                        "provider": "anthropic",
+                        "id": "claude-sonnet-5",
+                        "extra_kwargs": {"api_key": "k", "extended_cache_time": False},
+                    },
+                    240.0,
+                ),
+                (
+                    {
+                        "provider": "anthropic",
+                        "id": "claude-sonnet-5",
+                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
+                    },
+                    None,
+                ),
+            ],
+        ):
+            assert (
+                provider_for(spec, tmp_path / f"anth-{idx}", client).capabilities.prompt_cache_ttl_seconds == expected
+            )
+
+        for idx, (spec, expected) in enumerate(
+            [
+                (
+                    {"provider": "openrouter", "id": "anthropic/claude-sonnet-5", "extra_kwargs": {"api_key": "k"}},
+                    3300.0,
+                ),
+                (
+                    {"provider": "openrouter", "id": "~anthropic/claude-sonnet-5", "extra_kwargs": {"api_key": "k"}},
+                    3300.0,
+                ),
+                (
+                    {
+                        "provider": "openrouter",
+                        "id": "anthropic/claude-sonnet-5",
+                        "extra_kwargs": {"api_key": "k", "extended_cache_time": False},
+                    },
+                    240.0,
+                ),
+                (
+                    {
+                        "provider": "openrouter",
+                        "id": "anthropic/claude-sonnet-5",
+                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
+                    },
+                    None,
+                ),
+                ({"provider": "openrouter", "id": "openai/gpt-5", "extra_kwargs": {"api_key": "k"}}, 240.0),
+                (
+                    {
+                        "provider": "openrouter",
+                        "id": "openai/gpt-5",
+                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
+                    },
+                    None,
+                ),
+                ({"provider": "deepseek", "id": "deepseek-chat", "extra_kwargs": {"api_key": "k"}}, 240.0),
+                ({"provider": "openai", "id": "gpt-5", "api": "responses", "extra_kwargs": {"api_key": "k"}}, 240.0),
+                (
+                    {
+                        "provider": "openai",
+                        "id": "gpt-5",
+                        "api": "responses",
+                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
+                    },
+                    None,
+                ),
+            ],
+        ):
+            sub = tmp_path / f"oai-{idx}"
+            sub.mkdir()
+            assert openai_family_adapter(spec, sub, _dummy_resp).capabilities.prompt_cache_ttl_seconds == expected
+
+        _, runtime_paths = _make_config(tmp_path / "cc")
+        cc = build_claude_code(
+            ModelConfig(provider="claude_code", id="claude-sonnet-5"),
+            runtime_paths,
+            execution_identity=None,
+            auto_install=False,
+        )
+        assert cc.capabilities.prompt_cache_ttl_seconds is None
 
 
 def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path: Path) -> None:
@@ -487,12 +570,9 @@ def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path
 def test_prepare_fork_request_gates() -> None:
     _, fork = _warm_fork()
     assert _gate(fork, identity=ModelIdentity(id="other", provider="Synthetic")) == (None, "different_model")
-    for cc_provider in ("claude_code", "Anthropic (Claude Code)"):
-        cc_model = ScriptedModel([], identity=ModelIdentity(id="claude", provider=cc_provider))
-        assert _gate(_warm_fork(cc_model)[1]) == (None, "unsupported_provider")
 
     older_msgs = (*fork.request.messages, _msg("user", "More"), _msg("assistant", "Unanchored"))
-    uncached = ScriptedModel([], model_params={"cache_system_prompt": False})
+    uncached = ScriptedModel([], capabilities=Capabilities(prompt_cache_ttl_seconds=None))
     alice_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-alice", "session_id": "sess-alice"})
     bob_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-bob", "session_id": "sess-bob"})
     _, alice_fork = _warm_fork(alice_routed)
@@ -529,11 +609,10 @@ def test_prepare_fork_request_gates() -> None:
     assert _gate(fork, now=_TS + 239.0)[1] is None
     assert _gate(fork, now=_TS + 240.0) == (None, "cache_cold")
     assert _gate(fork, now=_TS - 1.0) == (None, "cache_cold")
-    ext_params = {"extended_cache_time": True, "cache_system_prompt": True}
     ext_model = ScriptedModel(
         [],
         identity=ModelIdentity(id="claude-sonnet-5", provider="Anthropic"),
-        model_params=ext_params,
+        capabilities=Capabilities(prompt_cache_ttl_seconds=3300.0),
     )
     _, ext_fork = _warm_fork(ext_model)
     assert _gate(ext_fork, now=_TS + 3299.0)[1] is None
@@ -595,6 +674,14 @@ def test_fork_frame_lru_isolation_sanitization_and_eviction(tmp_path: Path) -> N
     remember_fork_frame((tmp_path / "a.db", "agent:code", "extra-64"), tpl, _SYS)
     assert lookup_fork_frame((tmp_path / "a.db", "agent:code", "extra-0")) is not None
     assert lookup_fork_frame((tmp_path / "a.db", "agent:code", "extra-1")) is None
+
+    # Omitting system_messages extracts leading role=="system" messages from the live request.
+    live_key = warm_frame_key(tmp_path / "a.db", TEST_AGENT_SCOPE, "sess-live-split")
+    live_req = ModelRequest(messages=(*_SYS, _msg("user", "u"), _msg("system", "mid-turn")), tools=(_TOOL,))
+    remember_fork_frame(live_key, live_req)
+    split_found = lookup_fork_frame(live_key)
+    assert split_found is not None
+    assert (split_found[0].messages, split_found[1]) == ((), _SYS)
 
 
 def test_build_scope_fork_constructs_turnless_whole_history_request() -> None:
@@ -1602,3 +1689,74 @@ async def test_passing_warm_fork_summary_is_tokenized_only_once(
     assert outcome is not None
     assert calls_count == 1
     assert xml_primary.requests == []
+
+
+@pytest.mark.asyncio
+async def test_scope_fork_fails_fast_when_native_compaction_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope fork short-circuits in O(1) as native_compaction_active without materializing history runs."""
+    from mindroom.history import runtime as history_runtime  # noqa: PLC0415
+
+    config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000, replay_window_tokens=20_000)
+    inputs = _inputs(config)
+    native_settings = NativeCompactionReplay(route="anthropic:claude", threshold=12_000)
+
+    class _NativeRoute:
+        def native_compaction_settings(self, **_kwargs: Any) -> NativeCompactionReplay:  # noqa: ANN401
+            return native_settings
+
+    model = ScriptedModel([], capabilities=Capabilities(native_compaction=True), native_history_route=_NativeRoute())
+    _install_default(monkeypatch, model)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", SummaryCalls(summary="xml-summary"))
+
+    def forbid_build_scope_fork(**_kwargs: Any) -> Any:  # noqa: ANN401
+        pytest.fail("build_scope_fork must not run when native compaction is active")
+
+    monkeypatch.setattr(history_runtime, "build_scope_fork", forbid_build_scope_fork)
+
+    # 1. Pre-reply path with queued /compact on an active native-compaction route.
+    seed_session(storage, _session("sess-native-pre", runs=[_warm_run(model, ModelRequest(messages=()), 4_000)]))
+    sess = storage.load_session("sess-native-pre")
+    assert sess is not None
+    set_force_compaction(storage, session=sess, forced=True)
+    frame = RequestFrame(ModelRequest(messages=()), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
+    with capture_logs() as pre_logs:
+        prepared = await prepare_scope_history(
+            sizer=RequestSizer(model, "anthropic"),
+            frame=frame,
+            resolved_inputs=inputs,
+            runtime_paths=paths,
+            config=config,
+            scope_context=_scope_ctx(storage, "sess-native-pre", config, paths),
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+            pipeline_timing=None,
+            allow_native_compaction=True,
+        )
+    assert prepared.compaction_reply_outcome == "success"
+    assert any(entry.get("fork_skip_reason") == "native_compaction_active" for entry in pre_logs)
+
+    # 2. Live /compact path with a remembered native-compaction frame.
+    seed_session(
+        storage,
+        _session("sess-native-live", runs=[_warm_run(model, ModelRequest(messages=()), 4_000, run_id="r-live")]),
+    )
+    sess_live = storage.load_session("sess-native-live")
+    assert sess_live is not None
+    set_force_compaction(storage, session=sess_live, forced=True)
+    remember_fork_frame(
+        warm_frame_key(storage.path, TEST_AGENT_SCOPE, "sess-native-live"),
+        ModelRequest(messages=(*_SYS, _msg("user", "hi")), native_compaction=native_settings),
+    )
+    with capture_logs() as live_logs:
+        empty = await compact_scope_now(
+            _scope_ctx(storage, "sess-native-live", config, paths),
+            inputs,
+            lambda: model,
+            RecordingCompactionLifecycle(),
+            config,
+            paths,
+        )
+    assert empty is False
+    assert any(entry.get("fork_skip_reason") == "native_compaction_active" for entry in live_logs)

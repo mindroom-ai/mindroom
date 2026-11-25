@@ -147,7 +147,7 @@ def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], rout
     return replay_basis(summary, runs)
 
 
-def readable_checkpoint_summary(message: Message) -> tuple[str, str] | None:
+def _readable_checkpoint_summary(message: Message) -> tuple[str, str] | None:
     """Return ``(basis, summary_text)`` when ``message`` carries a readable checkpoint with a recorded basis."""
     state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
     if not isinstance(state, dict) or not isinstance(basis := state.get("basis"), str):
@@ -162,7 +162,7 @@ def iter_readable_checkpoints(runs: Sequence[AnyRunRecord]) -> Iterator[tuple[in
     for index in range(len(runs) - 1, -1, -1):
         messages = runs[index].messages
         for position in range(len(messages) - 1, -1, -1):
-            if (checkpoint := readable_checkpoint_summary(messages[position])) is not None:
+            if (checkpoint := _readable_checkpoint_summary(messages[position])) is not None:
                 yield index, position, checkpoint[0], checkpoint[1]
 
 
@@ -171,7 +171,7 @@ def checkpoint_summary(message: Message, basis: str) -> str | None:
 
     Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
     """
-    checkpoint = readable_checkpoint_summary(message)
+    checkpoint = _readable_checkpoint_summary(message)
     return checkpoint[1] if checkpoint is not None and checkpoint[0] == basis else None
 
 

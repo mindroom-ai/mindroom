@@ -27,7 +27,7 @@ from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import run_scope_compaction_with_lifecycle
 from mindroom.history.storage import new_scope_session, read_fold_basis
 from mindroom.history.summarizer import load_summarizer, summarize_runs
-from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
+from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame, warm_frame_key
 from mindroom.history.summary_message import (
     compaction_summary_message,
     compaction_summary_text,
@@ -230,12 +230,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     scope_fold = compaction.scope_fold
     if scope_fold is not None:
         store, session = scope_fold
-        leading = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
-        remember_fork_frame(
-            (store.path, owner_scope(session).key, session.session_id),
-            live_request,
-            messages[:leading],
-        )
+        remember_fork_frame(warm_frame_key(store.path, owner_scope(session), session.session_id), live_request)
     requested = _consume_request(state.run.compaction_requests, compaction.scope)
     if (compaction.stopped and not requested) or (policy := compaction.policy) is None:
         return
