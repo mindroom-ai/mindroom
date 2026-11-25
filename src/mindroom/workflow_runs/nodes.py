@@ -45,7 +45,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.peers import script_op, session_turn_message, withdraw_unread
+from mindroom.workflow_runs.peers import script_op, session_turn_message, valid_wait_seconds, withdraw_unread
 from mindroom.workflow_runs.replay import (
     CALLING_NODE,
     DIRTY_DIGEST,
@@ -320,12 +320,18 @@ async def _reuse_saved(
     action: str,
 ) -> NodeReceipt:
     """Adopt a saved node for this attempt (`hit`, `attach`, or `raise_indeterminate`)."""
-    stamp_fields: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
-    if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
-        stamp_fields["phase"] = phase
-    if regrouped := members != saved.members:
-        stamp_fields["members"] = members
-    await engine.stamp(saved, epoch, dirty_after=regrouped, **stamp_fields)
+    phase = cast("str | None", meta.get("phase"))
+    regrouped = members != saved.members
+    await engine.stamp(
+        saved,
+        epoch,
+        dirty_after=regrouped,
+        attempt=run.attempt,
+        stale=False,
+        cached=action == "hit",
+        phase=phase,
+        members=members,
+    )
     if action == "raise_indeterminate":
         return replace(receipt(saved), state=WorkflowNodeState.FAILED)
     if action == "attach":
@@ -484,7 +490,7 @@ async def _save_immediate(
             if not done:
                 waiting = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
                 wait_node = await asyncio.to_thread(engine.store.put_node, waiting, epoch, dirty_after=True)
-                engine.spawn(run.run_id, wait_inbox(engine, run, wait_node, epoch, float(value)))  # type: ignore[arg-type]
+                engine.spawn(run.run_id, wait_inbox(engine, run, wait_node, epoch, valid_wait_seconds(value)))
                 return receipt(wait_node)
             node = replace(node, result=value)
     elif kind == "value":
@@ -497,6 +503,14 @@ async def _save_immediate(
         raise WorkflowRunStoreError(msg)
     done_node = replace(node, ended_at=node.started_at)
     return receipt(await asyncio.to_thread(engine.store.put_node, done_node, epoch, dirty_after=True))
+
+
+def _turn_number(turn: WorkflowNode) -> int:
+    value = turn.request["turn"]
+    if type(value) is not int:
+        msg = "Session turn number must be a whole number of at least 1."
+        raise WorkflowRunStoreError(msg)
+    return value
 
 
 def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
@@ -515,8 +529,8 @@ def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict
         if turn.attempt == run.attempt and not turn.stale
     ]
     earlier = sorted(
-        (turn for turn in in_attempt if turn.key != key and int(turn.request["turn"]) < turn_num),  # type: ignore[arg-type]
-        key=lambda turn: (int(turn.request["turn"]), turn.seq),  # type: ignore[arg-type]
+        (turn for turn in in_attempt if turn.key != key and _turn_number(turn) < turn_num),
+        key=lambda turn: (_turn_number(turn), turn.seq),
     )
     prev = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
     lineage = [(session.digest, session.generation), *((t.key, t.digest, t.generation) for t in earlier)]

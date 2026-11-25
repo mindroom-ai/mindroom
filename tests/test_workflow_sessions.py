@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from mindroom.llm.model import ModelRequest
+    from mindroom.llm.provider import ModelRequest
 
 
 @pytest.fixture

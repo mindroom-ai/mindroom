@@ -100,7 +100,11 @@ def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
     # A bool is no cost, though it is an int.
     receipts = {key: float(usd) for key, usd in stored.items() if type(usd) in (int, float)}
     total = (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY)
-    if type(total) in (int, float) and (unkeyed := total - sum(receipts.values())) > 1e-9:
+    if (
+        isinstance(total, int | float)
+        and not isinstance(total, bool)
+        and (unkeyed := total - sum(receipts.values())) > 1e-9
+    ):
         receipts[LEGACY_COST_ID] = receipts.get(LEGACY_COST_ID, 0.0) + unkeyed
     return receipts
 

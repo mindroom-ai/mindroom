@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import Enum
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
@@ -77,6 +78,13 @@ _CHARGE_SECONDS = 60.0
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
 # "pending" while it cannot be checked yet, "revoked" when it is gone.
 type ResumeAccess = ToolRuntimeContext | Literal["pending", "revoked"]
+
+
+class _Unset(Enum):
+    VALUE = 0
+
+
+_UNSET = _Unset.VALUE
 
 
 @dataclass(slots=True)
@@ -406,13 +414,19 @@ class WorkflowEngine:
                 waits = WorkflowNodeState.WAITING in states and not working
                 next_state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
                 if next_state is not run.state:
-                    changes = {"state": next_state, **self.time_left(run, span)}
-                    self.store.update_run(run_id, run.epoch, when=SERVED_RUN_STATES, **changes)
+                    left = self._time_left(run, span)
+                    self.store.update_run(
+                        run_id,
+                        run.epoch,
+                        when=SERVED_RUN_STATES,
+                        state=next_state,
+                        runtime_seconds_left=run.runtime_seconds_left if left is None else left,
+                    )
                     return True
         return False
 
-    def time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> dict[str, object]:
-        """Return, as a change to save, the working time *run* has left after what it used since the last charge.
+    def _time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> float | None:
+        """Return the working time *run* has left after what it used since the last charge, or None when unchanged.
 
         Only a running run uses any, up to where its script ended: time spent waiting for a person, starting or
         ended is not charged, and neither is the time until somebody looked at a script that had ended. Off the
@@ -426,11 +440,11 @@ class WorkflowEngine:
         else:
             since, now = span
         if run.state is not WorkflowRunState.RUNNING or run.runtime_seconds_left is None:
-            return {}
+            return None
         with suppress(ScriptRunNotFoundError):
             if ended := self.scripts.store.get_run(run.script_run_id or "").finished_at:
                 now -= (datetime.now(UTC) - datetime.fromisoformat(ended)).total_seconds()
-        return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - max(0.0, now - since))}
+        return max(0.0, run.runtime_seconds_left - max(0.0, now - since))
 
     async def stamp(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
         """Apply a fenced `update_node` off the event loop."""
@@ -715,7 +729,9 @@ class WorkflowEngine:
         run: WorkflowRun,
         state: WorkflowRunState,
         error: str | None,
-        **changes: object,
+        *,
+        finished_at: str | None | _Unset = _UNSET,
+        previous_source_digest: str | None | _Unset = _UNSET,
     ) -> WorkflowRun:
         """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters.
 
@@ -738,15 +754,30 @@ class WorkflowEngine:
                 if state is WorkflowRunState.COMPLETED:
                     # What the completed script no longer reaches leaves the run's current view.
                     await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch)
-                at = current.finished_at or utc_timestamp()
-                changes = {"state": state, "error": error, "finished_at": at, **self.time_left(current), **changes}
+                at = current.finished_at or utc_timestamp() if finished_at is _UNSET else finished_at
+                left = self._time_left(current)
                 attempt = current.script_run_id or ""
 
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
                     if not written.cancelled() and written.exception() is None:
                         self.launched.pop(attempt, None)
 
-                end = asyncio.ensure_future(asyncio.to_thread(self.store.update_run, run.run_id, run.epoch, **changes))
+                end = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        self.store.update_run,
+                        run.run_id,
+                        run.epoch,
+                        state=state,
+                        error=error,
+                        finished_at=at,
+                        runtime_seconds_left=current.runtime_seconds_left if left is None else left,
+                        previous_source_digest=(
+                            current.previous_source_digest
+                            if previous_source_digest is _UNSET
+                            else previous_source_digest
+                        ),
+                    ),
+                )
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
                 ended_run = await asyncio.shield(end)
@@ -772,7 +803,9 @@ class WorkflowEngine:
             WorkflowRunState.CANCELLED: WorkflowNodeState.CANCELLED,
         }
         end = ends.get(child.state, WorkflowNodeState.FAILED)
-        error = None if end is WorkflowNodeState.COMPLETED else {"kind": child.state.value, "message": child.error}
+        error: dict[str, object] | None = (
+            None if end is WorkflowNodeState.COMPLETED else {"kind": child.state.value, "message": child.error}
+        )
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             outer = self.store.get_run(str(child.parent_run_id))
             key = f"{child.parent_node_key}/{child.run_id}"
@@ -790,8 +823,8 @@ class WorkflowEngine:
                 # by one of them at a time, so neither takes the same time off twice or writes back an older time.
                 async with self.condition(run_id):
                     run = self.store.get_run(run_id)
-                    if charge := self.time_left(run):
-                        run = await asyncio.to_thread(self.store.update_run, run_id, epoch, **charge)
+                    if (left := self._time_left(run)) is not None:
+                        run = await asyncio.to_thread(self.store.update_run, run_id, epoch, runtime_seconds_left=left)
                 left = run.runtime_seconds_left
             if left is not None:
                 # An attempt that had ended already is judged as the pass judges it, before the run is stopped.
@@ -978,8 +1011,13 @@ class WorkflowEngine:
         state, error = run_outcome(self.store.get_run(run.run_id), attempt)
         if replay and state is WorkflowRunState.INTERRUPTED and error in AUTO_RESUME_REASONS:
             # The attempt is over and the run is not: its nodes are settled, and the next attempt runs the same script.
-            same = {"finished_at": None, "previous_source_digest": run.source_digest}
-            return await self.end_run(run, WorkflowRunState.STARTING, None, **same)
+            return await self.end_run(
+                run,
+                WorkflowRunState.STARTING,
+                None,
+                finished_at=None,
+                previous_source_digest=run.source_digest,
+            )
         return await self.end_run(run, state, error)
 
     async def close(self) -> None:

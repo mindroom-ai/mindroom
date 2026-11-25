@@ -205,13 +205,14 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         engine, context = _waiting_runtime()
         outer = _outer_call()
         # A run inside a run is found by its script, which is read once, here, for its key and for the run.
-        text = None if outer is None else await resolve_source(engine, context, arguments)
-        origin = _inline_origin(context) if text is None else nested_key(outer, text, arguments.get("args"))
-        stopped = (
-            _resumable_child(engine, outer, text, arguments)
-            if outer is not None and text is not None and running_child_run() is None
-            else None
-        )
+        if outer is None:
+            text = None
+            origin = _inline_origin(context)
+            stopped = None
+        else:
+            text = await resolve_source(engine, context, arguments)
+            origin = nested_key(outer, text, arguments.get("args"))
+            stopped = _resumable_child(engine, outer, text, arguments) if running_child_run() is None else None
         if stopped is not None and outer is not None:
             action = partial(self._continue_child, engine, context, origin, outer, stopped, arguments)
         else:
@@ -411,7 +412,9 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             if function_name == _RESUME:
                 return await _resume_job(engine, context, arguments, self.limits, job_id, runtime, after=after)
             run = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
-            refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id, job_id, run.epoch)
+
+            async def refused() -> bool:
+                return await asyncio.to_thread(engine.store.delete_intent, run.run_id, job_id, run.epoch)
         except ValueError as exc:
             return str(exc)
         return _run_job(engine, run, job_id, context, self.limits, after=after, refused=refused)

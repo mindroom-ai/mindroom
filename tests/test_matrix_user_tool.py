@@ -756,6 +756,7 @@ async def test_the_owners_mcp_gateway_call_reads_an_agents_reply_with_its_tool_c
                     function="matrix_user_read",
                     arguments=arguments,
                 )
+                assert "result" in result
                 (line,) = json.loads(result["result"])["messages"]
                 shown.append(line.rsplit(" | ", 1)[1])
         return shown
