@@ -7890,6 +7890,7 @@ from = ["mindroom.matrix.voice_message"]
 expose = [
     "ResolvedVisibleMessage",
     "bundled_replacement_candidates",
+    "decrypt_bundled_replacement",
     "decrypt_wire_event_source",
     "extract_visible_edit_body",
     "is_visible_room_message",

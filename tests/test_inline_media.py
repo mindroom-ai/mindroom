@@ -24,11 +24,7 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
 )
 from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
-from mindroom.matrix.inline_media import (
-    attach_inline_media,
-    clear_inline_media_registry,
-    register_inline_media,
-)
+from mindroom.matrix.inline_media import _REGISTRY, attach_inline_media, register_inline_media
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -51,9 +47,9 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _reset_inline_media_registry() -> Iterator[None]:
-    clear_inline_media_registry()
+    _REGISTRY.clear()
     yield
-    clear_inline_media_registry()
+    _REGISTRY.clear()
 
 
 def _encrypted_file(mxc_uri: str, *, mime_type: str = "image/png", size: int = 123) -> dict[str, Any]:
@@ -247,7 +243,7 @@ async def test_prepare_message_content_freezes_inline_media_across_registry_clea
     assert isinstance(prepared, dict)
     assert prepared[INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/frozen1": file1}
 
-    clear_inline_media_registry()
+    _REGISTRY.clear()
     await send_message_outcome(client, room_id, prepared, content_is_prepared=True)
     assert client.room_send.await_args.kwargs["content"][INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/frozen1": file1}
 
@@ -283,15 +279,19 @@ def test_segmented_messages_filter_inline_media_per_segment_and_keep_tokens_inta
 
 
 @pytest.mark.asyncio
-async def test_long_text_sidecar_keeps_full_inline_media_and_omits_from_preview() -> None:
-    """Oversized encrypted messages store io.mindroom.inline_media in the encrypted sidecar, not the truncated preview."""
+@pytest.mark.parametrize("is_edit", [False, True])
+async def test_long_text_sidecar_keeps_full_inline_media_and_omits_from_preview(is_edit: bool) -> None:
+    """Oversized encrypted messages and edits keep io.mindroom.inline_media in the sidecar, never on preview/wrapper."""
     room_id = "!enc:localhost"
     client = _encrypted_client(room_id, encrypted=True)
     file1 = _encrypted_file("mxc://hs/sidecar1")
     register_inline_media(room_id, "mxc://hs/sidecar1", file1)
 
     huge_body = "![big](mxc://hs/sidecar1)\n\n" + ("word " * 15000)
-    attached = attach_inline_media(build_message_content(huge_body), room_id, room_encrypted=True)
+    content = build_message_content(huge_body)
+    if is_edit:
+        content = build_edit_event_content(event_id="$orig", new_content=content, new_text=huge_body)
+    attached = attach_inline_media(content, room_id, room_encrypted=True)
     captured_sidecar: dict[str, Any] = {}
 
     async def fake_upload(
@@ -306,9 +306,14 @@ async def test_long_text_sidecar_keeps_full_inline_media_and_omits_from_preview(
     with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=AsyncMock(side_effect=fake_upload)):
         preview = await prepare_large_message(client, room_id, attached, room_encrypted=True)
 
-    assert "io.mindroom.long_text" in preview
+    preview_visible = preview["m.new_content"] if is_edit else preview
+    sidecar_visible = captured_sidecar["payload"]["m.new_content"] if is_edit else captured_sidecar["payload"]
+    assert "io.mindroom.long_text" in preview_visible
     assert INLINE_MEDIA_CONTENT_KEY not in preview
-    assert captured_sidecar["payload"][INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/sidecar1": file1}
+    assert INLINE_MEDIA_CONTENT_KEY not in preview_visible
+    if is_edit:
+        assert INLINE_MEDIA_CONTENT_KEY not in captured_sidecar["payload"]
+    assert sidecar_visible[INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/sidecar1": file1}
 
 
 def test_segmented_messages_never_splits_inline_image_token_in_half() -> None:
@@ -316,7 +321,6 @@ def test_segmented_messages_never_splits_inline_image_token_in_half() -> None:
     room_id = "!enc:localhost"
     file1 = _encrypted_file("mxc://hs/nosplit1")
     register_inline_media(room_id, "mxc://hs/nosplit1", file1)
-    # Single line with no newlines where the image token lands right across the encrypted split budget.
     image_markdown = "![chart](mxc://hs/nosplit1)"
     body = ("a" * 14_800) + image_markdown + ("b" * 18_000)
     attached = attach_inline_media(build_message_content(body), room_id, room_encrypted=True)
@@ -326,42 +330,6 @@ def test_segmented_messages_never_splits_inline_image_token_in_half() -> None:
     assert any(image_markdown in seg["body"] for seg in all_segments)
     maps = [seg[INLINE_MEDIA_CONTENT_KEY] for seg in all_segments if INLINE_MEDIA_CONTENT_KEY in seg]
     assert maps == [{"mxc://hs/nosplit1": file1}]
-
-
-@pytest.mark.asyncio
-async def test_long_text_edit_sidecar_keeps_inline_media_in_new_content_not_outer_wrapper() -> None:
-    """Oversized encrypted edits keep io.mindroom.inline_media inside m.new_content in the sidecar, never on preview/wrapper."""
-    room_id = "!enc:localhost"
-    client = _encrypted_client(room_id, encrypted=True)
-    file1 = _encrypted_file("mxc://hs/sidecar-edit1")
-    register_inline_media(room_id, "mxc://hs/sidecar-edit1", file1)
-
-    huge_body = "![big](mxc://hs/sidecar-edit1)\n\n" + ("word " * 15000)
-    edit_content = build_edit_event_content(
-        event_id="$orig",
-        new_content=build_message_content(huge_body),
-        new_text=huge_body,
-    )
-    attached = attach_inline_media(edit_content, room_id, room_encrypted=True)
-    captured_sidecar: dict[str, Any] = {}
-
-    async def fake_upload(
-        _client: object,
-        _room_id: str,
-        payload: dict[str, Any],
-        **_kwargs: object,
-    ) -> tuple[str, dict[str, Any]]:
-        captured_sidecar["payload"] = payload
-        return "mxc://hs/sidecar-edit-json", _encrypted_file("mxc://hs/sidecar-edit-json", mime_type="application/json")
-
-    with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=AsyncMock(side_effect=fake_upload)):
-        preview = await prepare_large_message(client, room_id, attached, room_encrypted=True)
-
-    assert "io.mindroom.long_text" in preview["m.new_content"]
-    assert INLINE_MEDIA_CONTENT_KEY not in preview
-    assert INLINE_MEDIA_CONTENT_KEY not in preview["m.new_content"]
-    assert INLINE_MEDIA_CONTENT_KEY not in captured_sidecar["payload"]
-    assert captured_sidecar["payload"]["m.new_content"][INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/sidecar-edit1": file1}
 
 
 @pytest.mark.asyncio
