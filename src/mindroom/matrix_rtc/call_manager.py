@@ -289,13 +289,12 @@ class _CallAgentUnavailableError(Exception):
     """The call's agent could not be materialized; the join is skipped, not retried."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class _StartingCall:
     """One session start that revocation may cancel before publication."""
 
     session: CallSession
     task: asyncio.Task[None]
-    revoked: bool = False
 
 
 @dataclass
@@ -567,7 +566,6 @@ class CallManager:
             return
         starting_call = room_call.starting_call
         if starting_call is not None:
-            starting_call.revoked = True
             starting_call.task.cancel()
             await asyncio.gather(starting_call.task, return_exceptions=True)
             await _stop_session(starting_call.session)
@@ -586,32 +584,13 @@ class CallManager:
             self._reconcile_requests.pop(room_id, None)
             await room_call.end_call()
 
-    def _unowned_watched_room_ids(
-        self,
-        owners: _CallRoomOwners,
-        room_ids: Iterable[str] | None = None,
-    ) -> list[str]:
-        """Return watched room IDs in scope whose freshest snapshot is no longer owned by this call agent."""
-        watched_ids = list(self._rooms) if room_ids is None else [r for r in room_ids if r in self._rooms]
-        return [
-            room_id
-            for room_id in watched_ids
-            if (room_call := self._rooms.get(room_id)) is not None
-            and not self._is_configured_call_room(self._client.rooms.get(room_id) or room_call.room, owners=owners)
-        ]
-
     async def _reconcile_after_config_update(self) -> None:
-        """Evict unowned rooms, re-check reply authorization, and retry calls blocked only by a call-config failure."""
-        owners = self._call_room_owners()
-        unowned_room_ids = self._unowned_watched_room_ids(owners)
-        unowned_set = set(unowned_room_ids)
-        owned_room_ids = [room_id for room_id in list(self._rooms) if room_id not in unowned_set]
-        if unowned_room_ids:
-            await asyncio.gather(*(self._evict_unowned_room(room_id) for room_id in unowned_room_ids))
-        if self._shutting_down:
-            return
+        """Re-check reply authorization and retry calls blocked only by an earlier call-config failure."""
         unblocked_rooms: list[nio.MatrixRoom] = []
-        for room_id in owned_room_ids:
+        for room_id in list(self._rooms):
+            room_call = self._rooms.get(room_id)
+            if room_call is None or room_call.logical_call is None or room_call.logical_call.join_block != "config":
+                continue
             lock = self._locks.setdefault(room_id, asyncio.Lock())
             async with lock:
                 if self._shutting_down:
@@ -628,9 +607,9 @@ class CallManager:
         for room in unblocked_rooms:
             # Joined rooms are already retried by reconcile_joined_rooms above.
             if (
-                room.room_id not in self._client.rooms
+                room.room_id in self._rooms
+                and room.room_id not in self._client.rooms
                 and room.room_id not in self._departed_rooms
-                and self._is_configured_call_room(room)
             ):
                 self._request_reconcile(room)
 
@@ -748,27 +727,21 @@ class CallManager:
         """Reconcile all configured calls, or only the requested joined rooms."""
         if self._shutting_down:
             return
-        candidates = (
-            list(self._client.rooms.values())
-            if room_ids is None
-            else [room for room_id in room_ids if (room := self._client.rooms.get(room_id)) is not None]
-        )
         # Room ownership is read from storage, so one read serves the whole pass instead of several per room.
         owners = self._call_room_owners()
+        scope = set(self._client.rooms) | set(self._rooms) if room_ids is None else room_ids
         rooms: list[nio.MatrixRoom] = []
         unowned_room_ids: list[str] = []
-        for room in candidates:
+        for room_id in scope:
+            joined = self._client.rooms.get(room_id)
+            room = joined or (room_call.room if (room_call := self._rooms.get(room_id)) is not None else None)
+            if room is None:
+                continue
             if self._is_configured_call_room(room, owners=owners):
-                rooms.append(room)
-            elif room.room_id in self._rooms:
-                unowned_room_ids.append(room.room_id)
-        checked_room_ids = {room.room_id for room in candidates}
-        extra_scope = (
-            [r for r in self._rooms if r not in checked_room_ids]
-            if room_ids is None
-            else [r for r in room_ids if r not in checked_room_ids]
-        )
-        unowned_room_ids.extend(self._unowned_watched_room_ids(owners, extra_scope))
+                if joined is not None:
+                    rooms.append(joined)
+            elif room_id in self._rooms:
+                unowned_room_ids.append(room_id)
         for room in rooms:
             self._observe(room)
         await asyncio.gather(
@@ -810,7 +783,6 @@ class CallManager:
         if logical_call is not None:
             logical_call.join_block = "terminal"
         if starting_call is not None:
-            starting_call.revoked = True
             starting_call.task.cancel()
             await asyncio.gather(starting_call.task, return_exceptions=True)
             await _stop_session(starting_call.session)
@@ -1449,7 +1421,7 @@ class CallManager:
             logger.info("call_join_aborted_authorization_revoked", room_id=room_id, agent=self._agent_name)
             return False
         except asyncio.CancelledError:
-            if not starting_call.revoked and self._call_start_is_allowed(room_id, session.requester_id, logical_call):
+            if self._call_start_is_allowed(room_id, session.requester_id, logical_call):
                 raise
             logger.info("call_join_cancelled_authorization_revoked", room_id=room_id, agent=self._agent_name)
             return False
