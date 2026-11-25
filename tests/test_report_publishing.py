@@ -1231,43 +1231,6 @@ async def test_dynamic_workflow_run_source_type_returns_removal_error(tmp_path: 
     assert "workflow_run" in result["message"]
 
 
-def test_legacy_persisted_dynamic_workflow_run_report_loads_and_revokes(tmp_path: Path) -> None:
-    """An existing PublishedReport JSON on disk with source_type='dynamic_workflow_run' loads and revokes cleanly."""
-    storage_root = tmp_path / "mindroom_data"
-    artifact_path = storage_root / "reports" / "legacy.html"
-    artifact_path.parent.mkdir(parents=True)
-    artifact_path.write_text("<!doctype html><h1>Old Report</h1>", encoding="utf-8")
-    slug = "pub_11111111111111111111111111111111"
-    record_path = storage_root / "report_publishing" / "public_reports" / f"{slug}.json"
-    record_path.parent.mkdir(parents=True)
-    record_path.write_text(
-        json.dumps(
-            {
-                "slug": slug,
-                "source_type": "dynamic_workflow_run",
-                "source": {"workflow_id": "old-wf", "run_id": "run_123"},
-                "artifact_kind": "html_file",
-                "artifact_path": "reports/legacy.html",
-                "title": "Old Report",
-                "requested_by": "@alice:localhost",
-                "published_by": "@alice:localhost",
-                "published_at": "2026-10-01T00:00:00Z",
-                "public_url": f"https://acme.mindroom.chat/reports/public/{slug}",
-                "revoked_at": None,
-                "revoked_by": None,
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    store = ReportPublishingStore(storage_root)
-    loaded = store.get_public_report(slug)
-    assert loaded.source_type == "dynamic_workflow_run"
-    assert store.report_asset_path(loaded) == artifact_path
-    revoked = store.revoke_public_report(slug, revoked_by="@alice:localhost")
-    assert revoked.revoked_at is not None
-
-
 @pytest.mark.asyncio
 async def test_workflow_run_uses_orchestrator_store_and_handles_missing_control_root(tmp_path: Path) -> None:
     """When an orchestrator is attached its store is used; without orchestrator or control root publishing errors clearly."""

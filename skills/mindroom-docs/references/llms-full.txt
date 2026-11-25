@@ -17236,7 +17236,7 @@ To have a person approve each publication, add a [tool approval](https://docs.mi
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
-- **`workflow_run`**: `source` takes `run_id` of a completed workflow run and an optional `title` (defaulting to the run's title or `Workflow Run <run_id>`). The run's result (string or JSON value) is rendered to a self-contained escaped HTML page.
+- **`workflow_run`**: `source` takes `run_id` of a completed workflow run with a non-null result and an optional `title` (defaulting to the run's title or `Workflow Run <run_id>`). The run's result (string or JSON value) is rendered to a self-contained escaped HTML page.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.

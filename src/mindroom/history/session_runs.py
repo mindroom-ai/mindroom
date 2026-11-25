@@ -29,7 +29,7 @@ type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozense
 DELEGATION_SESSION_PREFIX = "delegate:"
 # LEGACY_COMPAT: Historical Dynamic Workflow participant sessions in existing conversation stores.
 # Legacy format: Pre-removal Dynamic Workflow participants used session IDs containing `:dynamic_workflow:`.
-# Last legacy release: v2026.11.582; replacement: v2026.11.583 deleted the Dynamic Workflows engine.
+# Last legacy release: v2026.11.585; replacement: unreleased; deleted the Dynamic Workflows engine.
 # Handling: Keep skipping `:dynamic_workflow:` sessions in `updated_sessions` so old stores never surface them.
 # Coverage: tests/test_history_session_runs.py::test_updated_sessions_lists_sessions_changed_after_the_cursor.
 _WORKFLOW_SESSION_MARKER = ":dynamic_workflow:"

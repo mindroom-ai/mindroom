@@ -8467,7 +8467,6 @@ expose = [
     "ApprovalActionResult",
     "AutomationToolOrigin",
     "BackgroundScriptToolOrigin",
-    "DynamicWorkflowToolOrigin",
     "MatrixApprovalAction",
     "ToolApprovalDecision",
     "ToolApprovalScriptError",

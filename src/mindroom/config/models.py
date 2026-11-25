@@ -314,6 +314,26 @@ class ToolConfigEntry(BaseModel):
         return {self.name: data}
 
 
+def _is_plain_dynamic_workflow_entry(entry: ToolConfigEntry) -> bool:
+    """Return whether ``entry`` was authored solely as `dynamic_workflow` with no remaining settings or lazy flags."""
+    return (
+        entry.spellings == ("dynamic_workflow",)
+        and not entry.overrides
+        and not entry.defer
+        and not entry.initial
+        and not (entry.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS)
+    )
+
+
+def _plain_dynamic_workflow_pair(first: ToolConfigEntry, other: ToolConfigEntry) -> ToolConfigEntry | None:
+    """Return the canonical `workflow` entry when paired with a plain `dynamic_workflow`-only alias entry."""
+    if _is_plain_dynamic_workflow_entry(first) and "workflow" in other.spellings:
+        return other
+    if _is_plain_dynamic_workflow_entry(other) and "workflow" in first.spellings:
+        return first
+    return None
+
+
 def validate_unique_tool_entries(
     tools: list[ToolConfigEntry],
     *,
@@ -332,6 +352,9 @@ def validate_unique_tool_entries(
         first = kept.get(name)
         if first is not None:
             reject_unmergeable_spellings(first, normalized, scope=f"{scope_name} tools")
+            preferred = _plain_dynamic_workflow_pair(first, normalized) or first
+        else:
+            preferred = normalized
         spellings = (*(first.spellings if first is not None else ()), normalized.name)
         ignored_allowed_tools = (
             (first._ignored_allowed_tools if first is not None else False)
@@ -341,7 +364,7 @@ def validate_unique_tool_entries(
         if spellings == (name,) and not ignored_allowed_tools:
             kept[name] = normalized
         else:
-            merged = (normalized if first is None else first).model_copy(update={"name": name})
+            merged = preferred.model_copy(update={"name": name})
             merged._spellings = spellings
             merged._ignored_allowed_tools = ignored_allowed_tools
             kept[name] = merged
@@ -350,6 +373,8 @@ def validate_unique_tool_entries(
 
 def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
     """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
+    if _plain_dynamic_workflow_pair(first, other) is not None:
+        return
     if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
         mine, theirs = next((a, b) for a in first.spellings for b in other.spellings if a != b)
         msg = (

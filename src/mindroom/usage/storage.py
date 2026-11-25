@@ -40,10 +40,19 @@ type IndependentUsageKind = Literal[
     "voice_normalization",
     "voice_transcription",
 ]
+# LEGACY_COMPAT: Historical `dynamic_workflow` helper usage rows in existing SQLite databases.
+# Legacy format: Pre-removal Dynamic Workflow participant turns wrote usage rows with `"kind": "dynamic_workflow"`.
+# Last legacy release: v2026.11.585; replacement: unreleased; the Dynamic Workflows engine was removed.
+# Handling: Keep `"dynamic_workflow"` outside `IndependentUsageKind` so nothing new writes it, while including it in
+#   `LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical rows keep counting in usage reports and budgets.
+# Coverage: tests/test_dynamic_workflow_alias.py::test_legacy_dynamic_workflow_usage_row_is_preserved.
+LEGACY_USAGE_KINDS: frozenset[str] = frozenset({"dynamic_workflow"})
 # ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
 # replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.
-type UsageKind = Literal["run", "pre_ledger"] | IndependentUsageKind
-USAGE_KINDS: frozenset[str] = frozenset({"run", "pre_ledger", *get_args(IndependentUsageKind.__value__)})
+type UsageKind = Literal["run", "pre_ledger", "dynamic_workflow"] | IndependentUsageKind
+USAGE_KINDS: frozenset[str] = frozenset(
+    {"run", "pre_ledger", *LEGACY_USAGE_KINDS, *get_args(IndependentUsageKind.__value__)},
+)
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"

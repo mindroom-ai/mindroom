@@ -885,7 +885,7 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 
 Amended 2026-11-24: Bas decided not to run a two-week parallel engine period.
 Instead, `dynamic_workflow` is now a deprecated config alias for `workflow` (ignoring legacy `allowed_tools` with a one-line warning), the old Dynamic Workflows engine and its YAML specs/API are deleted immediately, and old Dynamic Workflow run records and revisions are dropped.
-Historical SQLite usage rows with `kind="dynamic_workflow"` are skipped cleanly on read (`usage/stats_storage.py`), `:dynamic_workflow:` session markers continue to be skipped (`history/session_runs.py`), and `report_publishing` now accepts `source_type="workflow_run"` while still loading and revoking existing persisted `dynamic_workflow_run` links on disk.
+Historical SQLite usage rows with `kind="dynamic_workflow"` stay readable and continue counting in usage reports and monthly budgets (`usage/storage.py`), `:dynamic_workflow:` session markers continue to be skipped (`history/session_runs.py`), and `report_publishing` now accepts `source_type="workflow_run"` while still loading and revoking existing persisted `dynamic_workflow_run` links on disk.
 The removal gives back about 2,900 net source lines.
 
 ## Upgrades and packaging
@@ -966,7 +966,7 @@ Each line is a claim from reading code; the named test is its proof, and its PR 
 Round 1:
 
 1. A workflow may run the caller, agents in `delegate_to`, and agents joined to the run's room that the requester may address.
-2. `dynamic_workflow` is deprecated at parity and removed immediately (amended 2026-11-24: `dynamic_workflow` aliases `workflow` with `allowed_tools` ignored, the old engine and old run records are dropped, stored usage rows/session markers keep skipping cleanly, and `report_publishing` accepts `workflow_run` while still reading/revoking existing published links).
+2. `dynamic_workflow` is deprecated at parity and removed immediately (amended 2026-11-24: `dynamic_workflow` aliases `workflow` with `allowed_tools` ignored, the old engine and old run records are dropped, historical usage rows stay readable, `:dynamic_workflow:` session markers keep skipping cleanly, and `report_publishing` accepts `workflow_run` while still reading/revoking existing published links).
 3. Local runs need no new setting: they follow `defaults.allow_shell_without_worker` or an explicit local sandbox mode, and a configured worker that is down never falls back to the host.
 4. `ask_user` asks the person and `Session.ask` asks an agent.
 5. `foreach` and `parallel` raise `PartialFailure` after all siblings settle, with partial results and errors by position.

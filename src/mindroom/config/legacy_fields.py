@@ -457,7 +457,7 @@ def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
 # LEGACY_COMPAT: Retired `dynamic_workflow` toolkit alias and its `allowed_tools` override.
 # Legacy format: `defaults.tools` and `agents.<name>.tools` accepted `dynamic_workflow` (optionally with an
 #   `allowed_tools` override restricting participant tools under the deleted Dynamic Workflows engine).
-# Last legacy release: v2026.11.582; replacement: v2026.11.583 aliases `dynamic_workflow` to `workflow` and deletes
+# Last legacy release: v2026.11.585; replacement: unreleased; aliases `dynamic_workflow` to `workflow` and deletes
 #   the old Dynamic Workflows engine.
 # Handling: Canonicalize `dynamic_workflow` to `workflow` via TOOL_ALIASES, strip `allowed_tools` from entries
 #   authored under the legacy alias, and log one concise deprecation warning per config load.

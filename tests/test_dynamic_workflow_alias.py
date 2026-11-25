@@ -1,26 +1,36 @@
-"""Tests for the deprecated `dynamic_workflow` -> `workflow` alias and retired usage records."""
+"""Tests for the deprecated `dynamic_workflow` -> `workflow` alias and legacy usage records."""
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 import mindroom.tools  # noqa: F401
+from mindroom.budgets.pricing import PricedModel
+from mindroom.budgets.spend import collect_monthly_spend
 from mindroom.config.contacts import ContactsConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.models import ModelPricing
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.schema import usage_upsert_sql
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import _extract_run
+from mindroom.usage.storage import LEGACY_USAGE_KINDS, USAGE_KINDS, IndependentUsageKind
 from tests.conftest import persist_entity_accounts, persist_runs, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -186,6 +196,197 @@ def test_dynamic_workflow_deduplicates_with_workflow(
     assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
 
 
+@pytest.mark.parametrize(
+    ("tools_config", "expected_defer", "expect_allowed_tools_note"),
+    [
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": ["dynamic_workflow", {"workflow": {"max_concurrent_runs": 2, "defer": True}}],
+                    },
+                },
+            },
+            True,
+            False,
+            id="same-layer-bare-then-configured",
+        ),
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [{"workflow": {"max_concurrent_runs": 2, "defer": True}}, "dynamic_workflow"],
+                    },
+                },
+            },
+            True,
+            False,
+            id="same-layer-configured-then-bare",
+        ),
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [
+                            {"dynamic_workflow": {"allowed_tools": ["*"]}},
+                            {"workflow": {"max_concurrent_runs": 2, "defer": True}},
+                        ],
+                    },
+                },
+            },
+            True,
+            True,
+            id="same-layer-allowed-tools-then-configured",
+        ),
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [
+                            {"workflow": {"max_concurrent_runs": 2, "defer": True}},
+                            {"dynamic_workflow": {"allowed_tools": ["*"]}},
+                        ],
+                    },
+                },
+            },
+            True,
+            True,
+            id="same-layer-configured-then-allowed-tools",
+        ),
+        pytest.param(
+            {
+                "defaults": {"tools": ["dynamic_workflow"]},
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [{"workflow": {"max_concurrent_runs": 2, "defer": True}}],
+                    },
+                },
+            },
+            True,
+            False,
+            id="defaults-bare-agent-configured",
+        ),
+        pytest.param(
+            {
+                "defaults": {"tools": [{"workflow": {"max_concurrent_runs": 2}}]},
+                "agents": {"planner": {"display_name": "Planner", "tools": ["dynamic_workflow"]}},
+            },
+            False,
+            False,
+            id="defaults-configured-agent-bare",
+        ),
+        pytest.param(
+            {
+                "defaults": {"tools": [{"workflow": {"max_concurrent_runs": 2}}]},
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [{"dynamic_workflow": {"allowed_tools": ["*"]}}],
+                    },
+                },
+            },
+            False,
+            True,
+            id="defaults-configured-agent-allowed-tools",
+        ),
+    ],
+)
+def test_dual_tool_plain_dynamic_workflow_merges_with_configured_workflow(
+    tmp_path: Path,
+    tools_config: dict[str, object],
+    expected_defer: bool,
+    expect_allowed_tools_note: bool,
+) -> None:
+    """A plain (or allowed_tools-only) `dynamic_workflow` merges cleanly with a configured `workflow` across layers."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    with capture_logs() as logs:
+        config = Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
+
+    candidates = [
+        entry
+        for entry in resolve_agent_tools(config, "planner", builtin_tool_registry()).candidates()
+        if entry.name == "workflow"
+    ]
+    assert len(candidates) == 1
+    assert candidates[0].tool_config_overrides == {"max_concurrent_runs": 2}
+    assert candidates[0].defer is expected_defer
+
+    warnings = _warning_events(logs)
+    assert len(warnings) == 1
+    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
+
+
+@pytest.mark.parametrize(
+    "tools_config",
+    [
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [{"dynamic_workflow": {"defer": True}}, "workflow"],
+                    },
+                },
+            },
+            id="same-layer-defer-conflict",
+        ),
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [
+                            {"dynamic_workflow": {"defer": False}},
+                            {"workflow": {"defer": True}},
+                        ],
+                    },
+                },
+            },
+            id="same-layer-explicit-defer-false-conflict",
+        ),
+        pytest.param(
+            {
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [
+                            {"dynamic_workflow": {"max_concurrent_runs": 1}},
+                            {"workflow": {"max_concurrent_runs": 2}},
+                        ],
+                    },
+                },
+            },
+            id="same-layer-override-conflict",
+        ),
+        pytest.param(
+            {
+                "defaults": {"tools": [{"dynamic_workflow": {"max_concurrent_runs": 1}}]},
+                "agents": {
+                    "planner": {
+                        "display_name": "Planner",
+                        "tools": [{"workflow": {"max_concurrent_runs": 2}}],
+                    },
+                },
+            },
+            id="cross-layer-override-conflict",
+        ),
+    ],
+)
+def test_dual_tool_conflicting_dynamic_workflow_settings_still_rejected(
+    tmp_path: Path,
+    tools_config: dict[str, object],
+) -> None:
+    """Conflicting settings or lazy flags between `dynamic_workflow` and `workflow` are still rejected."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    with pytest.raises((ValidationError, ConfigRuntimeValidationError), match="both select workflow"):
+        Config.validate_with_runtime(_base_config(**tools_config), runtime_paths)
+
+
 def test_workflow_direct_allowed_tools_still_rejected(tmp_path: Path) -> None:
     """`allowed_tools` on `workflow` (not the legacy alias) is rejected as an unknown override."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
@@ -198,6 +399,83 @@ def test_workflow_direct_allowed_tools_still_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow(tmp_path: Path) -> None:
+    """Dashboard-saved `allowed_tools` under service `dynamic_workflow` is ignored; other stored keys still fail."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = Config.validate_with_runtime(
+        _base_config(agents={"planner": {"display_name": "Planner", "tools": ["workflow"]}}),
+        runtime_paths,
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("dynamic_workflow", {"_source": "ui", "allowed_tools": ["*"]})
+
+    toolkit = get_tool_by_name(
+        "workflow",
+        runtime_paths,
+        runtime_config=config,
+        tools=builtin_tool_registry(),
+        worker_target=None,
+    )
+    assert isinstance(toolkit, WorkflowTools)
+
+    manager.save_credentials("dynamic_workflow", {"_source": "ui", "allowed_tools": ["*"], "unexpected": True})
+    with pytest.raises(ToolConfigOverrideError, match="settings stored under 'dynamic_workflow' no longer apply"):
+        get_tool_by_name(
+            "workflow",
+            runtime_paths,
+            runtime_config=config,
+            tools=builtin_tool_registry(),
+            worker_target=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("data_extra", "expect_allowed_tools_note"),
+    [
+        pytest.param(
+            {
+                "defaults": {"tools": ["dynamic_workflow"]},
+                "personal_agents": {
+                    "helper": {"agent": {"display_name": "{user_display_name}'s Helper"}},
+                },
+            },
+            False,
+            id="defaults-with-unowned-template",
+        ),
+        pytest.param(
+            {
+                "defaults": {"tools": []},
+                "personal_agents": {
+                    "helper": {
+                        "agent": {
+                            "display_name": "{user_display_name}'s Helper",
+                            "tools": [{"dynamic_workflow": {"allowed_tools": ["*"]}}],
+                        },
+                    },
+                },
+            },
+            True,
+            id="unowned-template-only-with-allowed-tools",
+        ),
+    ],
+)
+def test_validate_with_runtime_logs_deprecation_warning_once_with_unowned_personal_agent_template(
+    tmp_path: Path,
+    data_extra: dict[str, object],
+    expect_allowed_tools_note: bool,
+) -> None:
+    """`Config.validate_with_runtime` logs the deprecation warning exactly once even when probing personal_agents."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    with capture_logs() as logs:
+        Config.validate_with_runtime(_base_config(**data_extra), runtime_paths)
+
+    warnings = _warning_events(logs)
+    assert len(warnings) == 1
+    assert "\n" not in warnings[0]
+    assert "dynamic_workflow" in warnings[0]
+    assert ("allowed_tools" in warnings[0]) is expect_allowed_tools_note
+
+
 @pytest.mark.parametrize("tool_name", ["workflow", "dynamic_workflow"])
 def test_contacts_tools_rejects_workflow_and_dynamic_workflow(tool_name: str) -> None:
     """Contact turns forbid both `workflow` and its deprecated `dynamic_workflow` alias."""
@@ -205,8 +483,14 @@ def test_contacts_tools_rejects_workflow_and_dynamic_workflow(tool_name: str) ->
         ContactsConfig(tools=[tool_name])
 
 
-def test_legacy_dynamic_workflow_usage_row_is_skipped_cleanly(tmp_path: Path) -> None:
-    """Historical SQLite usage rows with kind='dynamic_workflow' are skipped cleanly without crashing."""
+def test_legacy_dynamic_workflow_usage_row_is_preserved(tmp_path: Path) -> None:
+    """Historical SQLite usage rows with kind='dynamic_workflow' keep counting in usage reports and monthly budgets."""
+    assert "dynamic_workflow" not in get_args(IndependentUsageKind.__value__)
+    assert "dynamic_workflow" in LEGACY_USAGE_KINDS
+    assert "dynamic_workflow" in USAGE_KINDS
+
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    created_at = int(now.timestamp())
     legacy_row = {
         "run_id": "dynamic_workflow:deadbeef",
         "parent_run_id": None,
@@ -214,12 +498,14 @@ def test_legacy_dynamic_workflow_usage_row_is_skipped_cleanly(tmp_path: Path) ->
         "user_id": "@alice:localhost",
         "model_provider": "openai",
         "model": "gpt-6-astra",
-        "created_at": 1790000000,
+        "created_at": created_at,
         "metrics": {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
         "requests": [],
         "kind": "dynamic_workflow",
     }
-    assert _extract_run(legacy_row, row_requester="@alice:localhost", include_team_members=False) is None
+    extracted = _extract_run(legacy_row, row_requester="@alice:localhost", include_team_members=False)
+    assert extracted is not None
+    assert extracted.kind == "dynamic_workflow"
 
     paths = test_runtime_paths(tmp_path)
     config = Config.model_validate(
@@ -237,6 +523,7 @@ def test_legacy_dynamic_workflow_usage_row_is_skipped_cleanly(tmp_path: Path) ->
         user_id="@alice:localhost",
         model="gpt-6-astra",
         model_provider="openai",
+        created_at=created_at,
         status=RunStatus.completed,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=50, total_tokens=150)),
     )
@@ -248,6 +535,17 @@ def test_legacy_dynamic_workflow_usage_row_is_skipped_cleanly(tmp_path: Path) ->
         )
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 150
-    assert report.request_breakdown is not None
-    assert all(row.kind != "dynamic_workflow" for row in report.request_breakdown)
+    assert report.totals.total_tokens == 172
+
+    spend = collect_monthly_spend(
+        config=config,
+        runtime_paths=paths,
+        now=now,
+        prices={
+            ("openai", "gpt-6-astra"): PricedModel(
+                pricing=ModelPricing(input=1.0, output=1.0),
+                input_includes_cache=True,
+            ),
+        },
+    )
+    assert spend.spend_usd["@alice:localhost"] == pytest.approx(172 / 1_000_000)

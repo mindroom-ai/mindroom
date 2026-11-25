@@ -680,20 +680,23 @@ class Config(BaseModel):
                     reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
         return self
 
-    @model_validator(mode="after")
-    def warn_deprecated_dynamic_workflow_alias(self) -> Config:
-        """Log one concise warning when a config still names the retired `dynamic_workflow` tool."""
+    def _dynamic_workflow_alias_usage(self) -> tuple[bool, bool]:
+        """Return ``(used_alias, ignored_allowed_tools)`` across default and agent tool lists."""
         entries = (
             *self.defaults.tools,
             *(entry for agent in self.agents.values() for entry in agent.tools),
         )
         aliased = [entry for entry in entries if "dynamic_workflow" in entry.spellings]
-        if aliased:
-            logger.warning(
-                dynamic_workflow_deprecation_warning(
-                    ignored_allowed_tools=any(entry.ignored_legacy_allowed_tools for entry in aliased),
-                ),
-            )
+        return bool(aliased), any(entry.ignored_legacy_allowed_tools for entry in aliased)
+
+    @model_validator(mode="after")
+    def warn_deprecated_dynamic_workflow_alias(self, info: ValidationInfo) -> Config:
+        """Log one concise warning when a config still names the retired `dynamic_workflow` tool."""
+        if isinstance(info.context, dict) and info.context.get("suppress_deprecation_warnings"):
+            return self
+        used_alias, ignored_allowed_tools = self._dynamic_workflow_alias_usage()
+        if used_alias:
+            logger.warning(dynamic_workflow_deprecation_warning(ignored_allowed_tools=ignored_allowed_tools))
         return self
 
     @model_validator(mode="after")
@@ -1195,14 +1198,17 @@ class Config(BaseModel):
             expansion.data,
             runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            suppress_deprecation_warnings=True,
         )
+        probe_config: Config | None = None
         if expansion.probe_data is not None:
             # A template or override nobody uses yet must fail now, not at a later reload that onboards someone.
             try:
-                cls._validate_runtime_data(
+                probe_config = cls._validate_runtime_data(
                     expansion.probe_data,
                     runtime_paths,
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                    suppress_deprecation_warnings=True,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
                 msg = (
@@ -1229,6 +1235,7 @@ class Config(BaseModel):
                     generated_data,
                     runtime_paths,
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                    suppress_deprecation_warnings=True,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
                 if candidate:
@@ -1247,6 +1254,14 @@ class Config(BaseModel):
         config._personal_agents_added_agents_section = (
             bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
         )
+        checked_configs = (config, probe_config) if probe_config is not None else (config,)
+        alias_usage = [checked._dynamic_workflow_alias_usage() for checked in checked_configs]
+        if any(used for used, _ignored in alias_usage):
+            logger.warning(
+                dynamic_workflow_deprecation_warning(
+                    ignored_allowed_tools=any(ignored for _used, ignored in alias_usage),
+                ),
+            )
         return config
 
     @classmethod
@@ -1256,8 +1271,15 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool,
+        suppress_deprecation_warnings: bool = False,
     ) -> Config:
-        config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(
+            data,
+            context={
+                "runtime_paths": runtime_paths,
+                "suppress_deprecation_warnings": suppress_deprecation_warnings,
+            },
+        )
         config._reject_call_agents_sharing_a_room(lambda room: canonical_room_reference(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
