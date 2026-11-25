@@ -186,6 +186,7 @@ class ToolJobRuntimeCoordinator:
     _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
     # Held-jobs notices this process posted, by the jobs each names; kept until one of those jobs is reported or gone.
     _sent_notices: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
+    _sent_notice_revisions: dict[str, tuple[FollowUpKey, int]] = field(default_factory=dict, init=False)
     # Pure follow-up/held-notice IDs cached per candidate bucket revision so unchanged buckets skip hashing.
     _follow_up_known: dict[FollowUpKey, tuple[int, frozenset[str]]] = field(default_factory=dict, init=False)
     _follow_up_known_runtime: ToolJobRuntime | None = field(default=None, init=False)
@@ -435,6 +436,7 @@ class ToolJobRuntimeCoordinator:
                 release_background_tool_jobs(self.runtime_paths, self._instance)
             self._instance = self._runtime = self._journal = None
             self._follow_up_known.clear()
+            self._sent_notice_revisions.clear()
             self._follow_up_known_runtime = None
             self._initialized = False
 
@@ -583,26 +585,23 @@ class ToolJobRuntimeCoordinator:
         """
         if self._follow_up_known_runtime is not runtime:
             self._follow_up_known.clear()
+            self._sent_notice_revisions.clear()
             self._follow_up_known_runtime = runtime
         due: set[str] = set()
         holds: dict[str, dict[str, bool]] = {}
         revisions = runtime.follow_up_candidate_revisions()
         for raw_key in sorted(revisions, key=lambda raw: _key_order(ConversationKey(*raw))):
-            key = ConversationKey(*raw_key)
+            key, revision = ConversationKey(*raw_key), revisions[raw_key]
             # Jobs an admitted follow-up or a sent notice already reports need no access check again.
-            known = self._known_follow_up_ids(runtime, raw_key, key, revisions[raw_key])
+            known = self._known_follow_up_ids(runtime, raw_key, key, revision)
             if not known or all(item in self._admitted_follow_ups or item in self._sent_notices for item in known):
                 due |= known
                 continue
             # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
-            ended = await runtime.ended_jobs(key)
+            ended = await runtime.ended_jobs(key, include_cancelled=False)
             if (bot := self.bot_provider(key.recipient)) is None:
                 continue
-            ended = await unheld_jobs(
-                tuple(job for job in ended if job.status != "cancelled"),
-                bot.journal_principal().replies,
-                holds=holds.setdefault(key.recipient, {}),
-            )
+            ended = await unheld_jobs(ended, bot.journal_principal().replies, holds=holds.setdefault(key.recipient, {}))
             if jobs := follow_up_jobs(ended):
                 follow_up_id = next_follow_up_id(key, jobs)
                 if follow_up_id not in self._admitted_follow_ups:
@@ -624,14 +623,31 @@ class ToolJobRuntimeCoordinator:
                     ),
                 ):
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
+                    self._sent_notice_revisions[notice_id] = (raw_key, revision)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
-        if self._sent_notices:
-            self._sent_notices = {
-                n: ids for n, ids in self._sent_notices.items() if all(runtime.is_follow_up_candidate(j) for j in ids)
-            }
         remaining = runtime.follow_up_candidate_revisions()
+        if self._sent_notices or self._sent_notice_revisions:
+            self._prune_sent_notices(runtime, remaining)
         self._follow_up_known = {k: v for k, v in self._follow_up_known.items() if k in remaining}
+
+    def _prune_sent_notices(self, runtime: ToolJobRuntime, remaining: dict[FollowUpKey, int]) -> None:
+        stale: list[str] = []
+        for notice_id, ids in self._sent_notices.items():
+            meta = self._sent_notice_revisions.get(notice_id)
+            if meta is None:
+                if not all(runtime.is_follow_up_candidate(j) for j in ids):
+                    stale.append(notice_id)
+            elif (current_rev := remaining.get(meta[0])) != meta[1]:
+                if current_rev is not None and all(runtime.is_follow_up_candidate(j) for j in ids):
+                    self._sent_notice_revisions[notice_id] = (meta[0], current_rev)
+                else:
+                    stale.append(notice_id)
+        for notice_id in stale:
+            self._sent_notices.pop(notice_id, None)
+            self._sent_notice_revisions.pop(notice_id, None)
+        if not self._sent_notices:
+            self._sent_notice_revisions.clear()
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""

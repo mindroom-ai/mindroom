@@ -252,6 +252,95 @@ async def test_warm_pass_skips_unchanged_candidate_buckets_and_expired_cleared_r
 
 
 @pytest.mark.asyncio
+async def test_staggered_held_notices_skip_unchanged_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Staggered held notices skip revalidation on unchanged passes and prune selectively on ack."""
+    rt = await tool_job_runtime(tmp_path)
+    owner = replace(job_owner(), room_id="!ra:t")
+    key = ConversationKey(owner.recipient, "!ra:t", owner.resolved_thread_id, str(owner.requester_id), False)
+    bot = _bot("parent", {"!ra:t"})
+    coord = job_coordinator(tmp_path, rt, bot)
+    sent_notices = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(coord_module, "send_message_result", sent_notices)
+    try:
+        held_src = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+        await _launch(rt, "h-1", owner, _fast_ok, source_event_id=held_src)
+        await wait_for_status(rt, "h-1", "completed")
+        await coord._reconcile()
+        [n1] = list(coord._sent_notices)
+
+        await _launch(rt, "h-2", owner, _fast_ok, source_event_id=held_src)
+        await wait_for_status(rt, "h-2", "completed")
+        await coord._reconcile()
+        [n12] = [nid for nid in coord._sent_notices if nid != n1]
+
+        await _launch(rt, "h-3", owner, _fast_ok, source_event_id=held_src)
+        await wait_for_status(rt, "h-3", "completed")
+        await coord._reconcile()
+        assert sent_notices.await_count == 3
+        assert len(coord._sent_notices) == 3
+
+        fetches, checks = [], []
+        o_fetch, o_cand = rt.follow_up_candidate_jobs, rt.is_follow_up_candidate
+        monkeypatch.setattr(rt, "follow_up_candidate_jobs", lambda k: (fetches.append(k), o_fetch(k))[1])
+        monkeypatch.setattr(rt, "is_follow_up_candidate", lambda j: (checks.append(j), o_cand(j))[1])
+
+        await coord._reconcile()
+        assert (fetches, checks) == ([], [])
+
+        await rt.acknowledge_wait("h-3", (await rt.wait("h-3", owner=owner, depth=0)).claim)
+        await coord._reconcile()
+        assert set(coord._sent_notices) == {n1, n12}
+        assert set(coord._sent_notice_revisions) == {n1, n12}
+        assert sent_notices.await_count == 3
+
+        fetches.clear()
+        checks.clear()
+        await coord._reconcile()
+        assert (fetches, checks) == ([], [])
+
+        for jid in ("h-1", "h-2"):
+            await rt.acknowledge_wait(jid, (await rt.wait(jid, owner=owner, depth=0)).claim)
+        checks.clear()
+        await coord._reconcile()
+        assert (coord._sent_notices, coord._sent_notice_revisions, checks) == ({}, {}, [])
+
+        coord._sent_notices["manual-stale"] = frozenset({"h-1"})
+        await coord._reconcile()
+        assert coord._sent_notices == {}
+    finally:
+        await rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_admit_follow_ups_skips_grant_checks_for_cancelled_jobs(tmp_path: Path) -> None:
+    """_admit_follow_ups asks ended_jobs to skip cancelled jobs before checking grants."""
+    grant_calls: list[str] = []
+    rt = await tool_job_runtime(tmp_path, grant=lambda j: (grant_calls.append(j.job_id), "allowed")[1])
+    owner = replace(job_owner(), room_id="!rb:t")
+    key = ConversationKey(owner.recipient, "!rb:t", owner.resolved_thread_id, str(owner.requester_id), False)
+    bot = _bot("parent", {"!rb:t"}, open_replies={"open-reply"})
+    coord = job_coordinator(tmp_path, rt, bot)
+    try:
+        snaps = [_snap(f"canc-{i}", owner, status="cancelled") for i in range(4)]
+        snaps.append(_snap("held-reply", owner, reply_id="open-reply"))
+        await _seed_jobs(rt, snaps)
+
+        grant_calls.clear()
+        await coord._admit_follow_ups(rt)
+        assert grant_calls == ["held-reply"]
+        assert bot.admit_job_follow_up.await_count == 0
+
+        # Default ended_jobs() retains cancelled jobs for other callers.
+        all_ended = await rt.ended_jobs(key)
+        assert {job.job_id for job in all_ended} == {"held-reply", *(f"canc-{i}" for i in range(4))}
+    finally:
+        await rt.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_index_transitions_lifecycle_claims_and_expiry(tmp_path: Path) -> None:
     """start, span_stopped, reattach, waits, save_adapter, claims, cancel, ack, and expiry keep indexes exact."""
     grants: dict[str, JobGrant] = {}
@@ -723,6 +812,8 @@ class _EquivalenceHarness:
         assert sorted(actual_w, key=wk) == sorted(oracle_w, key=wk)
         assert sorted(actual_a, key=ak) == sorted(oracle_a, key=ak)
         assert self.sent_notices == oracle_n
+        assert self.coord._sent_notices == self.oracle.sent_notices
+        assert set(self.coord._sent_notice_revisions) == set(self.coord._sent_notices)
 
         for raw_key, group in _scan_candidates(self.rt.retained_jobs()).items():
             key = ConversationKey(*raw_key)

@@ -1497,7 +1497,7 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    async def ended_jobs(self, key: ConversationKey) -> tuple[BackgroundJob, ...]:
+    async def ended_jobs(self, key: ConversationKey, *, include_cancelled: bool = True) -> tuple[BackgroundJob, ...]:
         """Return one conversation's ended top-level jobs that nobody acknowledged or reads now, oldest first.
 
         A job stays out while a waiter claims it, while its requester's access is unresolved or gone, and once its
@@ -1517,6 +1517,7 @@ class ToolJobRuntime:
                 if entry.job.status in TERMINAL_STATUSES
                 and not entry.job.consumed
                 and entry.claim is None
+                and (include_cancelled or entry.job.status != "cancelled")
                 and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
