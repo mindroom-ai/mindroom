@@ -461,7 +461,8 @@ async def _countable_thread_history(
     """Return history an automatic pass may count, or nothing.
 
     An automatic pass records the counted size as its baseline on every outcome
-    it reaches, so it must not run at all on a count it cannot trust. Both reasons it
+    except an untitled thread's generation exception (which sets a short retry
+    cooldown instead), so it must not run at all on a count it cannot trust. Both reasons it
     cannot are handled the same way -- the history is unavailable, or it is a
     page of a longer thread -- because both leave the pass with no number worth
     recording.

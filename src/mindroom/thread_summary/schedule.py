@@ -65,7 +65,7 @@ class _ThreadSummaryBaselines:
         return self._counts.get((room_id, thread_id), 0)
 
     def record(self, room_id: str, thread_id: str, message_count: int) -> None:
-        """Raise one thread's summarized message count to ``message_count``."""
+        """Raise one thread's summarized message count to ``message_count`` and clear any failure cooldown when positive."""
         if message_count > self.count(room_id, thread_id):
             self._counts[room_id, thread_id] = message_count
         if message_count > 0:
