@@ -10,7 +10,6 @@ from __future__ import annotations
 from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast, get_args
 
-from mindroom.budgets import current_budget_scope
 from mindroom.config.models import (
     fallback_order,
     fallback_reference,
@@ -43,6 +42,7 @@ from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
+from mindroom.tool_system.context_scope import current_budget_monitor, current_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -188,9 +188,8 @@ def _budget_allows_fallback(
 ) -> bool:
     from mindroom.budgets.monitor import fallback_allowed_under_budget  # noqa: PLC0415
 
-    monitor, ctx_requester = current_budget_scope()
-    requester_id = bound_requester if bound_requester is not None else ctx_requester
-    return fallback_allowed_under_budget(config, runtime_paths, monitor, requester_id, candidate_ref)
+    requester_id = bound_requester if bound_requester is not None else current_requester_id()
+    return fallback_allowed_under_budget(config, runtime_paths, current_budget_monitor(), requester_id, candidate_ref)
 
 
 def _cooldown_key(config: Config, model_name: str) -> str:

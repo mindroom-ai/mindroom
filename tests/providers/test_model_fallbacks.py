@@ -430,7 +430,7 @@ async def test_a_fallback_whose_context_window_the_request_exceeds_is_skipped() 
 
 
 @pytest.mark.asyncio
-async def test_compaction_summary_fails_over_on_quota_but_keeps_transient_caller_retries() -> None:
+async def test_compaction_summary_fails_over_on_quota_but_defers_transient_retries() -> None:
     billed = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=10, total_tokens=50))
     answer = Message(
         role="assistant",

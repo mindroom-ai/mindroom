@@ -6282,8 +6282,17 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.context_scope",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.context_scope"
+depends_on = []
+visibility = [
+    "mindroom.providers.registry",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -8104,6 +8113,17 @@ expose = [
 from = ["mindroom.tool_system.runtime_context"]
 
 [[interfaces]]
+expose = [
+    "current_budget_monitor",
+    "current_requester_id",
+    "detached_requester_context",
+    "get_detached_requester_context",
+    "get_tool_runtime_context",
+    "tool_runtime_context",
+]
+from = ["mindroom.tool_system.context_scope"]
+
+[[interfaces]]
 expose = ["plugin_state_root", "validate_plugin_name"]
 from = ["mindroom.tool_system.plugin_identity"]
 
@@ -9125,6 +9145,7 @@ depends_on = [
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
     "mindroom.providers.synthetic_adapter",
+    "mindroom.tool_system.context_scope",
 ]
 
 [[modules]]

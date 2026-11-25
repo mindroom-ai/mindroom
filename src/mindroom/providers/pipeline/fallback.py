@@ -255,9 +255,10 @@ async def fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` on ``inner`` (``model_name``), then on eligible ``chain`` members while models fail over.
 
-    A caller-retried request (such as compaction summaries) fails over immediately on non-retryable availability errors
-    (quota, credentials) and on transient errors when ``fallback_on_retryable`` is set. Fallback turns are marked so
-    later requests never reuse foreign continuation or encrypted replay state.
+    With ``transient_retries="caller"`` (such as compaction summaries), retryable errors defer to the caller's retry
+    loop while non-retryable availability errors (quota, credentials) fail over immediately; ``"fallback"`` advances
+    immediately on retryable errors too. Fallback turns are marked so later requests never reuse foreign continuation
+    or encrypted replay state.
     """
     eligible = [member for member in chain if allow_fallback is None or allow_fallback(member.name)]
     primary = ChainModel(model_name, None, lambda: inner, cooldown_key)
@@ -279,9 +280,7 @@ async def fallback_stream(
                 async for event in stream:
                     yield event
         except ProviderError as error:
-            defer_transient = (
-                request.overrides.caller_retries and not request.overrides.fallback_on_retryable and error.retryable
-            )
+            defer_transient = request.overrides.transient_retries == "caller" and error.retryable
             can_fail_over = fails_over(error) and not defer_transient
             if can_fail_over:
                 _remember_reset(member.cooldown_key, error)

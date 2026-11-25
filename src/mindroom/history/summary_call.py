@@ -48,7 +48,7 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # authored thinking setting keeps a model that thinks only when asked, such as Claude 4.x, from spending the
 # output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
 # own, so a shorter authored provider timeout still applies; the summary call's wall deadline bounds every request.
-_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+_SUMMARY_OVERRIDES = RequestOverrides(transient_retries="caller", prompt_cache=False, omit_thinking_setting=True)
 
 
 class _CompactionSummaryTimeoutError(TimeoutError):
@@ -272,7 +272,7 @@ async def generate_compaction_summary(
         overrides=replace(
             _SUMMARY_OVERRIDES,
             omit_thinking_setting=not keep_thinking_setting,
-            fallback_on_retryable=allow_transient_fallback,
+            transient_retries="fallback" if allow_transient_fallback else "caller",
         ),
     )
     response_task = asyncio.create_task(

@@ -131,20 +131,26 @@ def structured_output_tools(
     )
 
 
+type TransientRetries = Literal["pipeline", "caller", "fallback"]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
     """Per-request knobs that override the adapter's configured defaults; a None temperature leaves it untouched.
 
-    ``caller_retries`` says the caller retries a failed request itself, so the pipeline's stream retry does not reissue
-    the request; the SDK clients' configurable retries are off. ``prompt_cache=False`` turns the route's
-    configured prompt caching off for the request. ``omit_thinking_setting`` sends a Claude request no thinking setting,
-    neither the authored one nor the default ``drop_block`` binding, so a model that thinks by default, such as every
-    Claude 5 model, still thinks; every other route keeps its authored setting.
+    ``transient_retries`` selects who handles transient retryable failures (the SDK clients' configurable retries stay
+    off): ``"pipeline"`` (default) lets the pipeline's retry stage reissue the request and advances the fallback chain
+    once exhausted; ``"caller"`` bypasses the pipeline retry stage and defers retryable errors to the caller's own
+    retry loop while still failing over immediately on non-retryable availability errors (quota, credentials);
+    ``"fallback"`` bypasses the pipeline retry stage and advances the fallback chain immediately on retryable errors
+    too (such as compaction's final attempt). ``prompt_cache=False`` turns the route's configured prompt caching off
+    for the request. ``omit_thinking_setting`` sends a Claude request no thinking setting, neither the authored one nor
+    the default ``drop_block`` binding, so a model that thinks by default, such as every Claude 5 model, still thinks;
+    every other route keeps its authored setting.
     """
 
     temperature: float | None = None
-    caller_retries: bool = False
-    fallback_on_retryable: bool = False
+    transient_retries: TransientRetries = "pipeline"
     prompt_cache: bool = True
     omit_thinking_setting: bool = False
 
@@ -534,6 +540,7 @@ __all__ = [
     "ToolCallReady",
     "ToolChoice",
     "ToolSpec",
+    "TransientRetries",
     "TurnCompleted",
     "UsageReported",
     "complete",

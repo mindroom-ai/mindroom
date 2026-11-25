@@ -122,7 +122,11 @@ async def test_the_summary_request_is_one_call_without_provider_retries_a_thinki
     [request] = model.requests
     assert request.tools == ()
     assert request.tool_choice is None
-    assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+    assert request.overrides == RequestOverrides(
+        transient_retries="caller",
+        prompt_cache=False,
+        omit_thinking_setting=True,
+    )
 
 
 @pytest.mark.asyncio

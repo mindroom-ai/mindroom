@@ -890,3 +890,62 @@ async def test_dynamic_workflow_permissions_block_unpermitted_fallback_requests(
 
     assert run_two["status"] == "completed", run_two
     assert calls == ["local-model", "local-backup-model"]
+
+
+def test_context_scope_precedence_and_restoration(tmp_path: Path) -> None:
+    """Nested conversation/detached scopes preserve precedence, never borrow detached monitors, and restore cleanly."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.tool_system.context_scope import (  # noqa: PLC0415
+        current_budget_monitor,
+        current_requester_id,
+        detached_requester_context,
+        get_detached_requester_context,
+        get_tool_runtime_context,
+        tool_runtime_context,
+    )
+    from mindroom.tool_system.runtime_context import DetachedRequesterContext  # noqa: PLC0415
+
+    bob = "@bob:localhost"
+    config = _subagent_workflow_config()
+    paths = _runtime_paths(tmp_path)
+    detached_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    conv_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    detached = DetachedRequesterContext(
+        requester_id=_ALICE,
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+        budget_monitor=detached_monitor,
+    )
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_identity(), requester_id=bob))
+    conv_with_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=conv_monitor))
+    conv_without_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=None))
+
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)
+    with detached_requester_context(detached):
+        assert get_detached_requester_context() is detached
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+        with tool_runtime_context(conv_with_monitor):
+            assert get_tool_runtime_context() is conv_with_monitor
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+            # Clearing conversation exposes enclosing detached authority.
+            with tool_runtime_context(None):
+                assert get_tool_runtime_context() is None
+                assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+        # A conversation context with budget_monitor=None must NOT borrow detached's monitor.
+        with tool_runtime_context(conv_without_monitor):
+            assert current_requester_id() == bob
+            assert current_budget_monitor() is None
+
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+    assert (get_tool_runtime_context(), get_detached_requester_context()) == (None, None)
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)
