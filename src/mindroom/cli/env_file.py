@@ -45,7 +45,7 @@ def write_private_env_text(env_path: Path, content: str) -> None:
 
 def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
     """Upsert KEY=value entries while preserving unrelated lines."""
-    assignments = {key: _env_assignment(key, value) for key, value in values.items()}
+    assignments = {key: format_env_assignment(key, value) for key, value in values.items()}
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.exists() else []
 
@@ -56,7 +56,7 @@ def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
     return env_path
 
 
-def _env_assignment(key: str, value: str) -> str:
+def format_env_assignment(key: str, value: str) -> str:
     """Return a `KEY=value` line that python-dotenv, which loads `.env`, reads back as exactly `value`."""
     if "\x00" in value or not _LINE_BREAK_CHARACTERS.isdisjoint(value):
         msg = f"Refusing to write {key} to the env file: its value contains a line break or NUL character"

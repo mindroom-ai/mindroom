@@ -79,7 +79,7 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
             agents={
                 "general": AgentConfig(
                     display_name="General Agent",
-                    tools=["matrix_message", "dynamic_workflow"],
+                    tools=["matrix_message", "workflow"],
                 ),
             },
             defaults=DefaultsConfig(tools=["calculator"]),
@@ -98,7 +98,7 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
         ScriptToolGrant("calculator", "add"),
         ScriptToolGrant("attachments", "get_attachment"),
     )
-    assert all(grant.toolkit_name != "dynamic_workflow" for grant in grants)
+    assert all(grant.toolkit_name != "workflow" for grant in grants)
 
 
 def _echo(text: str) -> str:

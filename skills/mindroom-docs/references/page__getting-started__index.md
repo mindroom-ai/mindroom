@@ -33,10 +33,12 @@ uvx mindroom run
 
 When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu.
+1. Choose a Matrix server.
+   Press Enter for MindRoom Chat (`mindroom.chat`), or select `Custom Matrix server` to connect to your own homeserver by domain or URL (`.well-known` discovery and local pairing are detected automatically, or you can enter a registration token, shared secret, separate provisioning URL, and owner Matrix user ID).
+2. Pick a model provider from the menu.
    Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
    When nothing is detected, the default menu starts with OpenAI.
-2. Finish provider setup when needed:
+3. Finish provider setup when needed:
    - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
      MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
      MindRoom does not ask when the key is already set in your environment.
@@ -44,14 +46,15 @@ When no config exists and MindRoom runs in a terminal, it checks for local login
    - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
    - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
-MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` for the selected Matrix server (hosted `MATRIX_HOMESERVER=https://mindroom.chat` by default) and a starter `Mind` agent in a `Personal` room.
 
 ### 2. Approve pairing
 
-MindRoom prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+If you selected MindRoom Chat (`mindroom.chat`) or a custom server with local provisioning enabled, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your Matrix account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 After approval, MindRoom prints the approving account and asks `Is this your account?` before saving anything.
 Pair codes expire after 10 minutes, and `mindroom run` prints a new one when that happens.
+If you selected a custom server with direct registration (token, shared secret, or open registration), MindRoom skips pairing and registers agents directly.
 See [connect](https://docs.mindroom.chat/deployment/hosted-matrix/#connect) for pairing details, the credentials it saves, and how to revoke a pairing.
 
 ### 3. Choose how MindRoom keeps running
@@ -182,7 +185,7 @@ Prerequisites:
 ### Configuration
 
 Generate a starter with `mindroom config init --matrix-server self-hosted`, or write `config.yaml` yourself.
-A generated config contains `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholders; replace each with your quoted Matrix user ID, such as `"@alice:matrix.example.com"`, because only hosted pairing fills them in.
+If you generate the config non-interactively or skip the owner user ID prompt during interactive setup, replace each `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholder with your quoted Matrix user ID, such as `"@alice:matrix.example.com"` (servers with local pairing fill them in automatically on approval).
 See [Configuration](https://docs.mindroom.chat/configuration/#configuration-file) for where MindRoom looks for `config.yaml`.
 
 A minimal hand-written `config.yaml`:

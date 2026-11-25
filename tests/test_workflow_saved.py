@@ -643,8 +643,8 @@ async def test_workflow_listings_and_source_reads_preserve_workspace_symlinks(to
     assert str(shortcut.readlink()) == "../notes"
 
 
-def test_an_agent_may_have_both_toolkits() -> None:
-    """Config validation accepts an agent with both `workflow` and `dynamic_workflow`, and their functions are disjoint."""
+def test_an_agent_listing_both_workflow_and_dynamic_workflow_deduplicates() -> None:
+    """Listing both `workflow` and its deprecated alias `dynamic_workflow` deduplicates to a single `workflow`."""
     config = Config(
         agents={
             "planner": AgentConfig(
@@ -653,10 +653,7 @@ def test_an_agent_may_have_both_toolkits() -> None:
             ),
         },
     )
-    assert config.agents["planner"].tool_names == ["workflow", "dynamic_workflow"]
+    assert config.agents["planner"].tool_names == ["workflow"]
     entries = builtin_tool_registry().entries
-    workflow_fns = set(entries["workflow"].function_names)
-    dynamic_fns = set(entries["dynamic_workflow"].function_names)
-    assert workflow_fns
-    assert dynamic_fns
-    assert workflow_fns.isdisjoint(dynamic_fns)
+    assert entries["workflow"].function_names
+    assert "dynamic_workflow" not in entries

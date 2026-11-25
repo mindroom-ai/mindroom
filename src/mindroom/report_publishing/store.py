@@ -46,9 +46,10 @@ class PublishableReport:
 
     source_type: str
     source: dict[str, object]
-    artifact_path: Path
     title: str
     requested_by: str
+    artifact_path: Path | None = None
+    html_content: str | None = None
     artifact_kind: str = _ARTIFACT_KIND_HTML_FILE
     # Trusted root a copied static-site source is walked from through descriptors.
     artifact_root: Path | None = None
@@ -152,12 +153,16 @@ class ReportPublishingStore:
 
     def _publish_artifact(self, source: PublishableReport, slug: str) -> str:
         if source.artifact_kind == _ARTIFACT_KIND_HTML_FILE:
-            if not source.artifact_path.is_file():
+            if source.html_content is not None:
+                destination = self._report_publishing_root / "artifacts" / f"{slug}.html"
+                _atomic_write_text(destination, source.html_content)
+                return _relative_artifact_path(destination, self._storage_root)
+            if source.artifact_path is None or not source.artifact_path.is_file():
                 msg = "Report artifact was not found."
                 raise ReportPublishingError(msg)
             return _relative_artifact_path(source.artifact_path, self._storage_root)
         if source.artifact_kind == ARTIFACT_KIND_STATIC_SITE:
-            if source.artifact_root is None:
+            if source.artifact_root is None or source.artifact_path is None:
                 msg = "Static site publishing requires an authorized source root."
                 raise ReportPublishingError(msg)
             destination_dir = self._report_publishing_root / "artifacts" / slug
@@ -271,3 +276,14 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
         msg = "Expected JSON mapping."
         raise ReportPublishingError(msg)
     return data
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise

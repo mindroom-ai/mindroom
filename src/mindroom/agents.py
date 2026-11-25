@@ -555,7 +555,7 @@ def _build_agent_model_provider(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
+def build_agent_toolkit(  # noqa: C901, PLR0911
     tool_name: str,
     *,
     agent_tools: AgentTools,
@@ -683,13 +683,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-        )
-
-    if tool_name == "dynamic_workflow":
-        from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
-
-        return wrap_direct(
-            DynamicWorkflowTools(),
         )
 
     if tool_name == "report_publishing":
@@ -1142,7 +1135,7 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
+def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferred tools share one construction path
     agent_tools: AgentTools,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
