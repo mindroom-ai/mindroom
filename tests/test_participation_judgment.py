@@ -18,6 +18,7 @@ from mindroom.attachments.storage import AttachmentRecord, format_attachment_ann
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.execution_preparation import _omitted_inline_files_note
 from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.summary_message import compaction_summary_message
@@ -751,3 +752,99 @@ async def test_without_a_judgment_backend_the_reply_model_judges(tmp_path: Path)
     assert record.content == "Useful answer"
     judged = [entry for entry in logs if entry["event"] == "Participation judged"]
     assert [(entry["judge"], entry["fallback"]) for entry in judged] == [("reply_model", "no_judgment_backend")]
+
+
+@pytest.mark.asyncio
+async def test_omitted_inline_file_notes_reach_the_judge_without_names_or_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitted inline-file notes scrub filenames and attachment IDs on both replayed and current turns."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    replayed_listing = format_attachments_prompt([_record("att_file1", "file", "export.json")])
+    replayed_note = _omitted_inline_files_note(
+        [File(id="att_file1", content=b"x" * 2_000_000, filename="export.json")],
+    )
+    current_note_with_id = _omitted_inline_files_note(
+        [File(id="att_file2", content=b"y" * 2_000_000, filename="quarterly-report.pdf")],
+    )
+    current_note_without_id = _omitted_inline_files_note(
+        [File(content=b"z" * 2_000_000, filename="notes.csv")],
+    )
+    messages = [
+        Message(
+            role="user",
+            content=(
+                f"Current message:\n{_msg('@alice:example.org', f'Check this first.\n\n{replayed_listing}')}"
+                f"\n\n{replayed_note}"
+            ),
+        ),
+        Message(role="assistant", content="Tell me which section you need."),
+        Message(
+            role="user",
+            content=f"{_msg('@bob:example.org', 'Also sent another copy.')}\n\n{current_note_with_id}",
+        ),
+        Message(role="assistant", content="Got it."),
+        Message(
+            role="user",
+            content=f"Current message:\n{_msg('@alice:example.org', 'And here are the notes.')}\n\n{current_note_without_id}",
+            files=[File(content=b"short summary", filename="summary.txt")],
+        ),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    record = await _reply(model, gate, messages)
+
+    assert record.content == "Useful answer"
+    assert len(posted) == 1
+    wire = json.dumps(posted[0])
+    for private in (
+        "export.json",
+        "quarterly-report.pdf",
+        "notes.csv",
+        "summary.txt",
+        "att_file1",
+        "att_file2",
+        "Inline file attachment omitted",
+        "Omitted files",
+        "get_attachment",
+    ):
+        assert private not in wire
+    assert [message["content"] for message in posted[0]["input"]] == [
+        'user: Current message:\n<msg from="speaker_1"><![CDATA[Check this first.\n\n[sent a file]]]></msg>',
+        "assistant: Tell me which section you need.",
+        'user: <msg from="speaker_2"><![CDATA[Also sent another copy.]]></msg>\n\n[sent a file]',
+        "assistant: Got it.",
+        'user: Current message:\n<msg from="speaker_1"><![CDATA[And here are the notes.]]></msg>\n\n[sent a file]',
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "malformed_note",
+    [
+        "[Inline file attachment omitted]\nOmitted files: audit.csv (att_leak, 2.0 MiB).",
+        "Please check [Inline file attachment omitted] audit.csv",
+        "[Inline file attachment omitted]\nOmitted files: audit.csv.\nUnexpected guidance line.",
+    ],
+)
+async def test_malformed_omitted_inline_file_heading_falls_back_to_reply_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformed_note: str,
+) -> None:
+    """Any leftover or malformed inline-file omission heading fails closed to the reply model."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    messages = [
+        Message(role="user", content=f"{_msg('@alice:example.org', 'Can you look?')}\n\n{malformed_note}"),
+    ]
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
+
+    with capture_logs() as logs:
+        record = await _reply(model, gate, messages)
+
+    assert record.content == "Useful answer"
+    assert posted == []
+    assert len(model.requests) == 2
+    judged = [entry for entry in logs if entry["event"] == "Participation judged"]
+    assert [(entry["judge"], entry["fallback"]) for entry in judged] == [("reply_model", "unreadable_reference")]

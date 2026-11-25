@@ -83,6 +83,20 @@ _LISTED_FILE = r"- \S+ \((image|audio|video|file)\b[^\n]*\)"
 _CURRENT_FILES = re.compile(
     rf"Attachments sent with the current message \(use tool calls to inspect or process them by ID\):(?:\n{_LISTED_FILE})+",
 )
+# Oversized inline files leave ``_omitted_inline_files_note`` outside ``<msg>``; a judge reads at most a file
+# placeholder, never omitted names or attachment IDs.
+_OMITTED_INLINE_FILES_HEADING = "[Inline file attachment omitted]"
+_OMITTED_INLINE_FILES = re.compile(
+    rf"(\n{{1,2}})?^{re.escape(_OMITTED_INLINE_FILES_HEADING)}\n"
+    r"Omitted files: [^\n]+\.\n"
+    r"Not included inline because it exceeds the inline attachment budget\. "
+    r"Do not claim to have read the omitted file content\."
+    r"(?: Use get_attachment\(attachment_id, mindroom_output_path=\.\.\.\) to save and inspect it selectively with "
+    r"tools, or get_attachment\(attachment_id, view=True\) if full viewing is needed\. "
+    r"If attachment tools are unavailable, ask the user for a smaller excerpt\.|"
+    r" Ask the user for a smaller excerpt\.)(?=\n|$)",
+    re.MULTILINE,
+)
 # An interrupted reply's replay and a retried attempt's prompt quote their tool calls' inputs and outputs, one call per
 # line (``_render_retained_tool_context``); a judge reads only the tool names.
 _RETAINED_TOOLS_HEADING = "Retained tool context from before interruption"
@@ -155,13 +169,25 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
             lambda match: _sent(re.findall(rf"^{_LISTED_FILE}", match[0], re.MULTILINE)),
             text,
         )
+        text, omitted_notes = _OMITTED_INLINE_FILES.subn(
+            "" if annotations + listings else lambda match: f"{match[1] or ''}{_sent(['file'])}",
+            text,
+        )
         text = _RETAINED_TOOLS.sub(lambda match: _used(_RETAINED_TOOL.findall(match[1])), text)
-        if mentions_attachments(text) or _RETAINED_TOOLS_HEADING in text:
+        if mentions_attachments(text) or _RETAINED_TOOLS_HEADING in text or _OMITTED_INLINE_FILES_HEADING in text:
             # A reference in another shape could name a private file or quote a tool call.
             return "unreadable_reference"
         notes = []
         if not annotations + listings:
-            notes.append(_sent([_MEDIA_KINDS[name] for name, media in message_media_entries(message) if media]))
+            notes.append(
+                _sent(
+                    [
+                        _MEDIA_KINDS[name]
+                        for name, media in message_media_entries(message)
+                        if media and not (omitted_notes and name == "files")
+                    ],
+                ),
+            )
         if message.tool_calls:
             notes.append(_used([(call.get("function") or {}).get("name") for call in message.tool_calls]))
         text = "\n".join(part for part in (text, *notes) if part)

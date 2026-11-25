@@ -202,15 +202,11 @@ def _decode_cp1252_stream(raw_seen: Sequence[bytes], stream: BinaryIO) -> Iterat
         yield raw.decode("cp1252", errors="replace")
 
 
-def _decode_utf8_after_first(
-    decoder: codecs.IncrementalDecoder,
-    stream: BinaryIO,
-    first_text: str,
-) -> Iterator[str]:
-    yield first_text
+def _drain_utf8_validation(decoder: codecs.IncrementalDecoder, stream: BinaryIO) -> None:
+    """Validate the remaining bytes of ``stream`` as strict UTF-8 without tokenizing or buffering text."""
     while raw := stream.read(_TEXT_STREAM_CHUNK_BYTES):
-        yield decoder.decode(raw)
-    yield decoder.decode(b"", final=True)
+        decoder.decode(raw)
+    decoder.decode(b"", final=True)
 
 
 def _count_text_stream_within_budget(
@@ -263,22 +259,39 @@ def _count_untyped_stream_within_budget(
     text_budget: int,
     headroom_budget: int | None,
 ) -> tuple[int, bool] | None:
-    """Count a non-text-MIME stream as strict UTF-8 text or fall back to ``MEDIA_ALLOWANCE_TOKENS`` for binary."""
+    """Count a non-text-MIME stream as strict UTF-8 text or fall back to ``MEDIA_ALLOWANCE_TOKENS`` for binary.
+
+    Matches ``_file_tokens``: once ``text_budget`` is exceeded, tokenization stops immediately, but when binary
+    fallback still fits ``headroom_budget`` the remaining bytes are scanned for invalid UTF-8 so archives or binary
+    files with a long valid-UTF-8 prefix still classify as binary.
+    """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    binary_fits = headroom_budget is None or headroom_budget >= MEDIA_ALLOWANCE_TOKENS
     try:
-        first_text = decoder.decode(first)
         if text_budget <= 0:
-            if len(first) < _TEXT_STREAM_CHUNK_BYTES:
-                decoder.decode(b"", final=True)
+            if not binary_fits:
+                return None
+            decoder.decode(first)
+            _drain_utf8_validation(decoder, stream)
             return None
-        tokens = _count_text_chunks_within_budget(
-            counter,
-            _decode_utf8_after_first(decoder, stream, first_text),
-            text_budget,
-        )
+        chunks: list[str] = []
+        approx_tokens = 0
+        for raw in _read_chunks(stream, first):
+            if text := decoder.decode(raw):
+                chunks.append(text)
+                approx_tokens += count(counter, text)
+                if approx_tokens > text_budget + len(chunks) * _CHUNK_BOUNDARY_SLACK_TOKENS:
+                    if not binary_fits:
+                        return None
+                    chunks.clear()
+                    _drain_utf8_validation(decoder, stream)
+                    return None
+        if tail := decoder.decode(b"", final=True):
+            chunks.append(tail)
     except UnicodeDecodeError:
         return _fits_non_text(MEDIA_ALLOWANCE_TOKENS, headroom_budget)
-    return (tokens, True) if tokens is not None else None
+    exact = count(counter, "".join(chunks))
+    return (exact, True) if exact <= text_budget else None
 
 
 def _stream_file_tokens_within_budget(

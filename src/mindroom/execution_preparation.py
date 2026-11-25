@@ -104,6 +104,7 @@ _NON_TURN_NOTICE_CONTENT_KEYS = (
 # Soft default ceiling for incoming text ``File`` attachments auto-inlined on a single turn's prompt.
 MAX_AUTO_INLINE_FILE_TOKENS = 32_000
 _ATTACHMENT_ID_PREFIX = "att_"
+# Format matched by ``participation_hook._OMITTED_INLINE_FILES`` to scrub omitted names and IDs from external judges.
 _INLINE_FILE_OMITTED_MARKER = "[Inline file attachment omitted]"
 _INLINE_FILE_OMITTED_BASE_GUIDANCE = (
     "Not included inline because it exceeds the inline attachment budget. "
