@@ -512,11 +512,12 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.585; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
 #   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
-# Handling: When the config enables `workflow` (including via `dynamic_workflow`), allow any replacement function
-#   already decided by an exact `match` rule, and otherwise reject `tool_approval.rules` when a retired function's
-#   effective approval decision differs from its replacement's effective decision.
+# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
+#   differs from its replacement's effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
-#   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed.
+#   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "run_workflow": ("start_workflow", "resume_workflow"),
     "create_workflow": ("save_workflow",),

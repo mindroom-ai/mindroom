@@ -1634,7 +1634,7 @@ class Config(BaseModel):
         ):
             raise ToolConfigOverrideError(trigger_error)
         if (
-            any(entry.name == "workflow" for _, entry in entries)
+            any(entry.aliased_from_dynamic_workflow for _, entry in entries)
             and (
                 workflow_error := retired_dynamic_workflow_approval_error(
                     self.tool_approval.rules,

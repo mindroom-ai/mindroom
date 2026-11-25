@@ -294,28 +294,28 @@ def test_validate_with_runtime_preserves_deprecation_warning_across_pass_two_edi
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "approval", "expected_match"),
+    ("agent_tools", "approval", "expected_match"),
     [
         pytest.param(
-            "dynamic_workflow",
+            ["dynamic_workflow"],
             {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
             "start_workflow",
             id="run-workflow-alias",
         ),
         pytest.param(
-            "workflow",
+            ["workflow", "dynamic_workflow"],
             {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
             "start_workflow",
-            id="run-workflow-canonical",
+            id="run-workflow-merged-alias",
         ),
         pytest.param(
-            "dynamic_workflow",
+            ["dynamic_workflow"],
             {"rules": [{"match": "create_workflow", "action": "require_approval"}]},
             "save_workflow",
             id="create-workflow",
         ),
         pytest.param(
-            "workflow",
+            ["dynamic_workflow"],
             {"default": "require_approval", "rules": [{"match": "start_*", "action": "auto_approve"}]},
             "start_workflow",
             id="broad-glob-weakening-default",
@@ -324,13 +324,13 @@ def test_validate_with_runtime_preserves_deprecation_warning_across_pass_two_edi
 )
 def test_retired_dynamic_workflow_approval_rules_fail(
     tmp_path: Path,
-    tool_name: str,
+    agent_tools: list[object],
     approval: dict[str, object],
     expected_match: str,
 ) -> None:
-    """Approval rules that stop deciding retired `dynamic_workflow` functions fail naming the replacement."""
+    """Configs authoring `dynamic_workflow` reject approval rules that stop deciding its retired functions."""
     with pytest.raises(ConfigRuntimeValidationError, match=expected_match):
-        Config.validate_with_runtime(_cfg(agent_tools=[tool_name], tool_approval=approval), _paths(tmp_path))
+        Config.validate_with_runtime(_cfg(agent_tools=agent_tools, tool_approval=approval), _paths(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -345,7 +345,7 @@ def test_retired_dynamic_workflow_approval_rules_fail(
             ],
             id="explicit-exact-replacements",
         ),
-        pytest.param(["workflow"], [{"match": "*_workflow*", "action": "require_approval"}], id="wildcard"),
+        pytest.param(["dynamic_workflow"], [{"match": "*_workflow*", "action": "require_approval"}], id="wildcard"),
         pytest.param(["calculator"], [{"match": "run_workflow", "action": "require_approval"}], id="without-workflow"),
     ],
 )
@@ -354,12 +354,29 @@ def test_retired_dynamic_workflow_approval_rules_allowed(
     agent_tools: list[object],
     rules: list[dict[str, object]],
 ) -> None:
-    """Exact replacement rules, matching wildcards, and configs without `workflow` load cleanly."""
+    """Exact replacement rules, matching wildcards, and configs without `dynamic_workflow` load cleanly."""
     config = Config.validate_with_runtime(
         _cfg(agent_tools=agent_tools, tool_approval={"rules": rules}),
         _paths(tmp_path),
     )
     assert len(config.tool_approval.rules) == len(rules)
+
+
+@pytest.mark.parametrize("pattern", ["start_*", "run_*", "resume_*", "create_*"])
+@pytest.mark.parametrize(
+    ("default_action", "rule_action"),
+    [("auto_approve", "require_approval"), ("require_approval", "auto_approve")],
+)
+def test_canonical_workflow_wildcard_approval_rules_load_cleanly(
+    tmp_path: Path,
+    pattern: str,
+    default_action: str,
+    rule_action: str,
+) -> None:
+    """Canonical-only `workflow` configs are not falsely blocked by ordinary wildcard approval rules."""
+    approval = {"default": default_action, "rules": [{"match": pattern, "action": rule_action}]}
+    config = Config.validate_with_runtime(_cfg(agent_tools=["workflow"], tool_approval=approval), _paths(tmp_path))
+    assert config.tool_approval.rules[0].match == pattern
 
 
 @pytest.mark.parametrize("tool_name", ["workflow", "dynamic_workflow"])

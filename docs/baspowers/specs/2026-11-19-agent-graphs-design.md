@@ -51,7 +51,7 @@ list_workflow_runs()
 save_workflow(run_id, name, description=None)
 ```
 
-No name clashes with `dynamic_workflow`, so an agent can have both toolkits while it migrates.
+No name clashes with the retired `dynamic_workflow` toolkit; `dynamic_workflow` now aliases `workflow` (see [The old toolkit](#the-old-toolkit)).
 
 ### Exact description of `start_workflow`
 
