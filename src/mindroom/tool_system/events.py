@@ -1170,32 +1170,38 @@ def _internal_fields(entry: ToolTraceEntry) -> dict[str, object]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def serialize_tool_trace_entry(
+    entry: ToolTraceEntry,
+    *,
+    include_internal: bool = False,
+) -> dict[str, object]:
+    """Serialize one trace entry with its call id and failure, optionally with restart-only fields."""
+    event: dict[str, object] = {
+        "type": entry.type,
+        "tool_name": entry.tool_name,
+    }
+    if entry.args_preview is not None:
+        event["args_preview"] = _redact_preview(entry.args_preview)
+    if entry.result_preview is not None:
+        event["result_preview"] = _redact_preview(entry.result_preview)
+    if entry.truncated:
+        event["truncated"] = True
+    if entry.is_error and entry.type == "tool_call_completed":
+        event["is_error"] = True
+    if include_internal:
+        event.update(_internal_fields(entry))
+    elif entry.tool_call_id is not None:
+        event["tool_call_id"] = entry.tool_call_id
+    return event
+
+
 def serialize_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Serialize trace entries with their call ids and a completed call's failure, optionally with restart-only fields."""
-    serialized: list[dict[str, object]] = []
-    for entry in tool_trace:
-        event: dict[str, object] = {
-            "type": entry.type,
-            "tool_name": entry.tool_name,
-        }
-        if entry.args_preview is not None:
-            event["args_preview"] = _redact_preview(entry.args_preview)
-        if entry.result_preview is not None:
-            event["result_preview"] = _redact_preview(entry.result_preview)
-        if entry.truncated:
-            event["truncated"] = True
-        if entry.is_error and entry.type == "tool_call_completed":
-            event["is_error"] = True
-        if include_internal:
-            event.update(_internal_fields(entry))
-        elif entry.tool_call_id is not None:
-            event["tool_call_id"] = entry.tool_call_id
-        serialized.append(event)
-    return tuple(serialized)
+    return tuple(serialize_tool_trace_entry(entry, include_internal=include_internal) for entry in tool_trace)
 
 
 # LEGACY_COMPAT: Tool trace entries that name their team slot as a ``scope_key`` string.
