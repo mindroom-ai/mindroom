@@ -970,7 +970,7 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 │                                                             agents, in pixels; defaults to   │
 │                                                             the saved setup (1568 unless     │
 │                                                             changed).                        │
-│ --jpeg-quality                INTEGER RANGE [40<=x<=95]     JPEG quality of screenshots sent │
+│ --jpeg-quality                INTEGER RANGE [20<=x<=95]     JPEG quality of screenshots sent │
 │                                                             to agents; defaults to the saved │
 │                                                             setup (80 unless changed).       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

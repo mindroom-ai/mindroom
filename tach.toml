@@ -5098,6 +5098,7 @@ depends_on = [
     "mindroom.desktop.input",
     "mindroom.desktop.macos_input",
     "mindroom.desktop.macos_capture",
+    "mindroom.desktop.native_config",
 ]
 
 [[modules]]

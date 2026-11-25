@@ -47,6 +47,8 @@ _CONTROLLER_ENTRY_KEYS = frozenset({"controller", "allowed_requester_ids", "allo
 _MAX_CONTROLLERS = 64
 _MAX_ROOTS = 32
 _MAX_ROOT_LENGTH = 4_096
+MIN_JPEG_QUALITY = 20
+MAX_JPEG_QUALITY = 95
 # Folder reads confine through POSIX descriptors; shell commands need process groups and the login account.
 _LOCAL_ACCESS_SUPPORTED = os.name == "posix"
 _POSIX_ONLY_ACCESS = (
@@ -219,7 +221,12 @@ class NativeDesktopConfig:
                 minimum=320,
                 maximum=3840,
             ),
-            jpeg_quality=_integer(capture_raw.get("jpeg_quality"), "jpeg_quality", minimum=20, maximum=95),
+            jpeg_quality=_integer(
+                capture_raw.get("jpeg_quality"),
+                "jpeg_quality",
+                minimum=MIN_JPEG_QUALITY,
+                maximum=MAX_JPEG_QUALITY,
+            ),
         )
         browser_raw = _mapping(payload.get("browser"), "browser")
         if set(browser_raw) != {"enabled", "executable_path", "user_data_dir", "timeout_seconds"}:
@@ -700,6 +707,8 @@ def _local_access_from_payload(payload: dict[str, object]) -> tuple[NativeFilesC
 
 
 __all__ = [
+    "MAX_JPEG_QUALITY",
+    "MIN_JPEG_QUALITY",
     "NativeBrowserConfig",
     "NativeCaptureConfig",
     "NativeConfigError",

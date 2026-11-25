@@ -6258,8 +6258,7 @@
                 "screenshot",
                 "both"
               ],
-              "default": "both",
-              "description": "Choose semantic state, pixels, or both; tree skips screenshot transfer."
+              "description": "Choose semantic state, pixels, or both; tree skips screenshot transfer. Defaults to screenshot for action=screenshot and both for other app actions."
             },
             "return_attachment": {
               "type": "boolean",

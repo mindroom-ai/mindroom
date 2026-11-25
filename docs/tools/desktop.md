@@ -313,7 +313,7 @@ Control actions require a control lease or full control:
 - `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
   App-switching, quit, launch, and address-bar shortcuts are rejected because they could reach apps outside the allowlist.
 
-Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; the default is `both`.
+Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; `screenshot` defaults to `screenshot` and other app actions default to `both`.
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.

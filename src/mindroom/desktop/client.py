@@ -40,6 +40,21 @@ class DesktopRequestError(RuntimeError):
         self.action_outcome = "unknown" if request_id is not None else "not_sent"
 
 
+_SHELL_CONCURRENT_ACTIONS = frozenset({"status", "request_status", "check_shell", "kill_shell"})
+
+
+def _request_lane(action: str) -> str:
+    return "run_shell" if action == "run_shell" else "other"
+
+
+def _lane_conflicts(active: dict[str, str], action: str) -> bool:
+    if action == "run_shell":
+        return "run_shell" in active or ("other" in active and active["other"] not in _SHELL_CONCURRENT_ACTIONS)
+    if action in _SHELL_CONCURRENT_ACTIONS:
+        return "other" in active
+    return bool(active)
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingDesktopResponse:
     target: PinnedMatrixDevice
@@ -53,7 +68,8 @@ class DesktopResponseRouter:
     def __init__(self, client: nio.AsyncClient) -> None:
         self._client_ref = weakref.ref(client)
         self._pending: dict[str, _PendingDesktopResponse] = {}
-        self._targets_in_flight: set[PinnedMatrixDevice] = set()
+        self._in_flight_lanes: dict[PinnedMatrixDevice, dict[str, str]] = {}
+        self._target_send_locks: dict[PinnedMatrixDevice, asyncio.Lock] = {}
         client.add_to_device_callback(self.on_to_device_event, AuthenticatedToDeviceEvent)
 
     async def request(
@@ -72,9 +88,11 @@ class DesktopResponseRouter:
         if command.request_id in self._pending:
             msg = f"Desktop request ID is already pending: {command.request_id}."
             raise DesktopRequestError(msg)
-        if target in self._targets_in_flight:
+        active = self._in_flight_lanes.get(target, {})
+        if _lane_conflicts(active, command.action):
             msg = "A desktop request is already in progress for this device; inspect its result before the next action."
             raise DesktopRequestError(msg)
+        lane = _request_lane(command.action)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[DesktopResponse] = loop.create_future()
         self._pending[command.request_id] = _PendingDesktopResponse(
@@ -82,20 +100,22 @@ class DesktopResponseRouter:
             session_id=command.session_id,
             future=future,
         )
-        self._targets_in_flight.add(target)
+        self._in_flight_lanes.setdefault(target, {})[lane] = command.action
+        send_lock = self._target_send_locks.setdefault(target, asyncio.Lock())
         try:
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    client = self._client_ref()
-                    if client is None:
-                        msg = "Desktop Matrix client closed before the request could be sent."
-                        raise DesktopRequestError(msg)
-                    await send_encrypted_to_device(
-                        client,
-                        target,
-                        event_type=DESKTOP_COMMAND_EVENT_TYPE,
-                        content=command.to_content(),
-                    )
+                    async with send_lock:
+                        client = self._client_ref()
+                        if client is None:
+                            msg = "Desktop Matrix client closed before the request could be sent."
+                            raise DesktopRequestError(msg)
+                        await send_encrypted_to_device(
+                            client,
+                            target,
+                            event_type=DESKTOP_COMMAND_EVENT_TYPE,
+                            content=command.to_content(),
+                        )
                     return await future
             except TimeoutError as exc:
                 msg = _timeout_message(command, timeout_seconds=timeout_seconds)
@@ -108,7 +128,12 @@ class DesktopResponseRouter:
                 raise DesktopRequestError(msg, request_id=command.request_id) from exc
         finally:
             self._pending.pop(command.request_id, None)
-            self._targets_in_flight.discard(target)
+            target_lanes = self._in_flight_lanes.get(target)
+            if target_lanes is not None:
+                target_lanes.pop(lane, None)
+                if not target_lanes:
+                    self._in_flight_lanes.pop(target, None)
+                    self._target_send_locks.pop(target, None)
 
     def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Resolve a waiter only for a valid response from its exact pinned device."""

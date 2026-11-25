@@ -20,6 +20,7 @@ from mindroom.cli.config import activate_cli_runtime, print_literal
 from mindroom.cli.help_format import PanelOrderedGroup
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
+from mindroom.desktop.native_config import MAX_JPEG_QUALITY, MIN_JPEG_QUALITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -812,8 +813,8 @@ def desktop_run(
     jpeg_quality: int | None = typer.Option(
         None,
         "--jpeg-quality",
-        min=40,
-        max=95,
+        min=MIN_JPEG_QUALITY,
+        max=MAX_JPEG_QUALITY,
         help="JPEG quality of screenshots sent to agents; defaults to the saved setup (80 unless changed).",
         rich_help_panel="Screenshots",
     ),

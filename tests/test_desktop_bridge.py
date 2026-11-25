@@ -20,6 +20,9 @@ import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.accessibility import (
+    AccessibilityElement,
+    AccessibilityError,
+    AccessibilityState,
     DesktopApp,
     MacAccessibilityBackend,
 )
@@ -174,7 +177,9 @@ async def _handle(bridge: DesktopBridge, event: AuthenticatedToDeviceEvent) -> N
     command = DesktopCommand.from_content(event.source["content"])
     state_id = command.parameters.get("state_id")
     if isinstance(state_id, str):
-        bridge._observations.remember(replace(STATE, state_id=state_id), command)
+        controller_key = bridge._match_controller(event)
+        if controller_key is not None:
+            bridge._observations.remember(replace(STATE, state_id=state_id), command, controller_key=controller_key)
     await bridge.on_to_device_event(event)
     await _execute(bridge)
     await bridge.deliver_pending()
@@ -692,7 +697,11 @@ async def test_shell_approval_is_shown_only_after_app_input_in_progress_finishes
     provider = _BlockingClickProvider()
     bridge = _control_shell_bridge(provider, _local_shell())
     click = _app_input("click", {"x": 100, "y": 200, "button": "left"}, sequence=1)
-    bridge._observations.remember(replace(STATE, state_id="state-1"), click)
+    bridge._observations.remember(
+        replace(STATE, state_id="state-1"),
+        click,
+        controller_key=bridge._primary_controller_key(),
+    )
     await bridge.on_to_device_event(_event(click))
     input_lane = asyncio.create_task(bridge.execute_pending(shell_starts=False))
     try:
@@ -2952,3 +2961,219 @@ async def test_agent_status_exposes_gui_permissions_ready(
     assert no_gui_status["gui_permissions_ready"] is False
     await no_gui_bridge.stop()
     no_gui_bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_oversized_ax_state_fits_inline_and_drops_unreturned_elements(
+    transport: AsyncMock,
+) -> None:
+    """Oversized AX replies drop a suffix within MAX_INLINE_RESPONSE_BYTES and refuse targeting dropped elements."""
+    big_elements = tuple(
+        AccessibilityElement(
+            index=i,
+            depth=1,
+            parent_index=0,
+            role="AXButton",
+            subrole=None,
+            name=f"button-{i:03d}-" + ("n" * 140),
+            value="v" * 150,
+            enabled=True,
+            settable=False,
+            bounds=WINDOW,
+            actions=("AXPress",),
+        )
+        for i in range(128)
+    )
+    state_seq = iter(f"big-state-{n}" for n in range(1, 5))
+    provider = FakeProvider()
+    provider.get_app_state = lambda _app_id: AccessibilityState(  # type: ignore[method-assign]
+        next(state_seq),
+        APP_ID,
+        "Editor",
+        WINDOW,
+        big_elements,
+        False,
+    )
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await _handle(bridge, _event(_command("get_app_state", request_id="r1", sequence=1, parameters={"app": APP_ID})))
+    response = _response(transport)
+    assert response.ok
+    assert response.screenshot == MEDIA
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    returned_state = response.result["state"]
+    kept_count = len(returned_state["elements"])
+    assert 0 < kept_count < 128
+    assert returned_state["truncated"] is True
+    assert returned_state["stability"] == "truncated"
+
+    # A dropped element is rejected even with bare element_index; a kept element succeeds.
+    dropped_cmd = _command(
+        "click_element",
+        request_id="r2",
+        sequence=2,
+        parameters={"app": APP_ID, "state_id": "big-state-1", "element_index": kept_count, "observation": "tree"},
+    )
+    await bridge.on_to_device_event(_event(dropped_cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "index" in (_response(transport).error or "")
+
+    kept_cmd = _command(
+        "click_element",
+        request_id="r3",
+        sequence=3,
+        parameters={"app": APP_ID, "state_id": "big-state-1", "element_index": kept_count - 1, "observation": "tree"},
+    )
+    await bridge.on_to_device_event(_event(kept_cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert _response(transport).content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_screenshot_mode_omits_elements_and_rejects_bare_element_index(
+    transport: AsyncMock,
+) -> None:
+    """observation=screenshot omits elements from the reply and blocks element targeting on that state_id."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "screenshot",
+                request_id="shot-1",
+                sequence=1,
+                parameters={"app": APP_ID, "observation": "screenshot"},
+            ),
+        ),
+    )
+    response = _response(transport)
+    assert response.ok
+    assert response.result["observation"] == {"mode": "screenshot"}
+    assert "elements" not in response.result["state"]
+    state_id = response.result["state"]["state_id"]
+
+    click_el = _command(
+        "click_element",
+        request_id="el-1",
+        sequence=2,
+        parameters={"app": APP_ID, "state_id": state_id, "element_index": 0, "observation": "tree"},
+    )
+    await bridge.on_to_device_event(_event(click_el))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "index" in (_response(transport).error or "")
+
+    # Coordinate fallback still works with the screenshot-mode state_id.
+    click_xy = _command(
+        "click",
+        request_id="xy-1",
+        sequence=3,
+        parameters={"app": APP_ID, "state_id": state_id, "x": 100, "y": 100, "button": "left", "observation": "tree"},
+    )
+    await bridge.on_to_device_event(_event(click_xy))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+
+
+@pytest.mark.asyncio
+async def test_oversized_capture_warning_and_error_response_are_bounded(
+    transport: AsyncMock,
+) -> None:
+    """Huge capture warnings fall back within MAX_INLINE_RESPONSE_BYTES and _error_response caps at 4096 chars."""
+    provider = FakeProvider()
+
+    def failing_screenshot(*, app_id: str, state_id: str) -> object:
+        del app_id, state_id
+        msg = "E" * 60_000
+        raise AccessibilityError(msg)
+
+    provider.screenshot = failing_screenshot  # type: ignore[method-assign]
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "click_element",
+                request_id="c1",
+                sequence=1,
+                parameters={"app": APP_ID, "state_id": "state-1", "element_index": 0},
+            ),
+        ),
+    )
+    response = _response(transport)
+    assert response.ok
+    assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
+    assert response.result["action"] == "click_element"
+    assert response.result["action_completed"] is True
+    assert str(response.result["warning"]).endswith("...")
+
+    # Direct error responses cap at 4,096 chars.
+    await _handle(
+        bridge,
+        _event(_command("screenshot", request_id="s1", sequence=2, parameters={"app": APP_ID})),
+    )
+    err_response = _response(transport)
+    assert not err_response.ok
+    assert err_response.error is not None
+    assert len(err_response.error) == 4096
+    assert err_response.error.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_two_controllers_cannot_cross_reference_observations(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical (requester_id, agent_name, session_id) across two controllers cannot share state_id."""
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", _match_pinned)
+    other = PinnedMatrixDevice("@cloud2:example.org", "CLOUD2", "cloud2-fingerprint")
+    policy = replace(
+        _policy(allow_control=True),
+        controllers=(
+            DesktopControllerPolicy(CONTROLLER, frozenset({ALICE}), frozenset({"computer"})),
+            DesktopControllerPolicy(other, frozenset({ALICE}), frozenset({"computer"})),
+        ),
+    )
+    bridge = DesktopBridge(client=object(), provider=FakeProvider(), policy=policy, clock=lambda: NOW_SECONDS)
+    await _handle(
+        bridge,
+        _controller_event(
+            CONTROLLER,
+            _command("get_app_state", request_id="a1", sequence=1, parameters={"app": APP_ID, "observation": "tree"}),
+        ),
+    )
+    state_id = _response(transport).result["state"]["state_id"]
+
+    other_cmd = _command(
+        "click_element",
+        request_id="b1",
+        sequence=1,
+        parameters={"app": APP_ID, "state_id": state_id, "element_index": 0, "observation": "tree"},
+    )
+    await bridge.on_to_device_event(_controller_event(other, other_cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "scope" in (_response(transport).error or "")

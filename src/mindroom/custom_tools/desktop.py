@@ -157,8 +157,10 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "observation": {
             "type": "string",
             "enum": ["tree", "screenshot", "both"],
-            "default": "both",
-            "description": "Choose semantic state, pixels, or both; tree skips screenshot transfer.",
+            "description": (
+                "Choose semantic state, pixels, or both; tree skips screenshot transfer. "
+                "Defaults to screenshot for action=screenshot and both for other app actions."
+            ),
         },
         "return_attachment": {
             "type": "boolean",
@@ -307,7 +309,7 @@ class DesktopTools(Toolkit):
         pages: int = 1,
         keys: list[str] | None = None,
         return_attachment: bool = False,
-        observation: str = "both",
+        observation: str | None = None,
         request_id: str | None = None,
         start_x: int | None = None,
         start_y: int | None = None,
@@ -378,7 +380,10 @@ class DesktopTools(Toolkit):
             else:
                 _reject_supplied(action, local_arguments.supplied())
                 parameters = _action_parameters(action, app_arguments)
-            mode = desktop_observation_mode(action, observation)
+            resolved_observation: object = (
+                ("screenshot" if action == "screenshot" else "both") if observation is None else observation
+            )
+            mode = desktop_observation_mode(action, resolved_observation)
             if mode != "both":
                 parameters["observation"] = mode
             transport_timeout = _SHELL_START_TIMEOUT_SECONDS if action == "run_shell" else configuration.timeout_seconds
@@ -999,23 +1004,52 @@ async def _local_result(
 
 
 async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *, timeout_seconds: float) -> ToolValue:
-    """Expand shell output inside a recovered reply exactly as in the original reply."""
+    """Expand shell output and screenshots inside a recovered reply without leaking encrypted media keys."""
     raw_response = result.get("response")
     recorded = DesktopResponse.from_content(raw_response) if raw_response is not None else None
-    if recorded is None or "output_attachment" not in recorded.result:
+    if recorded is None:
         return _ok_result("request_status", result)
+
+    def sanitized(shown_result: dict[str, object]) -> dict[str, object]:
+        response_content = {key: value for key, value in recorded.to_content().items() if key != "screenshot"}
+        response_content["result"] = _without_attachment(shown_result)
+        return {**result, "response": response_content}
+
+    shown = _without_attachment(recorded.result)
+    if "output_attachment" in recorded.result:
+        try:
+            shown = await _with_full_output(client, recorded.result, timeout_seconds=timeout_seconds)
+        except (DesktopMediaError, DesktopProtocolError) as exc:
+            return _partial_result(
+                "request_status",
+                result=sanitized(recorded.result),
+                message=(
+                    f"The recorded reply was found, but its full output could not be downloaded: {exc} "
+                    "Query request_status again later; do not run the command again."
+                ),
+            )
+    sanitized_result = sanitized(shown)
+    if recorded.screenshot is None:
+        return _ok_result("request_status", sanitized_result)
     try:
-        shown = await _with_full_output(client, recorded.result, timeout_seconds=timeout_seconds)
-    except (DesktopMediaError, DesktopProtocolError) as exc:
+        image_bytes = await download_encrypted_screenshot(
+            client,
+            recorded.screenshot,
+            timeout_seconds=timeout_seconds,
+        )
+    except DesktopMediaError as exc:
         return _partial_result(
             "request_status",
-            result={**result, "response": {**recorded.to_content(), "result": _without_attachment(recorded.result)}},
+            result=sanitized_result,
             message=(
-                f"The recorded reply was found, but its full output could not be downloaded: {exc} "
-                "Query request_status again later; do not run the command again."
+                f"The recorded reply was found, but its screenshot could not be decrypted: {exc} "
+                "Query request_status again later; do not repeat the action."
             ),
         )
-    return _ok_result("request_status", {**result, "response": {**recorded.to_content(), "result": shown}})
+    return ToolValue(
+        content=custom_tool_payload("desktop", "ok", action="request_status", result=sanitized_result),
+        images=(Image(content=image_bytes, mime_type=recorded.screenshot.mime_type),),
+    )
 
 
 async def _with_full_output(

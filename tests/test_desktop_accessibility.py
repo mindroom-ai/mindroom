@@ -976,3 +976,110 @@ def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:
     backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
     with pytest.raises(AccessibilityError, match="stale"):
         backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, "old-state")
+
+
+def test_mac_flatten_skips_empty_string_containers_and_keeps_empty_textfields() -> None:
+    """Blank-string container values are skipped while keeping descendants and empty text fields intact."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["window-1"]["children"] = UserList(["empty-group", "space-group", "text-field"])
+    services.attributes["empty-group"] = {
+        "role": "AXGroup",
+        "value": "",
+        "children": UserList(["nested-button"]),
+    }
+    services.attributes["space-group"] = {
+        "role": "AXGroup",
+        "value": "   \t\n",
+        "children": UserList([]),
+    }
+    services.attributes["nested-button"] = {"role": "AXButton", "title": "Nested"}
+    services.attributes["text-field"] = {"role": "AXTextField", "value": ""}
+
+    stored = backend._collect_app_state("com.example.Editor", state_id="s1")
+
+    roles_and_names = [(el.role, el.name, el.value, el.parent_index) for el in stored.public.elements]
+    assert roles_and_names == [
+        ("AXWindow", "Editor", None, None),
+        ("AXTextField", None, "", 0),
+        ("AXButton", "Nested", None, 0),
+    ]
+    nested_idx = next(el.index for el in stored.public.elements if el.name == "Nested")
+    assert stored.identities[nested_idx].ancestors == ("window-1", "empty-group")
+
+
+def test_mac_flatten_avoids_duplicate_label_and_action_ipcs() -> None:
+    """Flattening fetches each label attribute and action list at most once per node."""
+    backend, services, _ = _fake_mac_backend()
+    attr_calls: dict[tuple[object, str], int] = {}
+    action_calls: dict[object, int] = {}
+    orig_attr = services.AXUIElementCopyAttributeValue
+    orig_actions = services.AXUIElementCopyActionNames
+
+    def counting_attr(reference: object, attribute: str, unused: object) -> tuple[int, object | None]:
+        attr_calls[(reference, attribute)] = attr_calls.get((reference, attribute), 0) + 1
+        return orig_attr(reference, attribute, unused)
+
+    def counting_actions(reference: object, unused: object) -> tuple[int, object]:
+        action_calls[reference] = action_calls.get(reference, 0) + 1
+        return orig_actions(reference, unused)
+
+    services.AXUIElementCopyAttributeValue = counting_attr  # type: ignore[method-assign]
+    services.AXUIElementCopyActionNames = counting_actions  # type: ignore[method-assign]
+
+    stored = backend._collect_app_state("com.example.Editor", state_id="s1")
+
+    for ref in ("window-1", "button"):
+        assert action_calls[ref] == 1
+        for attr in ("title", "description", "help", "identifier"):
+            assert attr_calls[(ref, attr)] == 1
+    button_idx = next(el.index for el in stored.public.elements if el.name == "Save")
+    assert stored.identities[button_idx].content_fingerprint == backend._element_content_fingerprint("button", "draft")
+
+
+def test_mac_flatten_caps_queued_children_bounds_app_name_and_formats_refs() -> None:
+    """Excess children are capped to the remaining visit budget, app_name is bounded, and refs are 24 hex chars."""
+    backend, services, workspace = _fake_mac_backend()
+    workspace.applications[0].localizedName = lambda: "X" * 300  # type: ignore[method-assign]
+    services.attributes["window-1"]["children"] = UserList([f"child-{i}" for i in range(600)])
+    for i in range(600):
+        services.attributes[f"child-{i}"] = {"role": "AXGroup", "value": ""}
+
+    stored = backend._collect_app_state("com.example.Editor", state_id="s1")
+
+    assert stored.public.truncated is True
+    assert len(stored.public.app_name) == 160
+    ref = stored.public.element_ref(0)
+    assert len(ref) == 24
+    assert all(ch in "0123456789abcdef" for ch in ref)
+    without_elements = stored.public.to_result(include_elements=False)
+    assert "elements" not in without_elements
+    assert without_elements["state_id"] == "s1"
+
+
+def test_mac_prepare_capture_revalidates_window_without_walking_ax_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare_capture revalidates window identity and geometry without calling _flatten_tree."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    state = backend.get_app_state("com.example.Editor")
+
+    flatten_calls = 0
+    orig_flatten = backend._flatten_tree
+
+    def spy_flatten(root: object) -> object:
+        nonlocal flatten_calls
+        flatten_calls += 1
+        return orig_flatten(root)
+
+    monkeypatch.setattr(backend, "_flatten_tree", spy_flatten)
+    capture = backend.prepare_capture("com.example.Editor", state.state_id)
+    assert capture == AccessibilityCapture(state, 42)
+    assert flatten_calls == 0
+
+    # Window geometry change is caught and invalidates the retained state.
+    services.attributes["window-1"]["size"] = SimpleNamespace(width=900, height=600)
+    with pytest.raises(AccessibilityError, match="window geometry changed"):
+        backend.prepare_capture("com.example.Editor", state.state_id)
+    assert state.state_id not in backend._states
+    assert flatten_calls == 0
