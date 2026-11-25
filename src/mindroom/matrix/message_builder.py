@@ -12,6 +12,7 @@ from markdown_it.rules_block import StateBlock, heading, html_block, reference
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from mdit_py_plugins.footnote import footnote_plugin
+from mdit_py_plugins.footnote.index import footnote_def
 from pygments import highlight
 from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
@@ -514,6 +515,26 @@ def _decline_line_at_end_of_input(rule: Callable[[StateBlock, int, int, bool], b
     return guarded_rule
 
 
+def _track_duplicate_footnote_definitions(
+    rule: Callable[[StateBlock, int, int, bool], bool],
+) -> Callable[[StateBlock, int, int, bool], bool]:
+    """Flag duplicate footnote definitions in ``state.env`` using markdown-it's own ``footnote_def`` parse."""
+
+    def guarded_rule(state: StateBlock, start_line: int, end_line: int, silent: bool) -> bool:
+        if silent:
+            return rule(state, start_line, end_line, silent)
+        existing_refs = set(state.env.get("footnotes", {}).get("refs", ()))
+        token_index = len(state.tokens)
+        matched = rule(state, start_line, end_line, silent)
+        if matched and token_index < len(state.tokens):
+            label = state.tokens[token_index].meta.get("label")
+            if isinstance(label, str) and f":{label}" in existing_refs:
+                state.env["_has_duplicate_footnote_defs"] = True
+        return matched
+
+    return guarded_rule
+
+
 def _decline_footnote_definition_as_reference(
     state: StateBlock,
     start_line: int,
@@ -558,6 +579,11 @@ def _build_markdown_renderer(*, enable_footnotes: bool = True) -> MarkdownIt:
             move_to_end=True,
             always_match_refs=False,
         )
+        renderer.block.ruler.at(
+            "footnote_def",
+            _track_duplicate_footnote_definitions(footnote_def),
+            {"alt": ["paragraph", "reference"]},
+        )
     else:
         renderer.block.ruler.at("reference", _decline_footnote_definition_as_reference)
     return renderer
@@ -578,8 +604,13 @@ def markdown_to_html(text: str, *, enable_footnotes: bool = True) -> str:
     normalized_input = _normalize_input_line_endings(text)
     escaped_text = _escape_html_block_openers(normalized_input)
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
-    renderer = _MARKDOWN_RENDERER if enable_footnotes else _MARKDOWN_RENDERER_WITHOUT_FOOTNOTES
-    html_text: str = renderer.render(normalized_text)
+    if enable_footnotes:
+        env: dict[str, Any] = {}
+        html_text: str = _MARKDOWN_RENDERER.render(normalized_text, env)
+        if env.get("_has_duplicate_footnote_defs"):
+            html_text = _MARKDOWN_RENDERER_WITHOUT_FOOTNOTES.render(normalized_text)
+    else:
+        html_text = _MARKDOWN_RENDERER_WITHOUT_FOOTNOTES.render(normalized_text)
     return _sanitize_formatted_body_html(html_text)
 
 

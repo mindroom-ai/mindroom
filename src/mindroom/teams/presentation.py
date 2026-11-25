@@ -9,14 +9,13 @@ and the consensus slot by None, in the document and in each tool call's ``ToolTr
 
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
-from mindroom.matrix.message_builder import markdown_fenced_code_ranges, opens_with_markdown_block
+from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.legacy_team_presentation import upgrade_v2_team_snapshot
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -42,92 +41,6 @@ _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
 _TEAM_HEADER_END = "):\n\n"
 _NO_CONSENSUS_NOTE = "\n*No team consensus - showing individual responses only*"
 NO_TEAM_RESPONSE = "No team response generated."
-_BACKTICK_RUN_PATTERN = re.compile(r"`+")
-_FOOTNOTE_DEF_PATTERN = re.compile(r"^[ ]{0,3}(?:>[ ]{0,3})*\[\^([^\]\s]+)\]:", re.MULTILINE)
-_FOOTNOTE_REF_PATTERN = re.compile(r"(\\*)(\[\^([^\]\s]+)\])(?!\()")
-
-
-def _find_matching_backticks(text: str, start: int, tick_len: int) -> int | None:
-    """Return the end offset of the next backtick run of exact length ``tick_len`` before a blank line."""
-    para_end = text.find("\n\n", start)
-    limit = len(text) if para_end == -1 else para_end
-    for match in _BACKTICK_RUN_PATTERN.finditer(text, start, limit):
-        if match.end() - match.start() == tick_len:
-            return match.end()
-    return None
-
-
-def _has_odd_preceding_backslashes(text: str, index: int) -> bool:
-    count = 0
-    while index > 0 and text[index - 1] == "\\":
-        count += 1
-        index -= 1
-    return count % 2 == 1
-
-
-def _split_inline_code_spans(prose: str) -> list[tuple[bool, str]]:
-    """Split prose into ``(is_code, text)`` segments preserving CommonMark inline code spans."""
-    parts: list[tuple[bool, str]] = []
-    cursor = 0
-    pos = 0
-    while (match := _BACKTICK_RUN_PATTERN.search(prose, pos)) is not None:
-        if _has_odd_preceding_backslashes(prose, match.start()):
-            pos = match.start() + 1
-            continue
-        close_pos = _find_matching_backticks(prose, match.end(), match.end() - match.start())
-        if close_pos is None:
-            pos = match.end()
-            continue
-        if match.start() > cursor:
-            parts.append((False, prose[cursor : match.start()]))
-        parts.append((True, prose[match.start() : close_pos]))
-        cursor = close_pos
-        pos = close_pos
-    if cursor < len(prose):
-        parts.append((False, prose[cursor:]))
-    return parts
-
-
-def _split_markdown_code_regions(text: str) -> list[tuple[bool, str]]:
-    """Split Markdown into ``(is_code, segment)`` spans across fenced code blocks and inline code spans."""
-    parts: list[tuple[bool, str]] = []
-    cursor = 0
-    for fence_start, fence_end in markdown_fenced_code_ranges(text):
-        if fence_start > cursor:
-            parts.extend(_split_inline_code_spans(text[cursor:fence_start]))
-        parts.append((True, text[fence_start:fence_end]))
-        cursor = fence_end
-    if cursor < len(text):
-        parts.extend(_split_inline_code_spans(text[cursor:]))
-    return parts
-
-
-def _namespace_footnotes(text: str, prefix: str) -> str:
-    """Namespace footnote definitions and references in ``text`` outside code blocks and inline code spans."""
-    if "[^" not in text:
-        return text
-    segments = _split_markdown_code_regions(text)
-    defined_labels: set[str] = set()
-    at_line_start = True
-    for is_code, segment in segments:
-        if not is_code:
-            for match in _FOOTNOTE_DEF_PATTERN.finditer(segment):
-                if match.start() > 0 or at_line_start:
-                    defined_labels.add(match.group(1))
-        if segment:
-            at_line_start = segment.endswith(("\n", "\r"))
-    if not defined_labels:
-        return text
-
-    def replace_ref(match: re.Match[str]) -> str:
-        slashes, token, label = match.group(1), match.group(2), match.group(3)
-        if len(slashes) % 2 == 0 and label in defined_labels:
-            return f"{slashes}[^{prefix}{label}]"
-        return f"{slashes}{token}"
-
-    return "".join(
-        segment if is_code else _FOOTNOTE_REF_PATTERN.sub(replace_ref, segment) for is_code, segment in segments
-    )
 
 
 def format_team_header(agent_names: list[str]) -> str:
@@ -175,19 +88,12 @@ def render_team_member_slots(
 
     A ``finished`` reply whose leader said nothing ends with the no-consensus note (``_with_consensus``).
     """
-    member_entries = [
-        (display_names_by_id[member_id], text) for member_id in member_ids if (text := per_member[member_id].strip())
+    contributions = [
+        _format_member_contribution(display_names_by_id[member_id], per_member[member_id].strip())
+        for member_id in member_ids
+        if per_member[member_id].strip()
     ]
-    consensus_text = consensus.strip()
-    if len(member_entries) + int(bool(consensus_text)) >= 2:
-        member_entries = [
-            (name, _namespace_footnotes(text, f"m{index}-"))
-            for index, (name, text) in enumerate(member_entries, start=1)
-        ]
-        if consensus_text:
-            consensus_text = _namespace_footnotes(consensus_text, f"m{len(member_entries) + 1}-")
-    contributions = [_format_member_contribution(name, text) for name, text in member_entries]
-    return _with_consensus(contributions, consensus_text, finished=finished)
+    return _with_consensus(contributions, consensus.strip(), finished=finished)
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"

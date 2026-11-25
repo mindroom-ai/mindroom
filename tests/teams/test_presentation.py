@@ -581,61 +581,70 @@ def test_the_recorded_text_is_the_document_without_tool_markers(show_tool_calls:
     assert ("🔧" in presentation.render_body(finished=True)) is show_tool_calls
 
 
-def test_multi_member_footnotes_are_namespaced_without_touching_code() -> None:
-    """Two members and a consensus using ``[^1]`` each keep their own footnote, leaving code spans and fences intact."""
+@pytest.mark.parametrize(
+    ("alice_text", "bob_text"),
+    [
+        ("Policy[^1].\n\n[^1]: Handbook", "Budget[^1].\n\n[^1]: Grant"),
+        ("- Policy[^1].\n- [^1]: Handbook", "- Budget[^1].\n- [^1]: Grant"),
+        ("- Policy[^1].\n\n    [^1]: Handbook", "- Budget[^1].\n\n    [^1]: Grant"),
+    ],
+    ids=["top-level", "list-item", "list-continuation"],
+)
+def test_colliding_team_member_footnotes_keep_both_sources_visible(alice_text: str, bob_text: str) -> None:
+    """When two members define ``[^1]`` (top-level or inside lists), both definitions stay visible without mutation."""
     parts = render_team_member_slots(
         ["alice", "bob"],
         display_names_by_id={"alice": "Alice", "bob": "Bob"},
-        per_member={
-            "alice": (
-                "Policy[^1] and inline `[^1]` plus \\[^1].\n\n"
-                "```markdown\n"
-                "Demo[^1]\n\n"
-                "[^1]: Code example\n"
-                "```\n\n"
-                "[^1]: Handbook"
-            ),
-            "bob": "Budget[^1] and pending[^2].\n\n[^1]: Grant",
-        },
-        consensus="Summary[^1].\n\n[^1]: Combined",
-        finished=True,
+        per_member={"alice": alice_text, "bob": bob_text},
+        consensus="",
+        finished=False,
     )
     body = "\n\n".join(parts)
     html = markdown_to_html(body)
 
-    assert "```markdown\nDemo[^1]\n\n[^1]: Code example\n```" in body
-    assert "<code>[^1]</code>" in html
-    assert "plus [^1]." in html
-    assert "pending[^2]." in html
-    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in html
-    assert '<sup class="footnote-ref"><a href="#fn2" id="fnref2">[2]</a></sup>' in html
-    assert '<sup class="footnote-ref"><a href="#fn3" id="fnref3">[3]</a></sup>' in html
-    assert '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in html
-    assert '<li id="fn2" class="footnote-item"><p>Grant <a href="#fnref2" class="footnote-backref">↩︎</a></p>' in html
-    assert '<li id="fn3" class="footnote-item"><p>Combined <a href="#fnref3" class="footnote-backref">↩︎</a></p>' in html
+    assert "[^m1-1]" not in body
+    assert 'class="footnote-ref"' not in html
+    assert "[^1]: Handbook" in html
+    assert "[^1]: Grant" in html
 
 
-def test_single_member_footnotes_stay_unprefixed_and_undefined_refs_are_not_hijacked() -> None:
-    """A lone slot keeps raw labels; when another slot has only an undefined ``[^1]``, it stays literal."""
-    [single] = render_team_member_slots(
-        ["alice"],
-        display_names_by_id={"alice": "Alice"},
-        per_member={"alice": "Policy[^1].\n\n[^1]: Handbook"},
+def test_team_member_footnote_preserves_four_space_indented_code_block() -> None:
+    """A 4-space indented code block containing ``[^1]`` is never treated as a footnote or mutated."""
+    parts = render_team_member_slots(
+        ["alice", "bob"],
+        display_names_by_id={"alice": "Alice", "bob": "Bob"},
+        per_member={
+            "alice": 'Policy[^1].\n\n    regex = "[^1]+"\n\n[^1]: Handbook',
+            "bob": "Sample:\n\n    [^1]: not a footnote",
+        },
         consensus="",
         finished=False,
     )
-    assert single == "**Alice**: Policy[^1].\n\n[^1]: Handbook"
+    body = "\n\n".join(parts)
+    html = markdown_to_html(body)
 
+    assert '    regex = "[^1]+"' in body
+    assert "regex = &quot;[^1]+&quot;" in html
+    assert "[^1]: not a footnote" in html
+    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in html
+    assert '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in html
+
+
+def test_disjoint_team_member_footnotes_render_as_html_footnotes() -> None:
+    """Team members with distinct footnote labels render full interactive HTML footnotes."""
     parts = render_team_member_slots(
         ["alice", "bob"],
         display_names_by_id={"alice": "Alice", "bob": "Bob"},
         per_member={
             "alice": "Policy[^1].\n\n[^1]: Handbook",
-            "bob": "Still streaming[^1].",
+            "bob": "Budget[^2].\n\n[^2]: Grant",
         },
         consensus="",
         finished=False,
     )
     html = markdown_to_html("\n\n".join(parts))
-    assert "Still streaming[^1]." in html
+
+    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in html
+    assert '<sup class="footnote-ref"><a href="#fn2" id="fnref2">[2]</a></sup>' in html
     assert '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in html
+    assert '<li id="fn2" class="footnote-item"><p>Grant <a href="#fnref2" class="footnote-backref">↩︎</a></p>' in html

@@ -368,3 +368,18 @@ def test_markdown_to_html_with_footnotes_disabled_preserves_definitions_and_link
         "<p>[^2]: https://example.com</p>\n"
         '<p>See <a href="https://docs.example.com">docs</a>.</p>\n'
     )
+
+
+def test_duplicate_footnote_definitions_fall_back_so_no_source_vanishes() -> None:
+    """Duplicate footnote labels stay visible as text instead of letting the second definition overwrite the first."""
+    html = markdown_to_html("First[^1].\n\n[^1]: Handbook\n\nSecond[^1].\n\n[^1]: Grant")
+    assert 'class="footnote-ref"' not in html
+    assert "[^1]: Handbook" in html
+    assert "[^1]: Grant" in html
+
+    # A single paragraph-interrupting definition triggers a silent probe and must still render as a footnote.
+    single = markdown_to_html("Note[^1]\n[^1]: Detail.")
+    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in single
+    assert (
+        '<li id="fn1" class="footnote-item"><p>Detail. <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in single
+    )
