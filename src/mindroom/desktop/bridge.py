@@ -703,7 +703,7 @@ class DesktopBridge:
             mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
             if "state_id" in command.parameters:
                 resolved = self._observations.resolve(command, controller_key=controller_key)
-                allow_window_fallback = self._observations.screenshot_captured(resolved.parameters["state_id"])
+                allow_window_fallback = self._observations.allows_window_fallback(resolved.parameters["state_id"])
             else:
                 resolved = command
                 allow_window_fallback = False

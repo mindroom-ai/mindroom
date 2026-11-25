@@ -106,12 +106,16 @@ class DesktopObservations:
         parameters = {key: value for key, value in command.parameters.items() if key != "element_ref"}
         return replace(command, parameters={**parameters, "element_index": index})
 
-    def screenshot_captured(self, state_id: object) -> bool:
-        """Return whether a screenshot was delivered to the caller for this retained state."""
+    def allows_window_fallback(self, state_id: object) -> bool:
+        """Return whether this retained returned observation should use window-level screenshot fallback."""
         if not isinstance(state_id, str):
             return False
         observed = self._states.get(state_id)
-        return observed is not None and observed.screenshot_captured
+        return (
+            observed is not None
+            and observed.screenshot_captured
+            and (not observed.tree_captured or observed.state.truncated or observed.state.stability != "stable")
+        )
 
     def _prune(self) -> None:
         now = self.clock()

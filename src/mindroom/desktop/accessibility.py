@@ -513,11 +513,7 @@ class MacAccessibilityBackend:
         *,
         allow_window_fallback: bool = False,
     ) -> _StoredMacState:
-        stored = self._stored_state(app_id, state_id)
-        use_window_revalidation = allow_window_fallback and (
-            not stored.tree_captured or stored.public.truncated or stored.public.stability != "stable"
-        )
-        revalidate = self._current_window_state if use_window_revalidation else self._fresh_state
+        revalidate = self._current_window_state if allow_window_fallback else self._fresh_state
         current = revalidate(app_id, state_id)
         self._activate(current.application)
         if current.application is None:

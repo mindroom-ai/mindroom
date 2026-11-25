@@ -157,7 +157,7 @@ def test_screenshot_backed_observation_allows_fallback_while_screenshotless_reje
     cache = DesktopObservations()
     degraded = replace(STATE, **state_updates)
     cache.remember(degraded, COMMAND, screenshot_captured=True, tree_captured=tree_captured)
-    assert cache.screenshot_captured("snapshot-1") is True
+    assert cache.allows_window_fallback("snapshot-1") is True
     for action, params in (
         ("click", {"x": 100, "y": 100, "button": "left"}),
         ("type_text", {"text": "hello"}),
@@ -172,7 +172,7 @@ def test_screenshot_backed_observation_allows_fallback_while_screenshotless_reje
 
     no_shot = replace(degraded, state_id="snapshot-no-shot")
     cache.remember(no_shot, COMMAND, screenshot_captured=False, tree_captured=tree_captured)
-    assert cache.screenshot_captured("snapshot-no-shot") is False
+    assert cache.allows_window_fallback("snapshot-no-shot") is False
     rejected = replace(
         COMMAND,
         action="click",
@@ -180,3 +180,7 @@ def test_screenshot_backed_observation_allows_fallback_while_screenshotless_reje
     )
     with pytest.raises(DesktopProtocolError, match="stable complete observation"):
         cache.resolve(rejected)
+
+    complete = replace(STATE, state_id="snapshot-complete", truncated=False, stability="stable")
+    cache.remember(complete, COMMAND, screenshot_captured=True, tree_captured=True)
+    assert cache.allows_window_fallback("snapshot-complete") is False

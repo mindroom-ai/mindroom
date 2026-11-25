@@ -1346,6 +1346,13 @@ def test_mac_window_fallback_revalidates_before_and_after_activation(
         backend.prepare_fallback(fresh.app_id, fresh.state_id, allow_window_fallback=True)
     assert workspace.applications[0].activation_options == []
 
+    # PRIMARY_SCREEN_APP_ID keeps strict screen-size fingerprint checks even with allow_window_fallback=True.
+    backend._allowed_app_ids = frozenset({"com.example.Editor", PRIMARY_SCREEN_APP_ID})
+    screen_state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend._screen_size = lambda: (1280, 720)
+    with pytest.raises(AccessibilityError, match="Accessibility state changed"):
+        backend.prepare_fallback(PRIMARY_SCREEN_APP_ID, screen_state.state_id, allow_window_fallback=True)
+
 
 def test_mac_flatten_discounts_unnamed_wrappers_up_to_raw_depth_cap() -> None:
     """Unnamed Chromium-style AXGroup wrappers do not burn semantic depth, while raw depth stays hard-capped."""
