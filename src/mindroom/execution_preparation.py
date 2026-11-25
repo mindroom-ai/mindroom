@@ -755,18 +755,19 @@ def _select_inline_file_media(
     return replace(media, files=tuple(kept_files)), format_omitted_inline_files_note(omitted_files)
 
 
-async def _select_inline_file_media_off_loop(
+def _prepare_turn_media(
     model: ModelProvider,
     frame: Callable[[TurnMessages], RequestFrame],
     media: MediaInputs,
     turn: TurnMessages,
     limit: int | None,
     scope_context: ScopeSessionContext | None,
-) -> tuple[MediaInputs, str | None]:
-    """Run inline file selection in a worker thread when ``media`` carries files."""
-    if not media.files:
-        return media, None
-    return await asyncio.to_thread(_select_inline_file_media, model, frame, media, turn, limit, scope_context)
+) -> tuple[MediaInputs, str | None, Callable[[TurnMessages], RequestFrame]]:
+    """Select auto-inlined files, build their omission note, and attach kept media to ``frame`` when it fits."""
+    selected_media, omission_note = _select_inline_file_media(model, frame, media, turn, limit, scope_context)
+    noted_turn = _with_prompt_note(turn, omission_note)
+    prepared_frame = _frame_holding_attachments(model, frame, selected_media, noted_turn, limit, scope_context)
+    return selected_media, omission_note, prepared_frame
 
 
 def _frame_holding_attachments(
@@ -885,7 +886,8 @@ async def _prepare_execution_context_common(
     provisional_messages, _ = turn_messages(seen_event_ids)
     raw_media = ctx.media or MediaInputs()
     limit = resolved_inputs.execution_plan.limit_tokens
-    media, omission_note = await _select_inline_file_media_off_loop(
+    media, omission_note, replay_frame = await asyncio.to_thread(
+        _prepare_turn_media,
         sizer.model,
         frame,
         raw_media,
@@ -894,15 +896,6 @@ async def _prepare_execution_context_common(
         scope_context,
     )
     provisional_messages = _with_prompt_note(provisional_messages, omission_note)
-    replay_frame = await asyncio.to_thread(
-        _frame_holding_attachments,
-        sizer.model,
-        frame,
-        media,
-        provisional_messages,
-        limit,
-        scope_context,
-    )
     prepared_scope_history = await prepare_scope_history(
         sizer=sizer,
         frame=replay_frame(provisional_messages),
@@ -943,21 +936,12 @@ async def _prepare_execution_context_common(
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
         # The thread is fitted beside what the reply cannot trim without it, and the reply replays no summary.
-        fallback_base_turn = replace(raw_final_messages, context=())
-        media, fallback_omission_note = await _select_inline_file_media_off_loop(
+        media, fallback_omission_note, fallback_frame = await asyncio.to_thread(
+            _prepare_turn_media,
             sizer.model,
             frame,
             raw_media,
-            fallback_base_turn,
-            limit,
-            None,
-        )
-        fallback_frame = await asyncio.to_thread(
-            _frame_holding_attachments,
-            sizer.model,
-            frame,
-            media,
-            _with_prompt_note(fallback_base_turn, fallback_omission_note),
+            replace(raw_final_messages, context=()),
             limit,
             None,
         )
