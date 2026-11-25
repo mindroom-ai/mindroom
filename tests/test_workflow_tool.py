@@ -1573,102 +1573,41 @@ def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_reque
 _OFFERED_DESCRIPTION = """\
 Run a workflow: a Python script that puts many agents to work in the background.
 
-Use it when a task needs many agents, the same step over many items, an independent check, or a loop with a hard stop.
-Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
-The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
+Use when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.
+Pass exactly one of source (inline Python), path (workspace file), or name (saved workflows/<name>.py).
+Define `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.
 
     from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
                                    run, send, inbox, state, now, random, PartialFailure)
-
     def main(args):
-        phase("Research")                        # the same step over many items, in parallel
-        try:
-            notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
-        except PartialFailure as e:              # some items failed: keep the rest, or do not catch and the run fails
-            notes = e.ok
-        phase("Write")
-        draft = agent("Write a report from these notes:\\n\\n" + "\\n\\n".join(notes))
-        for _ in range(3):                       # a bounded loop with an independent check
-            check = agent("List factual problems in this report.\\n\\n" + draft,
-                          schema={"type": "object", "required": ["problems"],
-                                  "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
-            if not check["problems"]:
-                break
-            draft = agent(f"Fix these problems: {check['problems']}\\n\\n{draft}")
+        phase("Research")
+        try: notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
+        except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run
+        draft = agent("Write report:\\n\\n" + "\\n\\n".join(notes))
+        for _ in range(3):
+            chk = agent("List factual issues:\\n\\n" + draft, schema={"type": "object", "required": ["problems"],
+                        "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
+            if not chk["problems"]: break
+            draft = agent(f"Fix: {chk['problems']}\\n\\n{draft}")
         return draft
+    # Multi-turn loop: dev, rev = spawn("dev"), spawn("rev", system="Review diffs. Reply APPROVE or list issues.")
+    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\\n{tests.output}\\n{r}")
+    # Peers: parallel([lambda: agent("Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.", name="be"),
+    #                  lambda: agent("Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.", name="fe")]); return state.get("contract")
 
-    def review_loop(task, test_command):         # two agents that keep their conversation, and a hard check
-        dev, reviewer = spawn("dev"), spawn("reviewer", system="Review diffs. Reply APPROVE or list problems.")
-        dev.ask(f"Implement and commit: {task}")
-        for _ in range(5):
-            tests, review = shell(test_command), reviewer.ask("Review `git diff main`.")
-            if tests.ok and review.startswith("APPROVE"):
-                return review
-            dev.ask(f"Fix and commit.\\n\\nTests:\\n{tests.output}\\n\\nReview:\\n{review}")
-        return "Not approved after 5 rounds:\\n" + review
+SDK:
+- agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None, profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None): fresh copy of you (all tools, no conversation memory—include full context in prompt); returns text or parsed JSON if schema (JSON Schema dict; retries up to 5 turns, then AgentError kind "schema", or "indeterminate" if a turn used tools; mutually exclusive with output_path). agent="other" runs that configured agent; name is label/peer address only. model: from Models below. system: replaces prompt; tools/skills/knowledge: subset lists (require system). profile: subagents/<profile>.md. minimal=True: cheap single-shell copy. timeout: seconds before cancel. output_path: also writes workspace file. dedicated_worker=True: isolated container; resource_profile: worker size. Failures raise AgentError.
+- foreach(items, fn) / parallel([fn1, fn2]): run in parallel (up to max_concurrent), returning ordered results (use foreach over items, not lambda lists; may nest). On any failure, waits for siblings then raises PartialFailure (.ok, .results, .errors; uncaught fails run).
+- s = spawn(name, **agent_opts): stateful session; s.ask(msg, *, schema=None, timeout=None) continues it (concurrent asks on one session fail; run two sessions via parallel).
+- ask_user(question, options=None): asks user in thread (option buttons or free text); only this branch waits while parallel branches continue.
+- shell(command) -> .ok, .exit_code, .output (last 50 KiB max; redirect to file for more). tool(toolkit, function, **arguments) calls any other tool of yours.
+- phase(title) groups calls; log(text) emits progress; run(name, args) runs a nested saved workflow.
+- Peers & shared state: every agent automatically has send_peer_message(to, text), read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value), ask_user(question, options=None). Address by name, "*" (all unfinished agents), or "script"; tell agents in prompts whom to message. Unread-only cursor: read_peer_messages/inbox return {messages: [{from, text, sent_at}], note?}; waiting frees slot until mail or timeout ("No message arrived within <N> s.")—prefer short bounded loops (10-30s x N rounds); mail to unstarted peers is queued. Script uses send(to, text), inbox(wait_seconds=0), state.get(key, default=None) (returns value directly), state.set(key, value). set_shared_state/state.set accept raw JSON values (don't json.dumps), last-write-wins (one writer/key); get_shared_state(key) returns {key, found, value} (or full dict if omitted).
 
-    def negotiate(feature):                      # two peers negotiating via messages, one shared-state writer
-        parallel([
-            lambda: agent(f"Propose a JSON API for {feature} to 'frontend' via send_peer_message; poll read_peer_messages(20) "
-                          "up to 4 rounds. Once agreed, call set_shared_state('contract', <dict>) and send DONE.", name="backend"),
-            lambda: agent("Poll read_peer_messages(20) up to 4 rounds for 'backend', reply via send_peer_message with feedback "
-                          "or AGREE, and stop on DONE. Leave shared state to 'backend'.", name="frontend"),
-        ])
-        return state.get("contract")             # or have another agent call get_shared_state("contract")
-
-- agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
-        profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
-  runs one agent turn and returns its answer: text, or parsed JSON when schema (a JSON Schema dict) is given.
-  With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema",
-  or "indeterminate" when one of its turns used a tool. schema and output_path cannot be used together.
-  The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
-  agent="other" runs that configured agent with its own tools. name is only a label and the address for messages; it does not pick an agent.
-  model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you (require system).
-  profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
-  output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
-  A failed turn raises AgentError.
-- foreach(items, fn) calls fn(item) for every item in parallel and returns the results in order.
-  parallel([fn1, fn2]) does the same for different functions; for a loop over items use foreach, not a list of lambdas.
-  If any call fails, both wait for the others and then raise PartialFailure: .ok holds the results that succeeded,
-  .results every position, .errors the failures by position. Not caught, it fails the run.
-  fn may make several calls and may itself call foreach or parallel. At most max_concurrent agents and tools run at once.
-- s = spawn(name, ...options of agent) keeps one agent's conversation: s.ask(message, *, schema=None, timeout=None)
-  sends the next message and returns the answer. A second ask while the session is in a turn fails.
-  Ask two sessions at once with parallel([lambda: a.ask(x), lambda: b.ask(y)]).
-- ask_user(question, options=None) asks the user in the thread and returns the answer: one of options (a list of strings),
-  or free text without options. Only that branch waits, for as long as it takes; parallel branches keep running.
-- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
-  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
-- phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
-- Agents in a run can talk to each other: each automatically has the tools send_peer_message(to, text),
-  read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value),
-  and ask_user(question, options=None), addressed by the name you gave them ("*" reaches every unfinished agent,
-  "script" reaches the script).
-  Say in each prompt whom to talk to. read_peer_messages(wait_seconds=0) and inbox(wait_seconds=0) return only
-  unread messages since the last read as {messages: [{from, text, sent_at}], note?} and advance the cursor;
-  waiting frees the slot and ends when mail arrives or after wait_seconds with note "No message arrived within <N> s."
-  Prefer short waits in a bounded loop (e.g. 10 to 30 s per wait for a fixed number of rounds) over one long wait.
-  Messages to a peer that has not started yet are held until it reads. The script joins in with send(to, text),
-  inbox(wait_seconds=0), state.get(key, default=None) and state.set(key, value); agents read and write the same state.
-  set_shared_state(key, value) and state.set(key, value) take any JSON value (pass the value directly; don't json.dumps it)
-  with last-write-wins semantics, so pick one writer per key. get_shared_state(key) returns {key, found, value}
-  (or {key: value, ...} when key is omitted), whereas script state.get(key, default=None) returns the value directly.
-
-Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
-so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
-resume_workflow reuses saved calls: in each sequence of calls, those before the first changed call are reused; that call and the
-calls after it run again, and so does everything after a foreach or parallel in which an item ran again. Unchanged items are reused.
-Resume retries only calls proven not to have started. A call that may have written (a tool that raised, an agent that made
-tool calls) is indeterminate: check its effect, then name it in rerun.
-Use now() and random() from the SDK instead of time and random when the value goes into a prompt.
-shell(..., cached=False) and tool(..., cached=False) run again on every resume: use it for a check of something outside the run.
-The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
-Where the call cannot be a background job, it waits and returns the report itself.
-A run that completed although calls failed says so in the first line of the report.
-get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
-Nothing caps a run's cost unless you pass max_cost_usd: then, once the run has cost that much, no further call starts,
-running ones finish, and the run ends interrupted; resume it with a higher max_cost_usd.
-An agent that needs an approval waits for the user; it does not fail.
+Durability & execution:
+- Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
+- resume_workflow reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in rerun.
+- Returns {run_id, job_id, status, title} immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). get_workflow(run_id) shows calls and cost_usd/attempt_cost_usd. Uncapped unless max_cost_usd is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher max_cost_usd). Agents needing approval wait for user without failing.
 
 Models: haiku, opus (add an effort as in opus@high).
 Agents you can run with agent=: helper, roommate."""

@@ -826,61 +826,41 @@ class BrowserTools(Toolkit):
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> str | ToolValue:
-        """Control MindRoom's browser state and actions, including worker browser navigation.
+        """Drive a live Chromium browser: open/navigate URLs or local HTML (`paths`), inspect pages via `action='snapshot'` (returns element refs), interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), capture screenshots/PDFs, upload files, and read console logs.
 
-        If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel;
-        use chat_ui.open_panel(panel='computer') only to show it again.
-        That UI request does not navigate, send a prompt to ChatGPT, or take control.
-        The user's local browser is separate and requires the configured desktop target.
+        `target='host'` uses MindRoom's worker browser (first call auto-shows the Computer panel if `chat_ui` is present; call `chat_ui.open_panel(panel='computer')` only to reopen it—never navigates or takes control). `target='desktop'` (when configured) observes/opens tabs in the user's local browser.
 
         Args:
-            action: Browser action. Page interactions such as click or type use action='act' with request.kind.
-                Use action='help' to inspect the full table.
-            target: Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local
-                Playwright extension in the user's existing profile.
-                Desktop supports observation and start, stop, open;
-                existing-page control requires upstream stable targeting.
-                Reconnecting or reselecting does not enable it.
-            node: Node id compatibility field; unsupported in MindRoom runtime.
-            profile: Host-target browser profile name (defaults to ``mindroom``).
-            targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes
-                mutable numeric indices, not stable page identity. Desktop observations refer to its current tab only.
+            action: Browser action; page interactions use action='act' with request.kind. Use action='help' for full table.
+            target: `host` (worker browser) or `desktop` (user's local browser: observation + start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it).
+            node: Unsupported compatibility field.
+            profile: Host-target profile name (default `mindroom`).
+            targetUrl: URL for `open`/`navigate`.
+            targetId: Opaque host tab ID (rejected by desktop; desktop observes its active tab).
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
-            mode: Host-target snapshot mode (supports ``efficient``).
-            snapshotFormat: Host-target snapshot format (``ai`` or ``aria``).
-            refs: Host-target snapshot refs mode (accepted for compatibility).
-            interactive: Host-target snapshot interactive filtering.
-            compact: Host-target snapshot compact mode hint.
+            mode: Host-target snapshot mode (`efficient`).
+            snapshotFormat: Host-target snapshot format (`ai`/`aria`).
+            refs: Host-target snapshot refs mode (compat).
+            interactive: Host-target interactive-only snapshot filter.
+            compact: Host-target compact snapshot hint.
             depth: Snapshot traversal depth.
-            selector: Root selector for snapshot.
-            frame: Host-target frame selector (accepted for compatibility; ignored for now).
-            labels: Host-target snapshot label hint (accepted for compatibility; ignored for now).
-            fullPage: Full-page capture for screenshots.
-            ref: Snapshot ref id or CSS selector.
-            element: CSS selector for element-specific actions.
-            type: Screenshot type (``png`` or ``jpeg``).
-            saveOnly: For host action=screenshot, return only the saved artifact metadata instead of model-visible
-                image bytes.
-            returnAttachment: For action=screenshot with target=desktop, return a turn-scoped att_* handle so
-                matrix_message can send the captured image without saving plaintext to disk.
+            selector: Snapshot root CSS selector.
+            frame: Host-target frame selector (compat; ignored).
+            labels: Host-target snapshot label hint (compat; ignored).
+            fullPage: Capture full page screenshot.
+            ref: Snapshot ref or CSS selector.
+            element: CSS selector for element actions.
+            type: Screenshot format (`png`/`jpeg`).
+            saveOnly: Host screenshot: return artifact metadata only (omit image bytes).
+            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk.
             level: Console log level filter.
-            paths: Browser artifact or workspace file paths, or att_* context attachment IDs to upload.
-                Workspace-relative paths are allowed; use ./ for a workspace file named att_*.
-                For ``open``, one HTML file to show instead of targetUrl, for example to check a page you wrote;
-                it cannot load other local files, and relative links in it do not resolve.
-            inputRef: Host-target upload input selector or ref.
-            timeoutMs: Host-target timeout for upload/dialog actions.
-            accept: Whether to accept dialog.
-            promptText: Prompt text for dialog accept.
-            request: Act request object for action='act'. Set request.kind to one of: click, type, press, hover,
-                drag, select, fill, resize, wait, evaluate, close.
-                Common shapes: click {kind, ref, doubleClick?, button?, modifiers?};
-                type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref};
-                drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]};
-                resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?};
-                close {kind}. Refs come from action='snapshot'.
+            paths: Upload files (artifact/workspace paths or att_* IDs; use `./att_*` for workspace files named att_*). For `open`, one local HTML file instead of targetUrl (cannot load other local files; relative links don't resolve).
+            inputRef: Host-target upload input selector/ref.
+            timeoutMs: Host-target upload/dialog timeout (ms).
+            accept: Accept browser dialog.
+            promptText: Dialog prompt text.
+            request: For action='act'; set request.kind to: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'.
 
         Returns:
             JSON-encoded result payload.

@@ -161,7 +161,7 @@
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to cancel (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -183,17 +183,17 @@
         },
         {
           "name": "continue_subagent",
-          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.",
           "parameters": {
             "type": "object",
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent."
               },
               "message": {
                 "type": "string",
-                "description": "Follow-up instructions or question for that child."
+                "description": "Follow-up instructions or question."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -249,13 +249,13 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to edit (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "message": {
                 "anyOf": [
@@ -266,7 +266,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New trigger message posted when the schedule fires."
+                "description": "New trigger message."
               },
               "description": {
                 "anyOf": [
@@ -277,7 +277,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New short label for schedule listings."
+                "description": "New listing label."
               },
               "execute_at": {
                 "anyOf": [
@@ -288,7 +288,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+                "description": "New one-time ISO 8601 datetime with time."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -299,7 +299,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+                "description": "New one-time delay in seconds (>= 1)."
               },
               "cron": {
                 "anyOf": [
@@ -310,7 +310,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+                "description": "New 5-field cron in `timezone`."
               },
               "timezone": {
                 "anyOf": [
@@ -321,7 +321,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
+                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
               },
               "history_limit": {
                 "anyOf": [
@@ -332,11 +332,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
               },
               "clear_history_limit": {
                 "type": "boolean",
-                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
+                "description": "Set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -347,7 +347,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
+                "description": "Update quiet delivery mode."
               },
               "model": {
                 "anyOf": [
@@ -358,7 +358,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -630,7 +630,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show the user a side panel in MindRoom Chat: 'computer' or 'members'.\npanel='computer' opens the Computer panel: a live view of your own worker\nbrowser, the one browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have\nit your browser calls are blocked, and when they hand it back you get a\nmessage. Opening the panel does not navigate to a URL, send a prompt to\nChatGPT, or take control, and it never opens or controls the user's own\nbrowser. Your first worker browser call in a conversation (browser_control\nwith target='host', or any browser_mcp function) already shows the user this\npanel; call open_panel(panel='computer') only to show it again in a later\nreply, for example when the user should log in or after they closed it. One\nreply shows the panel once.\n\npanel='members' opens the Members panel, listing the people and agents in\nthis room.\n\nSuccess means the UI request was sent, not that the client opened a panel.",
+          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -640,7 +640,7 @@
                   "members",
                   "computer"
                 ],
-                "description": "'computer' for your worker browser, or 'members' (the default) for this room's members."
+                "description": "'computer' (worker browser) or 'members' (default; room members)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -694,13 +694,13 @@
         },
         {
           "name": "run_scheduled_call",
-          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The scheduled task's ID from its message."
+                "description": "Task ID from the scheduled prompt."
               },
               "arguments_json": {
                 "anyOf": [
@@ -711,7 +711,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+                "description": "Replacement JSON object string (only when any arguments were approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -733,13 +733,13 @@
         },
         {
           "name": "run_subagent",
-          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: researcher.\nUse only these agent names. Include full context, constraints, and expected output in task; the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if allowed).\nAvailable models: default. Omit/null model for normal selection. The caller waits; this does not create a Matrix thread. Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and child-scoped audit reference.",
           "parameters": {
             "type": "object",
             "properties": {
               "task": {
                 "type": "string",
-                "description": "Self-contained task with relevant context, constraints, and expected output."
+                "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
                 "anyOf": [
@@ -750,7 +750,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
                 "anyOf": [
@@ -761,11 +761,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model name from models; omitted or null uses normal model selection."
+                "description": "Model name or name@level override (omit/null for default)."
               },
               "title": {
                 "type": "string",
-                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+                "description": "3-6 word task title shown to observers."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -789,17 +789,17 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
               "message": {
                 "type": "string",
-                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
+                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
               },
               "new_thread": {
                 "type": "boolean",
-                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
               },
               "execute_at": {
                 "anyOf": [
@@ -810,7 +810,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -821,7 +821,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
               },
               "cron": {
                 "anyOf": [
@@ -832,7 +832,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
               },
               "description": {
                 "anyOf": [
@@ -843,7 +843,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+                "description": "Short listing label (defaults to trimmed `message`)."
               },
               "timezone": {
                 "anyOf": [
@@ -854,7 +854,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
+                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -865,11 +865,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
+                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
               },
               "silent": {
                 "type": "boolean",
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
+                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -880,7 +880,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -903,25 +903,25 @@
         },
         {
           "name": "schedule_tool_call",
-          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
           "parameters": {
             "type": "object",
             "properties": {
               "tool_name": {
                 "type": "string",
-                "description": "One of your tool functions, e.g. \"post_slack_message\"."
+                "description": "Your tool function name (e.g. \"post_slack_message\")."
               },
               "arguments_json": {
                 "type": "string",
-                "description": "The call's arguments as a JSON object string."
+                "description": "Arguments as a JSON object string."
               },
               "execute_at": {
                 "type": "string",
-                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
               },
               "description": {
                 "type": "string",
-                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+                "description": "Short action summary (guides execution if any arguments are approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1156,7 +1156,7 @@
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to cancel (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1178,17 +1178,17 @@
         },
         {
           "name": "continue_subagent",
-          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.",
           "parameters": {
             "type": "object",
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent."
               },
               "message": {
                 "type": "string",
-                "description": "Follow-up instructions or question for that child."
+                "description": "Follow-up instructions or question."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1244,13 +1244,13 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to edit (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "message": {
                 "anyOf": [
@@ -1261,7 +1261,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New trigger message posted when the schedule fires."
+                "description": "New trigger message."
               },
               "description": {
                 "anyOf": [
@@ -1272,7 +1272,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New short label for schedule listings."
+                "description": "New listing label."
               },
               "execute_at": {
                 "anyOf": [
@@ -1283,7 +1283,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+                "description": "New one-time ISO 8601 datetime with time."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -1294,7 +1294,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+                "description": "New one-time delay in seconds (>= 1)."
               },
               "cron": {
                 "anyOf": [
@@ -1305,7 +1305,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+                "description": "New 5-field cron in `timezone`."
               },
               "timezone": {
                 "anyOf": [
@@ -1316,7 +1316,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
+                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
               },
               "history_limit": {
                 "anyOf": [
@@ -1327,11 +1327,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
               },
               "clear_history_limit": {
                 "type": "boolean",
-                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
+                "description": "Set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -1342,7 +1342,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
+                "description": "Update quiet delivery mode."
               },
               "model": {
                 "anyOf": [
@@ -1353,7 +1353,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1625,7 +1625,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show the user a side panel in MindRoom Chat: 'computer' or 'members'.\npanel='computer' opens the Computer panel: a live view of your own worker\nbrowser, the one browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have\nit your browser calls are blocked, and when they hand it back you get a\nmessage. Opening the panel does not navigate to a URL, send a prompt to\nChatGPT, or take control, and it never opens or controls the user's own\nbrowser. Your first worker browser call in a conversation (browser_control\nwith target='host', or any browser_mcp function) already shows the user this\npanel; call open_panel(panel='computer') only to show it again in a later\nreply, for example when the user should log in or after they closed it. One\nreply shows the panel once.\n\npanel='members' opens the Members panel, listing the people and agents in\nthis room.\n\nSuccess means the UI request was sent, not that the client opened a panel.",
+          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -1635,7 +1635,7 @@
                   "members",
                   "computer"
                 ],
-                "description": "'computer' for your worker browser, or 'members' (the default) for this room's members."
+                "description": "'computer' (worker browser) or 'members' (default; room members)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1689,13 +1689,13 @@
         },
         {
           "name": "run_scheduled_call",
-          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The scheduled task's ID from its message."
+                "description": "Task ID from the scheduled prompt."
               },
               "arguments_json": {
                 "anyOf": [
@@ -1706,7 +1706,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+                "description": "Replacement JSON object string (only when any arguments were approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1728,13 +1728,13 @@
         },
         {
           "name": "run_subagent",
-          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: researcher.\nUse only these agent names. Include full context, constraints, and expected output in task; the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if allowed).\nAvailable models: default. Omit/null model for normal selection. The caller waits; this does not create a Matrix thread. Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and child-scoped audit reference.",
           "parameters": {
             "type": "object",
             "properties": {
               "task": {
                 "type": "string",
-                "description": "Self-contained task with relevant context, constraints, and expected output."
+                "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
                 "anyOf": [
@@ -1745,7 +1745,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
                 "anyOf": [
@@ -1756,11 +1756,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model name from models; omitted or null uses normal model selection."
+                "description": "Model name or name@level override (omit/null for default)."
               },
               "title": {
                 "type": "string",
-                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+                "description": "3-6 word task title shown to observers."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1784,17 +1784,17 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
+          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
               "message": {
                 "type": "string",
-                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
+                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
               },
               "new_thread": {
                 "type": "boolean",
-                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
               },
               "execute_at": {
                 "anyOf": [
@@ -1805,7 +1805,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -1816,7 +1816,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
               },
               "cron": {
                 "anyOf": [
@@ -1827,7 +1827,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
               },
               "description": {
                 "anyOf": [
@@ -1838,7 +1838,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+                "description": "Short listing label (defaults to trimmed `message`)."
               },
               "timezone": {
                 "anyOf": [
@@ -1849,7 +1849,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
+                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -1860,11 +1860,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
+                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
               },
               "silent": {
                 "type": "boolean",
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
+                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -1875,7 +1875,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1898,25 +1898,25 @@
         },
         {
           "name": "schedule_tool_call",
-          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
           "parameters": {
             "type": "object",
             "properties": {
               "tool_name": {
                 "type": "string",
-                "description": "One of your tool functions, e.g. \"post_slack_message\"."
+                "description": "Your tool function name (e.g. \"post_slack_message\")."
               },
               "arguments_json": {
                 "type": "string",
-                "description": "The call's arguments as a JSON object string."
+                "description": "Arguments as a JSON object string."
               },
               "execute_at": {
                 "type": "string",
-                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
               },
               "description": {
                 "type": "string",
-                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+                "description": "Short action summary (guides execution if any arguments are approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [

@@ -131,17 +131,17 @@
         },
         {
           "name": "continue_subagent",
-          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.",
           "parameters": {
             "type": "object",
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent."
               },
               "message": {
                 "type": "string",
-                "description": "Follow-up instructions or question for that child."
+                "description": "Follow-up instructions or question."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -319,13 +319,13 @@
         },
         {
           "name": "run_subagent",
-          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include full context, constraints, and expected output in task; the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if allowed).\nAvailable models: default. Omit/null model for normal selection. The caller waits; this does not create a Matrix thread. Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\nAuthoring: pass system_prompt to replace your role/instructions on a fresh copy of yourself, plus optional subsets of tools (toolkit or toolkit.function), skills, and knowledge (omitting tools keeps all; listing tools restricts skills/knowledge to those listed; keeps workspace, credentials, approvals). Or pass profile for a workspace subagents/<name>.md (YAML frontmatter description + optional tools/skills/knowledge/model/mode, body = system_prompt); explicit model overrides profile. Follow-ups keep the initial prompt.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and child-scoped audit reference.",
           "parameters": {
             "type": "object",
             "properties": {
               "task": {
                 "type": "string",
-                "description": "Self-contained task with relevant context, constraints, and expected output."
+                "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
                 "anyOf": [
@@ -336,7 +336,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
                 "anyOf": [
@@ -347,7 +347,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model name from models; omitted or null uses normal model selection."
+                "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
                 "anyOf": [
@@ -358,7 +358,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+                "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
                 "anyOf": [
@@ -372,7 +372,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+                "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
                 "anyOf": [
@@ -386,7 +386,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
                 "anyOf": [
@@ -400,7 +400,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
                 "anyOf": [
@@ -411,11 +411,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+                "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {
                 "type": "string",
-                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+                "description": "3-6 word task title shown to observers."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -592,17 +592,17 @@
         },
         {
           "name": "continue_subagent",
-          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.",
           "parameters": {
             "type": "object",
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent."
               },
               "message": {
                 "type": "string",
-                "description": "Follow-up instructions or question for that child."
+                "description": "Follow-up instructions or question."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -780,13 +780,13 @@
         },
         {
           "name": "run_subagent",
-          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include full context, constraints, and expected output in task; the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if allowed).\nAvailable models: default. Omit/null model for normal selection. The caller waits; this does not create a Matrix thread. Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\nAuthoring: pass system_prompt to replace your role/instructions on a fresh copy of yourself, plus optional subsets of tools (toolkit or toolkit.function), skills, and knowledge (omitting tools keeps all; listing tools restricts skills/knowledge to those listed; keeps workspace, credentials, approvals). Or pass profile for a workspace subagents/<name>.md (YAML frontmatter description + optional tools/skills/knowledge/model/mode, body = system_prompt); explicit model overrides profile. Follow-ups keep the initial prompt.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and child-scoped audit reference.",
           "parameters": {
             "type": "object",
             "properties": {
               "task": {
                 "type": "string",
-                "description": "Self-contained task with relevant context, constraints, and expected output."
+                "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
                 "anyOf": [
@@ -797,7 +797,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
                 "anyOf": [
@@ -808,7 +808,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model name from models; omitted or null uses normal model selection."
+                "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
                 "anyOf": [
@@ -819,7 +819,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+                "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
                 "anyOf": [
@@ -833,7 +833,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+                "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
                 "anyOf": [
@@ -847,7 +847,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
                 "anyOf": [
@@ -861,7 +861,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
                 "anyOf": [
@@ -872,11 +872,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+                "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {
                 "type": "string",
-                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+                "description": "3-6 word task title shown to observers."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1083,17 +1083,17 @@
         },
         {
           "name": "continue_subagent",
-          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.",
           "parameters": {
             "type": "object",
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent."
               },
               "message": {
                 "type": "string",
-                "description": "Follow-up instructions or question for that child."
+                "description": "Follow-up instructions or question."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1271,13 +1271,13 @@
         },
         {
           "name": "run_subagent",
-          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include full context, constraints, and expected output in task; the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if allowed).\nAvailable models: default. Omit/null model for normal selection. The caller waits; this does not create a Matrix thread. Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\nAuthoring: pass system_prompt to replace your role/instructions on a fresh copy of yourself, plus optional subsets of tools (toolkit or toolkit.function), skills, and knowledge (omitting tools keeps all; listing tools restricts skills/knowledge to those listed; keeps workspace, credentials, approvals). Or pass profile for a workspace subagents/<name>.md (YAML frontmatter description + optional tools/skills/knowledge/model/mode, body = system_prompt); explicit model overrides profile. Follow-ups keep the initial prompt.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and child-scoped audit reference.",
           "parameters": {
             "type": "object",
             "properties": {
               "task": {
                 "type": "string",
-                "description": "Self-contained task with relevant context, constraints, and expected output."
+                "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
                 "anyOf": [
@@ -1288,7 +1288,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
                 "anyOf": [
@@ -1299,7 +1299,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model name from models; omitted or null uses normal model selection."
+                "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
                 "anyOf": [
@@ -1310,7 +1310,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+                "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
                 "anyOf": [
@@ -1324,7 +1324,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+                "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
                 "anyOf": [
@@ -1338,7 +1338,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
                 "anyOf": [
@@ -1352,7 +1352,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+                "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
                 "anyOf": [
@@ -1363,11 +1363,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+                "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {
                 "type": "string",
-                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+                "description": "3-6 word task title shown to observers."
               },
               "mindroom_output_path": {
                 "anyOf": [

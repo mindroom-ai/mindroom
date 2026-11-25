@@ -45,8 +45,12 @@ if TYPE_CHECKING:
 
 
 def _model_choice(name: str, model: ModelConfig) -> str:
-    """Name one model for the tool description, with its reasoning levels and how to pick one."""
-    return f"{name} ({model.reasoning.describe()}; write {name}@<level>)" if model.reasoning else name
+    """Format one model name, compactly listing reasoning levels with `*` on the default."""
+    if not model.reasoning:
+        return name
+    default = model.reasoning.default
+    levels = "|".join(f"*{level}" if level == default else level for level in model.reasoning.levels)
+    return f"{name}[{levels}]"
 
 
 class DelegateTools(Toolkit, ManagedJobToolkit):
@@ -144,63 +148,55 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         """Build the model-facing function description with this caller's allowlist."""
         available_targets = ", ".join(self._delegate_to)
         minimal_guidance = (
-            "Set minimal to true to run the child in minimal mode: a short system prompt and one Bash tool "
-            "through which the child discovers and calls its configured tools on demand. "
-            "Each child request carries far fewer tokens, at the cost of a few discovery steps. "
-            "Prefer minimal when the task is self-contained and the child's full role, instructions, and tool "
-            "descriptions are not important in its system prompt; it can still read them on demand. "
-            "Use standard mode when that context matters or the child needs tools that require approval, "
-            "which minimal children cannot use. "
+            "Minimal mode: set minimal=true for a short system prompt + single Bash tool (discovers/calls tools on "
+            "demand; lower tokens, extra discovery steps). Prefer for self-contained tasks when the child's full "
+            "role, instructions, and tool docs are not important in its system prompt; use standard mode when they "
+            "matter or the child needs approval-gated tools (unsupported in minimal). "
             f"Subagents that support minimal mode: {', '.join(self._minimal_targets)}.\n"
             if self._minimal_targets
             else ""
         )
         background = self._background_jobs_available()
         background_guidance = (
-            "Managed Matrix calls accept background_after: null waits, zero returns a Job ID immediately, "
-            "and a positive number is how many seconds to wait before the child continues in the background. "
-            "A newer message you answer releases the wait while the child keeps working. "
+            "Managed Matrix calls accept background_after (null waits or yields on newer user message; 0 returns a "
+            "Job ID immediately; >0 waits N seconds before backgrounding). "
             if background
             else ""
         )
+        has_reasoning = any(model.reasoning for model in self._config.models.values())
         models = ", ".join(_model_choice(name, model) for name, model in sorted(self._config.models.items()))
+        models_header = (
+            "Available models (append @<level> for reasoning effort; * = default)"
+            if has_reasoning
+            else "Available models"
+        )
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
-            "Use only these agent names. Include all relevant context, constraints, and expected output in task; "
-            "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
-            "Selecting your own name starts a fresh copy of yourself, if listed. "
-            "Omit agent_name or pass null to select yourself; the same allowlist applies. "
+            "Use only these agent names. Include full context, constraints, and expected output in task; "
+            "the child does not inherit this conversation, but keeps its configured tools, workspace, and memory. "
+            "Selecting your own name starts a fresh copy of yourself (omit/null agent_name also selects you if "
+            "allowed).\n"
             f"{background_guidance}"
-            "Set model to a configured model name to override the child's model for this session. "
-            f"Available models: {models}. "
-            "Omit model or pass null to use the child's normal thread, room, or configured model. "
+            f"{models_header}: {models}. Omit/null model for normal selection. "
             f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
-            "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
-            "follow-ups keep the child's model and mode.\n"
+            "Use continue_subagent(subagent_id) for follow-ups (keeps model and mode).\n"
             f"{minimal_guidance}"
             f"{self._dedicated_worker_guidance()}"
             f"{self._authoring_guidance()}"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
-            "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
+            "Returns the child's answer, stable subagent ID, and child-scoped audit reference."
         )
 
     def _dedicated_worker_guidance(self) -> str:
         if not self._dedicated_workers:
             return ""
-        profiles = (
-            "Set resource_profile to small, standard, or large to size that worker; omit it for the normal worker size. "
-            if self._resource_profiles
-            else ""
-        )
+        profiles = " Set resource_profile (small/standard/large) to size it." if self._resource_profiles else ""
         return (
-            "Set dedicated_worker to true to run the child's shell, file, python, and other worker tools in a new "
-            "worker of its own instead of its normal worker, which it shares with you or with its agent's other "
-            "subagents, so parallel or heavy children do not compete for one worker. It sees the same workspace; its "
-            "first worker call waits for the new worker to start, and packages installed into the normal worker's "
-            "environment are not there. "
-            f"{profiles}Follow-ups keep the child's worker while it exists; once it has been idle for the worker idle "
-            "timeout, a follow-up starts a new one with the same workspace and nothing installed outside it.\n"
+            "Dedicated worker: set dedicated_worker=true to run shell/file/python/worker tools in an isolated worker "
+            "(avoids sharing with you or sibling subagents; same workspace; first call waits for startup; excludes "
+            f"packages installed in the shared worker).{profiles} Follow-ups reuse it until idle-timeout expiry, "
+            "then start a clean one.\n"
         )
 
     def _authoring_guidance(self) -> str:
@@ -208,17 +204,12 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             return ""
         minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
         return (
-            "To author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, "
-            "and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of "
-            "your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all "
-            "of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without "
-            "tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and "
-            "approval rules, sees that prompt instead of your configured role and instructions, and gets only those "
-            "tools, skills, and knowledge bases. "
-            "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
-            "description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. "
-            f"An explicit model{minimal} overrides the profile. "
-            "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
+            "Authoring: pass system_prompt to replace your role/instructions on a fresh copy of yourself, plus "
+            "optional subsets of tools (toolkit or toolkit.function), skills, and knowledge (omitting tools keeps "
+            "all; listing tools restricts skills/knowledge to those listed; keeps workspace, credentials, approvals). "
+            "Or pass profile for a workspace subagents/<name>.md (YAML frontmatter description + optional "
+            f"tools/skills/knowledge/model/mode, body = system_prompt); explicit model{minimal} overrides profile. "
+            "Follow-ups keep the initial prompt.\n"
             f"{self._profile_listing()}"
         )
 
@@ -248,18 +239,18 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         targets, model guidance, and subagents that support minimal mode.
 
         Args:
-            task: Self-contained task with relevant context, constraints, and expected output.
-            agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
-            model: Configured model name from models; omitted or null uses normal model selection.
-            minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
-            system_prompt: Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt.
-            tools: Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours.
-            skills: Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too.
-            knowledge: Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too.
-            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge.
-            dedicated_worker: True runs the child's worker tools in a new worker of its own, for parallel or heavy children.
-            resource_profile: CPU and memory size of that worker, small, standard, or large; omit for the normal size.
-            title: Short title of 3-6 words naming the task, shown to people watching the run.
+            task: Self-contained task with context, constraints, and expected output.
+            agent_name: Allowed subagent name (omit/null selects yourself if allowed).
+            model: Model name or name@level override (omit/null for default).
+            minimal: Run in token-efficient minimal mode (only for listed subagents).
+            system_prompt: Custom prompt replacing your role/instructions on a self-copy.
+            tools: Subset of your toolkits or toolkit.function entries (omit to keep all).
+            skills: Subset of your skills (omit keeps all only if tools is also omitted).
+            knowledge: Subset of your knowledge base IDs (omit keeps all only if tools is also omitted).
+            profile: Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge).
+            dedicated_worker: Run worker tools in an isolated worker for parallel/heavy work.
+            resource_profile: Worker size: small, standard, or large (omit for default).
+            title: 3-6 word task title shown to observers.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
@@ -294,15 +285,11 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
     async def continue_subagent(self, subagent_id: str, message: str) -> str:
         """Send a follow-up to an existing subagent and wait for its answer.
 
-        Reuses the child's conversation history, tools, workspace, and memory.
-        Use after its previous turn returns; finish pending approvals first.
-        The ID belongs to this caller and conversation, including after restart.
-        Current allowed-subagent and requester permissions still apply.
-        Each follow-up gets a separate audit record and returns the same subagent ID.
+        Reuses history, tools, workspace, and memory (persists across restarts; wait for prior turn/approvals first; current permissions apply). Returns answer, same subagent ID, and new audit ref.
 
         Args:
-            subagent_id: Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent.
-            message: Follow-up instructions or question for that child.
+            subagent_id: Subagent ID (or unique >=8-hex prefix) from run_subagent/continue_subagent.
+            message: Follow-up instructions or question.
 
         Returns:
             The child's answer, stable subagent ID, and this turn's audit reference, or an error.

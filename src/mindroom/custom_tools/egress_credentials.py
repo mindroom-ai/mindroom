@@ -217,24 +217,14 @@ class EgressCredentialsTools(Toolkit):
         super().__init__(name="egress_credentials", tools=[self.list_egress_credentials, self.request_secret])
 
     def list_egress_credentials(self) -> str:
-        """List the services this agent can use through the egress broker and how to give it credentials.
+        """List Agent Keys egress services available to this agent, credential status, and `manage_url`.
 
-        Call this when a request fails with `credential_not_configured`, or before telling the user
-        which credential they need. Returns each configured service with whether this agent has a
-        credential for it (`configured`) and which one the broker uses (`active_source`: `key`, `oauth`, or
-        `github_app`). A `github_app` service lists the repositories its GitHub App covers in
-        `github_app_repositories`, each `read` or `read_write`; it takes no key and covers no other repository.
-        `source` says who defined the service: `config` for the administrator, `user` for the user's own.
-        `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`
-        whether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with
-        nothing configured also says whether the user can connect an account instead of adding a key
-        (`can_connect_account`), with the account's
-        `provider` when it can or when the account still needs allowing. `separate_account: true` marks a service
-        of the user's own that takes no API key, only an account of its own, which a request uses by naming it in an
-        `X-Agent-Keys-Service` header.
-        The result carries the link
-        where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
-        into the chat: call `request_secret` for a missing key; the link is the fallback.
+        Call after `credential_not_configured` or before asking for credentials. Each service reports `configured`,
+        `active_source` (`key`|`oauth`|`github_app`), `source` (`config`|`user`), `oauth_reuse`, `oauth_access`
+        (`read`|`read_write`|null), `can_connect_account`/`provider` (when unconfigured), `github_app_repositories`
+        (repo access; takes no key), and `separate_account` (user account-only; selected via `X-Agent-Keys-Service`
+        header). Never ask the user to paste a key in chat—call `request_secret` for missing API keys (`manage_url`
+        is the fallback).
         """
         settable = self._settable()
         link = manage_url(self._runtime_paths) if settable else None
@@ -271,36 +261,19 @@ class EgressCredentialsTools(Toolkit):
         placeholder: str | None = None,
         new_service: dict[str, object] | None = None,
     ) -> str:
-        """Ask the user for a missing API key with a card in this conversation, and wait for their answer.
+        """Post a masked in-chat card requesting a missing API key for an Agent Keys service (never ask the user to paste keys in chat).
 
-        Call this when a brokered request fails with `credential_not_configured` for a service that takes an API key
-        (`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the
-        key is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's
-        Agent Keys key for the service. The key never reaches you, the chat, or your commands.
-        A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
-        Give `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to
-        hint at the key's form.
-        For a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving
-        adds it with the key.
-        Waits up to 15 minutes and returns `status`:
-        `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
-        `declined` when the user refused: do not ask again for this service in this turn;
-        `expired` when no answer came in 15 minutes.
-        An `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.
-        After `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the
-        wrong owner or read-only access) and ask again.
+        Use after `credential_not_configured` (key never reaches you, chat, or commands; replaces any existing key—don't
+        ask while it works). For an unlisted service, propose it via `new_service` instead of editing config.yaml.
+        Waits up to 15m and returns `status`: `saved` (retry/test with one request; if refused, explain why and re-ask),
+        `declined` (do not re-ask this turn), `expired`, or `error` (no card posted; includes fallback `link` if any).
 
         Args:
-            service: The service's `name` from `list_egress_credentials`, or the name of the service `new_service`
-                proposes (lowercase letters, digits, `-` and `_`).
-            reason: What you need the key for, in a sentence or two the user reads on the card.
-            url: An `http` or `https` page where the user gets or creates the key, such as the service's keys page.
-            placeholder: A hint the empty field shows, such as the key's form (`sk-…`). Never a real value.
-            new_service: A new service of the user's own that takes this key, with only these fields of a service in
-                config.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`
-                and `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and
-                optional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never
-                an account login.
+            service: Service `name` from `list_egress_credentials`, or new name for `new_service` (lowercase letters, digits, `-`, `_`).
+            reason: 1-2 sentences shown on the card explaining why the key is needed.
+            url: `http(s)` URL where the user can get/create the key (shown as a button).
+            placeholder: Format hint for empty field (e.g. `sk-…`); never a real secret.
+            new_service: Propose a new key-only user service (no account login); allowed fields: `display_name`, `description`, `preset`, `rules` (`host`, optional `path_prefix`/`port`, `auth`: `type` `bearer` | `basic`+`username` | `header`/`query`+`name`, optional `template` with `{secret}`), `placeholder_env`, `restrict_to_rules`.
 
         """
         context = get_tool_runtime_context()
