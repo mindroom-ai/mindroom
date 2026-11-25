@@ -309,6 +309,8 @@ def _accept_turn(
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far."""
     metrics = state.record.metrics
     assert metrics is not None
+    for prior_identity, prior_metrics in tracker.prior_usage:
+        _count_request(metrics, prior_metrics, prior_identity)
     state.messages.append(message)
     answered = _answering_identity(message, tracker.identity)
     _stamp_answering_model(state.record, answered, tracker.model_name)
@@ -573,6 +575,8 @@ def _keep_unaccepted(
     """Keep a cut-off request under its answering identity and update the record when the active model answered."""
     metrics = record.metrics
     assert metrics is not None
+    for prior_identity, prior_metrics in tracker.prior_usage:
+        _count_request(metrics, prior_metrics, prior_identity)
     if turn is not None:
         sums_attempts = usage_sums_attempts(turn.message.provider_data)
         answered = _answering_identity(turn.message, tracker.identity)

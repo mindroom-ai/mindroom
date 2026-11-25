@@ -201,6 +201,8 @@ async def _reply_model_decision(
             replace(state.request(decision_messages), tool_choice="none"),
         )
         assert state.record.metrics is not None
+        for prior_identity, prior_metrics in turn.prior_usage:
+            state.record.metrics.add(prior_metrics, model_id=prior_identity.id, provider=prior_identity.provider)
         provenance = read_model_provenance(turn.message.provider_data)
         identity = (
             ModelIdentity(id=provenance.model_id, provider=provenance.provider)

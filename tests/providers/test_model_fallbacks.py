@@ -294,7 +294,7 @@ async def test_a_fallback_is_sent_the_request_without_the_first_routes_replay_st
 
 
 @pytest.mark.asyncio
-async def test_answering_fallback_is_billed_under_its_own_model_and_price() -> None:
+async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cost() -> None:
     config = Config(
         models={
             "paid": ModelConfig(
@@ -315,8 +315,9 @@ async def test_answering_fallback_is_billed_under_its_own_model_and_price() -> N
     async def persist(record: RunRecord) -> None:
         saved.append(record)
 
-    fallback_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000))
-    primary = _Model("paid", [[_quota()]])
+    primary_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000))
+    fallback_usage = MessageMetrics(tokens=TokenCounts(input_tokens=500_000, total_tokens=500_000))
+    primary = _Model("paid", [[UsageReported(primary_usage, final=False), _quota()]])
     primary.identity = ModelIdentity(id="claude-opus-5-5", provider="Anthropic")
     answer = Message(
         role="assistant",
@@ -349,15 +350,20 @@ async def test_answering_fallback_is_billed_under_its_own_model_and_price() -> N
     [record] = saved
     assert (record.model_provider, record.model, record.model_name) == ("OpenAI", "gpt-6-mini", "cheap")
     assert record.metrics is not None
+    assert record.metrics.tokens.input_tokens == 1_500_000
     assert [
         (entry.provider, entry.id, entry.tokens.input_tokens) for entry in (record.metrics.details or {})["model"]
-    ] == [("OpenAI", "gpt-6-mini", 1_000_000)]
+    ] == [
+        ("Anthropic", "claude-opus-5-5", 1_000_000),
+        ("OpenAI", "gpt-6-mini", 500_000),
+    ]
+    # Primary billed $5 (1M * $5/M) + fallback billed $0.50 (500k * $1/M) = $5.50.
     assert run_cost_usd(
         record.metrics,
         model_provider=record.model_provider,
         model_id=record.model,
         prices=model_prices(config),
-    ) == pytest.approx(1.0)
+    ) == pytest.approx(5.5)
 
 
 @pytest.mark.asyncio

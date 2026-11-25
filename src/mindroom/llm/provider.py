@@ -357,7 +357,7 @@ class ReportedUsage:
 
 @dataclass(slots=True)
 class StreamTracker:
-    """Tracks the active model identity, reference, capabilities, and reported usage across fallback switches."""
+    """Tracks the active model identity, reference, capabilities, and billed usage across fallback switches."""
 
     identity: ModelIdentity
     model_name: str | None = None
@@ -365,10 +365,13 @@ class StreamTracker:
     selected: bool = False
     answered: bool = False
     reported: ReportedUsage = field(default_factory=ReportedUsage)
+    prior_usage: list[tuple[ModelIdentity, MessageMetrics]] = field(default_factory=list)
 
     def observe(self, event: StreamEvent) -> None:
         """Update tracker state for one stream event."""
         if isinstance(event, ModelSelected):
+            if (received := self.reported.received) is not None and received.reported:
+                self.prior_usage.append((self.identity, received))
             self.reported = ReportedUsage()
             self.identity = event.identity
             self.model_name = event.model_name
@@ -388,6 +391,7 @@ class ModelTurn:
     message: Message
     stop_reason: StopReason | None
     capabilities: Capabilities | None = None
+    prior_usage: tuple[tuple[ModelIdentity, MessageMetrics], ...] = ()
     identity: ModelIdentity | None = None
 
     @property
@@ -500,6 +504,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         message=completed.message,
         stop_reason=completed.stop_reason,
         capabilities=tracker.capabilities,
+        prior_usage=tuple(tracker.prior_usage),
         identity=tracker.identity if tracker.selected else None,
     )
 

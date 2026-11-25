@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, fails_over
@@ -18,6 +18,7 @@ from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Mes
 from mindroom.llm.provider import (
     DeferredTools,
     ModelSelected,
+    ReportedUsage,
     StructuredOutput,
     TurnCompleted,
     json_output_prompt,
@@ -141,9 +142,10 @@ def _fits(provider: ModelProvider, request: ModelRequest, context_window: int | 
 
 @dataclass(slots=True)
 class _Attempt:
-    """Whether one model's stream committed output or a hosted tool run."""
+    """What one model's stream handed the caller so far: whether it committed, and the usage it reported."""
 
     committed: bool = False
+    usage: ReportedUsage = field(default_factory=ReportedUsage)
 
 
 async def _attempt_stream(
@@ -159,6 +161,7 @@ async def _attempt_stream(
     events = provider.stream(sent)
     async with closing_async_stream(events):
         async for event in events:
+            attempt.usage.observe(event)
             attempt.committed = attempt.committed or commits_attempt(event)
             if fallback and isinstance(event, TurnCompleted):
                 message = event.message
@@ -253,8 +256,8 @@ async def fallback_stream(
     """Stream ``request`` on ``inner`` (``model_name``), then on eligible ``chain`` members while models fail over.
 
     A caller-retried request (such as compaction summaries) fails over immediately on non-retryable availability errors
-    (quota, credentials) and on transient errors when ``fallback_on_retryable`` is set. Fallback turns are marked so later requests never reuse foreign
-    continuation or encrypted replay state.
+    (quota, credentials) and on transient errors when ``fallback_on_retryable`` is set. Fallback turns are marked so
+    later requests never reuse foreign continuation or encrypted replay state.
     """
     eligible = [member for member in chain if allow_fallback is None or allow_fallback(member.name)]
     primary = ChainModel(model_name, None, lambda: inner, cooldown_key)
@@ -288,6 +291,8 @@ async def fallback_stream(
         else:
             _clear_cooldown(member.cooldown_key, seen[member.cooldown_key])
             return
+        if (report := attempt.usage.settle()) is not None:
+            yield report
     # The request's own model is never skipped, so a failure ends the chain.
     assert failure is not None
     raise failure[1]

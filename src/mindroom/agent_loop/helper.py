@@ -77,6 +77,8 @@ async def complete_prompt[T: BaseModel](
     answering_provider = provenance.provider if provenance is not None else fallback_identity.provider
     capabilities = turn.capabilities or provider.capabilities
     metrics = RunMetrics(duration=perf_counter() - started)
+    for prior_identity, prior_metrics in turn.prior_usage:
+        metrics.add(prior_metrics, model_id=prior_identity.id, provider=prior_identity.provider)
     metrics.add(turn.usage, model_id=answering_id, provider=answering_provider)
     text = turn.content if schema is None else structured_answer_text(turn, capabilities)
     lenient = capabilities.structured_output == "json_mode"

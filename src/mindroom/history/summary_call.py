@@ -186,13 +186,38 @@ def _cancel_and_detach(response_task: asyncio.Task[ModelTurn], *, reason: str) -
     asyncio.get_running_loop().call_later(_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS, warn_if_still_running)
 
 
+def _summary_usage_entries(
+    tracker: StreamTracker,
+    *,
+    completed: TurnCompleted | None,
+    failure: Exception | None,
+) -> list[tuple[ModelIdentity, MessageMetrics]]:
+    """Return every billed ``(identity, metrics)`` entry for a summary request."""
+    entries = list(tracker.prior_usage)
+    if completed is not None:
+        provenance = read_model_provenance(completed.message.provider_data)
+        identity = (
+            ModelIdentity(id=provenance.model_id, provider=provenance.provider)
+            if provenance is not None
+            else tracker.identity
+        )
+        entries.append((identity, completed.message.metrics))
+    elif tracker.reported.received is not None and tracker.reported.received.reported:
+        entries.append((tracker.identity, tracker.reported.received))
+    elif isinstance(failure, ModelSafeguardRefusal):
+        entries.append(
+            (ModelIdentity(id=failure.model_id or tracker.identity.id, provider=failure.provider), failure.usage),
+        )
+    return [(identity, usage) for identity, usage in entries if usage.reported]
+
+
 async def _request_summary(
     model: ModelProvider,
     request: ModelRequest,
     provider_done: asyncio.Future[None],
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
 ) -> ModelTurn:
-    """Send the summary request, then persist the usage it reported under the answering model."""
+    """Send the summary request, then persist the usage it reported under each billed model."""
     tracker = StreamTracker(model.identity)
     completed: TurnCompleted | None = None
     failure: Exception | None = None
@@ -209,32 +234,16 @@ async def _request_summary(
         provider_done.set_result(None)
     if failure is None and completed is None:
         failure = incomplete_stream_error(provider=tracker.identity.provider)
-    usage = (
-        completed.message.metrics
-        if completed is not None
-        else tracker.reported.received
-        if tracker.reported.received is not None and tracker.reported.received.reported
-        else failure.usage
-        if isinstance(failure, ModelSafeguardRefusal)
-        else None
-    )
-    if on_usage is not None and usage is not None and usage.reported:
-        provenance = read_model_provenance(completed.message.provider_data) if completed is not None else None
-        identity = (
-            ModelIdentity(id=provenance.model_id, provider=provenance.provider)
-            if provenance is not None
-            else ModelIdentity(id=failure.model_id or tracker.identity.id, provider=failure.provider)
-            if isinstance(failure, ModelSafeguardRefusal)
-            else tracker.identity
-        )
-        try:
-            await on_usage(identity, usage)
-        except Exception as error:
-            logger.warning(
-                "compaction_summary_usage_save_failed",
-                error_type=type(error).__name__,
-                exc_info=True,
-            )
+    if on_usage is not None:
+        for identity, usage in _summary_usage_entries(tracker, completed=completed, failure=failure):
+            try:
+                await on_usage(identity, usage)
+            except Exception as error:
+                logger.warning(
+                    "compaction_summary_usage_save_failed",
+                    error_type=type(error).__name__,
+                    exc_info=True,
+                )
     if failure is not None:
         raise failure
     assert completed is not None

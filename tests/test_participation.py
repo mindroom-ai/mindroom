@@ -259,7 +259,7 @@ async def test_decision_failover_records_usage_under_answering_model() -> None:
     from functools import partial  # noqa: PLC0415
 
     from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
-    from mindroom.llm.provider import ModelIdentity  # noqa: PLC0415
+    from mindroom.llm.provider import ModelIdentity, UsageReported  # noqa: PLC0415
     from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream  # noqa: PLC0415
     from mindroom.providers.pipeline.wrapped import WrappedProvider  # noqa: PLC0415
 
@@ -269,9 +269,9 @@ async def test_decision_failover_records_usage_under_answering_model() -> None:
     class _QuotaFail(ScriptedModel):
         async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
             self.requests.append(request)
+            yield UsageReported(usage(15, 3))
             msg = "quota"
             raise ProviderError(msg, provider="Anthropic", status_code=429, code=QUOTA_EXHAUSTED)
-            yield  # pragma: no cover
 
     primary = _QuotaFail([], identity=primary_id)
     fallback = ScriptedModel(
@@ -295,7 +295,7 @@ async def test_decision_failover_records_usage_under_answering_model() -> None:
         (entry.provider, entry.id): (entry.tokens.input_tokens, entry.tokens.output_tokens)
         for entry in record.metrics.details["model"]
     }
-    assert by_model == {("OpenAI", "fallback-m"): (35, 7)}
+    assert by_model == {("Anthropic", "primary-m"): (30, 6), ("OpenAI", "fallback-m"): (35, 7)}
 
 
 @pytest.mark.asyncio
