@@ -194,6 +194,10 @@ def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
     plain_text = system_text(prompt_for_turn(plain_build))
 
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT in matrix_text
+    assert "Mermaid fences (```mermaid)" in matrix_text
+    assert "GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`)" in matrix_text
+    assert "footnotes (`[^1]` / `[^1]: ...`)" in matrix_text
+    assert "External image URLs (`![](https://...)`) are not rendered; link to external URLs instead." in matrix_text
     assert "blank lines around inner Markdown" in matrix_text
     assert "<span data-mx-spoiler>...</span>" in matrix_text
     assert "<https://matrix.to/#/!room_id>" in matrix_text
