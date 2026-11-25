@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
+import aiohttp
 import nio
 import pytest
 
@@ -487,3 +488,29 @@ async def test_download_rejects_plaintext_that_does_not_match_its_declared_type(
 
     with pytest.raises(DesktopMediaError, match="do not match their declared PNG, JPEG, or text MIME type"):
         await download_encrypted_screenshot(client, replace(media, mime_type="image/png"), timeout_seconds=1)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        aiohttp.ClientPayloadError("mxc://example.org/secret truncated"),
+        nio.LocalProtocolError("mxc://example.org/secret rejected"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_download_normalizes_client_and_protocol_errors_without_echoing_url(error: Exception) -> None:
+    """Transport and nio protocol errors normalize to a generic DesktopMediaError without leaking URIs."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.download.side_effect = error
+    media = EncryptedDesktopMedia(
+        url="mxc://example.org/secret",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/jpeg",
+        size=len(JPEG),
+    )
+
+    with pytest.raises(DesktopMediaError, match=r"^Matrix media download failed\.$") as exc_info:
+        await download_encrypted_media(client, media, timeout_seconds=1)
+    assert "mxc://" not in str(exc_info.value)

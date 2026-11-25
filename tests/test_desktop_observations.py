@@ -114,3 +114,28 @@ def test_resolve_rejects_bare_element_index_outside_observed_elements() -> None:
     bare = replace(COMMAND, parameters={"app": "com.example.Editor", "state_id": "shot-only", "element_index": 0})
     with pytest.raises(DesktopProtocolError, match="index"):
         cache.resolve(bare)
+
+
+@pytest.mark.parametrize(
+    "state_updates",
+    [
+        {"truncated": True, "stability": "truncated"},
+        {"truncated": False, "stability": "unstable"},
+    ],
+)
+def test_resolve_rejects_fallback_input_on_incomplete_or_unstable_observations(
+    state_updates: dict[str, object],
+) -> None:
+    """Coordinate and untargeted keyboard fallbacks require a stable complete observation."""
+    cache = DesktopObservations()
+    degraded = replace(STATE, **state_updates)
+    cache.remember(degraded, COMMAND)
+    fallback = replace(
+        COMMAND,
+        action="click",
+        parameters={"app": "com.example.Editor", "state_id": "snapshot-1", "x": 100, "y": 100, "button": "left"},
+    )
+    with pytest.raises(DesktopProtocolError, match="stable complete observation"):
+        cache.resolve(fallback)
+    # Retained semantic element actions remain valid on truncated states.
+    assert cache.resolve(COMMAND) == COMMAND

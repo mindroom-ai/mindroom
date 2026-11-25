@@ -1019,12 +1019,12 @@ async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *,
     if "output_attachment" in recorded.result:
         try:
             shown = await _with_full_output(client, recorded.result, timeout_seconds=timeout_seconds)
-        except (DesktopMediaError, DesktopProtocolError) as exc:
+        except (DesktopMediaError, DesktopProtocolError):
             return _partial_result(
                 "request_status",
                 result=sanitized(recorded.result),
                 message=(
-                    f"The recorded reply was found, but its full output could not be downloaded: {exc} "
+                    "The recorded reply was found, but its full output could not be downloaded. "
                     "Query request_status again later; do not run the command again."
                 ),
             )
@@ -1037,12 +1037,12 @@ async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *,
             recorded.screenshot,
             timeout_seconds=timeout_seconds,
         )
-    except DesktopMediaError as exc:
+    except DesktopMediaError:
         return _partial_result(
             "request_status",
             result=sanitized_result,
             message=(
-                f"The recorded reply was found, but its screenshot could not be decrypted: {exc} "
+                "The recorded reply was found, but its screenshot could not be downloaded or decrypted. "
                 "Query request_status again later; do not repeat the action."
             ),
         )

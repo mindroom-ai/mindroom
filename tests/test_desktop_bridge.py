@@ -3025,10 +3025,30 @@ async def test_oversized_ax_state_fits_inline_and_drops_unreturned_elements(
     assert not _response(transport).ok
     assert "index" in (_response(transport).error or "")
 
+    # Coordinate fallback is rejected on a wire-truncated observation.
+    fallback_cmd = _command(
+        "click",
+        request_id="r2b",
+        sequence=3,
+        parameters={
+            "app": APP_ID,
+            "state_id": "big-state-1",
+            "x": 100,
+            "y": 100,
+            "button": "left",
+            "observation": "tree",
+        },
+    )
+    await bridge.on_to_device_event(_event(fallback_cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "stable complete observation" in (_response(transport).error or "")
+
     kept_cmd = _command(
         "click_element",
         request_id="r3",
-        sequence=3,
+        sequence=4,
         parameters={"app": APP_ID, "state_id": "big-state-1", "element_index": kept_count - 1, "observation": "tree"},
     )
     await bridge.on_to_device_event(_event(kept_cmd))
@@ -3127,9 +3147,9 @@ async def test_oversized_capture_warning_and_error_response_are_bounded(
     assert response.content_bytes() <= MAX_INLINE_RESPONSE_BYTES
     assert response.result["action"] == "click_element"
     assert response.result["action_completed"] is True
-    assert str(response.result["warning"]).endswith("...")
+    assert response.result["warning"] == "Desktop state exceeded the inline reply size limit and was omitted."
 
-    # Direct error responses cap at 4,096 chars.
+    # Direct error responses cap at 2,048 chars.
     await _handle(
         bridge,
         _event(_command("screenshot", request_id="s1", sequence=2, parameters={"app": APP_ID})),
@@ -3137,7 +3157,7 @@ async def test_oversized_capture_warning_and_error_response_are_bounded(
     err_response = _response(transport)
     assert not err_response.ok
     assert err_response.error is not None
-    assert len(err_response.error) == 4096
+    assert len(err_response.error) == 2048
     assert err_response.error.endswith("...")
 
 

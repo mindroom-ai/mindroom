@@ -86,7 +86,8 @@ _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
-_MAX_ERROR_CHARS = 4_096
+_MAX_ERROR_CHARS = 2_048
+_OMITTED_STATE_WARNING = "Desktop state exceeded the inline reply size limit and was omitted."
 
 
 async def _run_macos_application_events() -> None:
@@ -1317,27 +1318,11 @@ class DesktopBridge:
             )
             if key in result
         }
-        raw_warning = result.get("warning")
-        warning = (
-            raw_warning
-            if isinstance(raw_warning, str) and raw_warning
-            else "Follow-up desktop state exceeded the inline reply size limit and was omitted."
+        bounded = {**preserved, "warning": _OMITTED_STATE_WARNING}
+        attached_screenshot = (
+            screenshot if screenshot is not None and fits_inline(command, bounded, screenshot=screenshot) else None
         )
-        attached_screenshot = screenshot
-        if attached_screenshot is not None and not fits_inline(
-            command,
-            {**preserved, "warning": ""},
-            screenshot=attached_screenshot,
-        ):
-            attached_screenshot = None
-
-        def build(dropped_chars: int) -> dict[str, object]:
-            kept = len(warning) - dropped_chars
-            text = warning[:kept] if dropped_chars == 0 or len(warning) <= 3 else f"{warning[: max(0, kept - 3)]}..."
-            return {**preserved, "warning": text}
-
-        dropped_chars = leftmost_fitting(command, 0, len(warning), build, screenshot=attached_screenshot)
-        return success_response(command, result=build(dropped_chars), screenshot=attached_screenshot)
+        return success_response(command, result=bounded, screenshot=attached_screenshot)
 
     def _observation_refused(
         self,

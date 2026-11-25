@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.desktop.accessibility import MAX_RETAINED_STATES, STATE_TTL_SECONDS, AccessibilityState
-from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError
+from mindroom.desktop.protocol import DESKTOP_CONTROL_ACTIONS, DesktopCommand, DesktopProtocolError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -61,6 +61,12 @@ class DesktopObservations:
                 ):
                     msg = "Desktop element index is unknown in this observation."
                     raise DesktopProtocolError(msg)
+                return command
+            if command.action in DESKTOP_CONTROL_ACTIONS and (
+                observed.state.truncated or observed.state.stability != "stable"
+            ):
+                msg = "Accessibility fallback requires a stable complete observation; request get_app_state again."
+                raise DesktopProtocolError(msg)
             return command
         reference = command.parameters["element_ref"]
         index = next(
