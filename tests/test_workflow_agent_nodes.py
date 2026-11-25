@@ -26,7 +26,6 @@ from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.llm.errors import ProviderError
 from mindroom.orchestration import workflow_runtime
-from mindroom.orchestration.tool_job_runtime import _follow_up_candidates
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
@@ -900,7 +899,7 @@ async def test_node_jobs_are_in_no_list_no_room_state_and_no_follow_up(stack: Wo
     ended = stack.jobs.retained_jobs()
 
     assert [(job.status, job.consumed) for job in ended] == [("completed", False)]
-    assert _follow_up_candidates(ended) == {}
+    assert stack.jobs.follow_up_candidates() == {}
     assert await stack.jobs.ended_jobs(key) == ()
     assert await stack.jobs.list_jobs(owner=owner, depth=0) == []
 

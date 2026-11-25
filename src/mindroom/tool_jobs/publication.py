@@ -120,24 +120,25 @@ class JobStatePublisher:
         jobs: Sequence[BackgroundJob],
         *,
         awaited: Collection[str] = frozenset(),
+        ended_rooms: Collection[tuple[str, str]] = (),
     ) -> None:
         """Rewrite the state of every agent and room whose live jobs changed; a failed write is retried next time.
 
-        ``jobs`` are every retained job, so a new process also clears state an earlier one left listing jobs that a
-        restart interrupted. ``awaited`` names the jobs a call still waits for.
+        ``jobs`` are live jobs (or all retained jobs for legacy callers) and ``ended_rooms`` names every
+        ``(agent, room_id)`` retaining terminal jobs so a new process clears state left by a restart.
+        ``awaited`` names the jobs a call still waits for.
         """
-        groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in self._published}
-        for job in jobs:
-            if job.owner.room_id is not None:
-                groups.setdefault((job.owner.recipient, job.owner.room_id), []).append(job)
+        groups, ended = self._group_jobs(jobs, ended_rooms)
         for (agent, room_id), group in groups.items():
             published = self._published.get((agent, room_id))
+            if not group and published == _EMPTY:
+                continue
             listed = [] if published is None else cast("list[dict[str, object]]", published["jobs"])
             listed_before = {str(job["job_id"]) for job in listed}
             content = _jobs_state_content(group, awaited=awaited, listed_before=listed_before)
             # An earlier process's state can list only jobs it left, which are retained as ended, so a room with none
             # holds no listing to clear.
-            if published is None and not any(job.status in TERMINAL_STATUSES for job in group):
+            if published is None and (agent, room_id) not in ended:
                 published = _EMPTY
             if published == content:
                 continue
@@ -166,6 +167,23 @@ class JobStatePublisher:
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))
+
+    def _group_jobs(
+        self,
+        jobs: Sequence[BackgroundJob],
+        ended_rooms: Collection[tuple[str, str]],
+    ) -> tuple[dict[tuple[str, str], list[BackgroundJob]], set[tuple[str, str]]]:
+        ended = set(ended_rooms)
+        groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in (*self._published, *ended)}
+        for job in jobs:
+            if job.owner.room_id is not None:
+                pair = (job.owner.recipient, job.owner.room_id)
+                if job.status in TERMINAL_STATUSES:
+                    ended.add(pair)
+                    groups.setdefault(pair, [])
+                else:
+                    groups.setdefault(pair, []).append(job)
+        return groups, ended
 
     def _warn_refused(self, agent: str, room_id: str, status_code: str) -> None:
         """Warn that the room refused the agent's state, unless it already refused the agent's last write."""
