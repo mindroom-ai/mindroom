@@ -1,6 +1,6 @@
 """The compaction summary request is the ``compaction_summary`` prompt golden's, byte for byte, from production code.
 
-The golden's first turn calls ``compact_context`` and stores its run; the next reply compacts that run before it
+The golden's first turn stores its run and manual compaction is scheduled; the next reply compacts that run before it
 answers, with one summary request. Here the run the first turn stores is seeded from the golden's own
 requests, and the runtime's pre-reply compaction (summarizer loading through the provider registry, the summary input,
 and the summary call) sends the summary request to the recorder the prompt goldens were captured with.
@@ -44,16 +44,16 @@ _FIRST_TURN_METADATA = {
 
 
 def _first_turn_run(golden: dict[str, object]) -> RunRecord:
-    """Return the run the first turn stores: its request after the tool result, without the prompt, then its answer."""
+    """Return the run the first turn stores: its user messages without the system prompt, then its answer."""
     requests = golden["requests"]
     assert isinstance(requests, list)
-    after_tool = [Message.from_dict(message) for message in requests[1]["messages"] if message["role"] != "system"]
+    first_messages = [Message.from_dict(message) for message in requests[0]["messages"] if message["role"] != "system"]
     return RunRecord(
         run_id="run-compact",
         agent_id="assistant",
         session_id="!room:localhost:$thread:localhost",
         status=RunStatus.completed,
-        messages=[*after_tool, Message(role="assistant", content="ok")],
+        messages=[*first_messages, Message(role="assistant", content="ok")],
         metadata=dict(_FIRST_TURN_METADATA),
     )
 

@@ -627,7 +627,7 @@ async def compact_running_turn(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     available_history_budget: int | None,
-    max_summary_tokens: int,
+    max_summary_tokens: int | None,
     model: ModelProvider,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[str], int],

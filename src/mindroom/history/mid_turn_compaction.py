@@ -169,10 +169,7 @@ def mid_turn_compaction_hook(
             fit_limit=plan.fit_limit_tokens,
             sizer=request_sizer(model, config, plan.active_model_name or model_name),
         )
-        if plan.automatic_compaction
-        and plan.text_compaction_available
-        and plan.limit_tokens is not None
-        and plan.fit_limit_tokens is not None
+        if plan.text_compaction_available
         else None
     )
     compaction = _MidTurnCompaction(
@@ -224,9 +221,9 @@ class _Policy:
     """The resolved compaction plan and request limit for one model request."""
 
     inputs: HistoryPreparationInputs
-    limit: int
+    limit: int | None
     # The model's own window minus the reserve; a rewritten request over it would fail at the provider.
-    fit_limit: int
+    fit_limit: int | None
     # How the requests of the run's loop are sized.
     sizer: RequestSizer
 
@@ -243,11 +240,14 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             live_request,
             messages[:leading],
         )
-    if compaction.stopped or (policy := compaction.policy) is None:
+    requested = _consume_request(state.run.compaction_requests, compaction.scope)
+    if (compaction.stopped and not requested) or (policy := compaction.policy) is None:
+        return
+    if not requested and (not policy.inputs.execution_plan.automatic_compaction or policy.limit is None):
         return
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
     request_size = await asyncio.to_thread(policy.sizer.size, live_request)
-    if request_size.tokens <= policy.limit:
+    if not requested and (policy.limit is None or request_size.tokens <= policy.limit):
         return
     layout = _layout(messages, compaction.prompt_id, scoped=scope_fold is not None)
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
@@ -273,16 +273,8 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     _require_fit(policy, fold.rewritten_tokens, fold.summary_message)
     if fold.commit is not None:
         fold.commit()
-    if state.request_template.native_compaction is not None:
-        # The provider's own compaction could not keep this request within the window.
-        logger.warning(
-            "Native compaction left the request over its limit; compacted as text",
-            run_id=state.record.run_id,
-        )
-        # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
-        # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
-        state.request_template = replace(state.request_template, native_compaction=None)
-    if fold.rewritten_tokens > policy.limit:
+    _disable_native_compaction(state, requested=requested)
+    if policy.limit is not None and fold.rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
         # would only summarize each new tool result before the model ever saw it.
         logger.warning(
@@ -290,6 +282,32 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             run_id=state.record.run_id,
         )
         compaction.stopped = True
+
+
+def _consume_request(requests: set[HistoryScope] | None, scope: HistoryScope) -> bool:
+    if requests is None or scope not in requests:
+        return False
+    requests.discard(scope)
+    return True
+
+
+def _disable_native_compaction(state: LoopState, *, requested: bool) -> None:
+    if state.request_template.native_compaction is None:
+        return
+    if requested:
+        logger.info(
+            "Mid-turn compaction requested on native compaction route; compacted as text",
+            run_id=state.record.run_id,
+        )
+    else:
+        # The provider's own compaction could not keep this request within the window.
+        logger.warning(
+            "Native compaction left the request over its limit; compacted as text",
+            run_id=state.record.run_id,
+        )
+    # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
+    # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
+    state.request_template = replace(state.request_template, native_compaction=None)
 
 
 def _mid_turn_fork(policy: _Policy, live_request: ModelRequest) -> SummaryFork | None:
@@ -329,7 +347,7 @@ async def _summarize(
         # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
         kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if scope_fold is None:
-            budget_limit = policy.limit if kept_tokens < policy.limit else policy.fit_limit
+            budget_limit = policy.limit if policy.limit is not None and kept_tokens < policy.limit else policy.fit_limit
             # Without a stored session to append a summary row to, replayed history is summarized with the turn's
             # exchanges, each message as a snapshot of its own.
             snapshots = [
@@ -349,7 +367,7 @@ async def _summarize(
                 ),
                 layout.previous_run_local_summary,
                 snapshots,
-                max_summary_tokens=max(0, budget_limit - kept_tokens),
+                max_summary_tokens=None if budget_limit is None else max(0, budget_limit - kept_tokens),
                 model=compaction.model,
             )
             summary_message = compaction_summary_message(summary, run_local=True)
@@ -362,7 +380,7 @@ async def _summarize(
                 commit=partial(_apply_rewrite, messages, rewritten, prompt_to_mark, layout, record),
             )
         store, session = scope_fold
-        if kept_tokens >= policy.limit:
+        if policy.limit is not None and kept_tokens >= policy.limit:
             # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
             logger.warning(
                 "Request exceeds the replay window without its history; not compacting",
@@ -381,7 +399,7 @@ async def _summarize(
             size_request,
             store=store,
             session=session,
-            max_summary_tokens=policy.limit - kept_tokens,
+            max_summary_tokens=None if policy.limit is None else policy.limit - kept_tokens,
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
@@ -401,7 +419,7 @@ async def _compact_scope(
     *,
     store: ConversationStore,
     session: ConversationSession,
-    max_summary_tokens: int,
+    max_summary_tokens: int | None,
 ) -> _Fold | None:
     """Append one summary row to ``session``'s scope, covering its runs after the latest row and this run's exchanges.
 
@@ -532,7 +550,7 @@ def _folded_calls(fold: Fold) -> set[str]:
 
 def _require_fit(policy: _Policy, tokens: int, summary_message: Message) -> None:
     """Refuse to send a rewritten request whose kept messages and summary exceed the model's own window."""
-    if tokens <= policy.fit_limit:
+    if policy.fit_limit is None or tokens <= policy.fit_limit:
         return
     summary_tokens = count(policy.sizer.model.token_counter, str(summary_message.content))
     raise HistorySummaryBudgetError(
