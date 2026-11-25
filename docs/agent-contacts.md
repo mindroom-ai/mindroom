@@ -121,7 +121,7 @@ Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent
 | `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
-It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `workflow` (and its deprecated alias `dynamic_workflow`), `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
@@ -186,7 +186,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 - It offers only the contact's tools plus `matrix_message`, and no skills, knowledge bases, or interactive questions.
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
 - Its tool calls finish inside the turn and never become [background jobs](tools/agent-orchestration.md#background-jobs).
-- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
+- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments into a contact room.
 - Other tools that post into rooms refuse the contact room.
 - MindRoom itself saves nothing from it: it writes no memory and starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](knowledge-graph.md), the agent's [thread exports](thread-exports.md), or [exploration](scheduling.md#exploration).
 
@@ -249,7 +249,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
 | `contacts are not enabled for <agent>, so the contact room cannot be set up` | An agent of the request lost `contacts` after it was asked; accept again once an administrator adds `contacts` back |
-| `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
+| `Error: contact rooms accept text only` | Attachments cannot go into a contact room |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
 | `Not sent: The message could not be checked; try again later.` | The judge failed, timed out, or abstained |

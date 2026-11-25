@@ -23,11 +23,8 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.AGENT,
     display_name="Chat UI",
     description=(
-        "Show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own "
-        "worker browser), the Canvas panel (an interactive web page the agent writes, such as a dashboard, "
-        "slides, or a form, which the user can answer; opt in with enable_show_canvas), the Members panel, "
-        "or a Settings section. "
-        "Sends a UI request; does not navigate or control the user's own browser."
+        "Show MindRoom Chat UI: Computer/Members panels, Settings, or an interactive Canvas (when enabled); "
+        "never controls the user's browser"
     ),
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,

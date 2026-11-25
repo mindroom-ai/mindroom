@@ -160,6 +160,7 @@ class ChatAdapter:
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
             provider=self.identity.provider,
+            fallback_model=request.fallback_model,
         )
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:

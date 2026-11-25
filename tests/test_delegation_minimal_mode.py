@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild, PersonaSourceKind
+    from mindroom.delegation.state import DelegationChild
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_access import ToolKey
     from mindroom.tool_system.tool_function import ToolFunction
@@ -394,7 +394,7 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
 ) -> None:
     """A reload after the caller's turn began leaves a fresh minimal child its Bash, not the caller's stale snapshot.
 
-    A Dynamic Workflow participant's pre-approval overlay is not part of the config a reload is checked against, but
+    A pre-approval overlay is not part of the config a reload is checked against, but
     its base is: an overlay built before a reload leaves a child whose tools that reload revokes.
     """
     config = _config(helper_tools=["shell"])
@@ -836,8 +836,8 @@ def test_only_a_completed_run_is_reload_stopped_and_a_workflow_participant_is_no
 
     stopped = stopped_run(RunStatus.completed)
 
-    def own_copy(source_kind: PersonaSourceKind) -> DelegationChild:
-        return prepare_child_turn(
+    def own_copy(*, workflow_run_id: str | None = None) -> DelegationChild:
+        child = prepare_child_turn(
             "leader",
             "leader",
             "Review",
@@ -849,13 +849,14 @@ def test_only_a_completed_run_is_reload_stopped_and_a_workflow_participant_is_no
             model=None,
             agent_mode="minimal",
             previous=None,
-            persona=SubagentPersona(source_kind=source_kind, source_name="review", system_prompt="Review."),
+            persona=SubagentPersona(source_kind="inline", source_name="review", system_prompt="Review."),
         )
+        return replace(child, workflow_run_id=workflow_run_id)
 
-    inline = own_copy("inline")
+    inline = own_copy()
     resume = f'Resume this subagent with continue_subagent(subagent_id="{inline.subagent_id}", message="continue").'
     assert reload_stopped_child_result(inline, stopped) == f"{RELOAD_STOPPED} {resume}"
-    assert reload_stopped_child_result(own_copy("workflow"), stopped) == RELOAD_STOPPED
+    assert reload_stopped_child_result(own_copy(workflow_run_id="wf-" + "a" * 32), stopped) == RELOAD_STOPPED
     assert reload_stopped_child_result(inline, RunRecord(run_id="run", session_id="session")) is None
     # A refused call marks the run, which may still be cancelled, fail, or pause before its batch ends.
     for status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused):

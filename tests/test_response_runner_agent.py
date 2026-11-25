@@ -375,8 +375,10 @@ class TestAgentBot(AgentBotTestBase):
         assert "[Matrix metadata for tool calls]" not in model_prompt
         target_item = _matrix_target_item(mock_ai)
         assert target_item.cache_policy == "stable"
-        assert "Matrix room 'Engineering' (room ID !test:localhost)" in target_item.text
-        assert "outside any thread" in target_item.text
+        assert (
+            target_item.text
+            == "Current Matrix context: room 'Engineering' (room ID !test:localhost) (room timeline, no thread)."
+        )
 
     @pytest.mark.asyncio
     async def test_agent_thread_reply_hears_about_the_room_s_other_threads(
@@ -949,10 +951,8 @@ class TestAgentBot(AgentBotTestBase):
         model_prompt = mock_stream_agent_response.call_args.args[0].model_prompt
         assert "[Matrix metadata for tool calls]" not in model_prompt
         assert (
-            "Matrix room 'Engineering' (room ID !test:localhost)"
-            in _matrix_target_item(
-                mock_stream_agent_response,
-            ).text
+            _matrix_target_item(mock_stream_agent_response).text
+            == "Current Matrix context: room 'Engineering' (room ID !test:localhost) (room timeline, no thread)."
         )
 
     @pytest.mark.asyncio

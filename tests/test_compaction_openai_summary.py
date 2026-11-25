@@ -291,7 +291,7 @@ async def test_openrouter_chat_summary_persists_reported_usage_when_stream_ends_
     model = pipeline_provider(build_provider(config, runtime))
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(metrics: MessageMetrics) -> None:
+    async def on_usage(_identity: object, metrics: MessageMetrics) -> None:
         recorded.append(metrics)
 
     with pytest.raises(ProviderUnavailable):
@@ -347,7 +347,7 @@ async def test_summary_persists_multi_attempt_reported_usage_when_retry_ends_in_
     )
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(metrics: MessageMetrics) -> None:
+    async def on_usage(_identity: object, metrics: MessageMetrics) -> None:
         recorded.append(metrics)
 
     with pytest.raises(ModelSafeguardRefusal):

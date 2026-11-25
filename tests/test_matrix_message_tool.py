@@ -36,7 +36,6 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
@@ -407,11 +406,6 @@ async def test_matrix_message_unknown_room_is_reported_as_unknown(room_id: str) 
         {"action": "send", "message": "hello", "new_thread": "maybe"},
         {"action": "send", "attachments": "att_context_file"},
         {"action": "send", "message": "hello", "idempotency_key": 7},
-        {
-            "action": "send",
-            "message": "hello",
-            "message_extras": [{"title": "Raw", "content_type": "application/json", "content": "{}"}],
-        },
     ],
 )
 async def test_matrix_message_rejects_malformed_arguments(kwargs: dict[str, object]) -> None:
@@ -439,11 +433,10 @@ async def test_matrix_message_rejects_malformed_arguments(kwargs: dict[str, obje
         ({"recipient": "  "}, "recipient must be a non-empty string when provided."),
         ({"thread_id": ""}, "thread_id must be a non-empty string when provided."),
         ({"action": "edit", "event_id": " "}, "event_id must be a non-empty string when provided."),
-        ({"message_extras": [MatrixMessageExtra(title="  ", content="details")]}, "requires a non-empty title"),
     ],
 )
 async def test_matrix_message_rejects_blank_values(kwargs: dict[str, object], expected_message: str) -> None:
-    """Blank identifiers and extras titles return a tool error before anything is sent."""
+    """Blank identifiers return a tool error before anything is sent."""
     tool = MatrixMessageTools()
     ctx = _make_context()
 
@@ -486,81 +479,6 @@ async def test_matrix_message_strips_targets_and_drops_blank_attachments() -> No
     assert payload["status"] == "ok"
     assert dispatch.await_args.kwargs["thread_id"] == "$other-thread"
     assert dispatch.await_args.kwargs["attachments"] == ["att_first", "./att_second"]
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_send_includes_message_extras() -> None:
-    """Send action should attach validated MindRoom message extras."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
-        ) as mock_send,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await toolkit_offers(tool, "matrix_message").entrypoint(
-                action="send",
-                message="Short answer.",
-                message_extras=[
-                    {
-                        "title": "Evidence",
-                        "content_type": "text/html",
-                        "content": "<table><tr><td>42</td></tr></table>",
-                        "collapsed": False,
-                    },
-                ],
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    sent_content = mock_send.await_args.args[2]
-    assert sent_content["body"] == "Short answer."
-    assert sent_content[MINDROOM_MESSAGE_EXTRAS_KEY] == {
-        "version": 2,
-        "sections": [
-            {
-                "title": "Evidence",
-                "content_type": "text/html",
-                "content": "<table><tr><td>42</td></tr></table>",
-                "collapsed": False,
-            },
-        ],
-    }
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_send_rejects_message_extras_without_text_event() -> None:
-    """Extras should not be silently dropped on attachment-only sends."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
-        ) as mock_send,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await toolkit_offers(tool, "matrix_message").entrypoint(
-                action="send",
-                attachments=["att_context_file"],
-                message_extras=[
-                    {
-                        "title": "Evidence",
-                        "content": "details",
-                    },
-                ],
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert "non-empty message" in payload["message"]
-    mock_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1500,51 +1418,6 @@ async def test_matrix_message_edit_rejects_interactive_prompts() -> None:
         "message": "Interactive prompts are only supported in normal agent responses.",
     }
     mock_edit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_edit_includes_message_extras_on_replacement_wrapper() -> None:
-    """Edit action should expose extras on both m.new_content and the outer edit event."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ) as mock_edit,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await toolkit_offers(tool, "matrix_message").entrypoint(
-                action="edit",
-                message="Updated answer.",
-                event_id="$target",
-                message_extras=[
-                    {
-                        "title": "Evidence",
-                        "content": "extra details",
-                    },
-                ],
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    new_content = mock_edit.await_args.args[3]
-    extra_content = mock_edit.await_args.kwargs["extra_content"]
-    expected_extras = {
-        "version": 2,
-        "sections": [
-            {
-                "title": "Evidence",
-                "content_type": "text/markdown",
-                "content": "extra details",
-                "collapsed": True,
-            },
-        ],
-    }
-    assert new_content[MINDROOM_MESSAGE_EXTRAS_KEY] == expected_extras
-    assert extra_content == {MINDROOM_MESSAGE_EXTRAS_KEY: expected_extras}
 
 
 @pytest.mark.asyncio

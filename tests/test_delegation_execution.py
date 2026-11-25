@@ -1747,10 +1747,13 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
 
 
 def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
-    """A workflow persona child needs the caller's dynamic_workflow tool, not a self entry in delegate_to."""
+    """A workflow child needs the caller's workflow tool, not a self entry in delegate_to."""
     paths = _runtime_paths(tmp_path)
     with_workflow = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])},
+        agents={
+            "leader": AgentConfig(display_name="Leader", tools=["workflow"]),
+            "child": AgentConfig(display_name="Child"),
+        },
         defaults=DefaultsConfig(tools=[]),
     )
     without_workflow = Config(
@@ -1766,7 +1769,7 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
             "leader",
             "task",
             config=with_workflow,
-            grant="dynamic_workflow",
+            grant="workflow",
             **options,
         )
         other_agent = authorize_delegation(
@@ -1774,7 +1777,7 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
             "child",
             "task",
             config=with_workflow,
-            grant="dynamic_workflow",
+            grant="workflow",
             **options,
         )
         delegate_rule = authorize_delegation("leader", "leader", "task", config=with_workflow, **options)
@@ -1784,14 +1787,12 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
             "leader",
             "task",
             config=without_workflow,
-            grant="dynamic_workflow",
+            grant="workflow",
             **options,
         )
 
     assert isinstance(granted, Config)
-    assert other_agent == (
-        "Cannot author a subagent for 'child': system_prompt, tools, skills, knowledge, and profile apply only to yourself."
-    )
+    assert other_agent == "Cannot delegate to 'child': it is no longer an allowed target."
     assert isinstance(delegate_rule, str)
     assert isinstance(revoked, str)
 
@@ -1801,21 +1802,21 @@ def test_workflow_grant_runs_for_requester_the_caller_already_serves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A workflow participant is the caller's own copy, so the caller's individual access is not rechecked.
+    """A workflow child copying the caller itself keeps the access the caller already serves.
 
     A requester may reach a team member only through the team's access, which this check would refuse.
     """
     monkeypatch.setattr("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", lambda *_args: False)
     paths = _runtime_paths(tmp_path)
     config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"], delegate_to=["leader"])},
+        agents={"leader": AgentConfig(display_name="Leader", tools=["workflow"], delegate_to=["leader"])},
         defaults=DefaultsConfig(tools=[]),
     )
     identity = _identity()
     options = {"config": config, "runtime_paths": paths, "execution_identity": identity, "depth": 0}
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        workflow = authorize_delegation("leader", "leader", "task", grant="dynamic_workflow", **options)
+        workflow = authorize_delegation("leader", "leader", "task", grant="workflow", **options)
         delegate = authorize_delegation("leader", "leader", "task", **options)
 
     assert isinstance(workflow, Config)

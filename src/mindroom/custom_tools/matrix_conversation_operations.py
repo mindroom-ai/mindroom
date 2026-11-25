@@ -38,7 +38,6 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
-from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
@@ -52,7 +51,6 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.message_extras import MatrixMessageExtra
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -190,7 +188,6 @@ class MatrixMessageOperations:
         text: str,
         thread_id: str | None,
         recipient_user_id: str | None,
-        message_extras: list[MatrixMessageExtra] | None,
         known_latest_thread_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
         send_claim: MatrixMessageSendClaim | None = None,
@@ -219,8 +216,6 @@ class MatrixMessageOperations:
                 extra_content[ACTING_REQUESTER_KEY] = context.requester_id
         if attachment_ids:
             extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
-        if message_extras:
-            extra_content.update(build_message_extras_content(message_extras))
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
@@ -300,7 +295,6 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MatrixMessageExtra] | None,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
@@ -318,8 +312,6 @@ class MatrixMessageOperations:
                 ),
             )
         text = (message or "").strip() or None
-        if text is None and message_extras:
-            return self._result("error", action="send", message="message_extras requires a non-empty message body.")
         if text is None and not attachments:
             return self._result("error", action="send", message="Provide message, attachments, or both.")
         if text is not None:
@@ -332,7 +324,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             text=text,
-            text_only=not attachments and not message_extras,
+            text_only=not attachments,
         )
         if isinstance(contact_verdict, MatrixMessageOperationResult):
             return contact_verdict
@@ -393,7 +385,6 @@ class MatrixMessageOperations:
                     thread_id=state.thread_id,
                     recipient_user_id=recipient_user_id,
                     attachment_ids=state.resolved_attachment_ids if recipient_user_id is not None else None,
-                    message_extras=message_extras,
                     known_latest_thread_event_id=(
                         state.attachment_event_ids[-1] if state.attachment_event_ids else None
                     ),
@@ -599,7 +590,6 @@ class MatrixMessageOperations:
         thread_id: str | None,
         event_id: str | None,
         message: str | None,
-        message_extras: list[MatrixMessageExtra] | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="edit", message="event_id is required for edit.")
@@ -616,18 +606,16 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             text=formatted_text,
-            text_only=not message_extras,
+            text_only=True,
         )
         if isinstance(contact_verdict, MatrixMessageOperationResult):
             return contact_verdict
         if contact_verdict is not None:
             formatted_text = contact_verdict.text
-        extras_content = build_message_extras_content(message_extras) if message_extras else {}
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
             formatted_text,
-            extra_content=extras_content or None,
         )
         with _policy_approved(contact_verdict):
             delivered = await edit_message_result(
@@ -636,7 +624,6 @@ class MatrixMessageOperations:
                 event_id,
                 content,
                 formatted_text,
-                extra_content=extras_content or None,
             )
         if delivered is None:
             return self._result(
@@ -670,7 +657,6 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MatrixMessageExtra] | None,
         read_limit: int,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
@@ -688,7 +674,6 @@ class MatrixMessageOperations:
                 recipient_user_id=recipient_user_id,
                 room_mode=room_mode,
                 new_thread=new_thread,
-                message_extras=message_extras,
             )
         if action == "read":
             return await self._message_read(
@@ -711,5 +696,4 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             event_id=event_id,
             message=message,
-            message_extras=message_extras,
         )

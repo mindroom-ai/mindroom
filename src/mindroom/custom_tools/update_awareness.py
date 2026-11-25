@@ -227,7 +227,9 @@ def _mindroom_release_status(
     )
 
 
-def _release_awareness_instructions(status: _MindRoomReleaseStatus) -> str:
+def _release_awareness_instructions(status: _MindRoomReleaseStatus) -> str | None:
+    if status.release_check_succeeded and status.update_available is False:
+        return None
     latest_version = status.latest_version or "unknown"
     lines = [
         "<mindroom_update_awareness>",
@@ -248,8 +250,6 @@ def _release_awareness_instructions(status: _MindRoomReleaseStatus) -> str:
             "explicit user request.",
         )
         lines.append(f"Release page: {_PYPI_PROJECT_URL}")
-    elif status.release_check_succeeded and status.update_available is False:
-        lines.append("This runtime is not older than the latest published release, so do not suggest an update.")
     else:
         lines.append("Do not claim this runtime is up to date while the latest release is unknown or stale.")
     lines.append("</mindroom_update_awareness>")

@@ -484,7 +484,7 @@ async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_
     adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
 
     attempts = []
-    for overrides in (RequestOverrides(), RequestOverrides(caller_retries=True)):
+    for overrides in (RequestOverrides(), RequestOverrides(transient_retries="caller")):
         sent.clear()
         with pytest.raises(ProviderUnavailable):
             await anext(adapter.stream(_request(overrides=overrides)))

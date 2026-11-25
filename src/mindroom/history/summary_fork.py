@@ -276,7 +276,7 @@ def prepare_fork_request(
     fork_request = replace(
         base,
         messages=(*base.messages, prompt_message),
-        overrides=replace(base.overrides, caller_retries=True),
+        overrides=replace(base.overrides, transient_retries="caller"),
         prompt_hold_pin=hold_pin,
         retry_budget=None,
     )

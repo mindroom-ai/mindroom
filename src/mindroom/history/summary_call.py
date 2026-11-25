@@ -23,7 +23,15 @@ from mindroom.llm.errors import (
     incomplete_stream_error,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ModelTurn, ReportedUsage, RequestOverrides, TurnCompleted
+from mindroom.llm.provider import (
+    ModelIdentity,
+    ModelRequest,
+    ModelTurn,
+    RequestOverrides,
+    StreamTracker,
+    TurnCompleted,
+    answering_identity,
+)
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -41,7 +49,7 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # authored thinking setting keeps a model that thinks only when asked, such as Claude 4.x, from spending the
 # output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
 # own, so a shorter authored provider timeout still applies; the summary call's wall deadline bounds every request.
-_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+_SUMMARY_OVERRIDES = RequestOverrides(transient_retries="caller", prompt_cache=False, omit_thinking_setting=True)
 
 
 class _CompactionSummaryTimeoutError(TimeoutError):
@@ -183,21 +191,40 @@ def _cancel_and_detach(response_task: asyncio.Task[ModelTurn], *, reason: str) -
     asyncio.get_running_loop().call_later(_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS, warn_if_still_running)
 
 
+def _summary_usage_entries(
+    tracker: StreamTracker,
+    *,
+    completed: TurnCompleted | None,
+    failure: Exception | None,
+) -> list[tuple[ModelIdentity, MessageMetrics]]:
+    """Return every billed ``(identity, metrics)`` entry for a summary request."""
+    entries = list(tracker.prior_usage)
+    if completed is not None:
+        entries.append((answering_identity(completed.message, tracker.identity), completed.message.metrics))
+    elif tracker.reported.received is not None and tracker.reported.received.reported:
+        entries.append((tracker.identity, tracker.reported.received))
+    elif isinstance(failure, ModelSafeguardRefusal):
+        entries.append(
+            (ModelIdentity(id=failure.model_id or tracker.identity.id, provider=failure.provider), failure.usage),
+        )
+    return [(identity, usage) for identity, usage in entries if usage.reported]
+
+
 async def _request_summary(
     model: ModelProvider,
     request: ModelRequest,
     provider_done: asyncio.Future[None],
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
 ) -> ModelTurn:
-    """Send the summary request, then persist the usage it reported, failed and refused responses included."""
-    reported = ReportedUsage()
+    """Send the summary request, then persist the usage it reported under each billed model."""
+    tracker = StreamTracker(model.identity)
     completed: TurnCompleted | None = None
     failure: Exception | None = None
     try:
         events = model.stream(request)
         async with closing_async_stream(events):
             async for event in events:
-                reported.observe(event)
+                tracker.observe(event)
                 if isinstance(event, TurnCompleted):
                     completed = event
     except Exception as error:
@@ -205,26 +232,17 @@ async def _request_summary(
     finally:
         provider_done.set_result(None)
     if failure is None and completed is None:
-        failure = incomplete_stream_error(provider=model.identity.provider)
-
-    usage = (
-        completed.message.metrics
-        if completed is not None
-        else reported.received
-        if reported.received is not None and reported.received.reported
-        else failure.usage
-        if isinstance(failure, ModelSafeguardRefusal)
-        else None
-    )
-    if on_usage is not None and usage is not None and usage.reported:
-        try:
-            await on_usage(usage)
-        except Exception as error:
-            logger.warning(
-                "compaction_summary_usage_save_failed",
-                error_type=type(error).__name__,
-                exc_info=True,
-            )
+        failure = incomplete_stream_error(provider=tracker.identity.provider)
+    if on_usage is not None:
+        for identity, usage in _summary_usage_entries(tracker, completed=completed, failure=failure):
+            try:
+                await on_usage(identity, usage)
+            except Exception as error:
+                logger.warning(
+                    "compaction_summary_usage_save_failed",
+                    error_type=type(error).__name__,
+                    exc_info=True,
+                )
     if failure is not None:
         raise failure
     assert completed is not None
@@ -237,7 +255,7 @@ async def request_compaction_summary(
     model: ModelProvider,
     request: ModelRequest,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
     reject_tool_calls: bool = False,
 ) -> str:
     """Bound one compaction summary request, persist returned usage, and validate the returned summary text."""
@@ -285,16 +303,22 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
     keep_thinking_setting: bool = False,
+    allow_transient_fallback: bool = False,
 ) -> str:
     """Bound the provider request, then persist returned usage before validating the summary text it returns.
 
     ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
+    ``allow_transient_fallback`` lets a configured fallback chain take over on transient errors on the final retry.
     """
     request = ModelRequest(
         messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        overrides=replace(_SUMMARY_OVERRIDES, omit_thinking_setting=not keep_thinking_setting),
+        overrides=replace(
+            _SUMMARY_OVERRIDES,
+            omit_thinking_setting=not keep_thinking_setting,
+            transient_retries="fallback" if allow_transient_fallback else "caller",
+        ),
     )
     return await request_compaction_summary(
         model=model,

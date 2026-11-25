@@ -126,7 +126,7 @@ async def test_run_turn_runs_tools_and_returns_text(
     assert len(provider.requests) == 2
     # No Matrix room: the prompt neither describes one nor attributes the prompt to the requester's Matrix ID.
     sent = _sent(provider.requests[0])
-    assert "Matrix Reply Targeting" not in sent
+    assert "MindRoom selects which messages reach you" not in sent
     assert "@alice:localhost" not in sent
 
 
@@ -408,7 +408,8 @@ async def test_default_base_dir_is_the_workspace(tmp_path: Path, monkeypatch: py
 
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(storage / "agents" / "coder" / "workspace")
     system = _sent(provider.requests[0], "system")
-    assert "MINDROOM_AGENT_WORKSPACE" in system
+    assert "agent workspace and attachments only" in system
+    assert "Workdir:" not in system
     assert "skills/<skill-name>/" in system
 
 

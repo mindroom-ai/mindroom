@@ -102,8 +102,9 @@ def cli_turn_owner(
     if runtime_context.correlation_id is not None and runtime_context.correlation_id != turn_context.correlation_id:
         msg = "CLI turn owner correlation identity does not match"
         raise ValueError(msg)
+    turn_id = runtime_context.membership_turn_id or runtime_context.turn_id
     required = (
-        (runtime_context.membership_turn_id, "turn"),
+        (turn_id, "turn"),
         (turn_context.run_id, "generation"),
         (runtime_context.requester_id, "requester"),
         (runtime_context.room_id, "room"),
@@ -115,7 +116,7 @@ def cli_turn_owner(
             raise ValueError(msg)
     return CliTurnOwner(
         execution_identity=runtime_context.execution_identity,
-        turn_id=cast("str", runtime_context.membership_turn_id),
+        turn_id=cast("str", turn_id),
         generation=cast("str", turn_context.run_id),
     )
 

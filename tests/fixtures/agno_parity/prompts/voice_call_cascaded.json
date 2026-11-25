@@ -1,7 +1,7 @@
 {
   "description": "Cascaded voice call: the Live model's system prompt and one transcript answered by the call's reused agent.",
   "exported": {
-    "system_prompt": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\n## Personality Context\nEach section below is headed by the path of the file it was read from, inlined here automatically every turn. Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\nWhen using skills, use the skill tools (skill names are not callable functions):\n- `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.\n- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.\n- Do not open a global skill's `SKILL.md` directly with file tools.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>"
+    "system_prompt": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>"
   },
   "input": {
     "call": {
@@ -55,7 +55,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\n## Personality Context\nEach section below is headed by the path of the file it was read from, inlined here automatically every turn. Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\nWhen using skills, use the skill tools (skill names are not callable functions):\n- `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.\n- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.\n- Do not open a global skill's `SKILL.md` directly with file tools.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>",
           "role": "system"
         },
         {
@@ -164,7 +164,7 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing scheduled task by replacing its timing and content.",
+          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -172,9 +172,71 @@
                 "type": "string",
                 "description": "The ID of the task to edit (from list_schedules)."
               },
-              "request": {
-                "type": "string",
-                "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+              "message": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New trigger message posted when the schedule fires."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New short label for schedule listings."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -185,7 +247,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
+                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+              },
+              "clear_history_limit": {
+                "type": "boolean",
+                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
               },
               "silent": {
                 "anyOf": [
@@ -196,7 +262,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
+                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
               },
               "model": {
                 "anyOf": [
@@ -207,7 +273,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -223,8 +289,7 @@
               }
             },
             "required": [
-              "task_id",
-              "request"
+              "task_id"
             ]
           }
         },
@@ -319,7 +384,7 @@
         },
         {
           "name": "get_skill_reference",
-          "description": "Load a reference document from a skill's references. Use this to access detailed documentation.",
+          "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -358,7 +423,7 @@
         },
         {
           "name": "get_skill_script",
-          "description": "Read a script from a skill. This never runs the script; run it with your shell tool if you have one.",
+          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -519,17 +584,72 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
+          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
-              "request": {
+              "message": {
                 "type": "string",
-                "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
               },
               "new_thread": {
                 "type": "boolean",
                 "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -540,18 +660,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
+                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                "type": "boolean",
+                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -578,7 +691,7 @@
               }
             },
             "required": [
-              "request",
+              "message",
               "new_thread"
             ]
           }

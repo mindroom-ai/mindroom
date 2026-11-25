@@ -10,6 +10,7 @@ TOOL_ALIASES: dict[str, str] = {
     "file": "filesystem",
     "coding": "filesystem",
     "external_trigger_manager": "triggers",
+    "dynamic_workflow": "workflow",
 }
 
 

@@ -20,7 +20,6 @@ from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, HookBindings, HookRegistry, hook
 from mindroom.matrix.guarded_rooms import guarded_room
-from mindroom.matrix.message_extras import MatrixMessageExtra
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -60,7 +59,6 @@ CONTACT_TURN_ERROR = (
 TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 REMOVED_ERROR = "Error: contact c1 was removed, so nothing more can be sent into its room"
 NOT_AUTHORIZED = "Not authorized to access the target room."
-MENU = MatrixMessageExtra(title="Menu", content="Soup")
 
 
 @pytest.fixture(autouse=True)
@@ -335,12 +333,11 @@ async def test_edit_in_contact_room_runs_the_policy(tmp_path: Path, effect: str)
     "call",
     [
         {"message": "See the menu.", "attachments": ["menu.pdf"]},
-        {"message": "See the menu.", "message_extras": [MENU]},
-        {"action": "edit", "event_id": "$mine:localhost", "message": "See the menu.", "message_extras": [MENU]},
+        {"attachments": ["menu.pdf"]},
     ],
 )
 async def test_contact_room_accepts_text_only(tmp_path: Path, call: dict[str, object]) -> None:
-    """Files and extra sections never reach a contact room, because the policy checks only the message text."""
+    """Files never reach a contact room, because the policy checks only the message text."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     seen: list[str] = []

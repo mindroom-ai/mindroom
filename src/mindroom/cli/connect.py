@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import yaml
 from rich.console import Group
+from rich.markup import escape
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
@@ -475,7 +476,7 @@ def pair_local_install(
     ).strip()
     name = (client_name or "").strip() or socket.gethostname()
 
-    with _pairing_display(console) as show_pair_code:
+    with _pairing_display(console, provisioning_url=resolved_url) as show_pair_code:
 
         def announce(session: DevicePairSession) -> None:
             show_pair_code(session)
@@ -534,7 +535,11 @@ def pair_local_install(
 
 
 @contextmanager
-def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession], None]]:
+def _pairing_display(
+    console: Console,
+    *,
+    provisioning_url: str = constants.DEFAULT_MATRIX_HOMESERVER,
+) -> Iterator[Callable[[DevicePairSession], None]]:
     """Yield the callback that shows each pair code, spinning in a terminal until pairing ends.
 
     Anywhere else it prints plain lines, which logs keep and the macOS app reads the link from.
@@ -545,7 +550,12 @@ def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession],
     if not (tty and console.is_interactive):
         yield partial(_print_plain_pairing_request, console, with_qr=tty)
         return
-    console.print(section("Connect to MindRoom Chat"))
+    title = (
+        "Connect to MindRoom Chat"
+        if constants.is_hosted_matrix_homeserver(provisioning_url)
+        else f"Connect to {escape(urlparse(provisioning_url).hostname or provisioning_url)}"
+    )
+    console.print(section(title))
     with console.status("Requesting a pair code…") as waiting:
 
         def show_pair_code(session: DevicePairSession) -> None:

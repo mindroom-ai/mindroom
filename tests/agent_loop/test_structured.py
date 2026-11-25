@@ -9,10 +9,9 @@ import pytest
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from pydantic import BaseModel, Field
 
-from mindroom.agent_loop.structured import json_output_prompt, output_format_prompt, parse_structured
-from mindroom.llm.provider import Capabilities
+from mindroom.agent_loop.structured import output_format_prompt, parse_structured
+from mindroom.llm.provider import Capabilities, json_output_prompt
 from mindroom.routing import _RoutingSuggestion
-from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.teams.formation import _TeamModeDecision
 from mindroom.thread_summary.generation import _ThreadEnrichment, _ThreadSummary
 from mindroom.topic_generator import _RoomTopic
@@ -21,7 +20,6 @@ from tests.agno_parity.prompt_scenarios import load_golden
 HELPER_SCHEMAS: dict[str, type[BaseModel]] = {
     "knowledge_graph": ExtractedEntities,
     "routing": _RoutingSuggestion,
-    "schedule_parse": ScheduledWorkflow,
     "team_mode": _TeamModeDecision,
     "thread_enrichment": _ThreadEnrichment,
     "thread_summary": _ThreadSummary,

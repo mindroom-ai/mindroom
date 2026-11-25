@@ -512,8 +512,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
-        "can use, and ask the user for a missing key"
+        "Opt this agent's shell and worker Python calls into Agent Keys, inspect available keys, and request missing ones"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE

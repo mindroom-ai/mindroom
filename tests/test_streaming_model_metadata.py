@@ -79,7 +79,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _plain_request, _target
-from tests.scripted_agent_helpers import registered_toolkit
+from tests.scripted_agent_helpers import raising, registered_toolkit
 from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
@@ -1261,6 +1261,65 @@ async def test_approval_pause_resumed_stream_progress_and_final_carry_model_meta
         assert final_ai_run is not None
         assert final_ai_run["status"] == "completed"
         assert final_ai_run["model"] == expected_model
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+async def test_capped_approval_resume_blocks_priced_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """An approval resume after the requester hits their cap sends zero requests to a priced fallback."""
+    from mindroom.budgets.monitor import BudgetMonitor  # noqa: PLC0415
+    from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
+    from mindroom.providers import registry as provider_registry  # noqa: PLC0415
+    from tests.budget_helpers import set_month_spend  # noqa: PLC0415
+
+    del echo_tool
+    real_build = provider_registry.build_model_provider
+    gated_call = calls(tool_call("echo", "call-1", text="hi"))
+    quota = ProviderError("quota", provider="openai", status_code=429, code=QUOTA_EXHAUSTED)
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10.0),
+        scripts={"default": [gated_call, [raising(quota)]], "large": [answer("must not run")]},
+    )
+    config = turn.bot.config
+    config.models["default"] = config.models["default"].model_copy(update={"fallbacks": ["large"]})
+    config.models["large"] = config.models["large"].model_copy(
+        update={"pricing": ModelPricing(input=5, output=25)},
+    )
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    config.background_tool_jobs.enabled = False
+
+    monitor = BudgetMonitor(runtime_paths=runtime_paths_for(config), config_provider=lambda: config)
+    monkeypatch.setattr(turn.runner.deps.runtime.orchestrator, "_budgets", monitor)
+    monkeypatch.setattr(provider_registry, "build_model_provider", real_build)
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, ref, **_kw: turn.models[ref],
+    )
+
+    _install_approval_store(turn)
+    request = _plain_request(_target())
+    try:
+        assert await turn.runner.generate_response(request) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+
+        # Requester crosses cap before approving and resuming.
+        set_month_spend(monitor, {_REQUESTER: 15.0})
+        await _approve_and_resume(turn, continuation, asyncio.Event())
+
+        assert len(turn.models["default"].requests) == 2
+        assert turn.models["large"].requests == []
     finally:
         await shutdown_approval_runtime()
 

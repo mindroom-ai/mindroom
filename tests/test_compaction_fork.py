@@ -336,7 +336,7 @@ async def _wire_fork(
 async def test_guidance_retry_stream_skips_retry_when_caller_retries() -> None:
     malformed = ProviderError("malformed", provider="gemini", code=MALFORMED_TOOL_CALL)
     inner = ScriptedModel([[_raise_step(malformed)], summary_steps("recovered")])
-    req = ModelRequest(messages=(_msg("user", "compact"),), overrides=RequestOverrides(caller_retries=True))
+    req = ModelRequest(messages=(_msg("user", "compact"),), overrides=RequestOverrides(transient_retries="caller"))
     with pytest.raises(ProviderError) as exc_info:
         await complete(WrappedProvider(inner, guidance_retry_stream), req)
     assert (exc_info.value.code, len(inner.requests)) == (MALFORMED_TOOL_CALL, 1)
@@ -398,7 +398,7 @@ async def test_request_compaction_summary_rejects_tool_calls_after_billing(stop_
     )
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(u: MessageMetrics) -> None:
+    async def on_usage(_identity: ModelIdentity, u: MessageMetrics) -> None:
         recorded.append(u)
 
     req = ModelRequest(messages=(_msg("user", "compact"),))
@@ -478,7 +478,7 @@ def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path
     assert reason is None
     assert fork_req is not None
     assert (fork_req.tools, fork_req.messages[:-1]) == (fork.request.tools, fork.request.messages)
-    assert (fork_req.overrides.caller_retries, fork_req.overrides.prompt_cache) == (True, True)
+    assert (fork_req.overrides.transient_retries, fork_req.overrides.prompt_cache) == ("caller", True)
     assert (fork_req.prompt_hold, fork_req.prompt_hold_pin, fork_req.retry_budget) == (hold_path, [], None)
     prompt_text = str(fork_req.messages[-1].content)
     assert fork_req.messages[-1].role == "user"
@@ -1287,7 +1287,7 @@ async def test_mid_turn_fork_with_inline_media_does_not_retry_media_dropped_on_c
         xml_calls=xml_calls,
         media=MediaInputs(images=[chart]),
     )
-    fork_requests = [req for req in inner.requests if req.overrides.caller_retries]
+    fork_requests = [req for req in inner.requests if req.overrides.transient_retries == "caller"]
     assert len(fork_requests) == 1
     assert any(message.images for message in fork_requests[0].messages)
     assert (len(inner.requests), len(xml_calls.inputs), record.content) == (3, 1, "Finished after XML fallback")

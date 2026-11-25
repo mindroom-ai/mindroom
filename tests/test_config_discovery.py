@@ -238,7 +238,6 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
                 ("src/mindroom/approval/execution.py", "tool_context.resolve_worker_target"),
                 ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
-                ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
                 ("src/mindroom/custom_tools/workflow.py", "context.resolve_worker_target"),
                 ("src/mindroom/plugin_testing.py", "context.resolve_worker_target"),
                 ("src/mindroom/tools/approved_egress.py", "context.resolve_worker_target"),

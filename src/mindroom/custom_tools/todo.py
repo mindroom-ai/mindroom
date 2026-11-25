@@ -686,11 +686,6 @@ class TodoTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="todo",
-            instructions=(
-                "Use these tools to manage a per-thread work plan with dependencies. "
-                "Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. "
-                "Items are scoped to the current conversation thread."
-            ),
             tools=[
                 self.plan,
                 self.add_todo,

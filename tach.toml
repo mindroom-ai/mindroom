@@ -122,12 +122,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.dynamic_workflows"
-depends_on = [
-    "mindroom.failure_text",
-]
-
-[[modules]]
 path = "mindroom.private_storage.private_instance_identity"
 depends_on = ["mindroom.private_storage.private_instance_identity_store"]
 
@@ -507,7 +501,6 @@ visibility = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
     "mindroom.api.agent_cli",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
@@ -707,7 +700,6 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -744,7 +736,6 @@ visibility = [
     "mindroom.post_response_effects",
     "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.thread_summary",
 ]
@@ -873,7 +864,6 @@ visibility = [
     "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.agent_cli.cli_approval_waits",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.job_approvals",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.reply_turn.locked_turn",
@@ -938,7 +928,7 @@ depends_on = [
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.computer_announcement",
     "mindroom.custom_tools.delegate",
-    "mindroom.custom_tools.dynamic_workflow",
+    "mindroom.custom_tools.report_publishing",
     "mindroom.custom_tools.job",
     "mindroom.custom_tools.memory",
     "mindroom.custom_tools.workflow_peers",
@@ -1043,11 +1033,9 @@ visibility = [
     "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
     "mindroom.memory._mem0_backend",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval.execution",
     "mindroom.teams",
     "mindroom.routing",
-    "mindroom.scheduling.tasks",
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice.handler",
@@ -1451,7 +1439,6 @@ visibility = [
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",
     "mindroom.approval.resume",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.execution",
     "mindroom.teams",
 ]
@@ -1591,7 +1578,6 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.scheduling.tasks",
     "mindroom.delegation.execution",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
     "mindroom.custom_tools.egress_credentials",
@@ -1726,36 +1712,13 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.custom_tools.dynamic_workflow"
+path = "mindroom.custom_tools.report_publishing"
 depends_on = [
-    "mindroom.agent_cli.shell_contract",
-    "mindroom.config.models",
-    "mindroom.agent_loop",
-    "mindroom.agent_loop.build",
-    "mindroom.agents",
-    "mindroom.approval.tool_approval",
-    "mindroom.delegation.direct",
-    "mindroom.delegation.lifecycle",
-    "mindroom.delegation.personas",
-    "mindroom.delegation.sessions",
-    "mindroom.dynamic_workflows",
-    "mindroom.entity_resolution",
-    "mindroom.helper_usage",
-    "mindroom.llm",
     "mindroom.origins",
-    "mindroom.response_turn",
-    "mindroom.run_storage",
-    "mindroom.tool_system",
-    "mindroom.tool_system.agno_toolkits",
+    "mindroom.report_publishing",
     "mindroom.tool_system.authoring",
-    "mindroom.tool_system.skills",
-    "mindroom.tool_system.agent_tools",
-    "mindroom.tool_system.metadata",
-    "mindroom.tool_system.sandbox_proxy",
-    "mindroom.turn_model",
-    "mindroom.config.resolution",
-    "mindroom.tool_system.plugins",
-    "mindroom.config.tool_aliases",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
 ]
 
 [[modules]]
@@ -1840,15 +1803,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.api.dynamic_workflows"
-depends_on = [
-    "mindroom.api.auth_user",
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.report_headers",
-    "mindroom.dynamic_workflows",
-]
-
-[[modules]]
 path = "mindroom.api.egress_broker"
 depends_on = [
     "mindroom.api.config_lifecycle",
@@ -1873,6 +1827,7 @@ depends_on = [
 path = "mindroom.api.external_triggers"
 depends_on = [
     "mindroom.bounded_bytes",
+    "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
@@ -2139,6 +2094,7 @@ expose = ["bind_workflow_engine", "router"]
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.api.agent_profiles",
+    "mindroom.api.room_triggers",
     "mindroom.api.agent_terminals",
     "mindroom.api.app_state",
     "mindroom.api.auth_user",
@@ -2160,7 +2116,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dictation",
-    "mindroom.api.dynamic_workflows",
     "mindroom.api.egress_broker",
     "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
@@ -2208,6 +2163,18 @@ depends_on = [
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.turn_model",
+]
+
+[[modules]]
+path = "mindroom.api.room_triggers"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.config_lifecycle",
+    "mindroom.matrix.state",
+    "mindroom.plugin_http",
+    "mindroom.reactive_triggers.management",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
 ]
 
 [[modules]]
@@ -5850,6 +5817,7 @@ depends_on = [
     "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
+    "mindroom.cli.setup_matrix",
     "mindroom.cli.setup_wizard",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
@@ -5882,6 +5850,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
     "mindroom.cli.service",
+    "mindroom.cli.setup_matrix",
 ]
 
 [[modules]]
@@ -5911,6 +5880,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
+    "mindroom.cli.setup_matrix",
 ]
 
 [[modules]]
@@ -5922,6 +5892,15 @@ depends_on = [
     "mindroom.providers.openai",
 ]
 visibility = ["mindroom.cli.setup_wizard"]
+
+[[modules]]
+path = "mindroom.cli.setup_matrix"
+depends_on = [
+    "mindroom.cli.env_file",
+    "mindroom.cli.owner",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.config"]
 
 [[modules]]
 path = "mindroom.cli.setup_wizard"
@@ -6247,18 +6226,12 @@ depends_on = [
 path = "mindroom.scheduling.tasks"
 depends_on = [
     "mindroom.config.models",
-    "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.conversation_hydration",
-    "mindroom.matrix.conversation_reads",
-    "mindroom.providers.registry",
-    "mindroom.agent_loop.helper",
-    "mindroom.llm",
     "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
-    "mindroom.failure_text",
     "mindroom.config.resolution",
+    "mindroom.scheduling.recurring_schedule",
     "mindroom.tool_system.plugins",
     "mindroom.matrix.state_failures",
 ]
@@ -6298,6 +6271,7 @@ depends_on = []
 visibility = [
     "mindroom.scheduling.executor",
     "mindroom.scheduling.runtime",
+    "mindroom.scheduling.tasks",
 ]
 
 [[modules]]
@@ -6305,10 +6279,18 @@ path = "mindroom.tool_system.runtime_context"
 depends_on = [
     "mindroom.hooks",
     "mindroom.runtime_resolution",
-    "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.context_scope",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.context_scope"
+depends_on = []
+visibility = [
+    "mindroom.providers.registry",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -8106,7 +8088,6 @@ expose = [
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
-    "build_scheduling_runtime_from_tool_runtime_context",
     "current_execution_identity",
     "current_plugins",
     "detached_tool_scope",
@@ -8129,6 +8110,17 @@ expose = [
     "worker_progress_pump_scope",
 ]
 from = ["mindroom.tool_system.runtime_context"]
+
+[[interfaces]]
+expose = [
+    "current_budget_monitor",
+    "current_requester_id",
+    "detached_requester_context",
+    "get_detached_requester_context",
+    "get_tool_runtime_context",
+    "tool_runtime_context",
+]
+from = ["mindroom.tool_system.context_scope"]
 
 [[interfaces]]
 expose = ["plugin_state_root", "validate_plugin_name"]
@@ -8538,7 +8530,6 @@ expose = [
     "ApprovalActionResult",
     "AutomationToolOrigin",
     "BackgroundScriptToolOrigin",
-    "DynamicWorkflowToolOrigin",
     "MatrixApprovalAction",
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
@@ -9152,6 +9143,7 @@ depends_on = [
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
     "mindroom.providers.synthetic_adapter",
+    "mindroom.tool_system.context_scope",
 ]
 
 [[modules]]
@@ -9303,7 +9295,6 @@ visibility = [
     "mindroom.custom_tools.workflow_peers",
     "mindroom.ai",
     "mindroom.custom_tools.delegate",
-    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.delegation.job_approvals",
@@ -9656,7 +9647,7 @@ depends_on = [
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
-    "mindroom.room_steward",
+    "mindroom.plugin_http",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 
@@ -11480,6 +11471,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.reactive_triggers.management"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.reactive_triggers.matching"
 depends_on = [
     "mindroom.constants",
@@ -11538,6 +11537,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
     "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",

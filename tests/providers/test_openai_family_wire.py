@@ -1666,7 +1666,7 @@ async def test_a_stream_error_event_whose_error_is_text_reads_as_that_text(tmp_p
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
-    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
+    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(transient_retries="caller"))
 
     with pytest.raises(InvalidRequest) as info:
         await _turn(built, request)

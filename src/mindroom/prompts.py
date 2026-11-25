@@ -69,7 +69,6 @@ __all__ = [
     "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
-    "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     "WORKSPACE_SKILL_AUTHORING_PROMPT",
 ]
 
@@ -91,9 +90,7 @@ Model: {{model_provider}} (`{{model_id}}`).
 
 {_MATRIX_CONVERSATION_GUIDE}
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
-
-## Matrix Reply Targeting
-MindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
@@ -128,35 +125,22 @@ You are {display_name}, the MindRoom team exposed through the OpenAI-compatible 
 {team_purpose}{openai_compat_history_guidance}"""
 
 
-INTERACTIVE_QUESTION_PROMPT = """When the user needs to choose between options, include one fenced interactive JSON block:
-
+INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):
 ```interactive
-{
-    "question": "How would you like to proceed?",
-    "options": [
-        {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
-        {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
-    ]
-}
-```
+{"question": "How to proceed?", "options": [
+  {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
+  {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
+]}
+```"""
 
-Rules:
-- Write literal ```interactive on the same line; include only a single block.
-- Max 5 options with distinct emojis.
-- Omit preambles like "here are the options:" — MindRoom replaces the block with the formatted prompt and reaction buttons.
-"""
-
-SKILLS_TOOL_USAGE_PROMPT = """When using skills, use the skill tools (skill names are not callable functions):
-- `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.
-- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.
-- Do not open a global skill's `SKILL.md` directly with file tools.
-"""
+SKILLS_TOOL_USAGE_PROMPT = (
+    "Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); "
+    "do not read global `SKILL.md` files directly."
+)
 
 WORKSPACE_SKILL_AUTHORING_PROMPT = (
-    "To create or edit your own skills, write `skills/<skill-name>/SKILL.md` in your workspace "
-    "(with YAML frontmatter `name` and `description`, plus optional `scripts/` and `references/`). "
-    "Never write to bundled, plugin, or user skill dirs (e.g. `~/.mindroom/skills`); "
-    "workspace skills take precedence and load on your next run."
+    "Create or edit workspace skills at `skills/<skill-name>/SKILL.md` (YAML frontmatter `name` and `description`; "
+    "never write bundled, plugin, or user skill dirs); they load on the next run."
 )
 
 HIDDEN_TOOL_CALLS_PROMPT = (
@@ -164,17 +148,12 @@ HIDDEN_TOOL_CALLS_PROMPT = (
     '(e.g. "let me check").'
 )
 
-OUTPUT_REDIRECT_PROMPT = (
-    "Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. "
-    "In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python)."
-)
+OUTPUT_REDIRECT_PROMPT = ""
 
 DATETIME_CONTEXT_TEMPLATE = "Current date: {date_str} ({timezone_str}, {timezone_abbrev})."
 
 PERSONALITY_CONTEXT_SECTION_HEADING = (
-    "## Personality Context\n"
-    "Each section below is headed by the path of the file it was read from, inlined here automatically every turn. "
-    "Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted."
+    "## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated."
 )
 # It holds no count that changes as the file grows, so lines added past the cut leave the prompt byte-identical.
 PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
@@ -184,12 +163,10 @@ PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
 )
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
-These toolkits are available, but the definitions of their functions are not included:
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list the deferred functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
-Search before concluding that a capability is unavailable."""
+Use `tool_search(query)` to load matching schemas (or `tool_search()` to list names), then `call_tool(name, arguments)`. Search before concluding a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.
@@ -294,17 +271,13 @@ Examples:
 
 Return the mode and a one-sentence reason why."""
 
-MEMORY_CONTEXT_PROMPT_TEMPLATE = """[Automatically extracted {context_type} memories - may not be relevant to current context]
-Previous {context_type} memories that might be related:
-{memory_lines}"""
+MEMORY_CONTEXT_PROMPT_TEMPLATE = "[Recalled {context_type} memories — may not be relevant]\n{memory_lines}"
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
-    "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
-    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
-    "or when a marker says content was omitted."
+    "[File memory: `{memory_path}` — preloaded every turn; do not re-read what is shown here "
+    "unless editing or checking for newer/truncated content]"
 )
 FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
-    "This conversation keeps the copy it last loaded, so entries added from other conversations since then "
-    "may be missing; open the file to look for them."
+    "Kept from this conversation's last load; open the file to see edits from other conversations."
 )
 PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens (limit {trigger_tokens}). Each reaches your prompt only up to its first {max_file_chars} characters; files over that limit: {over_limit_files}.
 Files: {file_sizes}.
@@ -590,61 +563,6 @@ Write a plain-text summary in exactly this markdown structure:
 ## Critical Context
 """
 
-WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into a structured workflow.
-
-Current time (UTC): {current_time}
-Current time in the user's timezone ({user_timezone}): {current_time_local}
-Request: "{request}"
-{existing_task_context}
-Your task is to:
-1. Determine if this is a one-time task or recurring (cron)
-2. Extract the schedule/timing
-3. Create a message that mentions the appropriate agents or teams
-4. Set is_conditional=true only when the request is event-based or conditional
-5. Resolve history_limit using the conversation context rules below
-6. Resolve silent using the schedule visibility rules below
-
-Available agents and teams: {agent_list}
-
-IMPORTANT: Event-based and conditional requests:
-When the request depends on an external event or condition rather than a fixed time:
-1. Convert to an appropriate recurring (cron) schedule for polling
-2. Include BOTH the condition check AND the action in the message
-3. Choose polling frequency based on urgency and type
-4. Set is_conditional to true
-
-Conversation context (history_limit):
-- history_limit is the number of recent thread messages the responding agent sees each time the task fires
-- "with no history", "without context", or "context-free" -> history_limit=0
-- "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
-- On edits, "restore full history" or "use unlimited history" -> history_limit=null
-- On edits, keep the current history_limit unchanged when the request says nothing about context or history
-- For new schedules, leave history_limit unset (null) when the request says nothing about context or history
-- Remove context phrases like "with no history" from the message itself
-
-Schedule visibility (silent):
-- For new schedules, default silent=false when the request says nothing about visibility
-- Explicit quiet or silent wording sets silent=true
-- Explicit visible wording sets silent=false
-- On edits, preserve the current silent value when the request omits visibility
-
-Important rules:
-- Set is_conditional=false for normal time-based schedules
-- For conditional/event-based requests, ALWAYS include the check condition in the message
-- Mention relevant agents or teams with @ only when needed
-- Interpret times in the request as {user_timezone} wall-clock times unless the request names an explicit timezone
-- Convert the interpreted time to UTC for the schedule (execute_at and cron_schedule are in UTC), but DO NOT include times in the message
-- Remove time phrases like "in 15 seconds" from the message itself
-- If schedule_type is "once", you MUST provide execute_at as a UTC datetime with an explicit UTC offset (e.g. 2026-01-15T17:30:00Z)
-- If schedule_type is "cron", you MUST provide cron_schedule
-
-Examples of event/condition phrasing to include in the message (do not include times in these examples):
-- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.
-- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.
-- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.
-- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
-"""
-
 VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE = """You are a voice transcription normalizer for a Matrix chat bot system.
 Your task is to lightly normalize spoken transcriptions while preserving natural language and user intent.
 
@@ -729,15 +647,10 @@ Avoid childish, sticker-like, or overly decorative designs.
 Make each room instantly recognizable at small sizes."""
 
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
-DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
+DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """Available subagents (`run_subagent` / `continue_subagent`):
 {agent_descriptions}
 
-Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
-Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
-In Matrix, a child tool that requires approval runs only once the user approves it.
-Other runtimes retain their approval restrictions.
-Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
-Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
+Max 3 nested subagent levels (follow-ups do not add depth)."""
 
 
 # What a subagent is sent when the runtime continues the turn a restart cut short, after that turn's own messages.
@@ -745,12 +658,11 @@ SUBAGENT_RESTART_CONTINUATION_PROMPT = (
     "[RUNTIME NOTE, NOT A USER MESSAGE] A restart interrupted your previous turn. Continue the task from where it "
     "stopped. Do not repeat tool calls with side effects that already finished."
 )
-DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
-A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
-Waiting neither restarts the child nor grants tool approval.
-To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
-Direct API calls and nested delegation wait within their existing execution owner.
-The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation."""
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = (
+    "Background subagent jobs: child tool approval pauses only the child's job (waiting neither restarts it nor "
+    "approves tools); cancel an active job before `continue_subagent` to redirect it. "
+    "Job ID = one turn; Subagent ID = reusable session."
+)
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(
@@ -831,9 +743,6 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation", "tag_vocabulary"}),
         "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE": frozenset(
             {"agent_list", "team_list", "transcription"},
-        ),
-        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
-            {"current_time", "current_time_local", "user_timezone", "request", "agent_list", "existing_task_context"},
         ),
     },
 )
