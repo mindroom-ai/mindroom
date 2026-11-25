@@ -150,7 +150,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, report publishing, config tools, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.

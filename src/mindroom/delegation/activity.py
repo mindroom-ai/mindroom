@@ -192,7 +192,9 @@ class _SubagentActivity:
     ) -> _SubagentActivity:
         """Begin a running activity for one child of the chain ``root_caller_agent_name``'s turn started."""
         identity = child_execution_identity(child)
-        is_workflow = child.persona is not None and child.persona.source_kind == "workflow"
+        is_workflow = child.workflow_run_id is not None or (
+            child.persona is not None and child.persona.source_kind == "workflow"
+        )
         return cls(
             delegation_id=child.delegation_id,
             subagent_id=child.subagent_id,

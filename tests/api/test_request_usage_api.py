@@ -157,7 +157,7 @@ def test_request_export_flag_authentication_and_cache_variants(
         config_lifecycle.app_state(client.app).usage_export_runner = None
 
 
-@pytest.mark.parametrize("kind", ["memory_auto_flush", "dynamic_workflow"])
+@pytest.mark.parametrize("kind", ["memory_auto_flush", "claude_agent"])
 def test_helper_usage_exports_once_without_counting_another_reply(
     temp_config_file: Path,
     tmp_path: Path,

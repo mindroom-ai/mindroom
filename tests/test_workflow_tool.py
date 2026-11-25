@@ -22,7 +22,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.agent import AgentConfig
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation import lifecycle
 from mindroom.delegation.state import SubagentPersona
@@ -1752,8 +1751,8 @@ def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stac
     assert "mindroom_output_path" in functions["get_workflow"].parameters["properties"]
 
 
-def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) -> None:
-    """An agent can hold both toolkits while it migrates."""
+def test_workflow_toolkit_offers_expected_functions(stack: WorkflowStack) -> None:
+    """The workflow toolkit exposes its six lifecycle and saved-workflow functions."""
     names = set(toolkit_function_names(WorkflowTools(stack.context.config)))
 
     assert names == {
@@ -1764,4 +1763,3 @@ def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) 
         "list_workflow_runs",
         "save_workflow",
     }
-    assert names.isdisjoint(toolkit_function_names(DynamicWorkflowTools()))

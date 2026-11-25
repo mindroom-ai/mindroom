@@ -24,7 +24,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-import nio
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
@@ -34,9 +33,6 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
-from mindroom.dynamic_workflows.spec import RoomAgentParticipant
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -942,58 +938,6 @@ async def _run_voice_cascaded(root: Path) -> ScenarioOutput:
     )
 
 
-def _workflow_config() -> dict[str, Any]:
-    return {
-        "agents": {
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Answer questions about the team handbook.",
-                "tools": ["dynamic_workflow"],
-            },
-            "researcher": {
-                "display_name": "Researcher",
-                "role": "Research topics in depth.",
-                "instructions": ["Name your sources."],
-                "tools": ["calculator"],
-                # A room-agent participant must answer this requester in this room.
-                "access": {"users": [_REQUESTER_ID]},
-            },
-        },
-        "memory": {"backend": "none"},
-        "models": {"default": _ANTHROPIC},
-        "timezone": "UTC",
-    }
-
-
-async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
-    authored = _workflow_config()
-    config, runtime_paths = _bound_config(root, authored)
-    registry = entity_identity_registry(config, runtime_paths)
-    room = nio.MatrixRoom(room_id=_ROOM_ID, own_user_id=registry.current_id("assistant").full_id)
-    for agent_name in ("assistant", "researcher"):
-        room.add_member(registry.current_id(agent_name).full_id, config.agents[agent_name].display_name, None)
-    room.members_synced = True
-    context = replace(_tool_runtime(config, runtime_paths, "assistant"), room=room)
-    participant = {"id": "writer_a", "kind": "room_agent", "agent": "researcher"}
-    prompt = "Summarize the travel policy."
-    output = await _execute_room_agent_participant(
-        context,
-        RoomAgentParticipant.model_validate(participant),
-        prompt,
-        run_key="travel-report:run_1",
-    )
-    assert output == "ok", output
-    return ScenarioOutput(
-        {
-            "config": authored,
-            "participant": participant,
-            "prompt": prompt,
-            "run_key": "travel-report:run_1",
-            "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
-        },
-    )
-
-
 def _skill_learning_config() -> dict[str, Any]:
     return {
         "agents": {
@@ -1322,10 +1266,6 @@ SCENARIOS: dict[str, Scenario] = {
     "voice_call_cascaded": Scenario(
         "Cascaded voice call: the Live model's system prompt and one transcript answered by the call's reused agent.",
         _run_voice_cascaded,
-    ),
-    "dynamic_workflow_room_agent": Scenario(
-        "Dynamic workflow room-agent participant: a restricted agent without runtime capabilities runs one step.",
-        _run_dynamic_workflow,
     ),
     "skill_review_fork": Scenario(
         "Skill review forking a response's final request: the response's request, then the review's request with "

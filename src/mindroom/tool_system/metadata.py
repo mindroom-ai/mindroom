@@ -783,8 +783,17 @@ def resolve_tool_settings(
     # Coverage:
     #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
     #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
+    # LEGACY_COMPAT: Dashboard-saved `allowed_tools` under service `dynamic_workflow`.
+    # Legacy format: Operators could save `allowed_tools` on the Tools page under service `dynamic_workflow`.
+    # Last legacy release: v2026.11.590; replacement: unreleased; `workflow` inherits its caller's tools.
+    # Handling: Ignore retired `allowed_tools` stored under `dynamic_workflow` so `workflow` still builds cleanly;
+    #   keep rejecting any other stored key under `dynamic_workflow` and all other aliases.
+    # Coverage: tests/test_dynamic_workflow_alias.py::test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow.
     for alias, name in TOOL_ALIASES.items():
-        if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
+        if name == tool_name and any(
+            not key.startswith("_") and not (alias == "dynamic_workflow" and key == "allowed_tools")
+            for key in stored(alias) or ()
+        ):
             msg = (
                 f"{tool_name}: settings stored under '{alias}' no longer apply; "
                 f"delete them, and save any you still want under '{tool_name}'."
