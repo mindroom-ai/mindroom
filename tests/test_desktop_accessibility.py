@@ -1099,3 +1099,33 @@ def test_mac_prepare_capture_revalidates_window_without_walking_ax_tree(
         backend.prepare_capture("com.example.Editor", state.state_id)
     assert state.state_id not in backend._states
     assert flatten_calls == 0
+
+
+def test_mac_flatten_deduplicates_shared_table_cells_on_enqueue() -> None:
+    """Shared cell references across table rows and columns do not consume the visit budget or truncate later controls."""
+    backend, services, _ = _fake_mac_backend()
+    rows = [f"row-{r}" for r in range(16)]
+    cols = [f"col-{c}" for c in range(16)]
+    services.attributes["window-1"]["children"] = UserList(["table", "footer"])
+    services.attributes["table"] = {"role": "AXTable", "children": UserList([*rows, *cols])}
+    services.attributes["footer"] = {"role": "AXGroup", "children": UserList(["footer-inner"])}
+    services.attributes["footer-inner"] = {"role": "AXGroup", "children": UserList(["save-btn"])}
+    services.attributes["save-btn"] = {"role": "AXButton", "title": "Save"}
+    for r in range(16):
+        services.attributes[f"row-{r}"] = {
+            "role": "AXRow",
+            "children": UserList([f"cell-{r}-{c}" for c in range(16)]),
+        }
+    for c in range(16):
+        services.attributes[f"col-{c}"] = {
+            "role": "AXColumn",
+            "children": UserList([f"cell-{r}-{c}" for r in range(16)]),
+        }
+    for r in range(16):
+        for c in range(16):
+            services.attributes[f"cell-{r}-{c}"] = {"role": "AXCell", "value": ""}
+
+    stored = backend._collect_app_state("com.example.Editor", state_id="s1")
+
+    assert stored.public.truncated is False
+    assert [el.name for el in stored.public.elements] == ["Editor", "Save"]

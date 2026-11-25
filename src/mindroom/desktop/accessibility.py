@@ -733,7 +733,7 @@ class MacAccessibilityBackend:
         root: object,
     ) -> tuple[tuple[AccessibilityElement, ...], tuple[object, ...], tuple[_MacElementIdentity, ...], bool]:
         queue: deque[tuple[object, int, int | None, tuple[object, ...]]] = deque([(root, 0, None, ())])
-        seen: set[object] = set()
+        seen: set[object] = {root}
         elements: list[AccessibilityElement] = []
         references: list[object] = []
         identities: list[_MacElementIdentity] = []
@@ -741,9 +741,6 @@ class MacAccessibilityBackend:
         truncated = False
         while queue and visited < _MAX_VISITED_ELEMENTS:
             reference, depth, parent_index, ancestors = queue.popleft()
-            if reference in seen:
-                continue
-            seen.add(reference)
             visited += 1
             role = _bounded_text(self._copy_attribute(reference, self._services.kAXRoleAttribute)) or "AXUnknown"
             subrole = _bounded_text(self._copy_attribute(reference, self._services.kAXSubroleAttribute))
@@ -805,10 +802,15 @@ class MacAccessibilityBackend:
             if depth >= _MAX_ACCESSIBILITY_DEPTH:
                 truncated = truncated or bool(children)
                 continue
-            remaining = max(0, _MAX_VISITED_ELEMENTS - visited - len(queue))
-            truncated = truncated or len(children) > remaining
-            for child in children[:remaining]:
-                queue.append((child, depth + 1, current_parent, (*ancestors, reference)))
+            truncated |= _enqueue_children(
+                queue,
+                seen,
+                children,
+                depth=depth + 1,
+                parent_index=current_parent,
+                ancestors=(*ancestors, reference),
+                remaining=_MAX_VISITED_ELEMENTS - visited - len(queue),
+            )
         if queue or visited >= _MAX_VISITED_ELEMENTS:
             truncated = True
         return tuple(elements), tuple(references), tuple(identities), truncated
@@ -1226,6 +1228,27 @@ def _state_fingerprint(state: AccessibilityState) -> str:
     }
     encoded = json.dumps(structural, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _enqueue_children(
+    queue: deque[tuple[object, int, int | None, tuple[object, ...]]],
+    seen: set[object],
+    children: tuple[object, ...],
+    *,
+    depth: int,
+    parent_index: int | None,
+    ancestors: tuple[object, ...],
+    remaining: int,
+) -> bool:
+    for child in children:
+        if child in seen:
+            continue
+        if remaining <= 0:
+            return True
+        seen.add(child)
+        queue.append((child, depth, parent_index, ancestors))
+        remaining -= 1
+    return False
 
 
 def _first_bounded_text(values: tuple[object, ...]) -> str | None:
