@@ -13,6 +13,7 @@ from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -219,8 +220,8 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     Other agents' and teams' entries are excluded; calls re-authorize the requester live.
     ``models``, ``room_models``, ``room_thread_summary_models``, ``defaults.thread_summary_model``, and
     ``router.model`` pick models only. The agent's own ``rooms`` are checked as a subset on reload.
-    ``calls`` is read only by the voice call manager; ``personal_agents`` keeps only this agent's own template;
-    ``tool_approval`` is checked per called key.
+    ``calls`` configures no prepared CLI tool (call manager and transcripts read it); ``personal_agents`` keeps only
+    this agent's own template; ``tool_approval`` is checked per called key.
     """
     agent = config.agents.get(agent_name)
     if agent is None:
@@ -274,7 +275,7 @@ def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKe
         old_agent is None
         or current_agent is None
         or not set(old_agent.rooms) <= set(current_agent.rooms)
-        or _call_approval_authority(current, context.plugins.tools, key)
+        or _call_approval_authority(current, config_plugins(current, context.runtime_paths).tools, key)
         != _call_approval_authority(context.config, context.plugins.tools, key)
         or _catalog_authority(current, context.agent_name) != _catalog_authority(context.config, context.agent_name)
     ):

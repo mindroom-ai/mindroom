@@ -1174,17 +1174,35 @@ async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
         category=ToolCategory.DEVELOPMENT,
         approval_aliases={"action": ApprovalAlias(judged_as="judged_target", judge=lambda _args: [])},
     )
-    plugins = cast("Any", SimpleNamespace(tools=ToolRegistry({"actions": alias_meta})))
+    default_tools = ToolRegistry({"actions": alias_meta})
+    published_tools = default_tools
+    monkeypatch.setattr(
+        approval_tools,
+        "config_plugins",
+        lambda *_args, **_kwargs: SimpleNamespace(tools=published_tools),
+    )
     monkeypatch.setattr(
         approval_tools,
         "is_sender_allowed_for_entity_replies_in_room",
         lambda *_args, **_kwargs: True,
     )
 
-    def bind_reload(mutate: Callable[[Config], object]) -> ToolRuntimeContext:
+    def bind_reload(
+        mutate: Callable[[Config], object],
+        *,
+        old_tools: ToolRegistry = default_tools,
+        current_tools: ToolRegistry = default_tools,
+    ) -> ToolRuntimeContext:
+        nonlocal published_tools
+        published_tools = current_tools
         current = config.model_copy(deep=True)
         mutate(current)
-        runtime = replace(catalog.runtime_context, config=config, plugins=plugins, config_provider=lambda: current)
+        runtime = replace(
+            catalog.runtime_context,
+            config=config,
+            plugins=cast("Any", SimpleNamespace(tools=old_tools)),
+            config_provider=lambda: current,
+        )
         catalog.runtime_context = runtime
         return runtime
 
@@ -1193,6 +1211,26 @@ async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
         lambda cfg: setattr(cfg.tool_approval, "rules", [ApprovalRuleConfig(match="judged_*", script="gate.py")]),
     )
     action_binding = await catalog.bind(ToolKey("actions", "action"))
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
+
+    # An alias published only in the reloaded plugin registry + rule on its judged_as target refuses.
+    new_alias_meta = replace(
+        alias_meta,
+        approval_aliases={"action": ApprovalAlias(judged_as="upload_file", judge=lambda _args: [])},
+    )
+    runtime = bind_reload(
+        lambda cfg: setattr(
+            cfg.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="upload_file", action="require_approval")],
+        ),
+        old_tools=ToolRegistry({}),
+        current_tools=ToolRegistry({"actions": new_alias_meta}),
+    )
     with pytest.raises(PermissionError):
         await approval_tools.authorize_prepared_tool_call(
             action_binding,

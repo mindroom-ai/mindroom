@@ -1452,6 +1452,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
