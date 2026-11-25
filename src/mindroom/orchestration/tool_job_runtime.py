@@ -634,7 +634,7 @@ class ToolJobRuntimeCoordinator:
                 # The call of a run owns its job, until it has an outcome or went with its run.
                 child = job.adapter["child"]
                 call = (child["workflow_run_id"], child.get("workflow_node_key"), child.get("workflow_generation"))
-                return self.workflow_engine().agent_dispatch.node_prompt(*call) is None
+                return self.workflow_engine().node_prompt(*call) is None
             entity, source = job.owner.recipient, job.source_event_id
             if (entity, job.owner.session_id) in protected_sessions:
                 return False

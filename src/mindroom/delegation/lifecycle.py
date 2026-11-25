@@ -125,6 +125,12 @@ class ChildRunObservation:
         response = self.response
         return response if response is not None and response.run_id == self.child.run_id else None
 
+    def fail_current(self, reason: str) -> None:
+        """Promote the child's current observed record to ``RunStatus.error`` when its turn envelope failed it."""
+        record = self.current_record()
+        if record is not None and record.status is not RunStatus.error:
+            self.response = replace(record, status=RunStatus.error, error=reason)
+
 
 _CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
 
@@ -850,7 +856,7 @@ def workflow_call_prompt(child: DelegationChild) -> str | None:
     context = get_tool_runtime_context()
     if child.workflow_run_id is None or context is None or context.orchestrator is None:
         return None
-    return context.orchestrator.workflow_engine.agent_dispatch.node_prompt(
+    return context.orchestrator.workflow_engine.node_prompt(
         child.workflow_run_id,
         child.workflow_node_key,
         child.workflow_generation,

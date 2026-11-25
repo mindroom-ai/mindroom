@@ -19,7 +19,8 @@ import pytest_asyncio
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.script_runs.models import ScriptRunState, utc_timestamp
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
-from mindroom.workflow_runs import endings as endings_module
+from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import DispatchHandle, NodeRequest, WorkflowNode, WorkflowNodeState, WorkflowRunState
@@ -406,11 +407,11 @@ async def test_old_attempt_is_refused_after_resume(stack: WorkflowStack) -> None
     await stack.engine.reopen(stack.run_id, stack.context)
     with pytest.raises(SupersededAttemptError):
         # The run is ready for its next attempt and names none: the old one gets no call in.
-        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+        await nodes_module.submit_node(stack.engine, old, NodeRequest("@0", "tool", _A, {}))
     await stack.engine.launch(stack.run_id, stack.context)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+        await nodes_module.submit_node(stack.engine, old, NodeRequest("@0", "tool", _A, {}))
     assert stack.counting_tool.calls == 0
 
 
@@ -601,7 +602,7 @@ async def test_resume_whose_script_cannot_start_fails_the_run_with_the_reason(st
 @pytest_asyncio.fixture
 async def timed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with a run that may work for one hour, and an engine that charges working time every 10 ms."""
-    monkeypatch.setattr(endings_module, "_CHARGE_SECONDS", 0.01)
+    monkeypatch.setattr(engine_module, "_CHARGE_SECONDS", 0.01)
     with workflow_stack(tmp_path) as stack:
         stack.limits = WorkflowLimits(max_runtime_hours=1)
         await stack.start(runtime_seconds_left=3600.0)
@@ -718,19 +719,18 @@ async def test_working_time_is_read_and_charged_on_the_event_loop_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The clock and the time of the last charge are the loop's: the look at the run in a thread is handed both."""
-    seen, clock = set(), timed.engine.live.clock
+    seen, clock, record_charge = set(), timed.engine.clock, timed.engine._record_charge
 
     def read() -> float:
         seen.add(threading.current_thread())
         return clock()
 
-    class Charged(dict[str, float]):
-        def __setitem__(self, run_id: str, at: float) -> None:
-            seen.add(threading.current_thread())
-            super().__setitem__(run_id, at)
+    def write_charge(run_id: str, at: float) -> None:
+        seen.add(threading.current_thread())
+        record_charge(run_id, at)
 
-    monkeypatch.setattr(timed.engine.live, "clock", read)
-    monkeypatch.setattr(timed.engine.live, "charged", Charged(timed.engine.live.charged))
+    monkeypatch.setattr(timed.engine, "clock", read)
+    monkeypatch.setattr(timed.engine, "_record_charge", write_charge)
     timed.now += 600
     timed.resolver.hold_approvals = asyncio.Event()
     await timed.submit("@0", "tool", _A)
@@ -779,7 +779,7 @@ async def test_working_time_is_saved_when_the_attempt_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """What the run used is saved at its end too, not only once a minute."""
-    monkeypatch.setattr(endings_module, "_CHARGE_SECONDS", 3600)
+    monkeypatch.setattr(engine_module, "_CHARGE_SECONDS", 3600)
     await timed.end_attempt(ScriptRunState.FAILED)
     await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=1))
     timed.now += 900
@@ -830,12 +830,12 @@ async def test_attempt_end_whose_writer_is_cancelled_at_its_commit_makes_the_nex
     with pytest.raises(asyncio.CancelledError):
         await timed_out
     await held.release()
-    await stack.until(lambda: old not in stack.engine.live.launched)
+    await stack.until(lambda: old not in stack.engine.launched)
 
     assert await stack.maintain() == [stack.run_id]
     assert [(await stack.submit(key, "tool", args)).cached for key, args in (("@0", _A), ("@1", _B))] == [True, True]
     assert stack.counting_tool.lines == ["a", "b"]
-    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
+    assert list(stack.engine.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio
@@ -875,10 +875,10 @@ async def test_report_held_across_a_takeover_is_refused_and_the_next_attempts_re
     """A report is written with the epoch its attempt began with: the attempt that follows keeps its own."""
     old = stack.attempt
     held = HeldWrite(stack.store, "update_run", monkeypatch, when=lambda *_args, **changes: "result" in changes)
-    late = asyncio.create_task(stack.engine.calls.finish(old, result="the first report", error=None))
+    late = asyncio.create_task(nodes_module.finish(stack.engine, old, result="the first report", error=None))
     await held.reached()
     await _replayed(stack)
-    await stack.engine.calls.finish(stack.attempt, result="the second report", error=None)
+    await nodes_module.finish(stack.engine, stack.attempt, result="the second report", error=None)
 
     await held.release()
     with pytest.raises(SupersededAttemptError):
@@ -903,7 +903,7 @@ async def test_call_and_stop_of_an_attempt_that_the_run_moved_on_from_reach_no_l
     current = stack.store.get_run(stack.run_id)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls._admit(asked, old, NodeRequest("@0", "tool", _A, {}))
+        await nodes_module.admit(stack.engine, asked, old, NodeRequest("@0", "tool", _A, {}))
     out_of_time = {"reason": "Out of time.", "state": WorkflowRunState.INTERRUPTED, "epoch": asked.epoch}
     stopped = await stack.engine.cancel(stack.run_id, **out_of_time)
 

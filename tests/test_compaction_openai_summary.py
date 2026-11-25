@@ -16,11 +16,18 @@ from mindroom.history.summary_call import (
     generate_compaction_summary,
     is_summary_timeout,
 )
-from mindroom.llm.errors import TRANSPORT_TIMEOUT, ModelSafeguardRefusal, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    TRANSPORT_TIMEOUT,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+)
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.provider import ModelRequest, TurnCompleted, UsageReported, complete
 from mindroom.providers.openai.build import build_provider
-from tests.providers.golden_support import httpx2_transport, pipeline_provider, streamed_reply
+from tests.fakes.scripted_model import Await, ScriptedModel, usage
+from tests.providers.golden_support import encoded_response, httpx2_transport, pipeline_provider, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
@@ -28,6 +35,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.usage import MessageMetrics
 
 pytestmark = pytest.mark.asyncio
 
@@ -239,3 +247,101 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
     reply_body, summary_body = bodies
     assert "cache_control" in json.dumps(reply_body)
     assert "cache_control" not in json.dumps(summary_body)
+
+
+async def test_openrouter_chat_summary_persists_reported_usage_when_stream_ends_with_finish_reason_error(
+    tmp_path: Path,
+) -> None:
+    """Usage reported before a generic finish_reason='error' is still persisted once while ProviderUnavailable raises."""
+    reply = {
+        "status": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "sse": [
+            {
+                "data": {
+                    "id": "gen-summary-err",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "google/gemini-4-neon",
+                    "choices": [{"index": 0, "delta": {"content": "Partial"}, "finish_reason": None}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                },
+            },
+            {
+                "data": {
+                    "id": "gen-summary-err",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "google/gemini-4-neon",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                },
+            },
+            {"data": "[DONE]"},
+        ],
+    }
+    config = ModelConfig(
+        provider="openrouter",
+        id="google/gemini-4-neon",
+        extra_kwargs={"api_key": "test-key"},
+    )
+    runtime = provider_runtime(
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={}),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(lambda _req: encoded_response(reply))),
+    )
+    model = pipeline_provider(build_provider(config, runtime))
+    recorded: list[MessageMetrics] = []
+
+    async def on_usage(metrics: MessageMetrics) -> None:
+        recorded.append(metrics)
+
+    with pytest.raises(ProviderUnavailable):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+            on_usage=on_usage,
+        )
+
+    assert [(m.tokens.input_tokens, m.tokens.output_tokens) for m in recorded] == [(10, 4)]
+
+
+async def test_summary_persists_multi_attempt_reported_usage_when_retry_ends_in_refusal() -> None:
+    """When a retried summary attempt ends in ModelSafeguardRefusal, summed reported usage is persisted."""
+    first_usage = usage(10, 4)
+    second_usage = usage(20, 6)
+
+    async def raise_malformed() -> None:
+        msg = "malformed"
+        raise ProviderError(msg, provider="Synthetic", code=MALFORMED_TOOL_CALL)
+
+    model = pipeline_provider(
+        ScriptedModel(
+            [
+                [UsageReported(first_usage, final=False), Await(raise_malformed)],
+                [
+                    UsageReported(second_usage),
+                    TurnCompleted(
+                        message=Message(role="assistant", metrics=second_usage),
+                        stop_reason="content_filter",
+                        raw_stop_reason="RECITATION",
+                    ),
+                ],
+            ],
+        ),
+    )
+    recorded: list[MessageMetrics] = []
+
+    async def on_usage(metrics: MessageMetrics) -> None:
+        recorded.append(metrics)
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+            on_usage=on_usage,
+        )
+
+    assert [(m.tokens.input_tokens, m.tokens.output_tokens) for m in recorded] == [(30, 10)]

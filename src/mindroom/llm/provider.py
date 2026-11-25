@@ -283,6 +283,7 @@ class TurnCompleted:
 
     message: Message
     stop_reason: StopReason | None = None
+    raw_stop_reason: str | None = None
 
 
 type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | TurnCompleted
