@@ -587,7 +587,14 @@ async def _start_agent_run(
     driven = drive_delegation_stream(
         events,
         record_type=RunRecord,
-        continue_parent=_TurnRunContinuation(run_context, spec=spec, hooks=hooks, storage=storage, terminal=terminal),
+        continue_parent=_TurnRunContinuation(
+            run_context,
+            spec=spec,
+            hooks=hooks,
+            storage=storage,
+            terminal=terminal,
+            compaction_requests=run.compaction_requests,
+        ),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -617,6 +624,7 @@ class _TurnRunContinuation:
     hooks: LoopHooks
     storage: RunStorage
     terminal: TerminalRecord[RunRecord]
+    compaction_requests: set[HistoryScope] | None = None
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends as ``resume_from_session``'s does."""
@@ -633,6 +641,7 @@ class _TurnRunContinuation:
             hooks=self.hooks,
             persist=persist_into(self.terminal, self.storage),
             request_template=self.run_context.request_template,
+            compaction_requests=self.compaction_requests,
         )
 
 

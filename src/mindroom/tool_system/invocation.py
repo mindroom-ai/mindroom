@@ -81,6 +81,8 @@ class ToolCallContext:
     ``model_name`` is the configured model the run resolved, which ``run_tool_call`` binds as the tool runtime
     context's ``active_model_name`` around the call's middleware; None leaves that as the surrounding context names it.
     A team member's call carries the leader's model; its innermost step (``teams.members``) shows the tool the member's.
+    ``compaction_requests`` is the enclosing run's shared set of scopes queued for immediate mid-turn compaction, or
+    None when the call runs outside a model loop.
     """
 
     run_id: str
@@ -91,6 +93,7 @@ class ToolCallContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     history_scope: HistoryScope | None = None
     model_name: str | None = None
+    compaction_requests: set[HistoryScope] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

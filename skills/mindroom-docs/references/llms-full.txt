@@ -3851,7 +3851,8 @@ The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch
 ### Manual compaction
 
 Add the `compact_context` tool to an agent's `tools` to let it request compaction itself.
-The request runs before the next reply in the same conversation and always uses text compaction.
+When called inside a running turn, it triggers immediate mid-turn compaction before the next model request of that turn (for a team member, before the team leader's next request in the team scope) and always uses text compaction, even when automatic compaction is disabled.
+When called outside a running turn, it falls back to scheduling compaction before the next reply in the same conversation.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
 From chat, use `/compact` (or `!compact`) to compact now without another message.
