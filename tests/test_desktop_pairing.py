@@ -61,7 +61,7 @@ from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.message_target import MessageTarget
 from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import make_conversation_reader_mock, test_runtime_paths
+from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1179,7 +1179,6 @@ async def test_slash_desktop_setup_named_agent_in_multi_agent_room_and_rejects_o
         config=config,
         runtime_paths=runtime_paths,
         logger=Mock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(room.room_id, None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),

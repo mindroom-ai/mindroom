@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from mindroom.cli.config import _full_template, _write_env_file
+from mindroom.cli.setup_matrix import hosted_matrix_selection, unconfigured_self_hosted_matrix_selection
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.anthropic.messages import ClaudeProvider
@@ -62,15 +63,18 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
             f"ANTHROPIC_VERTEX_PROJECT_ID=authored-project\nCLOUD_ML_REGION={authored_region}\n",
             encoding="utf-8",
         )
+    matrix_selection = (
+        hosted_matrix_selection() if matrix_server == "mindroom.chat" else unconfigured_self_hosted_matrix_selection()
+    )
     _write_env_file(
         env_path,
-        matrix_server,
+        matrix_selection,
         "vertexai_claude",
         storage_root=tmp_path / "state",
         replace_existing=replace_existing,
     )
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_server=matrix_server))
+    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_selection=matrix_selection))
     config = Config(models={"default": starter["models"]["default"]})
 
     model = _vertex_adapter(config, runtime_paths)
@@ -96,16 +100,17 @@ def test_vertex_generated_environment_keeps_override_precedence(
     expected_region: str,
 ) -> None:
     """Process and model choices must still override the generated global endpoint; a blank export is unset."""
+    matrix_selection = hosted_matrix_selection()
     _write_env_file(
         tmp_path / ".env",
-        "mindroom.chat",
+        matrix_selection,
         "vertexai_claude",
         storage_root=tmp_path / "state",
         replace_existing=False,
     )
     process_env = {"CLOUD_ML_REGION": process_region} if process_region is not None else {}
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
-    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_server="mindroom.chat"))
+    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_selection=matrix_selection))
     config = Config(models={"default": starter["models"]["default"]})
     if model_region is not None:
         config.models["default"].extra_kwargs = {"region": model_region}

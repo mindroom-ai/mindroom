@@ -8,15 +8,8 @@ import type {
 
 const API_BASE = "/api/schedules";
 
-export async function listSchedules(
-  roomId?: string,
-): Promise<ScheduleListResponse> {
-  const url = new URL(API_BASE, window.location.origin);
-  if (roomId) {
-    url.searchParams.set("room_id", roomId);
-  }
-
-  const response = await fetch(url.pathname + url.search, {
+export async function listSchedules(): Promise<ScheduleListResponse> {
+  const response = await fetch(API_BASE, {
     method: "GET",
   });
 

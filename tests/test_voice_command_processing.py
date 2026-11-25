@@ -160,7 +160,7 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.text",
-                "body": "🎤 !schedule daily",
+                "body": "🎤 !list_schedules",
                 ORIGINAL_SENDER_KEY: "@alice:localhost",
                 SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
             },
@@ -257,8 +257,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
             body=json.dumps(
                 {
                     "msgtype": "m.text",
-                    "body": "!schedule tomorrow at 9am @mindroom_home:localhost turn off the lights",
-                    "m.mentions": {"user_ids": ["@mindroom_home:localhost"]},
+                    "body": "!cancel_schedule task123",
                 },
             ).encode("utf-8"),
         ),
@@ -275,7 +274,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
-                "body": "!schedule tomorrow [Message continues in attached file]",
+                "body": "!cancel_schedule [Message continues in attached file]",
                 "info": {"mimetype": "application/json"},
                 "io.mindroom.long_text": {
                     "version": 2,
@@ -288,12 +287,12 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
         },
     )
 
-    with patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule:
+    with patch("mindroom.commands.handler.cancel_scheduled_task", new_callable=AsyncMock) as mock_cancel:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    mock_schedule.assert_not_awaited()
+    mock_cancel.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
@@ -331,8 +330,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
             body=json.dumps(
                 {
                     "msgtype": "m.text",
-                    "body": "!schedule tomorrow at 9am @mindroom_home:localhost turn off the lights",
-                    "m.mentions": {"user_ids": ["@mindroom_home:localhost"]},
+                    "body": "!cancel_schedule task123",
                 },
             ).encode("utf-8"),
         ),
@@ -349,7 +347,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
-                "body": "!schedule tomorrow [Message continues in attached file]",
+                "body": "!cancel_schedule [Message continues in attached file]",
                 "info": {"mimetype": "application/json"},
                 "io.mindroom.long_text": {
                     "version": 2,
@@ -362,20 +360,16 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
 
     with (
         patch(
-            "mindroom.commands.handler.schedule_task",
+            "mindroom.commands.handler.cancel_scheduled_task",
             new_callable=AsyncMock,
-            return_value="scheduled",
-        ) as mock_schedule,
+            return_value="cancelled",
+        ) as mock_cancel,
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    assert (
-        mock_schedule.await_args.kwargs["full_text"] == "tomorrow at 9am @mindroom_home:localhost turn off the lights"
-    )
-    mentioned_agents = mock_schedule.await_args.kwargs["mentioned_agents"]
-    assert [agent.full_id for agent in mentioned_agents] == ["@mindroom_home:localhost"]
+    assert mock_cancel.await_args.kwargs["task_id"] == "task123"
 
 
 @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
@@ -490,7 +484,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.file",
-                "body": "!schedule tomorrow [Message continues in attached file]",
+                "body": "!cancel_schedule [Message continues in attached file]",
                 "info": {"mimetype": "application/json"},
                 "io.mindroom.long_text": {
                     "version": 2,
@@ -504,13 +498,13 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False),
         patch("mindroom.turn_policy.TurnPolicy.routes_for_sender_in_room", return_value=False),
-        patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule,
+        patch("mindroom.commands.handler.cancel_scheduled_task", new_callable=AsyncMock) as mock_cancel,
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
 
     bot.client.download.assert_not_awaited()
-    mock_schedule.assert_not_awaited()
+    mock_cancel.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)
 
 

@@ -25,7 +25,6 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_reader_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -74,7 +73,6 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
         config=Config(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data"),
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),

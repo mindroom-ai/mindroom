@@ -858,3 +858,27 @@ def test_an_administrator_owner_rotates_their_trigger_for_a_personal_agent_throu
     )
 
     assert rotated.key_id == "bridge"
+
+
+def test_old_trigger_record_without_last_fired_at_loads_as_none_and_records_fired(tmp_path: Path) -> None:
+    """Legacy records lacking last_fired_at load with None, and record_fired updates live records only."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create(store, _config(), trigger_id="deploy")
+    raw = json.loads(store.store_path.read_text(encoding="utf-8"))
+    raw["triggers"]["deploy"].pop("last_fired_at", None)
+    store.store_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.get_record("deploy")
+    assert loaded is not None
+    assert loaded.last_fired_at is None
+
+    store.record_fired("deploy", expected_uid="stale-uid", fired_at=1_764_000_000)
+    still_unset = store.get_record("deploy")
+    assert still_unset is not None
+    assert still_unset.last_fired_at is None
+
+    store.record_fired("deploy", expected_uid=record.uid, fired_at=1_764_000_100)
+    updated = store.get_record("deploy")
+    assert updated is not None
+    assert updated.last_fired_at == 1_764_000_100

@@ -103,7 +103,7 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
         "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
         "the user choose or fill something in; their answer comes back as their next message. Prefer "
-        "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
+        "show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a "
         "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
         "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
         "stays open beside it. A new canvas is posted as a separate message; in normal replies it appears "

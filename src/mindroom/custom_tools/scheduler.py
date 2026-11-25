@@ -1,6 +1,10 @@
-"""Scheduler tool that reuses the same backend as `!schedule`."""
+"""Scheduler tool for creating, editing, listing, and cancelling scheduled tasks."""
 
 from __future__ import annotations
+
+from typing import Annotated
+
+from pydantic import Strict
 
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
@@ -14,7 +18,6 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )
 
@@ -49,31 +52,48 @@ class SchedulerTools(Toolkit):
 
     async def schedule(
         self,
-        request: str,
+        message: str,
         new_thread: bool,
-        history_limit: int | None = None,
-        silent: bool | None = None,
+        execute_at: str | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
+        cron: str | None = None,
+        description: str | None = None,
+        timezone: str | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
+        silent: bool = False,
         model: str | None = None,
     ) -> str:
-        """Schedule a task using natural language.
+        """Schedule a one-time or recurring task with structured timing parameters.
 
-        This uses the exact same scheduling backend as the `/schedule` command.
+        Provide exactly one of `execute_at`, `delay_seconds`, or `cron`.
 
         Args:
-            request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
+            message: Exact trigger message posted when the schedule fires (non-empty).
+                Include `@agent_name` or `@team_name` if targeting specific responders.
             new_thread: Required delivery choice. Use `False` to post in the current
                 room/thread scope. Use `True` to start a fresh thread per fire: each
                 fire posts a room-level root and the responding agent answers in a
                 new thread under it with a fresh session. When `silent=True`, the
                 trigger stays hidden instead, and any finding or failure is posted
                 as a room-level root rather than beneath the hidden trigger.
+            execute_at: One-time run timestamp as an ISO 8601 datetime with a time
+                component (e.g. "2026-11-25T09:00:00-08:00", "...Z", or naive
+                "2026-11-25T09:00:00" interpreted in `timezone`). Must be in the
+                future; include an explicit UTC offset during DST transitions.
+            delay_seconds: One-time relative delay in positive seconds (>= 1),
+                e.g. 900 for 15 minutes, 3600 for 1 hour.
+            cron: Recurring 5-field cron expression (`minute hour day month weekday`,
+                e.g. "0 9 * * 1-5"), evaluated in `timezone` (DST-safe).
+            description: Optional short human-readable label for schedule listings;
+                defaults to trimmed `message`.
+            timezone: Optional IANA timezone name (e.g. "America/Los_Angeles");
+                defaults to this agent's configured timezone.
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
-                polling tasks), or leave unset for full history.
+                polling tasks), or leave unset for unlimited history.
             silent: Keep the trigger hidden and omit a final response when it is empty,
-                whitespace-only, or exactly `NO_REPLY`. Findings, failures, and
-                independently sent tool messages remain visible. Leave unset to infer
-                the mode from the scheduling request.
+                whitespace-only, or ends with `NO_REPLY`. Findings, failures, and
+                independently sent tool messages remain visible. Defaults to `False`.
             model: Configured model alias for each scheduled run (including team
                 members), e.g. "cheap", or `name@level` for one of its reasoning
                 levels, e.g. "sol@high". Leave unset to use normal agent, room, and
@@ -85,16 +105,17 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await schedule_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
-            full_text=request,
+            context=context,
+            message=message,
             new_thread=new_thread,
+            execute_at=execute_at,
+            delay_seconds=delay_seconds,
+            cron=cron,
+            description=description,
+            timezone=timezone,
             history_limit=history_limit,
             silent=silent,
             model=model,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def schedule_tool_call(
@@ -128,17 +149,12 @@ class SchedulerTools(Toolkit):
         context = _scheduling_context()
         live, arguments = prepare_scheduled_call(tool_name, arguments_json)
         return await schedule_approved_tool_call(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
-            agent_name=context.agent_name,
+            context=context,
             call=live,
             tool_name=tool_name,
             arguments=arguments,
             execute_at=execute_at,
             description=description,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def run_scheduled_call(
@@ -167,26 +183,46 @@ class SchedulerTools(Toolkit):
     async def edit_schedule(
         self,
         task_id: str,
-        request: str,
-        history_limit: int | None = None,
+        message: str | None = None,
+        description: str | None = None,
+        execute_at: str | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
+        cron: str | None = None,
+        timezone: str | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
+        clear_history_limit: bool = False,
         silent: bool | None = None,
         model: str | None = None,
     ) -> str:
-        """Edit an existing scheduled task by replacing its timing and content.
+        """Edit an existing pending scheduled task using patch semantics.
+
+        Omitted parameters keep their existing values. One-time tasks cannot switch
+        to cron and cron tasks cannot switch to one-time; provide at most one of
+        `execute_at`, `delay_seconds`, or `cron`.
 
         Args:
             task_id: The ID of the task to edit (from list_schedules).
-            request: The new scheduling request, e.g. "tomorrow at 9am check deployment"
-            history_limit: Max recent thread messages included as context each time
-                the task fires. Use 0 for no history. Leave unset to keep the task's
-                existing history limit. To restore full history, say so in request.
+            message: New trigger message posted when the schedule fires.
+            description: New short label for schedule listings.
+            execute_at: New one-time ISO 8601 datetime with a time component
+                (valid only for one-time schedules).
+            delay_seconds: New one-time relative delay in positive seconds (>= 1),
+                e.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time
+                schedules).
+            cron: New 5-field cron expression evaluated in `timezone` (valid only
+                for cron schedules).
+            timezone: New IANA timezone name (e.g. "America/Los_Angeles"). For
+                legacy UTC cron schedules, also pass `cron` in the target timezone.
+            history_limit: New max recent thread messages included per fire (0 for
+                no history). Cannot be combined with `clear_history_limit=True`.
+            clear_history_limit: Set to `True` to remove an existing history limit
+                and restore unlimited history.
             silent: Whether to update quiet delivery. Silent tasks hide their trigger
-                and omit empty, whitespace-only, or exact `NO_REPLY` finals while
-                keeping findings, failures, and independently sent tool messages
-                visible. Leave unset to preserve the existing mode.
+                and omit empty, whitespace-only, or `NO_REPLY` finals while keeping
+                findings, failures, and independently sent tool messages visible.
             model: Configured model alias for each run, including team members,
                 or `name@level` for one of its reasoning levels. Leave unset to
-                preserve the existing choice. Use an empty string to restore
+                preserve the existing choice. Pass an empty string to restore
                 normal agent, room, and thread model selection.
 
         Returns:
@@ -195,12 +231,16 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await edit_scheduled_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
+            context=context,
             task_id=task_id,
-            full_text=request,
-            scheduled_by=context.requester_id,
+            message=message,
+            description=description,
+            execute_at=execute_at,
+            delay_seconds=delay_seconds,
+            cron=cron,
+            timezone=timezone,
             history_limit=history_limit,
+            clear_history_limit=clear_history_limit,
             silent=silent,
             model=model,
         )

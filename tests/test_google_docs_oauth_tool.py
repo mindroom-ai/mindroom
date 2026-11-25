@@ -9,6 +9,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import pytest
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.errors import HttpError
 from httplib2 import Response
@@ -411,6 +412,105 @@ def test_google_docs_batch_update_returns_sanitized_http_error(tmp_path: Path) -
     result = json.loads(tool.google_docs_batch_update("document-id", _RICH_REQUESTS))
 
     assert result == {"error": "Google Docs request failed (HTTP 400)"}
+
+
+def test_google_docs_batch_update_omits_write_control_when_required_revision_id_is_none(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    offered = toolkit_offers(tool, "google_docs_batch_update")
+    validate_tool_arguments(
+        dict(offered.parameters),
+        {"document_id": "document-id", "requests": _RICH_REQUESTS, "required_revision_id": None},
+    )
+
+    result = json.loads(
+        offered.entrypoint(
+            document_id="document-id",
+            requests=copy.deepcopy(_RICH_REQUESTS),
+            required_revision_id=None,
+        ),
+    )
+
+    assert service.documents_resource.batch_update_calls == [
+        {"documentId": "document-id", "body": {"requests": _RICH_REQUESTS}},
+    ]
+    assert result["update"]["documentId"] == "document-id"
+
+
+def test_google_docs_batch_update_with_required_revision_id_sends_write_control(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    offered = toolkit_offers(tool, "google_docs_batch_update")
+    validate_tool_arguments(
+        dict(offered.parameters),
+        {"document_id": "document-id", "requests": _RICH_REQUESTS, "required_revision_id": "rev-123"},
+    )
+
+    result = json.loads(
+        offered.entrypoint(
+            document_id="document-id",
+            requests=copy.deepcopy(_RICH_REQUESTS),
+            required_revision_id="  rev-123  ",
+        ),
+    )
+
+    assert service.documents_resource.batch_update_calls == [
+        {
+            "documentId": "document-id",
+            "body": {"requests": _RICH_REQUESTS, "writeControl": {"requiredRevisionId": "rev-123"}},
+        },
+    ]
+    assert result["update"]["documentId"] == "document-id"
+    assert result["documentUrl"] == "https://docs.google.com/document/d/document-id/edit"
+
+
+@pytest.mark.parametrize("blank_revision_id", ["", "   ", "\t\n"])
+def test_google_docs_batch_update_rejects_blank_required_revision_id(tmp_path: Path, blank_revision_id: str) -> None:
+    tool, service = _connected_tool(tmp_path)
+    offered = toolkit_offers(tool, "google_docs_batch_update")
+
+    result = json.loads(
+        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id=blank_revision_id),
+    )
+
+    assert result == {"error": "Google Docs required_revision_id must not be empty when provided"}
+    assert service.documents_resource.batch_update_calls == []
+
+
+def test_google_docs_batch_update_http_400_with_required_revision_id_returns_recovery_guidance(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    service.documents_resource.batch_update_error = HttpError(
+        Response({"status": "400", "reason": "Bad Request"}),
+        b'{"error":{"message":"provider detail"}}',
+    )
+    offered = toolkit_offers(tool, "google_docs_batch_update")
+
+    result = json.loads(
+        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id="rev-stale"),
+    )
+
+    error = result["error"]
+    assert error.startswith("Google Docs request failed (HTTP 400). ")
+    assert "provider detail" not in error
+    assert "required_revision_id" in error
+    assert "Re-read the document/tab" in error
+    assert "UTF-16 start-inclusive/end-exclusive ranges" in error
+    assert "current revisionId" in error
+
+
+def test_google_docs_batch_update_non_400_http_error_with_required_revision_id_keeps_standard_error(
+    tmp_path: Path,
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+    service.documents_resource.batch_update_error = HttpError(
+        Response({"status": "500", "reason": "Internal Server Error"}),
+        b'{"error":{"message":"provider detail"}}',
+    )
+    offered = toolkit_offers(tool, "google_docs_batch_update")
+
+    result = json.loads(
+        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id="rev-123"),
+    )
+
+    assert result == {"error": "Google Docs request failed (HTTP 500)"}
 
 
 def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -> None:

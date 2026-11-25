@@ -44,13 +44,12 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
-| `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
 | `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `listening` | Silent turns of a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
+| `routing`, `room_topic`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.

@@ -789,7 +789,7 @@ When a provider says when its limit resets, as Codex and Claude subscriptions do
 A reply at `name@level` runs each fallback at that level when the fallback lists it, and at the fallback's default level otherwise.
 A fallback whose `context_window` is too small for the conversation is skipped, so give fallbacks at least the first model's window.
 A finished reply answered by a fallback shows the answering model, names the model it stood in for as `fallback_from` in its run metadata, and counts usage and cost under the model that billed them.
-For a user at their [budget cap](../budgets.md#over-budget-replies), fallback chains skip priced models other than `budgets.fallback_model`, and Dynamic Workflows with `permissions.models` skip fallbacks outside that allowlist.
+For a user at their [budget cap](../budgets.md#over-budget-replies), fallback chains skip priced models other than `budgets.fallback_model`.
 
 ## Reasoning Levels
 

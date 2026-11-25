@@ -24,7 +24,7 @@ from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling import recurring_schedule
 from mindroom.scheduling import runtime as scheduling
-from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, scheduled_cron_timezone
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
 from tests.scheduling_helpers import (
@@ -129,6 +129,7 @@ async def plan_at(
         cron=task.cron_schedule.to_cron_string(),
         now=now,
         grace_seconds=grace,
+        cron_timezone=scheduled_cron_timezone(task),
     )
 
 
@@ -790,13 +791,14 @@ async def test_checkpoint_io_failure_keeps_runner_alive(
         cron: str,
         now: datetime,
         grace_seconds: int,
+        cron_timezone: str = "UTC",
     ) -> recurring_schedule.RecurringOccurrence:
         nonlocal failed
         if stage == "plan" and not failed:
             failed = True
             msg = "temporary checkpoint read failure"
             raise OSError(msg)
-        return plan(path, workflow_key, cron, now, grace_seconds)
+        return plan(path, workflow_key, cron, now, grace_seconds, cron_timezone)
 
     def flaky_save(path: Path, checkpoint: recurring_schedule._RecurringCheckpoint) -> None:
         nonlocal failed
@@ -853,13 +855,14 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
         cron: str,
         now: datetime,
         grace_seconds: int,
+        cron_timezone: str = "UTC",
     ) -> recurring_schedule.RecurringOccurrence:
         nonlocal plans
         plans += 1
         if stage == "plan" and plans == 1:
             msg = "temporary planning failure"
             raise OSError(msg)
-        return plan(path, workflow_key, cron, now, grace_seconds)
+        return plan(path, workflow_key, cron, now, grace_seconds, cron_timezone)
 
     def fail_preparation(path: Path, checkpoint: recurring_schedule._RecurringCheckpoint) -> None:
         nonlocal failed
@@ -1138,3 +1141,132 @@ async def test_frozen_delivery_failure_preserves_retry_identity(
     assert outcome.status == "delivered"
     assert send.await_count == 2
     assert send.await_args == first_attempt
+
+
+@pytest.mark.asyncio
+async def test_local_time_cron_tracks_dst_transitions_with_utc_checkpoints(tmp_path: Path) -> None:
+    """Local-time crons follow DST shifts while storing UTC checkpoint instants."""
+    task = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9"),
+        message="Daily standup",
+        description="Daily standup",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+        new_thread=True,
+        timezone="America/Los_Angeles",
+        cron_timezone="America/Los_Angeles",
+    )
+    cron_str = "0 9 * * *"
+
+    # Before US spring-forward (2026-03-08): 09:00 PST == 17:00 UTC.
+    before_spring = await plan_at(tmp_path, task, datetime(2026, 3, 7, 16, 0, tzinfo=UTC))
+    assert before_spring.checkpoint.next_run_at == datetime(2026, 3, 7, 17, 0, tzinfo=UTC)
+    assert json.loads(before_spring.path.read_text())["next_run_at"] == "2026-03-07T17:00:00Z"
+
+    # Completing the 2026-03-07 09:00 PST run schedules 2026-03-08 09:00 PDT == 16:00 UTC.
+    await recurring_schedule.complete_recurring_occurrence(
+        before_spring,
+        cron_str,
+        datetime(2026, 3, 7, 17, 0, tzinfo=UTC),
+        cron_timezone="America/Los_Angeles",
+    )
+    assert json.loads(before_spring.path.read_text())["next_run_at"] == "2026-03-08T16:00:00Z"
+
+    # Before US fall-back (2026-11-01): completing 2026-10-31 09:00 PDT (16:00 UTC)
+    # schedules 2026-11-01 09:00 PST == 17:00 UTC.
+    fall_path = tmp_path / "fall"
+    before_fall = await plan_at(fall_path, task, datetime(2026, 10, 31, 15, 0, tzinfo=UTC))
+    assert before_fall.checkpoint.next_run_at == datetime(2026, 10, 31, 16, 0, tzinfo=UTC)
+    await recurring_schedule.complete_recurring_occurrence(
+        before_fall,
+        cron_str,
+        datetime(2026, 10, 31, 16, 0, tzinfo=UTC),
+        cron_timezone="America/Los_Angeles",
+    )
+    assert json.loads(before_fall.path.read_text())["next_run_at"] == "2026-11-01T17:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_hourly_local_cron_across_dst_fall_back_fold(tmp_path: Path) -> None:
+    """An hourly local-time cron fires for both 01:00 PDT and 01:00 PST without coalescing or regressing."""
+    task = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="*"),
+        message="Hourly heartbeat",
+        description="Hourly heartbeat",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+        new_thread=True,
+        timezone="America/Los_Angeles",
+        cron_timezone="America/Los_Angeles",
+    )
+    cron_str = "0 * * * *"
+
+    # Start at 00:30 PDT (07:30 UTC) -> next run is 01:00 PDT (08:00 UTC, fold=0).
+    first = await plan_at(tmp_path, task, datetime(2026, 11, 1, 7, 30, tzinfo=UTC))
+    assert first.checkpoint.next_run_at == datetime(2026, 11, 1, 8, 0, tzinfo=UTC)
+
+    # Exact boundary plan at 08:00 UTC keeps 08:00 UTC with no skip.
+    at_first = await plan_at(tmp_path, task, datetime(2026, 11, 1, 8, 0, tzinfo=UTC))
+    assert at_first.checkpoint.next_run_at == datetime(2026, 11, 1, 8, 0, tzinfo=UTC)
+    assert at_first.checkpoint.last_skipped_at is None
+
+    # Completing 08:00 UTC advances to 01:00 PST (09:00 UTC, fold=1).
+    await recurring_schedule.complete_recurring_occurrence(
+        at_first,
+        cron_str,
+        datetime(2026, 11, 1, 8, 0, tzinfo=UTC),
+        cron_timezone="America/Los_Angeles",
+    )
+    at_second = await plan_at(tmp_path, task, datetime(2026, 11, 1, 9, 0, tzinfo=UTC))
+    assert at_second.checkpoint.next_run_at == datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+    assert at_second.checkpoint.last_skipped_at is None
+
+    # Completing 09:00 UTC advances to 02:00 PST (10:00 UTC).
+    await recurring_schedule.complete_recurring_occurrence(
+        at_second,
+        cron_str,
+        datetime(2026, 11, 1, 9, 0, tzinfo=UTC),
+        cron_timezone="America/Los_Angeles",
+    )
+    assert json.loads(at_second.path.read_text())["next_run_at"] == "2026-11-01T10:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_cron_uses_workflow_cron_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live cron runner plans and completes occurrences in workflow.cron_timezone."""
+    clock = Clock()
+    clock.now = datetime(2026, 3, 7, 16, 59, tzinfo=UTC)
+    monkeypatch.setattr(scheduling, "datetime", type("Time", (datetime,), {"now": staticmethod(clock.utcnow)}))
+    monkeypatch.setattr(scheduling.asyncio, "sleep", clock.sleep)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$e1"))
+    monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
+
+    task = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9"),
+        message="Morning standup",
+        description="Morning standup",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+        new_thread=True,
+        timezone="America/Los_Angeles",
+        cron_timezone="America/Los_Angeles",
+    )
+    client = client_for(task)
+
+    # First run creates checkpoint at 2026-03-07T17:00:00Z (09:00 PST) and sleeps.
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 0
+
+    # At 17:00 UTC, runner fires and advances checkpoint across spring-forward to 2026-03-08T16:00:00Z (09:00 PDT).
+    clock.now = datetime(2026, 3, 7, 17, 0, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+    checkpoint_files = list((tmp_path / "mindroom_data" / "tracking" / "recurring_schedules").glob("*.json"))
+    assert len(checkpoint_files) == 1
+    assert json.loads(checkpoint_files[0].read_text())["next_run_at"] == "2026-03-08T16:00:00Z"

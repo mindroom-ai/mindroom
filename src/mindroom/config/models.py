@@ -17,6 +17,7 @@ from mindroom.config.legacy_fields import (
     RETIRED_DEFAULTS_FIELDS,
     drop_retired_fields,
     reject_legacy_defaults_fields,
+    strip_legacy_dynamic_workflow_overrides,
 )
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
@@ -254,11 +255,23 @@ class ToolConfigEntry(BaseModel):
     )
     # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
     _spellings: tuple[str, ...] = PrivateAttr(default=())
+    _ignored_allowed_tools: bool = PrivateAttr(default=False)
+    _aliased_from_dynamic_workflow: bool = PrivateAttr(default=False)
 
     @property
     def spellings(self) -> tuple[str, ...]:
         """Return every name this entry's layer authored it under, which may be aliases of ``name``."""
         return self._spellings or (self.name,)
+
+    @property
+    def ignored_legacy_allowed_tools(self) -> bool:
+        """Return whether retired `allowed_tools` was stripped from a legacy `dynamic_workflow` spelling."""
+        return self._ignored_allowed_tools
+
+    @property
+    def aliased_from_dynamic_workflow(self) -> bool:
+        """Return whether this entry (or a merged duplicate) was authored under `dynamic_workflow`."""
+        return self._aliased_from_dynamic_workflow
 
     @model_validator(mode="before")
     @classmethod
@@ -307,6 +320,26 @@ class ToolConfigEntry(BaseModel):
         return {self.name: data}
 
 
+def _is_plain_dynamic_workflow_entry(entry: ToolConfigEntry) -> bool:
+    """Return whether ``entry`` was authored solely as `dynamic_workflow` with no remaining settings or lazy flags."""
+    return (
+        entry.spellings == ("dynamic_workflow",)
+        and not entry.overrides
+        and not entry.defer
+        and not entry.initial
+        and not (entry.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS)
+    )
+
+
+def _plain_dynamic_workflow_pair(first: ToolConfigEntry, other: ToolConfigEntry) -> ToolConfigEntry | None:
+    """Return the canonical `workflow` entry when paired with a plain `dynamic_workflow`-only alias entry."""
+    if _is_plain_dynamic_workflow_entry(first) and "workflow" in other.spellings:
+        return other
+    if _is_plain_dynamic_workflow_entry(other) and "workflow" in first.spellings:
+        return first
+    return None
+
+
 def validate_unique_tool_entries(
     tools: list[ToolConfigEntry],
     *,
@@ -316,21 +349,54 @@ def validate_unique_tool_entries(
     validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
     kept: dict[str, ToolConfigEntry] = {}
     for entry in tools:
-        name = canonical_tool_name(entry.name)
+        cleaned_overrides, stripped_allowed_tools = strip_legacy_dynamic_workflow_overrides(
+            entry.name,
+            entry.overrides,
+        )
+        normalized = entry.model_copy(update={"overrides": cleaned_overrides}) if stripped_allowed_tools else entry
+        name = canonical_tool_name(normalized.name)
         first = kept.get(name)
+        merged_plain_dynamic_workflow = False
         if first is not None:
-            reject_unmergeable_spellings(first, entry, scope=f"{scope_name} tools")
-        spellings = (*(first.spellings if first is not None else ()), entry.name)
-        if spellings == (name,):
-            kept[name] = entry
+            reject_unmergeable_spellings(first, normalized, scope=f"{scope_name} tools")
+            plain_pair = _plain_dynamic_workflow_pair(first, normalized)
+            if plain_pair is not None:
+                preferred = plain_pair
+                merged_plain_dynamic_workflow = True
+            else:
+                preferred = first
         else:
-            kept[name] = (entry if first is None else first).model_copy(update={"name": name})
-            kept[name]._spellings = spellings
+            preferred = normalized
+        spellings: tuple[str, ...] = (
+            ("workflow",)
+            if merged_plain_dynamic_workflow
+            else tuple(dict.fromkeys((*(first.spellings if first is not None else ()), *normalized.spellings)))
+        )
+        ignored_allowed_tools = (
+            (first._ignored_allowed_tools if first is not None else False)
+            or entry._ignored_allowed_tools
+            or stripped_allowed_tools
+        )
+        aliased_from_dynamic_workflow = (
+            (first._aliased_from_dynamic_workflow if first is not None else False)
+            or entry._aliased_from_dynamic_workflow
+            or "dynamic_workflow" in normalized.spellings
+        )
+        if spellings == (name,) and not ignored_allowed_tools and not aliased_from_dynamic_workflow:
+            kept[name] = normalized
+        else:
+            merged = preferred.model_copy(update={"name": name})
+            merged._spellings = spellings
+            merged._ignored_allowed_tools = ignored_allowed_tools
+            merged._aliased_from_dynamic_workflow = aliased_from_dynamic_workflow
+            kept[name] = merged
     return list(kept.values())
 
 
 def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
     """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
+    if _plain_dynamic_workflow_pair(first, other) is not None:
+        return
     if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
         mine, theirs = next((a, b) for a in first.spellings for b in other.spellings if a != b)
         msg = (

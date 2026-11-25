@@ -64,6 +64,18 @@ def select[Value: str](message: str, choices: Sequence[tuple[Value, str] | Separ
     return next(value for value, _ in selectable if value == picked)
 
 
+def text(message: str, *, default: str = "") -> str:
+    """Return text typed after `message`, or `default` when Enter is pressed alone."""
+    _discard_typeahead()
+    if _arrow_keys_work():
+        import questionary  # noqa: PLC0415  # lazy: prompt_toolkit loads only for prompts
+
+        prompt_message = f"{message} [{default}]" if default else message
+        answer = str(_ask(questionary.text(prompt_message)))
+        return answer or default
+    return str(typer.prompt(message, default=default, show_default=bool(default)))
+
+
 def secret(message: str) -> str:
     """Return hidden text typed after `message`, or an empty string when Enter is pressed alone."""
     _discard_typeahead()
