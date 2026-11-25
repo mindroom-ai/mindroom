@@ -43,6 +43,7 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "human_gate",
@@ -154,6 +155,12 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     ):
         return _APPROVED_EGRESS_RULE
     return rule
+
+
+def effective_tool_approval_policy(config: Config, tool_name: str) -> ApprovalRuleConfig | str:
+    """Return the winning approval rule for ``tool_name``, or the default action when no rule matches."""
+    rule = _matching_tool_approval_rule(config, tool_name)
+    return rule if rule is not None else config.tool_approval.default
 
 
 def _rule_outcome(config: Config, rule: ApprovalRuleConfig | None) -> tuple[bool, float]:
