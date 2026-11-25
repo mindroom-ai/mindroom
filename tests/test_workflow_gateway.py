@@ -22,6 +22,7 @@ from mindroom.api.workflow_gateway import router as workflow_router
 from mindroom.constants import RuntimePaths
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.workflow_helpers import WorkflowStack, set_run, tool_args, workflow_stack
@@ -154,11 +155,12 @@ async def test_call_that_the_engine_cannot_answer_yet_is_503(
 ) -> None:
     """The engine's `try again` is the gateway's 503, which the SDK retries and nobody reads as a server fault."""
 
-    async def not_yet(*_args: object, **_options: object) -> None:
+    async def not_yet(engine: object, *_args: object, **_options: object) -> None:
+        assert engine is stack.engine
         msg = "Try again in a moment."
         raise ScriptRuntimeUnavailableError(msg)
 
-    monkeypatch.setattr(stack.engine.calls, "submit_node", not_yet)
+    monkeypatch.setattr(nodes_module, "submit_node", not_yet)
 
     answer = await client.post("nodes", json=_NODE)
 

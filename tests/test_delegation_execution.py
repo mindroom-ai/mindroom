@@ -22,7 +22,7 @@ import pytest
 
 from mindroom import agents
 from mindroom.ai import run_delegated_child_response
-from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE, queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -41,7 +41,8 @@ from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
-from mindroom.llm.provider import TurnCompleted
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ReasoningDelta, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
@@ -75,6 +76,7 @@ from tests.delegation_helpers import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
+from tests.providers.golden_support import pipeline_provider
 from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import NewerMessageWaits
@@ -2214,3 +2216,106 @@ async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
     result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
     assert isinstance(result, str)
     assert "Report written" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["unwrapped", "pipeline"])
+async def test_delegated_child_fails_on_reasoning_only_recitation_after_tool_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wrapped: bool,
+) -> None:
+    """A child hitting reasoning-only RECITATION after a tool call settles as failed, never silent completion."""
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=["report"]),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+        ),
+        "code",
+        users=[REQUESTER],
+    )
+    entity_ids(config, paths)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("Child failed."),
+        ],
+    )
+    code_model = ScriptedModel(
+        [
+            calls(tool_call("write_report", "write-1"), metrics=usage(10, 4)),
+            [
+                ReasoningDelta("Thinking before recitation..."),
+                TurnCompleted(
+                    message=Message(role="assistant", reasoning_content="Thinking before recitation..."),
+                    stop_reason="content_filter",
+                    raw_stop_reason="RECITATION",
+                ),
+            ],
+        ],
+    )
+    child_provider = pipeline_provider(code_model) if wrapped else code_model
+    ScriptedAgents({"leader": leader, "code": child_provider}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+
+    assert report.written == ["written"]
+    parent = _parent_record(config, paths, _leader_identity(), "parent-run")
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    assert child.status == "failed"
+    assert child.result is not None
+    assert "RECITATION" in child.result
+    assert "Agent completed the task but returned no content." not in child.result
+    [parent_call] = [tool for tool in parent.tools or () if tool.tool_call_id == "delegate-0"]
+    assert parent_call.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_delegated_child_fails_after_exhausted_empty_response_retry_and_keeps_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two consecutive 0-tool empty child responses retry once, then settle as failed with multi-attempt usage."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Do work")), answer("Retry failed.")],
+    )
+    code = ScriptedModel([answer("", usage(100, 5)), answer("", usage(120, 9))])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    await respond(
+        "leader",
+        "delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=_leader_identity(),
+        run_id="parent-run",
+    )
+
+    assert len(code.requests) == 2
+    parent = _parent_record(config, paths, _leader_identity(), "parent-run")
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    assert child.status == "failed"
+    assert child.result == EMPTY_RESPONSE_NOTICE
+    [parent_call] = [tool for tool in parent.tools or () if tool.tool_call_id == "delegate-0"]
+    assert parent_call.is_error is True
+    reported, counted = _child_turn_usage(tmp_path, config, paths)
+    assert counted == (220, 14)
+    assert reported == counted

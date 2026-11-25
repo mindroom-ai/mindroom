@@ -49,6 +49,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
     new_workflow_run_id,
 )
+from mindroom.workflow_runs.nodes import resolve_source
 from mindroom.workflow_runs.peers import all_messages, all_state
 from mindroom.workflow_runs.replay import calling_node, nested_key, result_digest
 from mindroom.workflow_runs.saved import list_saved, save_source
@@ -265,7 +266,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         engine, context = _waiting_runtime()
         outer = _outer_call()
         # A run inside a run is found by its script, which is read once, here, for its key and for the run.
-        text = None if outer is None else await engine.calls.resolve_source(context, arguments)
+        text = None if outer is None else await resolve_source(engine, context, arguments)
         origin = _inline_origin(context) if text is None else nested_key(outer, text, arguments.get("args"))
         stopped = (
             _resumable_child(engine, outer, text, arguments)
@@ -502,7 +503,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         placement = workflow_placement(context.config, context.runtime_paths)
         if placement not in ("worker", "local"):
             raise WorkflowRunStoreError(placement)
-        text = (source or await engine.calls.resolve_source(context, arguments)).decode()
+        text = (source or await resolve_source(engine, context, arguments)).decode()
         hours = self.limits.max_runtime_hours
         intent = WorkflowRun(
             run_id=new_workflow_run_id(),

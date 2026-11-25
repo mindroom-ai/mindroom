@@ -34,8 +34,8 @@ from mindroom.tool_jobs.client_cancel import conversation_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
-from mindroom.workflow_runs import endings as endings_module
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.delegation_helpers import offered_tools
@@ -282,7 +282,7 @@ async def test_outcome_that_the_node_could_not_take_is_given_back_to_its_job(
     await stack.submit("@0", "agent", _PROMPT)
     job_id = stack.node_job("@0").job_id
     await wait_for_status(stack.jobs, job_id, "completed")
-    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
+    await stack.until(lambda: not (stack.engine._runs.get(stack.run_id) and stack.engine._runs[stack.run_id].tasks))
 
     waited = await stack.jobs.wait(job_id, owner=stack.context.execution_identity, depth=0)
 
@@ -318,7 +318,7 @@ async def test_agent_whose_record_cannot_be_read_after_it_wrote_is_not_run_again
         WorkflowNodeState.INDETERMINATE,
         None,
     )
-    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
+    await stack.until(lambda: not (stack.engine._runs.get(stack.run_id) and stack.engine._runs[stack.run_id].tasks))
     waited = await stack.jobs.wait(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
     assert (waited.claim is not None, waited.job.consumed) == (True, read == "finds nothing")
     await stack.jobs.release_wait(waited.job.job_id, waited.claim)
@@ -358,7 +358,7 @@ async def test_edited_prompt_at_the_same_key_starts_a_new_job_and_stops_the_old_
     # Nothing waits for the old job under the run's lock: the call is asked again, as the script's SDK does.
     with pytest.raises(ScriptRuntimeUnavailableError, match="is stopping"):
         await stack.submit("@0", "agent", {"prompt": "new"})
-    assert not stack.engine.live.condition(stack.run_id).locked()
+    assert not stack.engine.condition(stack.run_id).locked()
     await wait_for_status(stack.jobs, old, "cancelled")
     assert await stack.result("@0", "agent", {"prompt": "new"}) == "new answer"
     gate.set()
@@ -473,7 +473,7 @@ async def test_a_stop_does_not_wait_forever_for_an_agent_that_does_not_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The run ends after a bounded wait, and the node of a turn nobody could read is not one to run again."""
-    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.1)
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.1)
     _hanging(stack)
     await stack.submit("@0", "agent", _PROMPT)
     job_id = stack.node_job("@0").job_id
@@ -500,7 +500,7 @@ async def test_a_stop_waits_for_all_its_agents_together_and_not_under_the_runs_l
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One deadline for every agent of the run, not one each; meanwhile the run's lock is free and no call gets in."""
-    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.6)
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.6)
     stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(4)))
     for index in range(4):
         await stack.submit(f"@{index}", "agent", {"prompt": f"Task {index}"})
@@ -510,7 +510,7 @@ async def test_a_stop_waits_for_all_its_agents_together_and_not_under_the_runs_l
         asked.append(job_id)
 
     monkeypatch.setattr(stack.jobs, "request_cancel", ignored)
-    lock, clock = stack.engine.live.condition(stack.run_id), asyncio.get_running_loop().time
+    lock, clock = stack.engine.condition(stack.run_id), asyncio.get_running_loop().time
     began = clock()
 
     stop = asyncio.create_task(stack.engine.cancel(stack.run_id, reason="Stopped."))
@@ -542,7 +542,7 @@ async def test_a_run_that_ends_starts_no_agent_in_the_place_its_stopped_agent_le
 
     The place the first gives up, while the end of the run still waits for the second, starts no third agent.
     """
-    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.5)
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.5)
     await stack.start(max_concurrent=2)
     stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(2)))
     for key in ("@0", "@1"):
@@ -577,7 +577,7 @@ async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short
     pass comes to first has a stopped job and an agent that does not end, and the other run only waits for its
     next attempt.
     """
-    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 2.5)
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 2.5)
     second = stack.run_id
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
     first = (await stack.start()).run_id
@@ -665,7 +665,7 @@ async def test_a_stop_of_several_agents_says_of_each_what_its_own_turn_did(
     await asyncio.wait_for(wrote.wait(), 5)
     for key in ("@1", "@2"):
         await stack.submit(key, "agent", {"prompt": f"Task {key}"})
-    lock, cancel, locked = stack.engine.live.condition(stack.run_id), stack.jobs.request_cancel, []
+    lock, cancel, locked = stack.engine.condition(stack.run_id), stack.jobs.request_cancel, []
 
     async def recorded(job_id: str) -> None:
         locked.append(lock.locked())
@@ -714,7 +714,7 @@ async def test_cancelling_one_node_job_fails_only_that_node(stack: WorkflowStack
     await stack.jobs.cancel(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
 
     while receipt.state == "running":
-        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await nodes_module.node_receipt(stack.engine, stack.attempt, receipt.id, wait=5)
 
     assert (receipt.state, receipt.error and receipt.error["kind"]) == ("cancelled", "cancelled")
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
@@ -758,7 +758,7 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 
     while receipt.state in ("running", "waiting"):
-        receipt = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=10)
+        receipt = await nodes_module.node_receipt(gated.engine, gated.attempt, receipt.id, wait=10)
 
     assert (receipt.error["kind"] if receipt.error else receipt.state) == kind
 
@@ -806,7 +806,7 @@ async def test_approval_wait_does_not_exhaust_schema_correction_working_time(
     release_correction.set()
 
     while receipt.state in ("running", "waiting"):
-        receipt = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=10)
+        receipt = await nodes_module.node_receipt(gated.engine, gated.attempt, receipt.id, wait=10)
 
     assert (receipt.state, receipt.result) == ("completed", {"ok": True})
 
@@ -1230,7 +1230,8 @@ async def test_engine_that_closes_while_an_agent_starts_begins_no_wait_for_it(
 
     with pytest.raises(asyncio.CancelledError):
         await request
-    assert not any(stack.engine.live.tasks.values())
+    assert not any(st.tasks for st in stack.engine._runs.values())
+    assert not stack.engine._admissions
     assert (_node(stack).state, stack.node_job("@0").status) == (WorkflowNodeState.RUNNING, "running")
 
 
@@ -1352,7 +1353,7 @@ async def test_child_that_needs_approval_waits_and_resumes(gated: WorkflowStack)
 
     node = _node(gated)
     assert (node.state, node.waiting_on, gated.counting_tool.lines) == (WorkflowNodeState.WAITING, "approval", [])
-    waiting = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=0)
+    waiting = await nodes_module.node_receipt(gated.engine, gated.attempt, receipt.id, wait=0)
     assert waiting.state == "waiting"
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 
@@ -1371,7 +1372,7 @@ async def test_run_whose_agent_waits_for_a_person_is_running_while_a_tool_of_it_
     gated.child_script(calls(tool_call("append", "c1", line="a")), answer("sent"))
     await gated.submit("@0", "agent", _PROMPT)
     await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
-    release, broker = asyncio.Event(), type(gated.engine.dispatch.broker)
+    release, broker = asyncio.Event(), type(gated.engine.broker)
     execute = broker.execute_for_workflow
 
     async def held(*args: Any, **options: Any) -> object:  # noqa: ANN401

@@ -6,7 +6,8 @@ import asyncio
 import json
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -63,6 +64,9 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.tool_job_helpers import awaiting_approval, job_owner, start_job, tool_job_runtime, wait_for_status
+
+if TYPE_CHECKING:
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -619,8 +623,16 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
         )
         # Rebuilt workflow contexts arrive with source_kind=None; launch_child must inherit the parent job's.
         assert context.source_kind is None
+        engine = cast(
+            "WorkflowEngine",
+            SimpleNamespace(
+                authorize=lambda _run: context,
+                agents=lambda: SimpleNamespace(jobs=runtime),
+                store=store,
+            ),
+        )
         with patch("mindroom.workflow_runs.agent_nodes.delegation_call_job", side_effect=fake_delegation_job):
-            launched = await launch_child(context, run, node, run.epoch, store=store, jobs=runtime)
+            launched = await launch_child(engine, run, node, run.epoch, jobs=runtime)
 
         assert launched.handle is not None
         child_job_id = launched.handle.ref
@@ -662,11 +674,10 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
         )
         with patch("mindroom.workflow_runs.agent_nodes.delegation_call_job", side_effect=fake_delegation_job):
             resumed_launched = await launch_child(
-                context,
+                engine,
                 resumed_run,
                 resumed_node,
                 run.epoch,
-                store=store,
                 jobs=runtime,
             )
 

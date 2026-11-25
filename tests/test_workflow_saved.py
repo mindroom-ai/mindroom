@@ -28,6 +28,7 @@ from mindroom.config.main import Config
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.models import WorkflowRunState
 from mindroom.workflow_runs.saved import (
     SavedWorkflow,
@@ -236,7 +237,7 @@ async def test_symlinks_are_refused(tmp_path: Path, stack: WorkflowStack) -> Non
         save_source(workspace, "secret", "def main(args):\n    return 2\n", description=None)
     assert list_saved(workspace) == []
     with pytest.raises(ValueError, match=symlink_error):
-        await stack.engine.calls.resolve_source(stack.context, {"name": "secret"})
+        await nodes_module.resolve_source(stack.engine, stack.context, {"name": "secret"})
 
 
 @pytest.mark.usefixtures("in_main")
@@ -636,7 +637,7 @@ async def test_workflow_listings_and_source_reads_preserve_workspace_symlinks(to
     assert shortcut.is_symlink()
     assert str(shortcut.readlink()) == "../notes"
 
-    raw = await tool_stack.engine.calls.resolve_source(tool_stack.context, {"name": "triage"})
+    raw = await nodes_module.resolve_source(tool_stack.engine, tool_stack.context, {"name": "triage"})
     assert b"Triage incoming issues." in raw
     assert shortcut.is_symlink()
     assert str(shortcut.readlink()) == "../notes"

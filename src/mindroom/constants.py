@@ -1177,6 +1177,7 @@ COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 # The automatic history compactions a reply ran, in start order, recorded on the reply itself.
 COMPACTIONS_CONTENT_KEY = "io.mindroom.compactions"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
+TODO_POKE_CONTENT_KEY = "io.mindroom.todo_poke"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 # Marks a notice that asks its reader to reply in its thread, so clients show it as a conversation, not a status.
