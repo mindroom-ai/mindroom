@@ -979,12 +979,15 @@ def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:
 
 
 def test_mac_flatten_skips_empty_string_containers_and_keeps_empty_textfields() -> None:
-    """Blank-string container values are skipped while keeping descendants and empty text fields intact."""
+    """Blank Chromium groups and read-only cells are skipped while writable cells, text fields, and descendants stay."""
     backend, services, _ = _fake_mac_backend()
-    services.attributes["window-1"]["children"] = UserList(["empty-group", "space-group", "text-field"])
+    services.attributes["window-1"]["children"] = UserList(
+        ["empty-group", "space-group", "writable-cell", "readonly-cell", "text-field"],
+    )
     services.attributes["empty-group"] = {
         "role": "AXGroup",
         "value": "",
+        "settable": True,
         "children": UserList(["nested-button"]),
     }
     services.attributes["space-group"] = {
@@ -992,17 +995,30 @@ def test_mac_flatten_skips_empty_string_containers_and_keeps_empty_textfields() 
         "value": "   \t\n",
         "children": UserList([]),
     }
+    services.attributes["writable-cell"] = {"role": "AXCell", "value": "", "settable": True}
+    services.attributes["readonly-cell"] = {"role": "AXCell", "value": "", "settable": False}
     services.attributes["nested-button"] = {"role": "AXButton", "title": "Nested"}
     services.attributes["text-field"] = {"role": "AXTextField", "value": ""}
 
+    settable_calls: dict[object, int] = {}
+    orig_settable = services.AXUIElementIsAttributeSettable
+
+    def counting_settable(reference: object, attribute: str, unused: object) -> tuple[int, bool]:
+        settable_calls[reference] = settable_calls.get(reference, 0) + 1
+        return orig_settable(reference, attribute, unused)
+
+    services.AXUIElementIsAttributeSettable = counting_settable  # type: ignore[method-assign]
+
     stored = backend._collect_app_state("com.example.Editor", state_id="s1")
 
-    roles_and_names = [(el.role, el.name, el.value, el.parent_index) for el in stored.public.elements]
+    roles_and_names = [(el.role, el.name, el.value, el.settable, el.parent_index) for el in stored.public.elements]
     assert roles_and_names == [
-        ("AXWindow", "Editor", None, None),
-        ("AXTextField", None, "", 0),
-        ("AXButton", "Nested", None, 0),
+        ("AXWindow", "Editor", None, False, None),
+        ("AXCell", None, "", True, 0),
+        ("AXTextField", None, "", False, 0),
+        ("AXButton", "Nested", None, False, 0),
     ]
+    assert settable_calls["writable-cell"] == 1
     nested_idx = next(el.index for el in stored.public.elements if el.name == "Nested")
     assert stored.identities[nested_idx].ancestors == ("window-1", "empty-group")
 

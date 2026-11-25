@@ -754,13 +754,14 @@ class MacAccessibilityBackend:
             secure = role == "AXSecureTextField" or subrole == "AXSecureTextField"
             raw_value = None if secure else self._copy_attribute(reference, self._services.kAXValueAttribute)
             value = _bounded_value(raw_value)
-            has_value = value is not None and (not isinstance(value, str) or bool(value.strip()))
-            include = (
-                depth == 0
-                or role not in _CONTAINER_ROLES
-                or name is not None
-                or has_value
-                or any(action not in _PRESENTATION_ONLY_ACTIONS for action in actions)
+            include, settable = self._element_inclusion(
+                reference,
+                depth=depth,
+                role=role,
+                name=name,
+                value=value,
+                actions=actions,
+                secure=secure,
             )
             current_parent = parent_index
             if include:
@@ -768,7 +769,8 @@ class MacAccessibilityBackend:
                     truncated = True
                     break
                 index = len(elements)
-                settable = not secure and self._attribute_settable(reference, self._services.kAXValueAttribute)
+                if settable is None:
+                    settable = not secure and self._attribute_settable(reference, self._services.kAXValueAttribute)
                 enabled_value = self._copy_attribute(reference, self._services.kAXEnabledAttribute)
                 enabled = enabled_value if isinstance(enabled_value, bool) else None
                 elements.append(
@@ -801,17 +803,39 @@ class MacAccessibilityBackend:
                 current_parent = index
             children = self._children(reference, role=role)
             if depth >= _MAX_ACCESSIBILITY_DEPTH:
-                if children:
-                    truncated = True
+                truncated = truncated or bool(children)
                 continue
             remaining = max(0, _MAX_VISITED_ELEMENTS - visited - len(queue))
-            if len(children) > remaining:
-                truncated = True
+            truncated = truncated or len(children) > remaining
             for child in children[:remaining]:
                 queue.append((child, depth + 1, current_parent, (*ancestors, reference)))
         if queue or visited >= _MAX_VISITED_ELEMENTS:
             truncated = True
         return tuple(elements), tuple(references), tuple(identities), truncated
+
+    def _element_inclusion(
+        self,
+        reference: object,
+        *,
+        depth: int,
+        role: str,
+        name: str | None,
+        value: object,
+        actions: tuple[str, ...],
+        secure: bool,
+    ) -> tuple[bool, bool | None]:
+        has_value = value is not None and (not isinstance(value, str) or bool(value.strip()))
+        include = (
+            depth == 0
+            or role not in _CONTAINER_ROLES
+            or name is not None
+            or has_value
+            or any(action not in _PRESENTATION_ONLY_ACTIONS for action in actions)
+        )
+        if not include and role == "AXCell" and not secure:
+            settable = self._attribute_settable(reference, self._services.kAXValueAttribute)
+            return settable, settable
+        return include, None
 
     def _element_content_fingerprint(
         self,

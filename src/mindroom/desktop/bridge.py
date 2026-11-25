@@ -1267,20 +1267,47 @@ class DesktopBridge:
             if fits_inline(command, result, screenshot=screenshot):
                 return success_response(command, result=result, screenshot=screenshot)
             return self._bounded_fallback_response(command, result, screenshot=screenshot)
-        if mode == "screenshot":
-            fitted_state = replace(observed_state, elements=())
-            candidate = {**result, "state": observed_state.to_result(include_elements=False)}
-            if fits_inline(command, candidate, screenshot=screenshot):
-                self._observations.remember(fitted_state, command, controller_key=controller_key)
-                return success_response(command, result=candidate, screenshot=screenshot)
+
+        fitted = self._fit_observed_state(
+            command,
+            result,
+            observed_state=observed_state,
+            mode=mode,
+            screenshot=screenshot,
+        )
+        if fitted is None:
             return self._bounded_fallback_response(command, result, screenshot=screenshot)
+        fitted_state, candidate = fitted
+        self._observations.remember(fitted_state, command, controller_key=controller_key)
+        return success_response(command, result=candidate, screenshot=screenshot)
+
+    @staticmethod
+    def _fit_observed_state(
+        command: DesktopCommand,
+        result: dict[str, object],
+        *,
+        observed_state: AccessibilityState,
+        mode: DesktopObservationMode,
+        screenshot: EncryptedDesktopMedia | None,
+    ) -> tuple[AccessibilityState, dict[str, object]] | None:
+        if mode == "screenshot":
+            candidate = {**result, "state": observed_state.to_result(include_elements=False)}
+            return (
+                (replace(observed_state, elements=()), candidate)
+                if fits_inline(command, candidate, screenshot=screenshot)
+                else None
+            )
+
+        full_candidate = {**result, "state": observed_state.to_result()}
+        if fits_inline(command, full_candidate, screenshot=screenshot):
+            return observed_state, full_candidate
 
         elements = observed_state.elements
         total = len(elements)
+        if total == 0:
+            return None
 
         def state_with_dropped(dropped: int) -> AccessibilityState:
-            if dropped == 0:
-                return observed_state
             return replace(
                 observed_state,
                 elements=elements[: total - dropped],
@@ -1291,13 +1318,10 @@ class DesktopBridge:
         def build(dropped: int) -> dict[str, object]:
             return {**result, "state": state_with_dropped(dropped).to_result()}
 
-        dropped = leftmost_fitting(command, 0, total, build, screenshot=screenshot)
+        dropped = leftmost_fitting(command, 1, total, build, screenshot=screenshot)
         fitted_state = state_with_dropped(dropped)
         candidate = {**result, "state": fitted_state.to_result()}
-        if fits_inline(command, candidate, screenshot=screenshot):
-            self._observations.remember(fitted_state, command, controller_key=controller_key)
-            return success_response(command, result=candidate, screenshot=screenshot)
-        return self._bounded_fallback_response(command, result, screenshot=screenshot)
+        return (fitted_state, candidate) if fits_inline(command, candidate, screenshot=screenshot) else None
 
     @staticmethod
     def _bounded_fallback_response(

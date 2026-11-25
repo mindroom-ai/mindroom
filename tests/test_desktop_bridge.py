@@ -3116,7 +3116,7 @@ async def test_screenshot_mode_omits_elements_and_rejects_bare_element_index(
 async def test_oversized_capture_warning_and_error_response_are_bounded(
     transport: AsyncMock,
 ) -> None:
-    """Huge capture warnings fall back within MAX_INLINE_RESPONSE_BYTES and _error_response caps at 4096 chars."""
+    """Huge capture warnings fall back within MAX_INLINE_RESPONSE_BYTES and _error_response caps at 2048 chars."""
     provider = FakeProvider()
 
     def failing_screenshot(*, app_id: str, state_id: str) -> object:

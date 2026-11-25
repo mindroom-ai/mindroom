@@ -316,5 +316,5 @@ async def test_management_actions_run_concurrently_with_run_shell_and_serialize_
     with pytest.raises(asyncio.CancelledError):
         await click_task
 
-    assert TARGET not in router._in_flight_lanes
-    assert TARGET not in router._target_send_locks
+    assert not router._pending
+    assert TARGET not in router._send_locks
