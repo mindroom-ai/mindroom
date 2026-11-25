@@ -16,6 +16,7 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_VISIBLE_BODY_KEY,
+    SUPPRESS_PUSH_KEY,
 )
 from mindroom.contacts.policy import ContactVerdict, check_contact_message
 from mindroom.contacts.turns import contact_room
@@ -204,16 +205,18 @@ class MatrixMessageOperations:
         extra_content: dict[str, Any] = {}
         if recipient_user_id is None:
             extra_content[SKIP_MENTIONS_KEY] = True
-        elif context.requester_id != context.client.user_id and is_human_requester_id(
-            context.requester_id,
-            context.config,
-            context.runtime_paths,
-        ):
-            extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
-            extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-        elif context.requester_id in context.config.bot_accounts:
-            # Name a bot-account requester the way ordinary agent replies do, so the recipient checks its access.
-            extra_content[ACTING_REQUESTER_KEY] = context.requester_id
+        else:
+            extra_content[SUPPRESS_PUSH_KEY] = True
+            if context.requester_id != context.client.user_id and is_human_requester_id(
+                context.requester_id,
+                context.config,
+                context.runtime_paths,
+            ):
+                extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
+                extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+            elif context.requester_id in context.config.bot_accounts:
+                # Name a bot-account requester the way ordinary agent replies do, so the recipient checks its access.
+                extra_content[ACTING_REQUESTER_KEY] = context.requester_id
         if attachment_ids:
             extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
         if message_extras:
@@ -251,6 +254,7 @@ class MatrixMessageOperations:
         *,
         room_mode: bool,
         needs_thread: bool,
+        suppress_push: bool = False,
     ) -> str | None:
         thread_id = state.thread_id
         if thread_id is None and not room_mode:
@@ -262,6 +266,7 @@ class MatrixMessageOperations:
                     room_id=state.room_id,
                     thread_id=None,
                     attachments=attachments[:1],
+                    suppress_push=suppress_push,
                 )
                 state.attachment_event_ids.extend(first_ids)
                 if error is not None or not first_ids:
@@ -278,6 +283,7 @@ class MatrixMessageOperations:
                 known_latest_thread_event_id=(
                     state.attachment_event_ids[-1] if state.attachment_event_ids else state.event_id
                 ),
+                suppress_push=suppress_push,
             )
             state.attachment_event_ids.extend(sent_ids)
             return error
@@ -370,6 +376,7 @@ class MatrixMessageOperations:
                 resolved,
                 room_mode=room_mode,
                 needs_thread=True,
+                suppress_push=True,
             )
             if error is not None:
                 return self._result("error", action="send", message=error, **asdict(state))

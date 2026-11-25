@@ -8,7 +8,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.attachments.storage import (
     AttachmentRecord,
@@ -18,7 +18,7 @@ from mindroom.attachments.storage import (
     register_local_attachment,
 )
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY, SUPPRESS_PUSH_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio, File, Video, is_document_mime_type, named_mime_type
@@ -346,6 +346,7 @@ async def send_resolved_attachments(
     thread_id: str | None,
     attachments: list[_ResolvedSendAttachment],
     known_latest_thread_event_id: str | None = None,
+    suppress_push: bool = False,
 ) -> tuple[list[str], str | None]:
     """Send retained files or already-encrypted Matrix media while preserving order.
 
@@ -363,6 +364,9 @@ async def send_resolved_attachments(
         thread_id=thread_id,
         known_latest_thread_event_id=known_latest_thread_event_id,
     )
+    extra_content: dict[str, Any] = {SKIP_MENTIONS_KEY: True}
+    if suppress_push:
+        extra_content[SUPPRESS_PUSH_KEY] = True
     for attachment in attachments:
         if isinstance(attachment, AttachmentRecord):
             attachment_event_id = await send_file_message(
@@ -373,7 +377,7 @@ async def send_resolved_attachments(
                 mimetype=attachment.mime_type,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                extra_content={SKIP_MENTIONS_KEY: True},
+                extra_content=dict(extra_content),
             )
         else:
             attachment_event_id = await send_runtime_encrypted_media_message(
@@ -382,7 +386,7 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                extra_content={SKIP_MENTIONS_KEY: True},
+                extra_content=dict(extra_content),
             )
         if attachment_event_id is None:
             return attachment_event_ids, f"Failed to send attachment: {attachment.attachment_id}"

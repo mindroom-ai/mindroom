@@ -128,6 +128,7 @@ from mindroom.streaming import (
     StreamingResponse,
     current_task_is_process_shutdown,
     interactive_response_for_visible_body,
+    is_error_ai_run,
     send_streaming_response,
     stream_progress_edits,
 )
@@ -560,6 +561,8 @@ class DeliveryGatewayDeps:
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     # Wakes claims that waited for a reply's earlier writes.
     reply_row_resolved: Callable[[str], None] | None = None
+    # Whether a finalized reply should suppress push notifications.
+    should_suppress_final_push: Callable[[MessageTarget, ResponseIdentity], Awaitable[bool]] | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -1845,6 +1848,12 @@ class DeliveryGateway:
             reply_model=handle.reply_model,
             edited_existing=edited_event_id is not None,
         )
+        await self._maybe_suppress_final_push(
+            delivery_extra_content,
+            target=request.target,
+            identity=request.identity,
+            has_interactive_prompt=interactive_response.interactive_metadata is not None,
+        )
         try:
             event_id = await self._send_reply_write(
                 reply_write,
@@ -2080,6 +2089,32 @@ class DeliveryGateway:
             return {}
         return {ACTING_REQUESTER_KEY: requester_id}
 
+    async def _maybe_suppress_final_push(
+        self,
+        extra_content: dict[str, Any],
+        *,
+        target: MessageTarget,
+        identity: ResponseIdentity,
+        has_interactive_prompt: bool,
+    ) -> None:
+        """Tag a finalized reply with suppress_push when background work continues."""
+        if (
+            not has_interactive_prompt
+            and not is_error_ai_run(extra_content)
+            and await self._should_suppress_final_push(target, identity)
+        ):
+            extra_content[constants.SUPPRESS_PUSH_KEY] = True
+
+    async def _should_suppress_final_push(
+        self,
+        target: MessageTarget,
+        identity: ResponseIdentity,
+    ) -> bool:
+        """Return whether a finalized reply should suppress push while background work stays active."""
+        if self.deps.should_suppress_final_push is None:
+            return False
+        return await self.deps.should_suppress_final_push(target, identity)
+
     async def _deliver_stream(
         self,
         request: StreamingDeliveryRequest,
@@ -2126,6 +2161,7 @@ class DeliveryGateway:
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
             placeholder_ready=request.placeholder_ready,
+            suppress_final_push=lambda: self._should_suppress_final_push(request.target, request.identity),
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
             initial_send=reply_hooks.initial_send,
