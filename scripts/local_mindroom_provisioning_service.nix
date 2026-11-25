@@ -73,9 +73,9 @@ in
     };
 
     forwardedAllowIps = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ "127.0.0.1" "::1" ];
-      description = "Trusted reverse-proxy IPs or CIDRs whose X-Forwarded-For headers are honored; empty disables proxy header trust.";
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      description = "Trusted reverse-proxy IPs or CIDRs whose X-Forwarded-For headers are honored; null uses the service default (127.0.0.1, ::1 or FORWARDED_ALLOW_IPS), and [ ] disables proxy header trust.";
     };
 
     statePath = lib.mkOption {
@@ -123,6 +123,7 @@ in
         MINDROOM_PROVISIONING_PORT = toString cfg.listenPort;
         MINDROOM_PROVISIONING_STATE_PATH = cfg.statePath;
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
+      } // lib.optionalAttrs (cfg.forwardedAllowIps != null) {
         MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS = lib.concatStringsSep "," cfg.forwardedAllowIps;
       } // lib.optionalAttrs (cfg.matrixServerName != null) {
         MATRIX_SERVER_NAME = cfg.matrixServerName;

@@ -461,7 +461,7 @@ def _read_secret(*, env_name: str, file_env_name: str) -> str | None:
     return value or None
 
 
-def _parse_forwarded_allow_ips(raw: str | None) -> tuple[str, ...]:
+def _parse_forwarded_allow_ips(raw: str | None, *, env_name: str) -> tuple[str, ...]:
     """Parse trusted reverse-proxy IPs/CIDRs; unset defaults to loopback and empty disables proxy headers."""
     if raw is None:
         return DEFAULT_FORWARDED_ALLOW_IPS
@@ -471,7 +471,7 @@ def _parse_forwarded_allow_ips(raw: str | None) -> tuple[str, ...]:
             # Match uvicorn's strict network parsing so malformed CIDRs fail at startup instead of turning into literals.
             ipaddress.ip_network(entry) if "/" in entry else ipaddress.ip_address(entry)
         except ValueError as exc:
-            msg = f"MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS contains invalid IP or CIDR: {entry!r}"
+            msg = f"{env_name} contains invalid IP or CIDR: {entry!r}"
             raise ValueError(msg) from exc
     return tuple(entries)
 
@@ -526,7 +526,12 @@ def _load_service_config_from_env() -> ServiceConfig:
     approve_url = (
         os.getenv("MINDROOM_PROVISIONING_APPROVE_URL", DEFAULT_APPROVE_URL).strip().rstrip("/") or DEFAULT_APPROVE_URL
     )
-    forwarded_allow_ips = _parse_forwarded_allow_ips(os.getenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"))
+    raw_forwarded = os.getenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS")
+    forwarded_env_name = "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"
+    if raw_forwarded is None:
+        raw_forwarded = os.getenv("FORWARDED_ALLOW_IPS")
+        forwarded_env_name = "FORWARDED_ALLOW_IPS"
+    forwarded_allow_ips = _parse_forwarded_allow_ips(raw_forwarded, env_name=forwarded_env_name)
 
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,

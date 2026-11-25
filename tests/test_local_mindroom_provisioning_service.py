@@ -1266,17 +1266,27 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_service_config_reads_and_validates_forwarded_allow_ips(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Trusted proxy IPs/CIDRs default to loopback, allow opting out via empty string, and reject wildcards/invalid entries."""
+    """Trusted proxy IPs/CIDRs default to loopback, fall back to FORWARDED_ALLOW_IPS, allow empty opt-out, and reject invalid entries."""
     monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
     for name in (
         "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
         "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
         "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS",
+        "FORWARDED_ALLOW_IPS",
     ):
         monkeypatch.delenv(name, raising=False)
 
     assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("127.0.0.1", "::1")
 
+    # Uvicorn's standard FORWARDED_ALLOW_IPS remains honored when the provisioning-specific var is unset.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.20.0.5")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("10.20.0.5",)
+
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ()
+
+    # MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS takes precedence over FORWARDED_ALLOW_IPS.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.20.0.5")
     monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8, 127.0.0.1, ::1")
     assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("10.0.0.0/8", "127.0.0.1", "::1")
 
@@ -1288,12 +1298,22 @@ def test_service_config_reads_and_validates_forwarded_allow_ips(monkeypatch: pyt
         with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"):
             provisioning._load_service_config_from_env()
 
+    monkeypatch.delenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    with pytest.raises(ValueError, match="FORWARDED_ALLOW_IPS"):
+        provisioning._load_service_config_from_env()
+
 
 def test_main_passes_forwarded_allow_ips_to_uvicorn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """main() enables uvicorn proxy headers only for configured trusted proxy IPs/CIDRs."""
     monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
     monkeypatch.setenv("MINDROOM_PROVISIONING_STATE_PATH", str(tmp_path / "state.sqlite3"))
-    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+    for name in (
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS",
+        "FORWARDED_ALLOW_IPS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     calls: list[dict[str, object]] = []
@@ -1302,6 +1322,10 @@ def test_main_passes_forwarded_allow_ips_to_uvicorn(tmp_path: Path, monkeypatch:
         calls.append({"app": app, **kwargs})
 
     monkeypatch.setattr(provisioning.uvicorn, "run", _fake_run)
+
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is True
+    assert calls[-1]["forwarded_allow_ips"] == ["127.0.0.1", "::1"]
 
     monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8,127.0.0.1")
     provisioning.main()
