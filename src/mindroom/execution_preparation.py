@@ -39,7 +39,6 @@ from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
-    scope_has_persisted_replay,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
@@ -102,17 +101,20 @@ _NON_TURN_NOTICE_CONTENT_KEYS = (
     UI_ACTION_CONTENT_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
 )
-# Soft default ceiling for incoming ``File`` attachments auto-inlined on a single turn's prompt.
+# Soft default ceiling for incoming text ``File`` attachments auto-inlined on a single turn's prompt.
 MAX_AUTO_INLINE_FILE_TOKENS = 32_000
 _ATTACHMENT_ID_PREFIX = "att_"
 _INLINE_FILE_OMITTED_MARKER = "[Inline file attachment omitted]"
-_INLINE_FILE_OMITTED_GUIDANCE = (
+_INLINE_FILE_OMITTED_BASE_GUIDANCE = (
     "Not included inline because it exceeds the inline attachment budget. "
-    "Do not claim to have read the omitted file content. "
-    "Use get_attachment(attachment_id, mindroom_output_path=...) to save and inspect it selectively with tools, "
+    "Do not claim to have read the omitted file content."
+)
+_INLINE_FILE_OMITTED_TOOL_GUIDANCE = (
+    " Use get_attachment(attachment_id, mindroom_output_path=...) to save and inspect it selectively with tools, "
     "or get_attachment(attachment_id, view=True) if full viewing is needed. "
     "If attachment tools are unavailable, ask the user for a smaller excerpt."
 )
+_INLINE_FILE_OMITTED_NO_ID_GUIDANCE = " Ask the user for a smaller excerpt."
 
 
 class _PartialReplyKind(str, Enum):
@@ -719,15 +721,21 @@ def _format_byte_size(size_bytes: int) -> str:
 def _omitted_inline_files_note(omitted_files: Sequence[File]) -> str:
     """Return a concise, byte-stable sanitized note naming files omitted from inline prompt media."""
     labels: list[str] = []
+    has_attachment_id = False
     for file in omitted_files:
         raw_name = file.filename or file.name
         label = (raw_name and rendered_label(raw_name)) or "file"
+        is_attachment = file.id.startswith(_ATTACHMENT_ID_PREFIX)
+        has_attachment_id = has_attachment_id or is_attachment
         details = [
-            *([rendered_label(file.id)] if file.id.startswith(_ATTACHMENT_ID_PREFIX) else []),
+            *([rendered_label(file.id)] if is_attachment else []),
             *([_format_byte_size(size)] if (size := file_byte_size(file)) is not None else []),
         ]
         labels.append(f"{label} ({', '.join(details)})" if details else label)
-    return f"{_INLINE_FILE_OMITTED_MARKER}\nOmitted files: {', '.join(labels)}.\n{_INLINE_FILE_OMITTED_GUIDANCE}"
+    guidance = _INLINE_FILE_OMITTED_BASE_GUIDANCE + (
+        _INLINE_FILE_OMITTED_TOOL_GUIDANCE if has_attachment_id else _INLINE_FILE_OMITTED_NO_ID_GUIDANCE
+    )
+    return f"{_INLINE_FILE_OMITTED_MARKER}\nOmitted files: {', '.join(labels)}.\n{guidance}"
 
 
 def _with_prompt_note(turn: TurnMessages, note: str | None) -> TurnMessages:
@@ -745,34 +753,58 @@ def _select_inline_file_media(
     turn: TurnMessages,
     limit: int | None,
     scope_context: ScopeSessionContext | None,
-    history_settings: ResolvedHistorySettings,
 ) -> tuple[MediaInputs, str | None]:
-    """Keep incoming ``media.files`` within the turn's auto-inline file budget, preserving non-file media untouched."""
+    """Keep incoming ``media.files`` within the turn's auto-inline file budgets, preserving non-file media untouched.
+
+    Text files are bounded by both ``MAX_AUTO_INLINE_FILE_TOKENS`` and half the remaining headroom below ``limit``.
+    PDFs and binary documents are bounded only by half the remaining headroom (unbounded when ``limit`` is None).
+    """
     if not media.files:
         return media, None
-    if limit is None:
-        file_budget = MAX_AUTO_INLINE_FILE_TOKENS
-    else:
+    remaining_headroom: int | None = None
+    if limit is not None:
         session = scope_context.session if scope_context is not None else None
-        persisted_replay = scope_has_persisted_replay(session, history_settings)
-        budget_turn = turn if persisted_replay else replace(turn, context=())
-        summary = session.summary if persisted_replay and session is not None else None
-        base_request = frame(with_media(budget_turn, replace(media, files=()))).request(summary=summary)
+        summary = session.summary if session is not None else None
+        base_request = frame(with_media(turn, replace(media, files=()))).request(summary=summary)
         base_tokens = model.request_tokens(base_request)
-        file_budget = min(MAX_AUTO_INLINE_FILE_TOKENS, max(0, limit - base_tokens) // 2)
+        remaining_headroom = max(0, limit - base_tokens) // 2
 
     kept_files: list[File] = []
     omitted_files: list[File] = []
-    remaining = file_budget
+    remaining_text = MAX_AUTO_INLINE_FILE_TOKENS
     for file in media.files:
-        if (tokens := file_tokens_within_budget(model.token_counter, file, remaining)) is not None:
+        counted = file_tokens_within_budget(
+            model.token_counter,
+            file,
+            text_budget=remaining_text,
+            headroom_budget=remaining_headroom,
+        )
+        if counted is not None:
+            tokens, is_text = counted
             kept_files.append(file)
-            remaining -= tokens
+            if is_text:
+                remaining_text -= tokens
+            if remaining_headroom is not None:
+                remaining_headroom -= tokens
         else:
             omitted_files.append(file)
     if not omitted_files:
         return media, None
     return replace(media, files=tuple(kept_files)), _omitted_inline_files_note(omitted_files)
+
+
+async def _select_inline_file_media_off_loop(
+    model: ModelProvider,
+    frame: Callable[[TurnMessages], RequestFrame],
+    media: MediaInputs,
+    turn: TurnMessages,
+    limit: int | None,
+    scope_context: ScopeSessionContext | None,
+) -> tuple[MediaInputs, str | None]:
+    """Run inline file selection in a worker thread when ``media`` carries files."""
+    if not media.files:
+        return media, None
+    return await asyncio.to_thread(_select_inline_file_media, model, frame, media, turn, limit, scope_context)
 
 
 def _frame_holding_attachments(
@@ -891,19 +923,13 @@ async def _prepare_execution_context_common(
     provisional_messages, _ = turn_messages(seen_event_ids)
     raw_media = ctx.media or MediaInputs()
     limit = resolved_inputs.execution_plan.limit_tokens
-    media, omission_note = (
-        await asyncio.to_thread(
-            _select_inline_file_media,
-            sizer.model,
-            frame,
-            raw_media,
-            provisional_messages,
-            limit,
-            scope_context,
-            resolved_inputs.history_settings,
-        )
-        if raw_media.files
-        else (raw_media, None)
+    media, omission_note = await _select_inline_file_media_off_loop(
+        sizer.model,
+        frame,
+        raw_media,
+        provisional_messages,
+        limit,
+        scope_context,
     )
     provisional_messages = _with_prompt_note(provisional_messages, omission_note)
     replay_frame = await asyncio.to_thread(
@@ -926,12 +952,12 @@ async def _prepare_execution_context_common(
         pipeline_timing=pipeline_timing,
         allow_native_compaction=ctx.scheduled_history_budget is None,
     )
-    final_messages, unseen_event_ids = turn_messages(
+    raw_final_messages, unseen_event_ids = turn_messages(
         await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
         if history_boundary_event_id and thread_history
         else set(),
     )
-    final_messages = _with_prompt_note(final_messages, omission_note)
+    final_messages = _with_prompt_note(raw_final_messages, omission_note)
 
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
@@ -955,12 +981,21 @@ async def _prepare_execution_context_common(
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
         # The thread is fitted beside what the reply cannot trim without it, and the reply replays no summary.
+        fallback_base_turn = replace(raw_final_messages, context=())
+        media, fallback_omission_note = await _select_inline_file_media_off_loop(
+            sizer.model,
+            frame,
+            raw_media,
+            fallback_base_turn,
+            limit,
+            None,
+        )
         fallback_frame = await asyncio.to_thread(
             _frame_holding_attachments,
             sizer.model,
             frame,
             media,
-            replace(final_messages, context=()),
+            _with_prompt_note(fallback_base_turn, fallback_omission_note),
             limit,
             None,
         )
@@ -985,7 +1020,7 @@ async def _prepare_execution_context_common(
             turn_tokens=turn_tokens,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
-            prompt_note=omission_note,
+            prompt_note=fallback_omission_note,
         )
         fallback_context_tokens = await asyncio.to_thread(turn_tokens, final_messages)
         if prepared_history.replay_plan is not None:

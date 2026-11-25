@@ -640,19 +640,6 @@ def _history_share(total: int | None, static_tokens: int) -> int | None:
     return None if total is None else max(0, total - static_tokens)
 
 
-def scope_has_persisted_replay(
-    session: ConversationSession | None,
-    history_settings: ResolvedHistorySettings,
-) -> bool:
-    """Return whether ``session`` has a summary or visible runs eligible for persisted replay."""
-    if session is None:
-        return False
-    return has_effective_persisted_replay(
-        session=session,
-        replay_plan=configured_replay_plan(history_settings=history_settings, estimated_tokens=0),
-    )
-
-
 def finalize_history_preparation(
     *,
     prepared_scope_history: PreparedScopeHistory,

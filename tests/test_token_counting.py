@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import io
+import codecs
 import math
 import threading
 import time
@@ -11,17 +11,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tiktoken
-from pypdf import PdfWriter
 
 from mindroom.llm.media import File
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import families
 from mindroom.token_counting.counts import count, fit_text
-from mindroom.token_counting.families import counter_for_model, load_o200k
+from mindroom.token_counting.families import counter_for_model, load_o200k, o200k_counter
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, file_tokens_within_budget
 from tests.fakes.token_counter import quarter_tokens
+from tests.history_helpers import blank_pdf
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     import pytest
 
 
@@ -182,76 +184,139 @@ def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> 
         assert abs(count(counter, run) - _o200k(run)) <= len(run) // 8_192 + 1
 
 
-def _padded_pdf(pages: int, padding_bytes: int) -> bytes:
-    writer = PdfWriter()
-    for _ in range(pages):
-        writer.add_blank_page(width=612, height=792)
-    writer.add_metadata({"/Padding": "p" * padding_bytes})
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+def test_file_tokens_within_budget_accepts_sparse_utf8_and_utf16_reports_over_512kb(
+    tmp_path: Path,
+) -> None:
+    """Fixed-width whitespace reports over 512 KB (UTF-8) and 1.09 MB (UTF-16 BOM) under 32k tokens are accepted."""
+    load_o200k()
+    counter = o200k_counter()
+    report_text = ("ITEM-001" + " " * 200 + "42.00\n") * 2_800
+    exact_tokens = count(counter, report_text)
+    assert 20_000 < exact_tokens < 32_000
+
+    utf8_path = tmp_path / "report-utf8.txt"
+    utf8_bytes = report_text.encode("utf-8")
+    assert len(utf8_bytes) > 545_000
+    utf8_path.write_bytes(utf8_bytes)
+
+    utf16_path = tmp_path / "report-utf16.txt"
+    utf16_bytes = codecs.BOM_UTF16_LE + report_text.encode("utf-16-le")
+    assert len(utf16_bytes) > 1_090_000
+    utf16_path.write_bytes(utf16_bytes)
+
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(utf8_path), filename="report-utf8.txt", mime_type="text/plain"),
+        text_budget=32_000,
+        headroom_budget=None,
+    ) == (exact_tokens, True)
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(utf16_path), filename="report-utf16.txt", mime_type="text/plain"),
+        text_budget=32_000,
+        headroom_budget=None,
+    ) == (exact_tokens, True)
 
 
-def test_file_tokens_within_budget_skips_reading_and_tokenizing_large_text_files(
+def test_file_tokens_within_budget_aborts_early_without_reading_entire_large_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Oversized non-PDF text files fail the fast byte guard via stat() + 5-byte peek without full reads or tokenizing."""
+    """Streaming chunk counts abort early on a 2.1 MB JSON file and binary archives without reading the whole file."""
     export_path = tmp_path / "export.json"
-    export_path.write_bytes(b'{"items": "' + b"x" * 700_000 + b'"}')
+    export_path.write_bytes(b'{"items": "' + b"a" * 2_100_000 + b'"}')
     untyped_log = tmp_path / "app.log"
-    untyped_log.write_bytes(b"entry\n" * 120_000)
+    untyped_log.write_bytes(b"entry line\n" * 200_000)
     binary_archive = tmp_path / "archive.zip"
-    binary_archive.write_bytes(b"PK\x03\x04\x89\xff" + b"\xff" * 700_000)
+    binary_archive.write_bytes(b"PK\x03\x04\x89\xff" + b"\xff" * 2_100_000)
 
-    tokenized: list[int] = []
-    counter = TokenCounter(estimate=lambda value: (tokenized.append(len(value)), quarter_tokens(value))[1])
+    bytes_read_by_path: dict[Path, int] = {}
+    real_open = Path.open
 
-    def forbid_read_bytes(self: Path) -> bytes:
-        msg = f"unexpected full read of {self}"
-        raise AssertionError(msg)
+    class _CountingReader:
+        def __init__(self, inner: BinaryIO, target: Path) -> None:
+            self._inner = inner
+            self._target = target
 
-    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+        def read(self, size: int = -1) -> bytes:
+            data = self._inner.read(size)
+            bytes_read_by_path[self._target] = bytes_read_by_path.get(self._target, 0) + len(data)
+            return data
+
+        def __enter__(self) -> _CountingReader:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.close()
+
+    def tracking_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+        if "b" in mode and self in {export_path, untyped_log, binary_archive}:
+            return _CountingReader(handle, self)  # type: ignore[arg-type]
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    counter = TokenCounter(estimate=quarter_tokens)
 
     assert (
         file_tokens_within_budget(
             counter,
             File(filepath=str(export_path), filename="export.json", mime_type="application/json"),
-            32_000,
+            text_budget=32_000,
+            headroom_budget=None,
         )
         is None
     )
-    assert file_tokens_within_budget(counter, File(filepath=str(untyped_log), filename="app.log"), 32_000) is None
+    assert bytes_read_by_path[export_path] < 300_000
+
     assert (
         file_tokens_within_budget(
             counter,
-            File(filepath=str(binary_archive), filename="archive.zip", mime_type="application/zip"),
-            32_000,
+            File(filepath=str(untyped_log), filename="app.log"),
+            text_budget=32_000,
+            headroom_budget=None,
         )
-        == MEDIA_ALLOWANCE_TOKENS
+        is None
     )
-    assert tokenized == []
+    assert bytes_read_by_path[untyped_log] < 300_000
+
+    # Binary archive stays allowed under headroom even when text_budget is exhausted, and stops on chunk 1.
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(binary_archive), filename="archive.zip", mime_type="application/zip"),
+        text_budget=0,
+        headroom_budget=20_000,
+    ) == (MEDIA_ALLOWANCE_TOKENS, False)
+    assert bytes_read_by_path[binary_archive] <= 65_536
 
 
-def test_file_tokens_within_budget_counts_large_pdfs_by_page_and_preserves_small_and_missing_files(
+def test_file_tokens_within_budget_separates_pdf_headroom_from_text_cap_and_handles_missing_and_cp1252(
     tmp_path: Path,
 ) -> None:
-    """Multi-MB low-page PDFs still count by page, small files by tokens, and missing files by MEDIA_ALLOWANCE_TOKENS."""
+    """PDFs obey headroom_budget (not the 32k text cap), cp1252 text falls back cleanly, and missing files keep allowance."""
     pdf_path = tmp_path / "report.pdf"
-    pdf_bytes = _padded_pdf(2, 1_100_000)
+    pdf_bytes = blank_pdf(10, padding_bytes=1_100_000)
     assert len(pdf_bytes) > 1_000_000
     pdf_path.write_bytes(pdf_bytes)
     notes_path = tmp_path / "notes.txt"
-    notes_path.write_text("hello world " * 40, encoding="utf-8")
+    notes_path.write_bytes(b"smart \x93quotes\x94 " * 20)
 
-    counter = TokenCounter(estimate=quarter_tokens, pdf_page_tokens=2_000)
+    counter = TokenCounter(estimate=quarter_tokens)
     pdf_file = File(filepath=str(pdf_path), filename="report.pdf", mime_type="application/pdf")
     notes_file = File(filepath=str(notes_path), filename="notes.txt", mime_type="text/plain")
     missing_file = File(filepath=str(tmp_path / "missing.json"), filename="missing.json", mime_type="application/json")
 
-    assert file_tokens_within_budget(counter, pdf_file, 32_000) == 4_000
-    assert file_tokens_within_budget(counter, pdf_file, 3_000) is None
-    assert file_tokens_within_budget(counter, notes_file, 500) == quarter_tokens("hello world " * 40)
-    assert file_tokens_within_budget(counter, notes_file, 50) is None
-    assert file_tokens_within_budget(counter, missing_file, 32_000) == MEDIA_ALLOWANCE_TOKENS
-    assert file_tokens_within_budget(counter, notes_file, 0) is None
+    # 10 pages * 5,000 = 50,000 tokens exceeds text_budget=32,000, but fits headroom_budget=90,000.
+    assert file_tokens_within_budget(counter, pdf_file, text_budget=32_000, headroom_budget=90_000) == (50_000, False)
+    assert file_tokens_within_budget(counter, pdf_file, text_budget=32_000, headroom_budget=40_000) is None
+    assert file_tokens_within_budget(counter, pdf_file, text_budget=32_000, headroom_budget=None) == (50_000, False)
+    assert file_tokens_within_budget(counter, notes_file, text_budget=500, headroom_budget=500) == (
+        quarter_tokens(b"smart \x93quotes\x94 ".decode("cp1252") * 20),
+        True,
+    )
+    assert file_tokens_within_budget(counter, notes_file, text_budget=10, headroom_budget=500) is None
+    assert file_tokens_within_budget(counter, missing_file, text_budget=0, headroom_budget=32_000) == (
+        MEDIA_ALLOWANCE_TOKENS,
+        False,
+    )
+    assert file_tokens_within_budget(counter, notes_file, text_budget=32_000, headroom_budget=0) is None

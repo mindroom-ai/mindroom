@@ -23,7 +23,8 @@ from mindroom.native_compaction import native_replay
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from typing import BinaryIO
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelRequest, TokenCounter
@@ -43,10 +44,9 @@ __all__ = [
 # page as 1,500 to 3,000 tokens of text beside the page's image.
 MEDIA_ALLOWANCE_TOKENS = 5_000
 _PDF_MAGIC = b"%PDF-"
-# No tokenizer or estimator packs more than 16 bytes of text per token, so any non-PDF text file larger than
-# ``max_tokens * 16`` bytes is guaranteed to exceed ``max_tokens`` without reading or tokenizing it.
-_MAX_TEXT_BYTES_PER_TOKEN = 16
-_UTF8_CHECK_CHUNK_BYTES = 65_536
+_TEXT_STREAM_CHUNK_BYTES = 65_536
+# At most a few extra tokens can appear where a chunk boundary splits a token or hits a family rounding margin.
+_CHUNK_BOUNDARY_SLACK_TOKENS = 4
 
 
 @dataclass(slots=True)
@@ -138,57 +138,6 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
         return MEDIA_ALLOWANCE_TOKENS
 
 
-def _is_utf8_file(path: Path) -> bool | None:
-    """Return whether ``path`` decodes as UTF-8, streaming in chunks, or None if it cannot be read."""
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(_UTF8_CHECK_CHUNK_BYTES):
-                decoder.decode(chunk)
-            decoder.decode(b"", final=True)
-    except UnicodeDecodeError:
-        return False
-    except OSError:
-        return None
-    return True
-
-
-def _content_exceeds_text_byte_guard(content: bytes | str, mime_type: str | None, byte_limit: int) -> bool | None:
-    """Apply the text byte guard to in-memory ``content`` without decoding or tokenizing oversized text."""
-    if isinstance(content, str):
-        exceeds = not content.startswith("%PDF-") and (
-            len(content) > byte_limit
-            or (not content.isascii() and len(content) * 4 > byte_limit and len(content.encode("utf-8")) > byte_limit)
-        )
-        return True if exceeds else None
-    if len(content) <= byte_limit or content.startswith(_PDF_MAGIC):
-        return None
-    if is_text_mime_type(mime_type):
-        return True
-    try:
-        content.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return True
-
-
-def _filepath_exceeds_text_byte_guard(path: Path, mime_type: str | None, byte_limit: int) -> bool | None:
-    """Apply the text byte guard to ``path`` using ``stat()`` and at most a 5-byte PDF header peek."""
-    try:
-        st = path.stat()
-        if not stat.S_ISREG(st.st_mode) or st.st_size <= byte_limit:
-            return None
-        with path.open("rb") as handle:
-            header = handle.read(len(_PDF_MAGIC))
-    except OSError:
-        return None
-    if header.startswith(_PDF_MAGIC):
-        return None
-    if is_text_mime_type(mime_type):
-        return True
-    return _is_utf8_file(path)
-
-
 def file_byte_size(file: File) -> int | None:
     """Return ``file``'s size in bytes without reading its full contents from disk, or None when unavailable."""
     if isinstance(file.content, bytes):
@@ -207,21 +156,207 @@ def file_byte_size(file: File) -> int | None:
     return file.size
 
 
-def file_tokens_within_budget(counter: TokenCounter, file: File, max_tokens: int) -> int | None:
-    """Return ``file``'s token count when it fits within ``max_tokens``, or None when it exceeds that budget."""
+def _fits_non_text(tokens: int, headroom_budget: int | None) -> tuple[int, bool] | None:
+    return (tokens, False) if headroom_budget is None or tokens <= headroom_budget else None
+
+
+def _count_text_chunks_within_budget(
+    counter: TokenCounter,
+    text_chunks: Iterable[str],
+    max_tokens: int,
+) -> int | None:
+    """Return exact token count when ``text_chunks`` fit ``max_tokens``, aborting early once clearly over budget."""
     if max_tokens <= 0:
         return None
-    byte_limit = max_tokens * _MAX_TEXT_BYTES_PER_TOKEN
-    if file.content is not None:
-        guarded = _content_exceeds_text_byte_guard(file.content, file.mime_type, byte_limit)
-    elif file.filepath is not None:
-        guarded = _filepath_exceeds_text_byte_guard(Path(file.filepath), file.mime_type, byte_limit)
-    else:
-        guarded = None
-    if guarded is True:
+    chunks: list[str] = []
+    approx_tokens = 0
+    for chunk in text_chunks:
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        approx_tokens += count(counter, chunk)
+        if approx_tokens > max_tokens + len(chunks) * _CHUNK_BOUNDARY_SLACK_TOKENS:
+            return None
+    exact = count(counter, "".join(chunks))
+    return exact if exact <= max_tokens else None
+
+
+def _read_chunks(stream: BinaryIO, first: bytes) -> Iterator[bytes]:
+    if first:
+        yield first
+    while chunk := stream.read(_TEXT_STREAM_CHUNK_BYTES):
+        yield chunk
+
+
+def _decode_stream(raw_chunks: Iterable[bytes], encoding: str, *, errors: str) -> Iterator[str]:
+    decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+    for chunk in raw_chunks:
+        yield decoder.decode(chunk)
+    yield decoder.decode(b"", final=True)
+
+
+def _decode_cp1252_stream(raw_seen: Sequence[bytes], stream: BinaryIO) -> Iterator[str]:
+    for raw in raw_seen:
+        yield raw.decode("cp1252", errors="replace")
+    while raw := stream.read(_TEXT_STREAM_CHUNK_BYTES):
+        yield raw.decode("cp1252", errors="replace")
+
+
+def _decode_utf8_after_first(
+    decoder: codecs.IncrementalDecoder,
+    stream: BinaryIO,
+    first_text: str,
+) -> Iterator[str]:
+    yield first_text
+    while raw := stream.read(_TEXT_STREAM_CHUNK_BYTES):
+        yield decoder.decode(raw)
+    yield decoder.decode(b"", final=True)
+
+
+def _count_text_stream_within_budget(
+    counter: TokenCounter,
+    stream: BinaryIO,
+    first: bytes,
+    max_tokens: int,
+) -> int | None:
+    """Count a text-MIME byte stream matching ``file_text`` semantics, aborting early once over ``max_tokens``."""
+    if max_tokens <= 0:
         return None
-    tokens = MEDIA_ALLOWANCE_TOKENS if guarded is False else _file_tokens(counter, file)
-    return tokens if tokens <= max_tokens else None
+    if first.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return _count_text_chunks_within_budget(
+            counter,
+            _decode_stream(_read_chunks(stream, first), "utf-16", errors="replace"),
+            max_tokens,
+        )
+    if first.startswith(codecs.BOM_UTF8):
+        return _count_text_chunks_within_budget(
+            counter,
+            _decode_stream(_read_chunks(stream, first), "utf-8-sig", errors="replace"),
+            max_tokens,
+        )
+    # No BOM: try strict UTF-8 incrementally; on any non-UTF-8 byte, fall back to cp1252 from byte 0.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    raw_seen: list[bytes] = []
+    chunks: list[str] = []
+    approx_tokens = 0
+    try:
+        for raw in _read_chunks(stream, first):
+            raw_seen.append(raw)
+            if text := decoder.decode(raw):
+                chunks.append(text)
+                approx_tokens += count(counter, text)
+                if approx_tokens > max_tokens + len(chunks) * _CHUNK_BOUNDARY_SLACK_TOKENS:
+                    return None
+        if tail := decoder.decode(b"", final=True):
+            chunks.append(tail)
+    except UnicodeDecodeError:
+        return _count_text_chunks_within_budget(counter, _decode_cp1252_stream(raw_seen, stream), max_tokens)
+    exact = count(counter, "".join(chunks))
+    return exact if exact <= max_tokens else None
+
+
+def _count_untyped_stream_within_budget(
+    counter: TokenCounter,
+    stream: BinaryIO,
+    first: bytes,
+    *,
+    text_budget: int,
+    headroom_budget: int | None,
+) -> tuple[int, bool] | None:
+    """Count a non-text-MIME stream as strict UTF-8 text or fall back to ``MEDIA_ALLOWANCE_TOKENS`` for binary."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    try:
+        first_text = decoder.decode(first)
+        if text_budget <= 0:
+            if len(first) < _TEXT_STREAM_CHUNK_BYTES:
+                decoder.decode(b"", final=True)
+            return None
+        tokens = _count_text_chunks_within_budget(
+            counter,
+            _decode_utf8_after_first(decoder, stream, first_text),
+            text_budget,
+        )
+    except UnicodeDecodeError:
+        return _fits_non_text(MEDIA_ALLOWANCE_TOKENS, headroom_budget)
+    return (tokens, True) if tokens is not None else None
+
+
+def _stream_file_tokens_within_budget(
+    counter: TokenCounter,
+    stream: BinaryIO,
+    mime_type: str | None,
+    *,
+    text_budget: int,
+    headroom_budget: int | None,
+) -> tuple[int, bool] | None:
+    """Classify and count one open byte stream against text and headroom budgets."""
+    header = stream.read(len(_PDF_MAGIC))
+    if header.startswith(_PDF_MAGIC):
+        tokens = _pdf_pages(header + stream.read()) * (counter.pdf_page_tokens or MEDIA_ALLOWANCE_TOKENS)
+        return _fits_non_text(tokens, headroom_budget)
+    if is_text_mime_type(mime_type):
+        if text_budget <= 0:
+            return None
+        first = header + stream.read(_TEXT_STREAM_CHUNK_BYTES - len(header))
+        tokens = _count_text_stream_within_budget(counter, stream, first, text_budget)
+        return (tokens, True) if tokens is not None else None
+    first = header + stream.read(_TEXT_STREAM_CHUNK_BYTES - len(header))
+    return _count_untyped_stream_within_budget(
+        counter,
+        stream,
+        first,
+        text_budget=text_budget,
+        headroom_budget=headroom_budget,
+    )
+
+
+def file_tokens_within_budget(
+    counter: TokenCounter,
+    file: File,
+    *,
+    text_budget: int,
+    headroom_budget: int | None,
+) -> tuple[int, bool] | None:
+    """Return ``(tokens, is_text)`` when ``file`` fits its budget, or None when it exceeds it.
+
+    Text files (text MIME types and untyped UTF-8 files) are bounded by both ``text_budget`` and ``headroom_budget``
+    using chunked streaming early-exit counting. PDFs and binary/missing files are bounded only by ``headroom_budget``.
+    """
+    if headroom_budget is not None and headroom_budget <= 0:
+        return None
+    effective_text_budget = text_budget if headroom_budget is None else min(text_budget, headroom_budget)
+    if isinstance(file.content, str):
+        if file.content.startswith("%PDF-"):
+            return _fits_non_text(_file_tokens(counter, file), headroom_budget)
+        slices = (
+            file.content[i : i + _TEXT_STREAM_CHUNK_BYTES]
+            for i in range(0, len(file.content), _TEXT_STREAM_CHUNK_BYTES)
+        )
+        tokens = _count_text_chunks_within_budget(counter, slices, effective_text_budget)
+        return (tokens, True) if tokens is not None else None
+    if isinstance(file.content, bytes):
+        return _stream_file_tokens_within_budget(
+            counter,
+            io.BytesIO(file.content),
+            file.mime_type,
+            text_budget=effective_text_budget,
+            headroom_budget=headroom_budget,
+        )
+    if file.filepath is not None:
+        path = Path(file.filepath)
+        try:
+            if stat.S_ISREG(path.stat().st_mode):
+                with path.open("rb") as handle:
+                    return _stream_file_tokens_within_budget(
+                        counter,
+                        handle,
+                        file.mime_type,
+                        text_budget=effective_text_budget,
+                        headroom_budget=headroom_budget,
+                    )
+        except OSError:
+            pass
+    return _fits_non_text(MEDIA_ALLOWANCE_TOKENS, headroom_budget)
 
 
 def _media_tokens(counter: TokenCounter, messages: Sequence[Message], *, keep_images: bool) -> int:

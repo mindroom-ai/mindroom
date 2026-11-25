@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 import threading
 import time
@@ -15,7 +14,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pypdf import PdfWriter
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
@@ -940,22 +938,12 @@ async def test_attachments_estimated_past_the_limit_leave_the_summarized_history
     ]
 
 
-def _large_pdf(pages: int, padding_bytes: int) -> bytes:
-    writer = PdfWriter()
-    for _ in range(pages):
-        writer.add_blank_page(width=612, height=792)
-    writer.add_metadata({"/Padding": "p" * padding_bytes})
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
-
-
 @pytest.mark.asyncio
-async def test_oversized_text_file_is_omitted_without_tokenizing_while_small_file_and_non_file_media_remain(
+async def test_oversized_text_file_is_omitted_early_while_small_file_and_non_file_media_remain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A multi-MB JSON file is omitted before tokenizing while later small files and non-file media stay inline."""
+    """A multi-MB JSON file aborts early while later small files and non-file media stay inline."""
     export_path = tmp_path / "export.json"
     export_path.write_bytes(b'{"payload": "' + b"a" * (2 * 1024 * 1024) + b'"}')
     notes_path = tmp_path / "notes.txt"
@@ -1001,7 +989,8 @@ async def test_oversized_text_file_is_omitted_without_tokenizing_while_small_fil
     assert "get_attachment" in content
     assert "mindroom_output_path" in content
     assert "view=True" in content
-    assert max(tokenized_lengths, default=0) < 100_000
+    # Early-exit chunked counting never tokenizes the full 2 MiB JSON payload.
+    assert sum(tokenized_lengths) < 400_000
 
     # Omission note sits outside <msg> so stored conversation utterances keep only the user's words.
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -1012,22 +1001,71 @@ async def test_oversized_text_file_is_omitted_without_tokenizing_while_small_fil
 
 
 @pytest.mark.asyncio
-async def test_multi_mb_low_page_pdf_still_auto_inlines_within_budget(
+async def test_pdfs_use_headroom_not_text_cap_so_ten_page_pdf_inlines_and_huge_pdf_omits(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
-    """A multi-MB 2-page PDF bypasses the text byte guard and auto-inlines when its page cost fits the budget."""
-    pdf_path = tmp_path / "report.pdf"
-    pdf_bytes = _large_pdf(2, 1_200_000)
-    assert len(pdf_bytes) > 1_000_000
-    pdf_path.write_bytes(pdf_bytes)
-    report = File(id="att_pdf2", filepath=str(pdf_path), filename="report.pdf", mime_type="application/pdf")
+    """A 10-page multi-MB PDF (50k tokens on a 5k/page model) auto-inlines in a 200k window, while a 25-page PDF omits."""
     config, runtime_paths = _uncompacted_config(tmp_path, 200_000)
 
-    _, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the PDF.")
+    ten_page_path = tmp_path / "report-10p.pdf"
+    ten_page_bytes = blank_pdf(10, padding_bytes=1_200_000)
+    assert len(ten_page_bytes) > 1_000_000
+    ten_page_path.write_bytes(ten_page_bytes)
+    ten_page = File(id="att_pdf10", filepath=str(ten_page_path), filename="report.pdf", mime_type="application/pdf")
 
-    assert request.messages[-1].files == (report,)
-    assert "[Inline file attachment omitted]" not in str(request.messages[-1].content)
+    _, kept_request = await _reply_with(
+        ten_page,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Summarize the 10-page PDF.",
+        session_id="session-10p",
+    )
+    assert kept_request.messages[-1].files == (ten_page,)
+    assert "[Inline file attachment omitted]" not in str(kept_request.messages[-1].content)
+
+    # 25 pages * 5,000 = 125,000 tokens exceeds headroom // 2 (~99k) in a 200k window and has no att_* ID.
+    huge_pdf = File(content=blank_pdf(25), filename="manual.pdf", mime_type="application/pdf")
+    _, omitted_request = await _reply_with_media(
+        MediaInputs(files=(huge_pdf,)),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Summarize the manual.",
+        session_id="session-25p",
+    )
+    assert omitted_request.messages[-1].files is None
+    omitted_content = str(omitted_request.messages[-1].content)
+    assert "manual.pdf (" in omitted_content
+    assert "get_attachment" not in omitted_content
+
+
+@pytest.mark.asyncio
+async def test_fallback_thread_replay_reselects_inline_files_after_persisted_replay_drops_them(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """When an oversized unseen thread disables persisted replay, fallback replay re-selects files from raw media."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    # 1 stored run, no summary, plus an unseen thread larger than the 11,500-token limit.
+    seed_session(storage, _session("session-fallback", runs=[_completed_run("run-fallback")]))
+    tiny = File(id="att_tiny", content=b"0123456789", filename="tiny.txt", mime_type="text/plain")
+
+    _, request = await _reply_with_media(
+        MediaInputs(files=(tiny,)),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read tiny.txt.",
+        session_id="session-fallback",
+        thread=_notes(16, 4_000),
+    )
+
+    sent = request.messages[-1]
+    assert sent.files == (tiny,)
+    assert "[Inline file attachment omitted]" not in str(sent.content)
 
 
 @pytest.mark.asyncio
@@ -1061,25 +1099,23 @@ async def test_auto_inline_file_budget_tracks_replay_window_headroom_and_enforce
     assert prepared.media.files == (small_10k,)
     assert "medium.txt (att_med," in prepared.prompt_text
 
-    # With context_window=None (limit=None), the 32,000-token default ceiling still omits a 40k-token file.
+    # With context_window=None (limit=None), the 32k text ceiling enforces aggregate text tokens across multiple files.
     unbounded_config, unbounded_paths = _make_config(tmp_path / "unbounded", context_window=None)
-    over_cap = File(
-        id="att_over",
-        content=b"x" * ((MAX_AUTO_INLINE_FILE_TOKENS + 8_000) * 4),
-        filename="export.json",
-        mime_type="application/json",
-    )
+    part1 = File(id="att_p1", content=b"a" * (20_000 * 4), filename="part1.txt", mime_type="text/plain")
+    part2 = File(id="att_p2", content=b"b" * (20_000 * 4), filename="part2.txt", mime_type="text/plain")
     with _no_memory():
         prepared_unbounded = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-2"),
-            prompt="Check export.",
+            prompt="Check both parts.",
             runtime_paths=unbounded_paths,
             config=unbounded_config,
             scope_context=None,
-            media=MediaInputs(files=(over_cap, small_10k)),
+            media=MediaInputs(files=(part1, part2)),
         )
-    assert prepared_unbounded.media.files == (small_10k,)
-    assert "export.json (att_over," in prepared_unbounded.prompt_text
+    assert MAX_AUTO_INLINE_FILE_TOKENS == 32_000
+    assert prepared_unbounded.media.files == (part1,)
+    assert "part2.txt (att_p2," in prepared_unbounded.prompt_text
+    assert "part1.txt" not in prepared_unbounded.prompt_text
 
 
 @pytest.mark.asyncio
