@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
+from mindroom.constants import SUPPRESS_PUSH_KEY, THREAD_SUMMARY_CONTENT_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
@@ -152,6 +152,7 @@ async def send_thread_summary_notice(
         extra_content={
             "msgtype": "m.notice",
             THREAD_SUMMARY_CONTENT_KEY: summary_metadata,
+            SUPPRESS_PUSH_KEY: True,
         },
     )
     delivered = await send_message_result(client, room_id, content)

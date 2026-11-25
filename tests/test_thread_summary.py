@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     FORK_CONTENT_KEY,
+    SUPPRESS_PUSH_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     resolve_runtime_paths,
@@ -36,6 +37,7 @@ from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -2525,6 +2527,7 @@ class TestSendSummaryEvent:
         content = call_kwargs["content"]
         assert content["msgtype"] == "m.notice"
         assert content["body"] == "Discussed deployment plan"
+        assert content[SUPPRESS_PUSH_KEY] is True
 
         relates_to = content["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
@@ -2609,6 +2612,28 @@ class TestSendSummaryEvent:
         relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
         assert relates_to["event_id"] == "$root1"
         assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+
+    async def test_event_content_suppresses_push_and_hoists_for_encryption(self) -> None:
+        """Thread summary notices suppress push and expose that marker outside encryption."""
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
+
+        result = await send_thread_summary_notice(
+            client,
+            room_id=_ROOM,
+            thread_id="$root1",
+            summary="Provisional title",
+            message_count=0,
+            model_name="haiku",
+            conversation_reader=conversation_reader,
+        )
+
+        assert result == "$s1"
+        content = client.room_send.call_args.kwargs["content"]
+        assert content[SUPPRESS_PUSH_KEY] is True
+        assert encryption_visible_metadata(content) == {SUPPRESS_PUSH_KEY: True}
 
 
 @pytest.mark.asyncio
