@@ -3008,6 +3008,7 @@ depends_on = [
     "mindroom.file_access",
     "mindroom.llm",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.inline_media",
     "mindroom.media_delivery",
     "mindroom.path_confinement",
     "mindroom.tool_system.authoring",
@@ -3236,6 +3237,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.inline_media",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.state_failures",
     "mindroom.event_journal.matrix_delivery",
@@ -4745,6 +4747,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.matrix.client_session",
     "mindroom.matrix.guarded_rooms",
+    "mindroom.matrix.inline_media",
     "mindroom.matrix_identifiers",
     "mindroom.tool_system.events",
     "mindroom.matrix.state_failures",
@@ -5111,6 +5114,10 @@ depends_on = ["mindroom.desktop.input", "mindroom.matrix.encrypted_file"]
 path = "mindroom.matrix.encrypted_file"
 depends_on = []
 visibility = ["mindroom.desktop.protocol"]
+
+[[modules]]
+path = "mindroom.matrix.inline_media"
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"

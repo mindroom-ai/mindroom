@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
+    INLINE_MEDIA_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_VISIBLE_BODY_KEY,
     TOOL_TRACE_CONTENT_KEY,
 )
+from mindroom.matrix.inline_media import filter_inline_media_for_html
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -47,6 +49,7 @@ SEGMENT_COUNT_KEY = "io.mindroom.segment_count"
 _INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, REASONING_CONTENT_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
+    INLINE_MEDIA_CONTENT_KEY,
     "body",
     "format",
     "formatted_body",
@@ -57,6 +60,7 @@ _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
 _MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
 _CODE_REGION_PATTERN = re.compile(r"(<code\b[^>]*>.*?</code>)", re.DOTALL)
 _FENCE_LINE_PATTERN = re.compile(r"[ \t]*((?:>[ \t]{0,3})*)(`{3,}|~{3,})(.*)")
+_INLINE_MXC_IMAGE_PATTERN = re.compile(r"!\[(?:\\.|[^\]\\])*\]\(mxc://[^)\s]+\)")
 
 
 def _user_id_boundary_pattern(user_ids: list[str]) -> re.Pattern[str]:
@@ -156,7 +160,11 @@ def _rich_text_content(
     content.setdefault("msgtype", "m.text")
     content["body"] = body
     content["format"] = "org.matrix.custom.html"
-    content["formatted_body"] = _render_segment_html(source, body, enable_footnotes=enable_footnotes)
+    formatted_body = _render_segment_html(source, body, enable_footnotes=enable_footnotes)
+    content["formatted_body"] = formatted_body
+    inline_media = filter_inline_media_for_html(source, formatted_body)
+    if inline_media is not None:
+        content[INLINE_MEDIA_CONTENT_KEY] = inline_media
     mentions = _chunk_mentions(source, body)
     if mentions is not None:
         content["m.mentions"] = mentions
@@ -180,7 +188,11 @@ def _edit_content_chunk(
     per-chunk set lives under ``m.new_content``.
     """
     replacement = _rich_text_content(source, body, enable_footnotes=enable_footnotes)
-    edit = {key: value for key, value in content.items() if key not in _INTERNAL_STREAM_KEYS}
+    edit = {
+        key: value
+        for key, value in content.items()
+        if key not in _INTERNAL_STREAM_KEYS and key != INLINE_MEDIA_CONTENT_KEY
+    }
     edit["body"] = f"* {body}"
     edit["format"] = "org.matrix.custom.html"
     edit["formatted_body"] = replacement["formatted_body"]
@@ -346,6 +358,14 @@ def _split_body(
             return None
         if end < len(text):
             end = _preferred_boundary(text, offset, end)
+            for match in _INLINE_MXC_IMAGE_PATTERN.finditer(text, offset):
+                if match.start() >= end:
+                    break
+                if match.end() > end:
+                    if match.start() == offset:
+                        return None
+                    end = match.start()
+                    break
         fence_start = _unclosed_fence_start(text, offset, end)
         if fence_start is not None:
             if fence_start == offset:

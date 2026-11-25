@@ -70,6 +70,7 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_room_event_result,
 )
+from mindroom.matrix.inline_media import attach_inline_media
 from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
     fit_reasoning_to_ordinary_event,
@@ -2395,7 +2396,11 @@ class DeliveryGateway:
         if isinstance(encryption_outcome, MatrixDeliveryFailure):
             return encryption_outcome
         split = self.deps.runtime.config.defaults.large_message_strategy == "split"
-        payload = matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content)
+        payload = attach_inline_media(
+            matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content),
+            room_id,
+            room_encrypted=encryption_outcome,
+        )
         # Reasoning is fitted against what would otherwise segment the reply or move it to a sidecar; durable rows
         # are sized for encrypted delivery, as prepare_large_message sizes them below.
         wire_content = fit_reasoning_to_ordinary_event(
