@@ -1845,7 +1845,7 @@ def team_background_jobs(
     return LeaderJobs(controls=entry.adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
 
-_MEMORY_SEARCH_TOOL_NAME = "search_memories"
+_MEMORY_SEARCH_TOOL_NAME = "memory"
 
 
 def _offers_function(entries: Sequence[_ToolkitEntry], function_name: str) -> bool:

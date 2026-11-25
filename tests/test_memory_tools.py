@@ -87,7 +87,7 @@ class TestMemoryTools:
     async def test_add_memory(self, tools: MemoryTools) -> None:
         """Test that add_memory stores content via add_agent_memory."""
         with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
-            result = await tools.add_memory("The user prefers dark mode")
+            result = await tools.memory(action="add", content="The user prefers dark mode")
 
             mock_add.assert_called_once_with(
                 "The user prefers dark mode",
@@ -124,7 +124,7 @@ class TestMemoryTools:
         )
 
         with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
-            await tools.add_memory("Remember this")
+            await tools.memory(action="add", content="Remember this")
 
         assert mock_add.await_args.kwargs["execution_identity"] == execution_identity
         assert similar_lookup.await_args.kwargs["execution_identity"] == execution_identity
@@ -138,7 +138,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB down"),
         ):
-            result = await tools.add_memory("something")
+            result = await tools.memory(action="add", content="something")
 
             assert "Failed to store memory" in result
             assert "DB down" in result
@@ -153,7 +153,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=_auth_error_with_secret(secret),
         ):
-            result = await tools.add_memory("something")
+            result = await tools.memory(action="add", content="something")
 
         assert result == "Failed to store memory: embedder authentication failed (HTTP 401)"
         assert secret not in result
@@ -174,7 +174,7 @@ class TestMemoryTools:
             runtime_paths=runtime_paths_for(config),
         )
 
-        result = await tools.add_memory("Tool memory stays canonical")
+        result = await tools.memory(action="add", content="Tool memory stays canonical")
         memories = (
             await search_agent_memories(
                 "Tool memory",
@@ -221,17 +221,17 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=[semantic_hit],
         ):
-            await tools.add_memory(existing_text)
-            existing = (await tools.list_memories()).splitlines()[1]
+            await tools.memory(action="add", content=existing_text)
+            existing = (await tools.memory(action="list")).splitlines()[1]
             existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
 
-            result = await tools.add_memory("The weekly standup moved to Tuesdays")
+            result = await tools.memory(action="add", content="The weekly standup moved to Tuesdays")
 
         assert result.startswith("Memorized: The weekly standup moved to Tuesdays\n")
         assert f"[id={existing_id}] {existing_text}" in result
         assert result.count("moved to Tuesdays") == 1
-        assert "update_memory" in result
-        assert "delete_memory" not in result
+        assert 'memory(action="update", ...)' in result
+        assert 'action="delete"' not in result
 
     @pytest.mark.asyncio
     async def test_add_memory_reply_stays_plain_when_the_similar_lookup_fails(self, tools: MemoryTools) -> None:
@@ -244,7 +244,7 @@ class TestMemoryTools:
                 side_effect=RuntimeError("index down"),
             ),
         ):
-            result = await tools.add_memory("The user prefers dark mode")
+            result = await tools.memory(action="add", content="The user prefers dark mode")
 
         assert result == "Memorized: The user prefers dark mode"
 
@@ -261,7 +261,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=MemorySearchOutcome(results=mock_results),
         ) as mock_search:
-            result = await tools.search_memories("preferences", limit=3)
+            result = await tools.memory(action="search", query="preferences", limit=3)
 
             mock_search.assert_called_once_with(
                 "preferences",
@@ -279,7 +279,7 @@ class TestMemoryTools:
 
     def test_search_memories_tool_description_is_backend_neutral(self, tools: MemoryTools) -> None:
         """Agent-facing memory search should not mention a specific storage backend."""
-        description = tools.search_memories.__doc__
+        description = tools.memory.__doc__
 
         assert description is not None
         assert "notes" in description
@@ -289,7 +289,7 @@ class TestMemoryTools:
         assert "MEMORY.md and memory/**/*.md" in description
         assert "semantic:*" in description
         assert "read-only locators" in description
-        assert "get_memory, update_memory, or delete_memory" in description
+        assert "`get`, `update`, or `delete`" in description
         assert "knowledge base" not in description.lower()
         assert "mem0" not in description.lower()
 
@@ -314,7 +314,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=MemorySearchOutcome(results=mock_results),
         ):
-            result = await tools.search_memories("preferences")
+            result = await tools.memory(action="search", query="preferences")
 
         assert "[id=semantic:file.md:1] [semantic] Semantic match" in result
         assert "[id=file:MEMORY.md:2] [keyword] Keyword match" in result
@@ -327,7 +327,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=MemorySearchOutcome(results=[]),
         ):
-            result = await tools.search_memories("nonexistent")
+            result = await tools.memory(action="search", query="nonexistent")
 
             assert result == "No relevant memories found."
 
@@ -341,7 +341,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         lines = result.splitlines()
         assert lines[0] == "Semantic memory search unavailable: embedder authentication failed (HTTP 401)."
@@ -362,7 +362,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         lines = result.splitlines()
         assert lines[0] == (
@@ -383,7 +383,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         assert result == "Semantic memory search unavailable: embedder endpoint unreachable."
         assert "EMBEDDER_API_KEY" not in result
@@ -402,7 +402,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         lines = result.splitlines()
         assert lines[0] == (
@@ -427,7 +427,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         assert result.splitlines()[0] == (
             "Semantic memory search partially unavailable: embedder endpoint unreachable. "
@@ -469,7 +469,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         assert "memory.embedder.config.api_key" in result
         assert "'embedding-production' credential service" in result
@@ -513,7 +513,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         assert result.splitlines() == [
             f"Semantic memory search unavailable: {rejection.value}.",
@@ -546,7 +546,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=outcome,
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
         assert result.splitlines() == [
             "Semantic memory search unavailable: embedder permission denied (HTTP 403).",
@@ -563,7 +563,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=RuntimeError("Search failed"),
         ):
-            result = await tools.search_memories("anything")
+            result = await tools.memory(action="search", query="anything")
 
             assert "Failed to search memories" in result
             assert "Search failed" in result
@@ -577,7 +577,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=_auth_error_with_secret(secret),
         ):
-            result = await tools.update_memory("memory-id", "new content")
+            result = await tools.memory(action="update", memory_id="memory-id", content="new content")
 
         assert result == "Failed to update memory: embedder authentication failed (HTTP 401)"
         assert secret not in result
@@ -586,15 +586,50 @@ class TestMemoryTools:
         """Test that the toolkit is registered with the correct name."""
         assert tools.name == "memory"
 
-    def test_toolkit_has_six_tools(self, tools: MemoryTools) -> None:
-        """Test that the toolkit exposes all memory tools."""
-        func_names = list(tools.functions)
-        assert "add_memory" in func_names
-        assert "search_memories" in func_names
-        assert "list_memories" in func_names
-        assert "get_memory" in func_names
-        assert "update_memory" in func_names
-        assert "delete_memory" in func_names
+    def test_toolkit_exposes_unified_memory_tool(self, tools: MemoryTools) -> None:
+        """Test that the toolkit exposes only the single unified memory tool."""
+        assert list(tools.functions) == ["memory"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"action": "add"}, "`content` is required"),
+            ({"action": "add", "content": "  "}, "`content` is required"),
+            ({"action": "add", "content": "fact", "query": "q"}, "`query`"),
+            ({"action": "add", "content": "fact", "memory_id": "m1"}, "`memory_id`"),
+            ({"action": "add", "content": "fact", "limit": 5}, "`limit`"),
+            ({"action": "search"}, "`query` is required"),
+            ({"action": "search", "query": "  "}, "`query` is required"),
+            ({"action": "search", "query": "q", "content": "c"}, "`content`"),
+            ({"action": "search", "query": "q", "memory_id": "m1"}, "`memory_id`"),
+            ({"action": "list", "content": "c"}, "`content`"),
+            ({"action": "list", "query": "q"}, "`query`"),
+            ({"action": "list", "memory_id": "m1"}, "`memory_id`"),
+            ({"action": "get"}, "`memory_id` is required"),
+            ({"action": "get", "memory_id": "m1", "content": "c"}, "`content`"),
+            ({"action": "get", "memory_id": "m1", "query": "q"}, "`query`"),
+            ({"action": "get", "memory_id": "m1", "limit": 5}, "`limit`"),
+            ({"action": "update", "content": "c"}, "`memory_id` is required"),
+            ({"action": "update", "memory_id": "m1"}, "`content` is required"),
+            ({"action": "update", "memory_id": "m1", "content": "c", "query": "q"}, "`query`"),
+            ({"action": "update", "memory_id": "m1", "content": "c", "limit": 5}, "`limit`"),
+            ({"action": "delete"}, "`memory_id` is required"),
+            ({"action": "delete", "memory_id": "m1", "content": "c"}, "`content`"),
+            ({"action": "delete", "memory_id": "m1", "query": "q"}, "`query`"),
+            ({"action": "delete", "memory_id": "m1", "limit": 5}, "`limit`"),
+        ],
+    )
+    async def test_memory_action_parameter_validation(
+        self,
+        tools: MemoryTools,
+        kwargs: dict[str, object],
+        expected: str,
+    ) -> None:
+        """Missing required arguments or mismatched arguments return clear error strings."""
+        result = await tools.memory(**kwargs)  # type: ignore[arg-type]
+        assert result.startswith("Error:")
+        assert expected in result
 
     @pytest.mark.asyncio
     async def test_list_memories(self, tools: MemoryTools) -> None:
@@ -610,7 +645,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=mock_results,
         ) as mock_list:
-            result = await tools.list_memories(limit=10)
+            result = await tools.memory(action="list", limit=10)
 
             mock_list.assert_called_once_with(
                 "test_agent",
@@ -635,7 +670,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=[],
         ):
-            result = await tools.list_memories()
+            result = await tools.memory(action="list")
 
             assert result == "No memories stored yet."
 
@@ -647,7 +682,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB down"),
         ):
-            result = await tools.list_memories()
+            result = await tools.memory(action="list")
 
             assert "Failed to list memories" in result
             assert "DB down" in result
@@ -662,7 +697,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=mock_result,
         ) as mock_get:
-            result = await tools.get_memory("abc-123")
+            result = await tools.memory(action="get", memory_id="abc-123")
 
             mock_get.assert_called_once_with(
                 "abc-123",
@@ -682,7 +717,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             return_value=None,
         ):
-            result = await tools.get_memory("nonexistent")
+            result = await tools.memory(action="get", memory_id="nonexistent")
 
             assert "No memory found" in result
 
@@ -694,7 +729,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB down"),
         ):
-            result = await tools.get_memory("abc-123")
+            result = await tools.memory(action="get", memory_id="abc-123")
 
             assert "Failed to get memory" in result
             assert "DB down" in result
@@ -706,7 +741,7 @@ class TestMemoryTools:
             "mindroom.custom_tools.memory.update_agent_memory",
             new_callable=AsyncMock,
         ) as mock_update:
-            result = await tools.update_memory("abc-123", "Updated content")
+            result = await tools.memory(action="update", memory_id="abc-123", content="Updated content")
 
             mock_update.assert_called_once_with(
                 "abc-123",
@@ -731,7 +766,7 @@ class TestMemoryTools:
             ),
             patch("mindroom.custom_tools.memory.logger") as mock_logger,
         ):
-            result = await tools.update_memory("abc-123", "new content")
+            result = await tools.memory(action="update", memory_id="abc-123", content="new content")
 
         assert result == "Failed to update memory: Not found"
         mock_logger.exception.assert_called_once_with(
@@ -749,7 +784,7 @@ class TestMemoryTools:
             "mindroom.custom_tools.memory.delete_agent_memory",
             new_callable=AsyncMock,
         ) as mock_delete:
-            result = await tools.delete_memory("abc-123")
+            result = await tools.memory(action="delete", memory_id="abc-123")
 
             mock_delete.assert_called_once_with(
                 "abc-123",
@@ -769,7 +804,7 @@ class TestMemoryTools:
             new_callable=AsyncMock,
             side_effect=RuntimeError("Not found"),
         ):
-            result = await tools.delete_memory("abc-123")
+            result = await tools.memory(action="delete", memory_id="abc-123")
 
             assert "Failed to delete memory" in result
             assert "Not found" in result
@@ -778,8 +813,12 @@ class TestMemoryTools:
     async def test_memory_not_found_logs_warning_without_traceback(self, tools: MemoryTools) -> None:
         """Missing memory IDs log a warning without a traceback and preserve the tool error text."""
         cases = (
-            ("update", "update_agent_memory", lambda: tools.update_memory("missing-id", "new content")),
-            ("delete", "delete_agent_memory", lambda: tools.delete_memory("missing-id")),
+            (
+                "update",
+                "update_agent_memory",
+                lambda: tools.memory(action="update", memory_id="missing-id", content="new content"),
+            ),
+            ("delete", "delete_agent_memory", lambda: tools.memory(action="delete", memory_id="missing-id")),
         )
         for action, helper_name, invoke in cases:
             with (

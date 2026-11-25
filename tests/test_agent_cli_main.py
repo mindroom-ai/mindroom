@@ -294,7 +294,7 @@ def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch
 
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    assert main(["tools", "call", "memory.add_memory", "{}"]) == 1
+    assert main(["tools", "call", "memory.memory", "{}"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 

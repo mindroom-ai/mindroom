@@ -314,7 +314,7 @@ async def test_workflow_call_reaches_a_toolkit_plain_scripts_may_not_use(tmp_pat
     with workflow_stack(tmp_path, extra_tools=("memory",)) as stack:
         await stack.start()
 
-        listed = await stack.result("@0", "tool", tool_args("memory", "list_memories"))
+        listed = await stack.result("@0", "tool", tool_args("memory", "memory", action="list"))
         await stack.engine.close()
 
     assert isinstance(listed, str)

@@ -150,7 +150,7 @@ def test_agent_without_listen_is_none() -> None:
     [
         ({"rooms": ["lobby"]}, ("memory",), r"listen\.tools\[1\]\.react: Tool 'react' is not one of the agent's tools"),
         (
-            {"rooms": ["lobby"], "tools": ["memory.add_memory"]},
+            {"rooms": ["lobby"], "tools": ["memory.memory"]},
             ("react",),
             r"listen\.tools\[0\]\.memory: Tool 'memory' is not one of the agent's tools; add it to agents\.scribe\.tools",
         ),
@@ -177,7 +177,7 @@ def test_listen_misspelled_function_rejected(tmp_path: Path) -> None:
     ):
         Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory.add_memroy"]}), runtime_paths)
 
-    Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory.add_memory"]}), runtime_paths)
+    Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory.memory"]}), runtime_paths)
 
 
 def test_listen_default_tools_validate(tmp_path: Path) -> None:
