@@ -376,6 +376,7 @@ def build_ai_run_metadata_content(
     model_provider: str | None,
     prices: Mapping[tuple[str, str], PricedModel],
     tool_count: int,
+    answering_model_name: str | None = None,
     metrics: RunMetrics | None = None,
     prior_usage: Sequence[RunMetrics] = (),
     context_run: AnyRunRecord | None = None,
@@ -397,6 +398,8 @@ def build_ai_run_metadata_content(
     turn running in this context when this builds: an approval resume makes its builder before its calls run.
     """
     metrics = turn_usage(prior_usage, metrics)
+    configured_name = model_name
+    model_name = answering_model_name or model_name
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
@@ -409,6 +412,8 @@ def build_ai_run_metadata_content(
         "status": status.value.lower(),
     }
     payload["model"] = model_payload(config, model_name, model_id=model_id, provider=provider)
+    if model_name != configured_name:
+        payload["model"]["fallback_from"] = configured_name
     if metrics is not None:
         usage = ReplyUsage.of(
             metrics,

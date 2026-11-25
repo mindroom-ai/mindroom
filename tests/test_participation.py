@@ -254,6 +254,50 @@ async def test_cancellation_is_not_converted_to_silence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_decision_failover_records_usage_under_answering_model() -> None:
+    """A participation decision that fails over records decision and reply usage under the answering fallback."""
+    from functools import partial  # noqa: PLC0415
+
+    from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
+    from mindroom.llm.provider import ModelIdentity, UsageReported  # noqa: PLC0415
+    from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream  # noqa: PLC0415
+    from mindroom.providers.pipeline.wrapped import WrappedProvider  # noqa: PLC0415
+    from tests.scripted_agent_helpers import raising  # noqa: PLC0415
+
+    primary_id = ModelIdentity(id="primary-m", provider="Anthropic")
+    fallback_id = ModelIdentity(id="fallback-m", provider="OpenAI")
+    quota = ProviderError("quota", provider="Anthropic", status_code=429, code=QUOTA_EXHAUSTED)
+
+    primary = ScriptedModel(
+        [[UsageReported(usage(15, 3)), raising(quota)], [UsageReported(usage(15, 3)), raising(quota)]],
+        identity=primary_id,
+    )
+    fallback = ScriptedModel(
+        [answer(_RESPOND, usage(25, 5)), answer("Reply", usage(10, 2))],
+        identity=fallback_id,
+    )
+    chained = WrappedProvider(
+        primary,
+        partial(
+            fallback_stream,
+            model_name="primary",
+            chain=(ChainModel("fallback", None, lambda: fallback, "fallback"),),
+            cooldown_key="primary",
+        ),
+    )
+
+    _, record = await _reply(chained, ParticipationGate())
+
+    assert (len(primary.requests), len(fallback.requests)) == (2, 2)
+    assert record.metrics is not None
+    by_model = {
+        (entry.provider, entry.id): (entry.tokens.input_tokens, entry.tokens.output_tokens)
+        for entry in record.metrics.details["model"]
+    }
+    assert by_model == {("Anthropic", "primary-m"): (30, 6), ("OpenAI", "fallback-m"): (35, 7)}
+
+
+@pytest.mark.asyncio
 async def test_decision_usage_is_included_in_run_metrics() -> None:
     """The decision request's tokens count toward the run like any other request."""
     model = ScriptedModel([answer(_RESPOND, usage(40, 8, cache_read_tokens=30)), answer("Useful answer", usage(10, 2))])

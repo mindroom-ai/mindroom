@@ -3,6 +3,7 @@
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_personal_agent_templates  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
+_.validate_model_fallbacks  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_memory_auto_flush_model  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_vertex_ai_embedder_memory  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_knowledge_chunk_context_models  # Pydantic model validator (src/mindroom/config/main.py)

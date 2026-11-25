@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +12,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.structured import output_format_prompt
-from mindroom.llm.errors import ProviderUnavailable
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, ModelProvenance
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
@@ -26,14 +27,18 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agno_parity.golden_files import turn_message
 from tests.fakes.request_sizing import PlainRequestSizing
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import fake_token_counter
+from tests.scripted_agent_helpers import raising
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.llm.provider import TokenCounter
+    from mindroom.llm.provider import StructuredOutput, TokenCounter
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic")
 LUNA = ModelIdentity(id="gpt-6-luna", provider="OpenAI")
@@ -214,7 +219,7 @@ async def test_an_unreadable_structured_answer_stays_text() -> None:
 async def test_a_request_carries_the_callers_overrides_and_no_tools() -> None:
     """Per-call overrides reach the request, and a helper request offers no tools."""
     provider = _RecordingProvider(answer="ok")
-    overrides = RequestOverrides(temperature=0.2, caller_retries=True)
+    overrides = RequestOverrides(temperature=0.2, transient_retries="caller")
 
     await complete_prompt(provider, "Thread: ...", instructions=["Summarize."], overrides=overrides)
 
@@ -234,3 +239,78 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
 
     with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await complete_prompt(provider, "Thread: ...", instructions=["Summarize."])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("from_mode", "to_mode", "fallback_identity", "raw_answer", "expected", "expect_json_prompt"),
+    [
+        (
+            "native",
+            "forced_tool",
+            ModelIdentity(id="llama-4", provider="Groq"),
+            '{"answer": "yes", "confidence": 9}',
+            _Verdict(answer="yes", confidence=9),
+            False,
+        ),
+        (
+            "native",
+            "json_mode",
+            LUNA,
+            '```json\n{"answer": "no"}\n```',
+            _Verdict(answer="no"),
+            True,
+        ),
+        (
+            "json_mode",
+            "forced_tool",
+            ModelIdentity(id="llama-4", provider="Groq"),
+            '{"answer": "maybe"}',
+            _Verdict(answer="maybe"),
+            False,
+        ),
+    ],
+    ids=["native-to-forced-tool", "native-to-json-mode", "json-mode-to-forced-tool"],
+)
+async def test_complete_prompt_fails_over_between_unlike_structured_output_providers(
+    from_mode: StructuredOutput,
+    to_mode: StructuredOutput,
+    fallback_identity: ModelIdentity,
+    raw_answer: str,
+    expected: _Verdict,
+    *,
+    expect_json_prompt: bool,
+) -> None:
+    """Failing over between unlike structured-output routes adapts prompt & decoding and records the answering model."""
+    quota = ProviderError("quota", provider="Codex", status_code=429, code=QUOTA_EXHAUSTED)
+    primary = ScriptedModel(
+        [[raising(quota)]],
+        identity=ModelIdentity(id="gpt-6-sol", provider="Codex"),
+        capabilities=Capabilities(structured_output=from_mode),
+    )
+    fallback = _RecordingProvider(
+        answer=raw_answer,
+        identity=fallback_identity,
+        capabilities=Capabilities(structured_output=to_mode),
+    )
+    chained = WrappedProvider(
+        primary,
+        partial(
+            fallback_stream,
+            model_name="primary",
+            chain=(ChainModel("fallback", None, lambda: fallback, "fallback"),),
+            cooldown_key="primary",
+        ),
+    )
+
+    result = await complete_prompt(chained, "Is it raining?", instructions=["Decide."], schema=_Verdict, run_id="h-1")
+
+    assert result.content == expected
+    assert (result.usage.model, result.usage.provider) == (fallback_identity.id, fallback_identity.provider)
+    [details] = result.usage.metrics.to_dict()["details"]["model"]
+    assert (details["id"], details["provider"]) == (fallback_identity.id, fallback_identity.provider)
+    system = str(fallback.requests[0].messages[0].content)
+    if expect_json_prompt:
+        assert "<json_schema>" in system
+    else:
+        assert system == "Decide."

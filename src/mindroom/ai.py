@@ -376,6 +376,7 @@ def agent_run_metadata_content(
         status=status,
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
+        answering_model_name=record.model_name if record is not None else None,
         metrics=record.metrics if record is not None else None,
         prior_usage=prior_usage,
         context_run=record,

@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.llm.messages import media_items, tool_result_view
+from mindroom.llm.messages import FALLBACK_MODEL_KEY, media_items, tool_result_view
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -38,6 +38,7 @@ from mindroom.native_compaction import (
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
+from mindroom.providers.openai.errors import body_retry_after
 from mindroom.providers.openai.media import responses_file_part, responses_image_part, responses_video_part
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
@@ -179,6 +180,8 @@ def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bo
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once and continues the response it stores from then on; ``mindroom_system_sha256`` is ignored.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_conversation_digest_replays_once
+    if FALLBACK_MODEL_KEY in provider_data:
+        return False
     return provider_data.get(_CONVERSATION_DIGEST_KEY) == conversation_digest(before)
 
 
@@ -546,13 +549,12 @@ class ResponsesStream:
     _summary_part: tuple[str, int] | None = None
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
-        if event.type == "error":
-            return _response_error(event.code, event.message, provider=self.provider)
-        failure = event.response.error
-        return _response_error(
-            failure.code if failure is not None else None,
-            failure.message if failure is not None else None,
+        failure = event if event.type == "error" else event.response.error
+        return classify_provider_error(
+            getattr(failure, "message", None) or "OpenAI Responses stream failed",
             provider=self.provider,
+            code=getattr(failure, "code", None),
+            retry_after_seconds=body_retry_after(getattr(failure, "model_extra", None)),
         )
 
     def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:
@@ -638,11 +640,6 @@ class ResponsesStream:
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         return self.parts
-
-
-def _response_error(code: str | None, message: str | None, *, provider: str) -> ProviderError:
-    """Return the error a failed response reports: its code names the failure, as an error type does elsewhere."""
-    return classify_provider_error(message or "OpenAI Responses stream failed", provider=provider, code=code)
 
 
 def usage_report(event: ResponseStreamEvent) -> UsageReported | None:

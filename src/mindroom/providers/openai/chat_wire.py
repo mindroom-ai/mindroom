@@ -18,7 +18,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
+from mindroom.llm.messages import FALLBACK_MODEL_KEY, PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     ReasoningDelta,
@@ -241,6 +241,7 @@ def _chat_message(
     provider: str,
     *,
     wrap_gemini_tool_results: bool = False,
+    fallback_model: str | None = None,
 ) -> dict[str, Any]:
     if PROMPT_UPDATE_KEY in (message.provider_data or {}):
         # Only a request to a route that takes one where it stands holds one (``pipeline.prompt_hold``).
@@ -276,7 +277,15 @@ def _chat_message(
         # Handling: each request joins the pieces into whole details, as later releases store them; signatures and
         # encrypted details pass unchanged.
         # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole
-        formatted["reasoning_details"] = _joined_reasoning_details(reasoning_details)
+        joined = _joined_reasoning_details(reasoning_details)
+        if (message.provider_data or {}).get(FALLBACK_MODEL_KEY) != fallback_model:
+            joined = [
+                detail
+                for detail in joined
+                if detail.get("type") != "reasoning.encrypted" and detail.get("signature") is None
+            ]
+        if joined:
+            formatted["reasoning_details"] = joined
     return formatted
 
 
@@ -311,11 +320,18 @@ def _chat_messages(
     provider: str,
     *,
     wrap_gemini_tool_results: bool = False,
+    fallback_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the request's messages: the system prompt joined, in the wire's ``system_role``, and foreign ids fitted."""
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
     return [
-        _chat_message(message, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results)
+        _chat_message(
+            message,
+            wire,
+            provider,
+            wrap_gemini_tool_results=wrap_gemini_tool_results,
+            fallback_model=fallback_model,
+        )
         for message in canonical
     ]
 
@@ -511,6 +527,7 @@ def chat_request_kwargs(
     settings: ChatSettings,
     wire: ChatWire,
     provider: str,
+    fallback_model: str | None = None,
 ) -> dict[str, Any]:
     """Return the ``chat.completions.create`` keyword arguments for one streamed request.
 
@@ -534,7 +551,13 @@ def chat_request_kwargs(
     wrap_gemini_tool_results = wraps_openrouter_gemini_tool_results(wire, params, model_id)
     params = {
         "model": model_id,
-        "messages": _chat_messages(messages, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results),
+        "messages": _chat_messages(
+            messages,
+            wire,
+            provider,
+            wrap_gemini_tool_results=wrap_gemini_tool_results,
+            fallback_model=fallback_model,
+        ),
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True

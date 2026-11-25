@@ -27,6 +27,7 @@ from mindroom.llm.errors import (
     ProviderError,
     ProviderUnavailable,
     RateLimited,
+    is_transient_status,
 )
 from mindroom.llm.messages import media_items
 
@@ -71,12 +72,6 @@ _UNAUTHORIZED_STATUS = 401
 # also sends one with a ``Retry-After`` header when the requests it is still settling fill a low balance's in-flight
 # spending budget, which a wait can let through; that one is final too.
 _PAYMENT_REQUIRED_STATUS = 402
-# Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
-# timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
-# which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
-# (520 to 524) in front of a custom endpoint.
-_TRANSIENT_CLIENT_STATUSES = frozenset({408, 409})
-_SERVER_ERROR_RANGE = range(500, 600)
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
@@ -92,6 +87,8 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
 # package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
 # limit, extra usage included, name the time the limit resets, so they stay rate limits.
+# The Codex backend's error types, sent with a 429, for a ChatGPT plan whose Codex usage limit is reached until the
+# ``resets_at`` the body names, often hours away, and for a plan that does not include Codex.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -105,6 +102,8 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "1113",
         "1309",
         "1314",
+        "usage_limit_reached",
+        "usage_not_included",
     },
 )
 # How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
@@ -116,12 +115,14 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
 # Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
 # spending cap.", or "Your billing account has ..." for the billing account's cap. OpenRouter's 403 for a key that
 # reached the credit limit set on it: "Key limit exceeded (monthly limit). Manage it using ...".
+# The Codex backend's "The usage limit has been reached", for a reply that lost its error type.
 _QUOTA_EXHAUSTED_WORDING = (
     "credit balance is too low",
     "you have reached your specified",
     "prepayment credits are depleted",
     "exceeded its monthly spending cap",
     "key limit exceeded",
+    "the usage limit has been reached",
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
@@ -276,7 +277,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
     if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):
         return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if over_tokens_per_minute else typed(RateLimited)
-    if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
+    if is_transient_status(status):
         too_large = _PHYSICAL_BATCH_TOO_SMALL in lowered
         return typed(ContextWindowExceeded) if too_large else typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:

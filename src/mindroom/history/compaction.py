@@ -837,11 +837,8 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
                 keep_thinking_setting=summary_model.keeps_thinking_setting,
-                on_usage=(
-                    partial(summarizer.on_usage, summary_model.model.identity)
-                    if summarizer.on_usage is not None
-                    else None
-                ),
+                on_usage=summarizer.on_usage,
+                allow_transient_fallback=attempt >= retry_policy.max_attempts,
             )
         except Exception as exc:
             logger.warning(
@@ -854,6 +851,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 fallback_model is not None
                 and attempt < retry_policy.max_attempts
                 and isinstance(exc, ModelSafeguardRefusal)
+                and not (
+                    exc.model_id is not None
+                    and (provider_route(exc.provider), exc.model_id)
+                    == (provider_route(fallback_model.model.identity.provider), fallback_model.model.identity.id)
+                )
             ):
                 fallback_token_estimator = _summary_input_tokens(fallback_model.model)
                 fits_fallback = (

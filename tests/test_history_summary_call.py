@@ -92,7 +92,7 @@ async def test_a_summary_whose_provider_reported_no_usage_records_none() -> None
     """A response that is timed but carries no counters reported no usage, so the summary records none."""
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(usage: MessageMetrics) -> None:
+    async def on_usage(_identity: object, usage: MessageMetrics) -> None:
         recorded.append(usage)
 
     await generate_compaction_summary(
@@ -122,7 +122,11 @@ async def test_the_summary_request_is_one_call_without_provider_retries_a_thinki
     [request] = model.requests
     assert request.tools == ()
     assert request.tool_choice is None
-    assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+    assert request.overrides == RequestOverrides(
+        transient_retries="caller",
+        prompt_cache=False,
+        omit_thinking_setting=True,
+    )
 
 
 @pytest.mark.asyncio

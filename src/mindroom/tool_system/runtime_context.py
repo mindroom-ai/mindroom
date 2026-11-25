@@ -20,6 +20,14 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.tool_system.context_scope import (
+    current_budget_monitor,  # noqa: F401
+    current_requester_id,  # noqa: F401
+    detached_requester_context,  # noqa: F401
+    get_detached_requester_context,  # noqa: F401
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import (
     bind_detached_execution_identity,
@@ -69,44 +77,6 @@ class DetachedRequesterContext:
     agent_reply_memberships: AgentReplyMembershipIndex
     config_provider: Callable[[], Config | None]
     budget_monitor: BudgetMonitor | None
-
-
-_DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
-    "detached_requester_context",
-    default=None,
-)
-
-
-def get_detached_requester_context() -> DetachedRequesterContext | None:
-    """Return authority established by the current detached request boundary."""
-    return _DETACHED_REQUESTER_CONTEXT.get()
-
-
-def current_budget_monitor() -> BudgetMonitor | None:
-    """Return the spend monitor of the current conversation or detached API request."""
-    if (context := get_tool_runtime_context()) is not None:
-        return context.budget_monitor
-    detached = get_detached_requester_context()
-    return detached.budget_monitor if detached is not None else None
-
-
-def current_requester_id() -> str | None:
-    """Return the requester of the current conversation, or of the detached API request when there is none.
-
-    An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
-    """
-    context = get_tool_runtime_context() or get_detached_requester_context()
-    return context.requester_id if context is not None else None
-
-
-@contextmanager
-def detached_requester_context(context: DetachedRequesterContext | None) -> Iterator[None]:
-    """Bind detached authority for an operation without leaking between requests."""
-    token = _DETACHED_REQUESTER_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _DETACHED_REQUESTER_CONTEXT.reset(token)
 
 
 @dataclass(frozen=True)
@@ -460,10 +430,6 @@ class ToolRuntimeSupport:
         )
 
 
-_TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
-    "tool_runtime_context",
-    default=None,
-)
 _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
@@ -519,11 +485,6 @@ class CallOutputStream:
 
 
 _CALL_OUTPUT_STREAM: ContextVar[CallOutputStream | None] = ContextVar("call_output_stream", default=None)
-
-
-def get_tool_runtime_context() -> ToolRuntimeContext | None:
-    """Get the current shared tool runtime context."""
-    return _TOOL_RUNTIME_CONTEXT.get()
 
 
 def require_tool_runtime_context() -> ToolRuntimeContext:
@@ -726,16 +687,6 @@ async def emit_custom_event(
         message_received_depth=context.message_received_depth,
     )
     await emit(context.hooks.registry, event_name, hook_context)
-
-
-@contextmanager
-def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
-    """Set shared tool runtime context for the current async execution scope."""
-    token = _TOOL_RUNTIME_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _TOOL_RUNTIME_CONTEXT.reset(token)
 
 
 @contextmanager

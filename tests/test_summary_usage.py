@@ -47,6 +47,8 @@ from tests.history_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.llm.provider import ModelIdentity
+
 
 def _summary_model(*replies: Reply) -> ScriptedSummaryModel:
     """Return a summary model whose stored usage rows name ``test-provider``."""
@@ -324,7 +326,7 @@ async def test_safeguard_refusal_propagates_when_usage_save_fails() -> None:
         usage=MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
     )
 
-    async def locked_usage_storage(_usage: MessageMetrics) -> None:
+    async def locked_usage_storage(_identity: object, _usage: MessageMetrics) -> None:
         msg = "database is locked"
         raise sqlite3.OperationalError(msg)
 
@@ -397,10 +399,10 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
         ],
     )
 
-    async def record(usage: MessageMetrics) -> None:
+    async def record(identity: ModelIdentity, usage: MessageMetrics) -> None:
         recording.set()
         try:
-            await record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None)
+            await record_summary_usage(identity, usage, storage=storage, session_id="session", requester_id=None)
         finally:
             recorded.set()
 
@@ -455,8 +457,8 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
     )
     model = _summary_model([Await(ignore_cancellation), *summary_steps(late_summary)])
 
-    async def record(usage: MessageMetrics) -> None:
-        await record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None)
+    async def record(identity: ModelIdentity, usage: MessageMetrics) -> None:
+        await record_summary_usage(identity, usage, storage=storage, session_id="session", requester_id=None)
         recorded.set()
 
     with pytest.raises(_CompactionSummaryTimeoutError):

@@ -186,6 +186,7 @@ class TeamAttempt:
             status=status,
             model=record.model,
             model_provider=record.model_provider,
+            answering_model_name=record.model_name,
             metrics=team_usage(record),
             prior_usage=prior_usage,
             context_run=record,

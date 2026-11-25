@@ -28,9 +28,12 @@ from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.identity import model_identity
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -48,8 +51,10 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import drain
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
+from tests.scripted_agent_helpers import raising
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 
@@ -528,3 +533,123 @@ def test_openai_compat_completion_adds_its_cost_for_its_requester(
     # Alice is over her zero cap, so the reply runs on luna: 1,000 input tokens at $0.20 and 100 at $1.25 per million.
     response_finished.assert_called_once_with("@alice:localhost", pytest.approx(0.000325), ANY)
     assert response_finished.call_args.args[2] <= datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_capped_user_cannot_fail_over_from_unpriced_primary_to_priced_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A voice reusable build created under budget blocks priced fallbacks once the requester crosses their cap."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.matrix_rtc.call_tools import _CallAgentCache  # noqa: PLC0415
+
+    config = _make_config({"leader": AgentConfig(display_name="Leader", model="opus")})
+    config.models["opus"] = ModelConfig(provider="synthetic", id="opus-sub", fallbacks=["bedrock-opus"])
+    config.models["bedrock-opus"] = ModelConfig(
+        provider="synthetic",
+        id="bedrock-paid",
+        pricing=ModelPricing(input=5, output=25),
+    )
+    config.models["local"] = ModelConfig(provider="synthetic", id="local-free")
+    config.budgets = BudgetsConfig(fallback_model="local", monthly_limit_usd=10.0)
+    paths = _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+
+    opus_identity = model_identity(config.models["opus"])
+    quota_error = ProviderError("quota", provider=opus_identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+    models_by_ref = {
+        "opus": ScriptedModel([[raising(quota_error)]], identity=opus_identity),
+        "bedrock-opus": ScriptedModel([answer("paid")], identity=model_identity(config.models["bedrock-opus"])),
+    }
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, name, **_kw: models_by_ref[name],
+    )
+
+    monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_owner(), requester_id=_ALICE))
+    context = replace(
+        base_ctx,
+        requester_id=_ALICE,
+        orchestrator=SimpleNamespace(budgets=monitor),
+        active_model_name="opus",
+    )
+    # Build the reusable voice agent while Alice is still under budget (spend = 0 < 10).
+    cache = _CallAgentCache(
+        agent_name="leader",
+        config=config,
+        runtime_paths=paths,
+        context=context,
+        active_model_name="opus",
+    )
+    reusable_build = cache._build(knowledge=None, refresh_scheduler=None)
+
+    # Alice crosses her cap before the next call turn reuses the cached build.
+    set_month_spend(monitor, {_ALICE: 12.0})
+    with tool_runtime_context(context), pytest.raises(ProviderError):
+        await drain(reusable_build.spec.model, ModelRequest(messages=(Message(role="user", content="hello"),)))
+
+    assert len(models_by_ref["opus"].requests) == 1
+    assert models_by_ref["bedrock-opus"].requests == []
+
+
+def test_context_scope_precedence_and_restoration(tmp_path: Path) -> None:
+    """Nested conversation/detached scopes preserve precedence, never borrow detached monitors, and restore cleanly."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.tool_system.context_scope import (  # noqa: PLC0415
+        current_budget_monitor,
+        current_requester_id,
+        detached_requester_context,
+        get_detached_requester_context,
+        get_tool_runtime_context,
+        tool_runtime_context,
+    )
+    from mindroom.tool_system.runtime_context import DetachedRequesterContext  # noqa: PLC0415
+
+    bob = "@bob:localhost"
+    config = _make_config({"leader": AgentConfig(display_name="Leader")})
+    paths = _runtime_paths(tmp_path)
+    detached_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    conv_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    detached = DetachedRequesterContext(
+        requester_id=_ALICE,
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+        budget_monitor=detached_monitor,
+    )
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_owner(), requester_id=bob))
+    conv_with_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=conv_monitor))
+    conv_without_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=None))
+
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)
+    with detached_requester_context(detached):
+        assert get_detached_requester_context() is detached
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+        with tool_runtime_context(conv_with_monitor):
+            assert get_tool_runtime_context() is conv_with_monitor
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+            # Clearing conversation exposes enclosing detached authority.
+            with tool_runtime_context(None):
+                assert get_tool_runtime_context() is None
+                assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+        # A conversation context with budget_monitor=None must NOT borrow detached's monitor.
+        with tool_runtime_context(conv_without_monitor):
+            assert current_requester_id() == bob
+            assert current_budget_monitor() is None
+
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+    assert (get_tool_runtime_context(), get_detached_requester_context()) == (None, None)
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)
