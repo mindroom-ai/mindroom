@@ -99,6 +99,7 @@ __all__ = [
     "client_user_oauth_access_token",
     "plugin_context",
     "plugin_origin_url",
+    "read_in_room",
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
@@ -121,7 +122,7 @@ _NOT_A_MEMBER = "Not a member of this room."
 # A client can tell the condition that lasts until a bot joins the room from a failure worth retrying.
 _NO_BOT_IN_ROOM = "No running MindRoom bot is in this room."
 # As long as the computers API waits for the same membership check.
-ROOM_READ_TIMEOUT_SECONDS = 20
+_ROOM_READ_TIMEOUT_SECONDS = 20
 logger = get_logger(__name__)
 
 
@@ -668,7 +669,7 @@ async def read_in_room[T](
     if client is None:
         raise HTTPException(503, _NO_BOT_IN_ROOM)
     try:
-        async with asyncio.timeout(ROOM_READ_TIMEOUT_SECONDS):
+        async with asyncio.timeout(_ROOM_READ_TIMEOUT_SECONDS):
             return await read(client)
     except Exception as error:
         # A failed or timed-out read leaves the answer unknown, which must never pass for a yes or a no.

@@ -51,12 +51,12 @@ type IndependentUsageKind = Literal[
 # Handling: Keep `schedule_parse` in `LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical `system.db`
 #   rows still read and aggregate cleanly, while removing it from `IndependentUsageKind` so no new writer can emit it.
 # Coverage: tests/test_usage_stats_storage.py::test_retired_schedule_parse_usage_rows_still_read_and_aggregate.
-LEGACY_USAGE_KINDS: frozenset[str] = frozenset({"dynamic_workflow", "schedule_parse"})
+_LEGACY_USAGE_KINDS: frozenset[str] = frozenset({"dynamic_workflow", "schedule_parse"})
 # ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
 # replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.
 type UsageKind = Literal["run", "pre_ledger", "dynamic_workflow", "schedule_parse"] | IndependentUsageKind
 USAGE_KINDS: frozenset[str] = frozenset(
-    {"run", "pre_ledger", *LEGACY_USAGE_KINDS, *get_args(IndependentUsageKind.__value__)},
+    {"run", "pre_ledger", *_LEGACY_USAGE_KINDS, *get_args(IndependentUsageKind.__value__)},
 )
 
 SYSTEM_USAGE_ENTITY = "system:internal"

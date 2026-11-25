@@ -273,7 +273,7 @@ async def test_a_failed_power_read_answers_503_never_no_power() -> None:
 @pytest.mark.asyncio
 async def test_a_power_read_that_never_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A state read that hangs gives up after the lookup timeout with 503, never holding the request open."""
-    monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(plugin_http, "_ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
     client.room_get_state = _never_answers
@@ -322,7 +322,7 @@ async def test_is_direct_follows_core_direct_message_rule(member_content: dict[s
 @pytest.mark.asyncio
 async def test_a_failed_direct_message_read_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A direct-message read that fails, raises or hangs is 503, never a guess."""
-    monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(plugin_http, "_ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
     client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN")

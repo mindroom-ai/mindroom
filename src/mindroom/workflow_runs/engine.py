@@ -88,7 +88,7 @@ _UNSET = _Unset.VALUE
 
 
 @dataclass(slots=True)
-class Places:
+class _Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
 
     A call holds its place from its start to its end (except while waiting on peer messages or a child ask_user).
@@ -107,7 +107,7 @@ class _RunState:
 
     # Which calls of the run work now and which wait for a place, counted here and not from the saved nodes: a
     # node that an ended attempt left running holds no place until the attempt that reaches it waits for it.
-    places: Places | None = None
+    places: _Places | None = None
     tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     # True while the run is ending and waits, without its lock, for its agents to stop: it takes no call.
     stopping: bool = False
@@ -120,7 +120,7 @@ class _RunState:
         return self.places is None and self.charged_at is None and not (self.tasks or self.stopping or self.refused)
 
 
-def run_outcome(
+def _run_outcome(
     run: WorkflowRun,
     attempt: ScriptRunRecord | None,
     stopped: WorkflowRunState = WorkflowRunState.CANCELLED,
@@ -210,11 +210,11 @@ class WorkflowEngine:
         """Return whether *run_id* is stopping or already terminal."""
         return self.is_stopping(run_id) or self.store.get_run(run_id).state in TERMINAL_RUN_STATES
 
-    def places_for(self, run: WorkflowRun) -> Places:
+    def places_for(self, run: WorkflowRun) -> _Places:
         """Return the slot pool for *run*, initializing it if absent."""
         state = self._state(run.run_id)
         if state.places is None:
-            state.places = Places(max(1, run.max_concurrent))
+            state.places = _Places(max(1, run.max_concurrent))
         return state.places
 
     def spawn[T](self, owner: str | None, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
@@ -650,7 +650,7 @@ class WorkflowEngine:
                 attempt = await self.scripts.reconcile_durable(run_id=run.script_run_id)
                 if attempt.state in TERMINAL_SCRIPT_RUN_STATES:
                     # The same rule as the maintenance pass: an attempt that ended before the stop ends as it did.
-                    outcome = run_outcome(self.store.get_run(run_id), attempt, stopped=state)
+                    outcome = _run_outcome(self.store.get_run(run_id), attempt, stopped=state)
             run = await self.end_run(run, *outcome)
         return run
 
@@ -1008,7 +1008,7 @@ class WorkflowEngine:
             attempt = None
         if attempt is not None and attempt.state not in TERMINAL_SCRIPT_RUN_STATES:
             return run
-        state, error = run_outcome(self.store.get_run(run.run_id), attempt)
+        state, error = _run_outcome(self.store.get_run(run.run_id), attempt)
         if replay and state is WorkflowRunState.INTERRUPTED and error in AUTO_RESUME_REASONS:
             # The attempt is over and the run is not: its nodes are settled, and the next attempt runs the same script.
             return await self.end_run(

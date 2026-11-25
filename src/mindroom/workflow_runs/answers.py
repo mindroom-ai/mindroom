@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
 
-type AnswerOutcome = Literal[
+type _AnswerOutcome = Literal[
     "accepted",
     "not_for_you",
     "wrong_place",
@@ -158,7 +158,7 @@ def _clip_options(options: list[str], limit: int | None) -> list[str]:
     return [] if limit == 0 else [clip(option, limit) for option in options]
 
 
-def question_content(
+def _question_content(
     run: WorkflowRun,
     node: WorkflowNode,
     status: Literal["open", "answered", "cancelled"] = "open",
@@ -226,7 +226,7 @@ async def show_question(
     if as_edit and not isinstance(event_id, str):
         return None
     for chars, answer_chars, option_chars, body_option_chars in _CLOSED_FITS if as_edit else _OPEN_FITS:
-        content = question_content(
+        content = _question_content(
             run,
             node,
             status,
@@ -264,7 +264,7 @@ async def answer_question(
     card_event_id: str | None,
     option: str | None,
     text: str | None,
-) -> AnswerOutcome:
+) -> _AnswerOutcome:
     """Answer the question of one `ask` call of a run, and return whether the answer counted or why it did not.
 
     It counts only from the run's requester, in the run's room and thread, for the card of the call as it is now,
@@ -294,7 +294,7 @@ async def handle_workflow_answer(
     *,
     agent_name: str,
     engine: Callable[[], WorkflowEngine],
-) -> AnswerOutcome | None:
+) -> _AnswerOutcome | None:
     """Answer the question a client's answer event names, and tell its sender when the answer did not count.
 
     The event is `{run, node, option | text}` in the run's thread, as a reply to the question's card. Every bot in

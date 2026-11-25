@@ -258,7 +258,7 @@ async def test_a_failed_history_read_answers_503(
     outcome: str,
 ) -> None:
     """A state or event read that answers an error, raises, or outlasts the lookup timeout is 503, never a start."""
-    monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(plugin_http, "_ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client("joined", _chain(BOB, *BOB_INVITED_JOINED_RENAMED))
     reader = await _reader(client, BOB)
     if outcome == "never answers":

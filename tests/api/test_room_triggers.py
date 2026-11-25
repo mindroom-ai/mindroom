@@ -417,5 +417,5 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
 
     h.client.room_get_state = _never_answers
-    monkeypatch.setattr(plugin_http, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(plugin_http, "_ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503

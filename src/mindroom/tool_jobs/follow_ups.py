@@ -130,7 +130,7 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     )
 
 
-async def has_working_jobs_for_conversation(
+async def _has_working_jobs_for_conversation(
     runtime: ToolJobRuntime,
     key: ConversationKey,
     *,
@@ -176,7 +176,7 @@ async def has_working_jobs_for_reply(
         silent=envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
     )
     current_follow_up_id = envelope.source_event_id if envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP else None
-    return await has_working_jobs_for_conversation(
+    return await _has_working_jobs_for_conversation(
         runtime,
         key,
         current_follow_up_id=current_follow_up_id,

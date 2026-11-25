@@ -65,7 +65,7 @@ _ERROR_CHARS = 200
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
 
 
-def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
+def _card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
     """Return what a run's card says: who and what the run is, where it stands, its counts and what it used.
 
     A run that ended without completing says why in one line, the last of its error: a traceback names its error
@@ -86,7 +86,7 @@ def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> d
     }
 
 
-def card_text(content: dict[str, Any]) -> str:
+def _card_text(content: dict[str, Any]) -> str:
     """Return the card as plain text, for a client that does not draw it."""
     counts = content["counts"]
     title = f'Workflow "{content["title"]}"' if content["title"] else "Workflow"
@@ -106,7 +106,7 @@ def _fitted_card(
     final: bool,
 ) -> dict[str, Any]:
     """Return the card's content within what one edit event holds; the card of an ended run carries its graph."""
-    content = card_content(run, meta, graph.phases)
+    content = _card_content(run, meta, graph.phases)
     if not final:
         return content if fits(content) else {**content, "phases": []}
 
@@ -310,7 +310,7 @@ class RunViews:
             return True
 
         def message(content: dict[str, Any]) -> dict[str, Any]:
-            return notice(run, card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
+            return notice(run, _card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
 
         def fits(content: dict[str, Any]) -> bool:
             return notice_fits(client, run, message(content), run.card_event_id)

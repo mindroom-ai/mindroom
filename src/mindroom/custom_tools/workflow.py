@@ -611,11 +611,11 @@ async def handle_workflow_event(
     engine: Callable[[], WorkflowEngine],
 ) -> None:
     """Act on a person's workflow event for the bot of *agent_name*: an answer to a question, or a Resume."""
-    handle = handle_workflow_answer if event.type == WORKFLOW_ANSWER_EVENT_TYPE else handle_workflow_control
+    handle = handle_workflow_answer if event.type == WORKFLOW_ANSWER_EVENT_TYPE else _handle_workflow_control
     await handle(room, event, agent_name=agent_name, engine=engine)
 
 
-async def handle_workflow_control(
+async def _handle_workflow_control(
     room: nio.MatrixRoom,
     event: nio.UnknownEvent,
     *,
