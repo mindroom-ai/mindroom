@@ -31,6 +31,7 @@ from mindroom.requester_identity import (
     is_persisted_managed_entity_id,
     managed_entity_user_ids,
 )
+from mindroom.thread_tags import reopen_thread_if_resolved
 
 if TYPE_CHECKING:
     import nio
@@ -368,6 +369,23 @@ async def dispatch_reactive_trigger(
         config=config,
         runtime_paths=runtime_paths,
     )
+    if rule.target.reopen_on_fire and resolved_thread.thread_event_id is not None and not resolved_thread.per_fire_root:
+        try:
+            await reopen_thread_if_resolved(
+                target_bot.client,
+                rule.target.room_id,
+                resolved_thread.thread_event_id,
+                requester_user_id=rule.owner_user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to auto-reopen resolved thread before reactive trigger delivery",
+                trigger_id=rule.trigger_id,
+                room_id=rule.target.room_id,
+                thread_id=resolved_thread.thread_event_id,
+                exc_info=True,
+            )
+
     transaction_id = build_reactive_trigger_transaction_id(firing)
     delivered = await send_matrix_message(
         target_bot.client,

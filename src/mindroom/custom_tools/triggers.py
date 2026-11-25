@@ -120,6 +120,7 @@ _UPDATABLE_FIELDS: tuple[str, ...] = (
     "cooldown_seconds",
     "max_fires_per_hour",
     "expires_in_hours",
+    "reopen_on_fire",
     "once",
     "enabled",
 )
@@ -133,6 +134,7 @@ _COMMON_REACTIVE_PARAMS: frozenset[str] = frozenset(
         "target_thread_id",
         "new_thread",
         "thread_key",
+        "reopen_on_fire",
         "once",
         "max_fires_per_hour",
         "cooldown_seconds",
@@ -163,6 +165,7 @@ _ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
             "target_room_id",
             "target_thread_id",
             "new_thread",
+            "reopen_on_fire",
             "allowed_kinds",
             "replay_window_seconds",
             "max_body_bytes",
@@ -262,24 +265,43 @@ class TriggersTools(Toolkit):
         target_room_id = args["target_room_id"]
         target_thread_id = args["target_thread_id"]
         new_thread = args["new_thread"]
+        reopen_on_fire = False if args["reopen_on_fire"] is None else args["reopen_on_fire"]
         is_admin = cls._is_admin(context)
         if not is_admin and target_agent not in (None, context.agent_name):
             msg = "Only external trigger admins can target a different agent or team."
             raise ExternalTriggerStoreError(msg)
-        target = ExternalTriggerTarget(
-            room_id=target_room_id or context.room_id,
-            thread_id=target_thread_id,
-            agent=target_agent or context.agent_name,
-            new_thread=new_thread,
-        )
-        resolved_room_id = resolve_room_id(target.room_id, context.runtime_paths)
-        if not is_admin and resolved_room_id != context.room_id:
+        if new_thread and target_thread_id is not None:
+            msg = "target_thread_id and new_thread are mutually exclusive"
+            raise ValueError(msg)
+        raw_room_id = target_room_id or context.room_id
+        resolved_room_id = resolve_room_id(raw_room_id, context.runtime_paths)
+        current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
+        if not is_admin and resolved_room_id != current_room_id:
             msg = "Only external trigger admins can target a different room."
             raise ExternalTriggerStoreError(msg)
-        if target.thread_id is None:
-            return target
-        thread_root = await explicit_thread_root(context, room_id=resolved_room_id, thread_id=target.thread_id)
-        return ExternalTriggerTarget.model_validate({**target.model_dump(), "thread_id": thread_root})
+        resolved_thread_id: str | None
+        if new_thread or target_thread_id == "room":
+            resolved_thread_id = None
+        elif target_thread_id is None:
+            resolved_thread_id = (
+                (context.resolved_thread_id or context.thread_id) if resolved_room_id == current_room_id else None
+            )
+        else:
+            if not target_thread_id.strip():
+                msg = "thread_id must not be empty"
+                raise ValueError(msg)
+            resolved_thread_id = await explicit_thread_root(
+                context,
+                room_id=resolved_room_id,
+                thread_id=target_thread_id,
+            )
+        return ExternalTriggerTarget(
+            room_id=raw_room_id,
+            thread_id=resolved_thread_id,
+            agent=target_agent or context.agent_name,
+            new_thread=new_thread,
+            reopen_on_fire=reopen_on_fire,
+        )
 
     @classmethod
     async def _resolve_reactive_target(
@@ -296,6 +318,7 @@ class TriggersTools(Toolkit):
         target_thread_id = args["target_thread_id"]
         new_thread = args["new_thread"]
         thread_key = args["thread_key"]
+        reopen_on_fire = False if args["reopen_on_fire"] is None else args["reopen_on_fire"]
         if new_thread and target_thread_id is not None:
             msg = "target_thread_id and new_thread are mutually exclusive"
             raise ValueError(msg)
@@ -351,7 +374,7 @@ class TriggersTools(Toolkit):
         )
 
         resolved_thread_id: str | None
-        if new_thread:
+        if new_thread or target_thread_id == "room":
             resolved_thread_id = None
         elif target_thread_id is None:
             resolved_thread_id = default_thread_id(resolved_target_room_id)
@@ -370,6 +393,7 @@ class TriggersTools(Toolkit):
             thread_id=resolved_thread_id,
             new_thread=new_thread,
             thread_key=thread_key,
+            reopen_on_fire=reopen_on_fire,
             prompt=prompt,
         )
 
@@ -636,6 +660,7 @@ class TriggersTools(Toolkit):
         target_thread_id: str | None = None,
         new_thread: bool = False,
         thread_key: str | None = None,
+        reopen_on_fire: bool | None = None,
         once: bool | None = None,
         max_fires_per_hour: int | None = None,
         cooldown_seconds: int | None = None,
@@ -665,7 +690,7 @@ class TriggersTools(Toolkit):
         - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
         - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 
-        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`). Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
+        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'room'` (room timeline) or `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
         Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
@@ -1433,10 +1458,15 @@ def _build_updated_reactive_record(
         if args["expires_in_hours"] is None
         else _validate_expires_in_hours(args["expires_in_hours"], now=now)
     )
+    target_updates: dict[str, Any] = {}
+    if args["prompt"] is not None:
+        target_updates["prompt"] = args["prompt"]
+    if args["reopen_on_fire"] is not None:
+        target_updates["reopen_on_fire"] = args["reopen_on_fire"]
     new_target = (
         existing.target
-        if args["prompt"] is None
-        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), "prompt": args["prompt"]})
+        if not target_updates
+        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), **target_updates})
     )
     if args["enabled"] is None:
         new_enabled, new_disabled_reason = existing.enabled, existing.disabled_reason

@@ -121,6 +121,7 @@ class _Harness:
             room_id=room_id,
             thread_id=extra.pop("thread_id", None),
             new_thread=extra.pop("new_thread", False),
+            reopen_on_fire=extra.pop("reopen_on_fire", False),
             agent="assistant",
         )
         base: dict[str, Any] = {
@@ -159,6 +160,7 @@ class _Harness:
             room_id=target_room,
             thread_id=extra.pop("thread_id", None),
             new_thread=extra.pop("new_thread", False),
+            reopen_on_fire=extra.pop("reopen_on_fire", False),
             prompt=prompt,
         )
         record = ReactiveTriggerRecord(
@@ -207,6 +209,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "wh_deploy",
         room_id="lobby",
         thread_id="$deploy_thread",
+        reopen_on_fire=True,
         public_key=pub_key,
         key_id="deploy-key-secret-id",
         description="Deploy notifications",
@@ -231,6 +234,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         target_room=ROOM_B,
         agent="ops",
         thread_id="$ops_thread",
+        reopen_on_fire=True,
         description="Private ops escalation",
         prompt="Secret escalation instructions",
         created_at=2.0,
@@ -263,6 +267,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "target_room_id": ROOM_A,
         "target_thread_id": "$deploy_thread",
         "thread_mode": "thread",
+        "reopen_on_fire": True,
         "enabled": True,
         "disabled_reason": None,
         "once": False,
@@ -296,6 +301,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "prompt": "Triage urgent",
         "target_thread_id": None,
         "thread_mode": "origin",
+        "reopen_on_fire": False,
         "enabled": False,
         "disabled_reason": "once_consumed",
         "once": True,
@@ -309,10 +315,12 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "can_manage": False,
     }.items() <= alice_rows["wh_once"].items()
     assert alice_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
+    assert alice_rows["tr_watch_msg"]["reopen_on_fire"] is True
     assert alice_rows["tr_watch_unreachable"]["prompt"] == "Secret tag prompt"
 
     bob_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, BOB).json()["triggers"]}
     assert bob_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
+    assert bob_rows["tr_watch_msg"]["reopen_on_fire"] is True
     assert bob_rows["tr_watch_unreachable"]["prompt"] is None
     assert bob_rows["tr_watch_unreachable"]["target_room_id"] is None
 
@@ -325,6 +333,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "target_room_id": None,
         "target_thread_id": None,
         "thread_mode": "thread",
+        "reopen_on_fire": False,
         "can_manage": False,
     }.items() <= {row["trigger_id"]: row for row in carol_resp.json()["triggers"]}["tr_watch_msg"].items()
     for leaked in ("Secret escalation instructions", "Private ops escalation", ROOM_B, "$ops_thread"):

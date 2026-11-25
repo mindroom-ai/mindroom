@@ -1864,6 +1864,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks.sender",
     "mindroom.matrix.room_reconciliation",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]
@@ -11501,6 +11502,7 @@ depends_on = [
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]

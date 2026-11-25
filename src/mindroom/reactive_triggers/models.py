@@ -175,6 +175,7 @@ class TriggerTargetSpec(BaseModel):
     thread_id: str | None = None
     new_thread: bool = False
     thread_key: str | None = Field(default=None, max_length=256)
+    reopen_on_fire: bool = False
     prompt: str = Field(min_length=1, max_length=4000)
 
     @field_validator("agent", "room_id", "prompt")

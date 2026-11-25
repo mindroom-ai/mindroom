@@ -69,6 +69,7 @@ class TriggerRow:
     target_room_id: str | None
     target_thread_id: str | None
     thread_mode: _TriggerThreadMode
+    reopen_on_fire: bool
     enabled: bool
     disabled_reason: str | None
     once: bool
@@ -281,6 +282,7 @@ def _build_trigger_row(matched: _MatchedTrigger, *, can_manage: bool, joined_tar
         target_room_id=None if redacted else matched.target_room_id,
         target_thread_id=None if redacted else target_thread_id,
         thread_mode=thread_mode,
+        reopen_on_fire=False if redacted else target.reopen_on_fire,
         enabled=record.enabled,
         disabled_reason=disabled_reason,
         once=once,
