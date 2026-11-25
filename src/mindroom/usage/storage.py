@@ -34,17 +34,24 @@ type IndependentUsageKind = Literal[
     "skill_learning",
     "routing",
     "room_topic",
-    "schedule_parse",
     "team_mode",
     "thread_summary",
     "voice_dictation",
     "voice_normalization",
     "voice_transcription",
 ]
+# LEGACY_COMPAT: Historical `schedule_parse` helper usage rows in `system.db`.
+# Legacy format: Usage rows with `kind == "schedule_parse"` written by the removed natural-language schedule parser.
+# Last legacy release: v2026.11.574; replacement: unreleased; structured scheduler tool calls parse no model prompt.
+# Handling: Keep `schedule_parse` in `UsageKind` and `USAGE_KINDS` so historical `system.db` rows still read and
+#   aggregate cleanly, while removing it from `IndependentUsageKind` so no new writer can emit it.
+# Coverage: tests/test_usage_stats_storage.py::test_retired_schedule_parse_usage_rows_still_read_and_aggregate.
 # ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
 # replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.
-type UsageKind = Literal["run", "pre_ledger"] | IndependentUsageKind
-USAGE_KINDS: frozenset[str] = frozenset({"run", "pre_ledger", *get_args(IndependentUsageKind.__value__)})
+type UsageKind = Literal["run", "pre_ledger", "schedule_parse"] | IndependentUsageKind
+USAGE_KINDS: frozenset[str] = frozenset(
+    {"run", "pre_ledger", "schedule_parse", *get_args(IndependentUsageKind.__value__)},
+)
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"

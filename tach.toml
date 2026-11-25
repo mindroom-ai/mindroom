@@ -707,7 +707,6 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -744,7 +743,6 @@ visibility = [
     "mindroom.post_response_effects",
     "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.thread_summary",
 ]
@@ -1047,7 +1045,6 @@ visibility = [
     "mindroom.approval.execution",
     "mindroom.teams",
     "mindroom.routing",
-    "mindroom.scheduling.tasks",
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice.handler",
@@ -6222,18 +6219,12 @@ depends_on = [
 path = "mindroom.scheduling.tasks"
 depends_on = [
     "mindroom.config.models",
-    "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.conversation_hydration",
-    "mindroom.matrix.conversation_reads",
-    "mindroom.providers.registry",
-    "mindroom.agent_loop.helper",
-    "mindroom.llm",
     "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
-    "mindroom.failure_text",
     "mindroom.config.resolution",
+    "mindroom.scheduling.recurring_schedule",
     "mindroom.tool_system.plugins",
     "mindroom.matrix.state_failures",
 ]
@@ -6273,6 +6264,7 @@ depends_on = []
 visibility = [
     "mindroom.scheduling.executor",
     "mindroom.scheduling.runtime",
+    "mindroom.scheduling.tasks",
 ]
 
 [[modules]]
@@ -6280,7 +6272,6 @@ path = "mindroom.tool_system.runtime_context"
 depends_on = [
     "mindroom.hooks",
     "mindroom.runtime_resolution",
-    "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",
@@ -8079,7 +8070,6 @@ expose = [
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
-    "build_scheduling_runtime_from_tool_runtime_context",
     "current_execution_identity",
     "current_plugins",
     "detached_tool_scope",

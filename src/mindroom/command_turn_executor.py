@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
-    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.model_selection import CommandResultContent
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
@@ -54,7 +53,6 @@ class CommandTurnExecutorDeps:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     normalizer: InboundTurnNormalizer
-    conversation_reader: ConversationReader
     turn_policy: TurnPolicy
     turn_store: TurnStore
     visible_responses: VisibleResponseReconciler
@@ -185,7 +183,6 @@ class CommandTurnExecutor:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
-            conversation_reader=self.deps.conversation_reader,
             stable_target=target,
             record_handled_turn=record_command_turn,
             record_command_result=record_command_result,

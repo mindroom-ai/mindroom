@@ -51,13 +51,11 @@ from mindroom.llm.provider import ModelIdentity, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture
 from mindroom.memory.auto_flush import _extract_memory_summary
-from mindroom.scheduling import tasks as scheduling
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
@@ -145,21 +143,6 @@ async def _routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, sums_atte
     config = _system_config(paths)
     _scripted(monkeypatch, json.dumps({"entity_name": "helper", "reasoning": "Matched"}), sums_attempts=sums_attempts)
     await routing.suggest_responder("Help", ["helper"], config, paths)
-    return paths.storage_root
-
-
-async def _schedule_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    paths = test_runtime_paths(tmp_path)
-    config = _system_config(paths)
-    workflow = scheduling.ScheduledWorkflow(
-        schedule_type="cron",
-        cron_schedule=scheduling.CronSchedule(minute="0", hour="9"),
-        message="Check",
-        description="Check",
-    )
-    _scripted(monkeypatch, workflow.model_dump_json(exclude_unset=True))
-    responders = [MatrixID(username="helper", domain="localhost")]
-    await scheduling._parse_workflow_schedule("Daily at 9", config, paths, responders, timezone="UTC")
     return paths.storage_root
 
 
@@ -474,7 +457,6 @@ _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
     "room_topic": _room_topic,
     "routing": _routing,
     "routing_retried": lambda tmp_path, monkeypatch: _routing(tmp_path, monkeypatch, sums_attempts=True),
-    "schedule_parse": _schedule_parse,
     "skill_learning": _skill_learning,
     "team_mode": _team_mode,
     "thread_summary": _thread_summary,

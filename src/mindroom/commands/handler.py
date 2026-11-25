@@ -46,14 +46,10 @@ from mindroom.requester_identity import is_platform_administrator, resolve_human
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.errors import SchedulingError, refused_for_power
 from mindroom.scheduling.tasks import (
-    SchedulingRuntime,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
-    edit_scheduled_task,
     list_scheduled_tasks,
-    schedule_task,
 )
-from mindroom.thread_utils import check_agent_mentioned
 from mindroom.tool_jobs.client_cancel import (
     JobCancelRequest,
     cancel_jobs_command,
@@ -81,7 +77,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.model_selection import CommandResultContent
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -93,9 +88,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_SCHEDULE_COMMAND_TYPES = frozenset(
-    {CommandType.SCHEDULE, CommandType.LIST_SCHEDULES, CommandType.EDIT_SCHEDULE, CommandType.CANCEL_SCHEDULE},
-)
+_SCHEDULE_COMMAND_TYPES = frozenset({CommandType.LIST_SCHEDULES, CommandType.CANCEL_SCHEDULE})
 # Commands an agent may post for a human; Desktop pairing, confirmations, and admin changes need the human in person.
 _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
     {CommandType.HELP, CommandType.MODE, CommandType.MODEL, CommandType.UNKNOWN, *_SCHEDULE_COMMAND_TYPES},
@@ -213,20 +206,6 @@ async def _workflows_command(
     return await asyncio.to_thread(load_listing)
 
 
-def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
-    """Collapse active scheduling collaborators into one explicit live runtime object."""
-    return SchedulingRuntime(
-        client=context.client,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        room=room,
-        conversation_reader=context.conversation_reader,
-        agent_reply_memberships=context.agent_reply_memberships,
-        responder_candidates_for_room=context.responder_candidates_for_room,
-        task_runtime=context.scheduled_tasks,
-    )
-
-
 class _CommandEvent(Protocol):
     """Minimal canonical text-event shape required by command handling."""
 
@@ -258,7 +237,6 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    conversation_reader: ConversationReader
     stable_target: MessageTarget
     record_handled_turn: Callable[[str], Awaitable[None]]
     record_command_result: _CommandResultRecorder
@@ -399,28 +377,10 @@ def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, req
 async def _run_schedule_command(
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
-    event: _CommandEvent,
     command: Command,
-    requester_user_id: str,
 ) -> str:
     """Run one schedule command and return its reply, raising ``SchedulingError`` when the operation did not happen."""
     thread_id = context.stable_target.resolved_thread_id
-    if command.type == CommandType.SCHEDULE:
-        mentioned_agents, _, _ = check_agent_mentioned(
-            event.source,
-            None,
-            context.config,
-            context.runtime_paths,
-            room=room,
-        )
-        return await schedule_task(
-            runtime=_scheduling_runtime(context, room),
-            room_id=room.room_id,
-            thread_id=thread_id,
-            scheduled_by=requester_user_id,
-            full_text=command.args["full_text"],
-            mentioned_agents=mentioned_agents,
-        )
     if command.type == CommandType.LIST_SCHEDULES:
         return await list_scheduled_tasks(
             client=context.client,
@@ -428,14 +388,6 @@ async def _run_schedule_command(
             runtime_paths=context.runtime_paths,
             thread_id=thread_id,
             config=context.config,
-        )
-    if command.type == CommandType.EDIT_SCHEDULE:
-        return await edit_scheduled_task(
-            runtime=_scheduling_runtime(context, room),
-            room_id=room.room_id,
-            task_id=command.args["task_id"],
-            full_text=command.args["full_text"],
-            scheduled_by=requester_user_id,
         )
     if command.args.get("cancel_all", False):
         return await cancel_all_scheduled_tasks(
@@ -552,7 +504,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type in _SCHEDULE_COMMAND_TYPES:
         try:
-            response_text = await _run_schedule_command(context, room, event, command, requester_user_id)
+            response_text = await _run_schedule_command(context, room, command)
         except SchedulingError as error:
             response_text = str(refused_for_power(error) or f"❌ {error}")
 

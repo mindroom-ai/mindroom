@@ -270,7 +270,7 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing scheduled task by replacing its timing and content.",
+          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -278,9 +278,71 @@
                 "type": "string",
                 "description": "The ID of the task to edit (from list_schedules)."
               },
-              "request": {
-                "type": "string",
-                "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+              "message": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New trigger message posted when the schedule fires."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New short label for schedule listings."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -291,7 +353,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
+                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+              },
+              "clear_history_limit": {
+                "type": "boolean",
+                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
               },
               "silent": {
                 "anyOf": [
@@ -302,7 +368,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
+                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
               },
               "model": {
                 "anyOf": [
@@ -313,7 +379,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -329,8 +395,7 @@
               }
             },
             "required": [
-              "task_id",
-              "request"
+              "task_id"
             ]
           }
         },
@@ -745,17 +810,72 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
+          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
-              "request": {
+              "message": {
                 "type": "string",
-                "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
               },
               "new_thread": {
                 "type": "boolean",
                 "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -766,18 +886,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
+                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                "type": "boolean",
+                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -804,7 +917,7 @@
               }
             },
             "required": [
-              "request",
+              "message",
               "new_thread"
             ]
           }
