@@ -102,34 +102,6 @@
           }
         },
         {
-          "name": "cancel_schedule",
-          "description": "Cancel a scheduled task.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "task_id": {
-                "type": "string",
-                "description": "Task ID from `list_schedules`."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "task_id"
-            ]
-          }
-        },
-        {
           "name": "divide",
           "description": "Divide first number by second and return the result.",
           "parameters": {
@@ -159,137 +131,6 @@
             "required": [
               "a",
               "b"
-            ]
-          }
-        },
-        {
-          "name": "edit_schedule",
-          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "task_id": {
-                "type": "string",
-                "description": "Task ID from `list_schedules`."
-              },
-              "message": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New trigger message."
-              },
-              "description": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New listing label."
-              },
-              "execute_at": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New one-time ISO 8601 datetime with time."
-              },
-              "delay_seconds": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New one-time delay in seconds (>= 1)."
-              },
-              "cron": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New 5-field cron in `timezone`."
-              },
-              "timezone": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
-              },
-              "history_limit": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
-              },
-              "clear_history_limit": {
-                "type": "boolean",
-                "description": "Set `True` to remove the history limit (unlimited)."
-              },
-              "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Update quiet delivery mode."
-              },
-              "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "task_id"
             ]
           }
         },
@@ -489,28 +330,6 @@
           }
         },
         {
-          "name": "list_schedules",
-          "description": "List all pending scheduled tasks in the current room/thread.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": []
-          }
-        },
-        {
           "name": "multiply",
           "description": "Multiply two numbers and return the result.",
           "parameters": {
@@ -544,16 +363,22 @@
           }
         },
         {
-          "name": "run_scheduled_call",
-          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
+          "name": "scheduler",
+          "description": "Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.\n- `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.\n- `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; `model=\"\"` resets; `clear_history_limit=True` clears limit).\n- `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "create",
+                  "edit",
+                  "list",
+                  "cancel"
+                ],
+                "description": "Operation to run."
+              },
               "task_id": {
-                "type": "string",
-                "description": "Task ID from the scheduled prompt."
-              },
-              "arguments_json": {
                 "anyOf": [
                   {
                     "type": "string"
@@ -562,39 +387,29 @@
                     "type": "null"
                   }
                 ],
-                "description": "Replacement JSON object string (only when any arguments were approved)."
+                "description": "Task ID from `list` (`edit`/`cancel`)."
               },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "task_id"
-            ]
-          }
-        },
-        {
-          "name": "schedule",
-          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
-          "parameters": {
-            "type": "object",
-            "properties": {
               "message": {
-                "type": "string",
-                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Trigger text (`create` required); include `@agent`/`@team` to mention responders."
               },
               "new_thread": {
-                "type": "boolean",
-                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`create` required: `False` = current room/thread, `True` = fresh thread per fire (with `silent=True`, findings/failures post as a room-level root)."
               },
               "execute_at": {
                 "anyOf": [
@@ -605,7 +420,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
+                "description": "Future ISO 8601 datetime with time (or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
                 "anyOf": [
@@ -616,7 +431,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
+                "description": "One-time delay in seconds (>= 1)."
               },
               "cron": {
                 "anyOf": [
@@ -627,7 +442,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
+                "description": "5-field cron (`min hour day month weekday`) in `timezone`."
               },
               "description": {
                 "anyOf": [
@@ -638,7 +453,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Short listing label (defaults to trimmed `message`)."
+                "description": "Short label (defaults to trimmed `message`)."
               },
               "timezone": {
                 "anyOf": [
@@ -649,7 +464,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
+                "description": "IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`)."
               },
               "history_limit": {
                 "anyOf": [
@@ -660,11 +475,22 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
+                "description": "Max thread messages per fire (`0` = none; unset = unlimited)."
+              },
+              "clear_history_limit": {
+                "type": "boolean",
+                "description": "`edit` only: remove history limit."
               },
               "silent": {
-                "type": "boolean",
-                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`)."
               },
               "model": {
                 "anyOf": [
@@ -675,7 +501,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
+                "description": "Per-run model alias or `name@level` (`\"\"` resets on `edit`; conversation model unchanged)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -691,51 +517,7 @@
               }
             },
             "required": [
-              "message",
-              "new_thread"
-            ]
-          }
-        },
-        {
-          "name": "schedule_tool_call",
-          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "tool_name": {
-                "type": "string",
-                "description": "Your tool function name (e.g. \"post_slack_message\")."
-              },
-              "arguments_json": {
-                "type": "string",
-                "description": "Arguments as a JSON object string."
-              },
-              "execute_at": {
-                "type": "string",
-                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
-              },
-              "description": {
-                "type": "string",
-                "description": "Short action summary (guides execution if any arguments are approved)."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "tool_name",
-              "arguments_json",
-              "execute_at",
-              "description"
+              "action"
             ]
           }
         },
