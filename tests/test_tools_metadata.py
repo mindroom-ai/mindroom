@@ -1689,18 +1689,15 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
     tool = get_tool_by_name(
         "scheduler",
         runtime_paths,
-        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        tool_config_overrides={"exclude_tools": ["run_scheduled_call"]},
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
 
     assert set(toolkit_function_names(tool)) == {
-        "schedule",
+        "scheduler",
         "schedule_tool_call",
-        "run_scheduled_call",
-        "edit_schedule",
-        "list_schedules",
     }
 
 

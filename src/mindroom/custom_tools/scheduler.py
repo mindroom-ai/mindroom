@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Strict
 
@@ -34,6 +34,23 @@ def _scheduling_context(*, needs_room: bool = True) -> ToolRuntimeContext:
     return context
 
 
+def _reject_disallowed(action: str, provided: dict[str, bool]) -> None:
+    """Fail the call when parameters that do not belong to ``action`` were supplied."""
+    unexpected = [name for name, is_set in provided.items() if is_set]
+    if unexpected:
+        names = ", ".join(f"`{name}`" for name in unexpected)
+        msg = f"Parameter(s) {names} cannot be used with action={action!r}."
+        raise SchedulingError(msg)
+
+
+def _require_non_empty(value: str | None, *, name: str, action: str) -> str:
+    """Return ``value`` if non-empty, or raise ``SchedulingError``."""
+    if value is None or not value.strip():
+        msg = f"`{name}` is required and must be non-empty for action={action!r}."
+        raise SchedulingError(msg)
+    return value
+
+
 class SchedulerTools(Toolkit):
     """Tools for scheduling tasks in the current Matrix room/thread."""
 
@@ -41,62 +58,152 @@ class SchedulerTools(Toolkit):
         super().__init__(
             name="scheduler",
             tools=[
-                self.schedule,
+                self.scheduler,
                 self.schedule_tool_call,
                 self.run_scheduled_call,
-                self.edit_schedule,
-                self.list_schedules,
-                self.cancel_schedule,
             ],
         )
 
-    async def schedule(
+    async def scheduler(
         self,
-        message: str,
-        new_thread: bool,
+        action: Literal["create", "edit", "list", "cancel"],
+        task_id: str | None = None,
+        message: str | None = None,
+        new_thread: bool | None = None,
         execute_at: str | None = None,
         delay_seconds: Annotated[int | None, Strict()] = None,
         cron: str | None = None,
         description: str | None = None,
         timezone: str | None = None,
         history_limit: Annotated[int | None, Strict()] = None,
-        silent: bool = False,
+        clear_history_limit: bool = False,
+        silent: bool | None = None,
         model: str | None = None,
     ) -> str:
-        """Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).
+        """Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.
 
-        Supports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.
+        - `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.
+        - `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; `model=""` resets; `clear_history_limit=True` clears limit).
+        - `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).
 
         Args:
-            message: Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders.
-            new_thread: `False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root.
-            execute_at: Future ISO 8601 datetime with time (e.g. "2026-11-25T09:00:00-08:00", "...Z", or naive in `timezone`; pass offset during DST).
-            delay_seconds: One-time delay in seconds (>= 1; e.g. 900 = 15m).
-            cron: 5-field cron (`min hour day month weekday`, e.g. "0 9 * * 1-5") in `timezone` (DST-safe).
-            description: Short listing label (defaults to trimmed `message`).
-            timezone: IANA timezone (e.g. "America/Los_Angeles"); defaults to agent timezone.
-            history_limit: Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited).
-            silent: Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`.
-            model: Per-run model alias (including team members, e.g. "cheap" or "sol@high"); unset = default. Does not change conversation model.
-
-        Returns:
-            The scheduling result message.
+            action: Operation to run.
+            task_id: Task ID from `list` (`edit`/`cancel`).
+            message: Trigger text (`create` required); include `@agent`/`@team` to mention responders.
+            new_thread: `create` required: `False` = current room/thread, `True` = fresh thread per fire (with `silent=True`, findings/failures post as a room-level root).
+            execute_at: Future ISO 8601 datetime with time (or naive in `timezone`; pass offset during DST).
+            delay_seconds: One-time delay in seconds (>= 1).
+            cron: 5-field cron (`min hour day month weekday`) in `timezone`.
+            description: Short label (defaults to trimmed `message`).
+            timezone: IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`).
+            history_limit: Max thread messages per fire (`0` = none; unset = unlimited).
+            clear_history_limit: `edit` only: remove history limit.
+            silent: Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`).
+            model: Per-run model alias or `name@level` (`""` resets on `edit`; conversation model unchanged).
 
         """
-        context = _scheduling_context()
-        return await schedule_task(
-            context=context,
-            message=message,
-            new_thread=new_thread,
-            execute_at=execute_at,
-            delay_seconds=delay_seconds,
-            cron=cron,
-            description=description,
-            timezone=timezone,
-            history_limit=history_limit,
-            silent=silent,
-            model=model,
-        )
+        if action == "create":
+            _reject_disallowed(
+                "create",
+                {
+                    "task_id": task_id is not None,
+                    "clear_history_limit": clear_history_limit,
+                },
+            )
+            validated_message = _require_non_empty(message, name="message", action="create")
+            if new_thread is None:
+                msg = "`new_thread` is required for action='create' (pass `False` for current room/thread or `True` for a new thread per fire)."
+                raise SchedulingError(msg)
+            context = _scheduling_context()
+            return await schedule_task(
+                context=context,
+                message=validated_message,
+                new_thread=new_thread,
+                execute_at=execute_at,
+                delay_seconds=delay_seconds,
+                cron=cron,
+                description=description,
+                timezone=timezone,
+                history_limit=history_limit,
+                silent=False if silent is None else silent,
+                model=model,
+            )
+
+        if action == "edit":
+            _reject_disallowed("edit", {"new_thread": new_thread is not None})
+            validated_task_id = _require_non_empty(task_id, name="task_id", action="edit")
+            context = _scheduling_context()
+            return await edit_scheduled_task(
+                context=context,
+                task_id=validated_task_id,
+                message=message,
+                description=description,
+                execute_at=execute_at,
+                delay_seconds=delay_seconds,
+                cron=cron,
+                timezone=timezone,
+                history_limit=history_limit,
+                clear_history_limit=clear_history_limit,
+                silent=silent,
+                model=model,
+            )
+
+        if action == "list":
+            _reject_disallowed(
+                "list",
+                {
+                    "task_id": task_id is not None,
+                    "message": message is not None,
+                    "new_thread": new_thread is not None,
+                    "execute_at": execute_at is not None,
+                    "delay_seconds": delay_seconds is not None,
+                    "cron": cron is not None,
+                    "description": description is not None,
+                    "timezone": timezone is not None,
+                    "history_limit": history_limit is not None,
+                    "clear_history_limit": clear_history_limit,
+                    "silent": silent is not None,
+                    "model": model is not None,
+                },
+            )
+            context = _scheduling_context(needs_room=False)
+            return await list_scheduled_tasks(
+                client=context.client,
+                room_id=context.room_id,
+                runtime_paths=context.runtime_paths,
+                thread_id=context.resolved_thread_id,
+                config=context.config,
+            )
+
+        if action == "cancel":
+            _reject_disallowed(
+                "cancel",
+                {
+                    "message": message is not None,
+                    "new_thread": new_thread is not None,
+                    "execute_at": execute_at is not None,
+                    "delay_seconds": delay_seconds is not None,
+                    "cron": cron is not None,
+                    "description": description is not None,
+                    "timezone": timezone is not None,
+                    "history_limit": history_limit is not None,
+                    "clear_history_limit": clear_history_limit,
+                    "silent": silent is not None,
+                    "model": model is not None,
+                },
+            )
+            validated_task_id = _require_non_empty(task_id, name="task_id", action="cancel")
+            context = _scheduling_context(needs_room=False)
+            return await cancel_scheduled_task(
+                client=context.client,
+                room_id=context.room_id,
+                task_id=validated_task_id,
+                runtime_paths=context.runtime_paths,
+                task_runtime=context.orchestrator.scheduled_tasks if context.orchestrator is not None else None,
+            )
+
+        msg = f"Unsupported scheduler action: {action!r}. Expected one of: create, edit, list, cancel."
+        raise SchedulingError(msg)
 
     async def schedule_tool_call(
         self,
@@ -148,87 +255,3 @@ class SchedulerTools(Toolkit):
 
         """
         return await run_scheduled_call(_scheduling_context(needs_room=False), task_id, arguments_json)
-
-    async def edit_schedule(
-        self,
-        task_id: str,
-        message: str | None = None,
-        description: str | None = None,
-        execute_at: str | None = None,
-        delay_seconds: Annotated[int | None, Strict()] = None,
-        cron: str | None = None,
-        timezone: str | None = None,
-        history_limit: Annotated[int | None, Strict()] = None,
-        clear_history_limit: bool = False,
-        silent: bool | None = None,
-        model: str | None = None,
-    ) -> str:
-        """Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).
-
-        Args:
-            task_id: Task ID from `list_schedules`.
-            message: New trigger message.
-            description: New listing label.
-            execute_at: New one-time ISO 8601 datetime with time.
-            delay_seconds: New one-time delay in seconds (>= 1).
-            cron: New 5-field cron in `timezone`.
-            timezone: New IANA timezone (legacy UTC cron also requires `cron` in the target timezone).
-            history_limit: New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`).
-            clear_history_limit: Set `True` to remove the history limit (unlimited).
-            silent: Update quiet delivery mode.
-            model: Per-run model alias or `name@level`; `""` restores default.
-
-        Returns:
-            The edit result message.
-
-        """
-        context = _scheduling_context()
-        return await edit_scheduled_task(
-            context=context,
-            task_id=task_id,
-            message=message,
-            description=description,
-            execute_at=execute_at,
-            delay_seconds=delay_seconds,
-            cron=cron,
-            timezone=timezone,
-            history_limit=history_limit,
-            clear_history_limit=clear_history_limit,
-            silent=silent,
-            model=model,
-        )
-
-    async def list_schedules(self) -> str:
-        """List all pending scheduled tasks in the current room/thread.
-
-        Returns:
-            A formatted list of scheduled tasks with their IDs.
-
-        """
-        context = _scheduling_context(needs_room=False)
-        return await list_scheduled_tasks(
-            client=context.client,
-            room_id=context.room_id,
-            runtime_paths=context.runtime_paths,
-            thread_id=context.resolved_thread_id,
-            config=context.config,
-        )
-
-    async def cancel_schedule(self, task_id: str) -> str:
-        """Cancel a scheduled task.
-
-        Args:
-            task_id: Task ID from `list_schedules`.
-
-        Returns:
-            The cancellation result message.
-
-        """
-        context = _scheduling_context(needs_room=False)
-        return await cancel_scheduled_task(
-            client=context.client,
-            room_id=context.room_id,
-            task_id=task_id,
-            runtime_paths=context.runtime_paths,
-            task_runtime=context.orchestrator.scheduled_tasks if context.orchestrator is not None else None,
-        )
