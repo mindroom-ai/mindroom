@@ -461,7 +461,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     )
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         AsyncMock(return_value="Keep the recent instruction"),
     )
     model = responses_adapter(tmp_path, base_url="https://proxy.example/v1", store=True)

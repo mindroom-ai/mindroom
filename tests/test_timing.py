@@ -411,7 +411,7 @@ def test_build_agent_model_provider_preserves_prompt_assembly_subspan() -> None:
 def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     """History compaction model init should keep its dedicated timing label."""
     labels = _timing_probe_labels(
-        module_name="mindroom.history.compaction",
+        module_name="mindroom.history.summarizer",
         call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
         patch_target="mindroom.providers.registry.build_model_provider",
     )

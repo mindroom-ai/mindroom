@@ -14,7 +14,6 @@ from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
     compact_scope_history,
-    load_summarizer,
     scope_usage_recorder,
 )
 from mindroom.history.native import configure_native_history, native_history_route, with_native_history
@@ -37,6 +36,7 @@ from mindroom.history.storage import (
     read_scope_state,
     set_force_compaction,
 )
+from mindroom.history.summarizer import load_summarizer
 from mindroom.history.summary_call import is_summary_timeout
 from mindroom.history.summary_fork import (
     build_scope_fork,
@@ -626,7 +626,6 @@ async def _compact_stored_scope(
                     session_id=session.session_id,
                     scope=owner_scope(session),
                     on_usage=scope_usage_recorder(storage, session.session_id),
-                    fork=fork,
                 ),
                 available_history_budget=history_budget,
                 max_summary_tokens=max_summary_tokens,
@@ -636,6 +635,7 @@ async def _compact_stored_scope(
                 progress=progress,
                 complete=clear_and_complete,
                 model=model,
+                fork=fork,
             )
         except ConversationChangedError:
             # A request the conversation outran stays, so the next reply compacts what the conversation holds then.

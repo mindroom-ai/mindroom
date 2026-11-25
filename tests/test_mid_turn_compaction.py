@@ -138,7 +138,7 @@ class _CancelOnSuccess(RecordingCompactionLifecycle):
 @pytest.fixture
 def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
     calls = SummaryCalls()
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", calls)
     install_model_providers(monkeypatch, {"summary": summary_model()})
     return calls
 
@@ -1506,7 +1506,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
             raise RuntimeError(msg)
         return await summary_calls(**kwargs)
 
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", fail_second)
     model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
@@ -1551,7 +1551,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
         return await summary_calls(**kwargs)
 
     monkeypatch.setattr(mid_turn_compaction, "compact_running_turn", counted_compaction)
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second_chunk_of_second_attempt)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", fail_second_chunk_of_second_attempt)
 
     agent = _scoped_agent(ToolLoopModel(tool_rounds=14), config, paths, storage)
     if stop is asyncio.CancelledError:

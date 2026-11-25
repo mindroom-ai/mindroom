@@ -17,7 +17,6 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.history.compaction import _compaction_fallback_is_distinct
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
@@ -40,6 +39,7 @@ from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import _compaction_fallback_is_distinct
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
@@ -791,7 +791,7 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         _runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.history.compaction.logger.warning") as warning_mock:
+    with patch("mindroom.history.summarizer.logger.warning") as warning_mock:
         assert (
             _compaction_fallback_is_distinct(
                 config,
@@ -1410,7 +1410,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     install_model_providers(monkeypatch, {"default": summary_model()})
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(
                 return_value="merged summary",
             ),

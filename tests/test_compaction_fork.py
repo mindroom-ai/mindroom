@@ -22,7 +22,7 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history.compaction import Summarizer, SummaryModel, compact_scope_history, summarize_runs
+from mindroom.history.compaction import compact_scope_history
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import configured_replay_plan
@@ -31,6 +31,7 @@ from mindroom.history.request_size import RequestFrame, RequestSize, RequestSize
 from mindroom.history.runtime import compact_scope_now, prepare_scope_history
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction
+from mindroom.history.summarizer import Summarizer, SummaryModel, summarize_runs
 from mindroom.history.summary_call import (
     CompactionForkToolCallError,
     _CompactionSummaryTimeoutError,
@@ -255,7 +256,6 @@ def _summarizer(
     on_usage: Any = None,  # noqa: ANN401
     timeout_s: float = 10.0,
     sid: str = "sess-matrix",
-    fork: SummaryFork | None = None,
 ) -> Summarizer:
     fb = SummaryModel(fallback, "fallback", 50_000) if fallback else None
     return Summarizer(
@@ -267,7 +267,6 @@ def _summarizer(
         sid,
         TEST_AGENT_SCOPE,
         on_usage,
-        fork=fork,
     )
 
 
@@ -768,11 +767,12 @@ async def test_wire_codex_fork_preserves_prompt_cache_key_and_session_id(tmp_pat
         8_192,
         False,
     )
-    summarizer = _summarizer(unbound, sid="sess-codex", fork=fork)
+    summarizer = _summarizer(unbound, sid="sess-codex")
     summary, _ = await summarize_runs(
         summarizer,
         None,
         [_completed_run("r1", messages=[live.messages[1], turn.message])],
+        fork=fork,
     )
     assert (summary, unbound_bodies) == ("## Goal\nCodex forked summary", [])
     (live_h, live_b), (fork_h, fork_b) = recorded
@@ -877,7 +877,7 @@ async def test_wire_openai_responses_stored_pre_reply_fork_preserves_portable_re
         _session("sess-resp", runs=[_completed_run("r1", messages=[live.messages[1], turn1.message])]),
     )
     xml_calls = SummaryCalls()
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     install_model_providers(monkeypatch, {"default": ScriptedModel([], identity=model.identity)})
     frame = RequestFrame(ModelRequest(messages=()), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
     prepared = await prepare_scope_history(
@@ -923,7 +923,7 @@ async def _run_pre_reply(
         replay_window_tokens=10_000,
         threshold_tokens=5_000,
     )
-    mp.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    mp.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(mp, active, other=summary_model(model_id="other-model", provider="openai"))
     seed_session(storage, _session(sid, runs=[run]))
     frame = RequestFrame(ModelRequest(messages=(), tools=(_TOOL,)), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
@@ -1050,7 +1050,7 @@ async def test_live_compact_scope_now_warm_hit_and_cold_or_drifted_fallback(
         remembered: tuple[Message, ...] | None,
     ) -> bool:
         clear_fork_frames()
-        monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+        monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
         _install_default(monkeypatch, model)
         seed_session(storage, _session(sid, runs=[_warm_run(model, template, 4_000, run_id=f"r-{sid}")]))
         sess = storage.load_session(sid)
@@ -1094,7 +1094,7 @@ async def test_live_compact_scope_now_skips_fork_for_different_requester_routing
 
     # Bob triggers /compact with a different requester-derived (prompt_cache_key, session_id) -> falls back to XML.
     xml_calls = SummaryCalls(summary="xml-for-bob")
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(monkeypatch, bob_model)
     ctx = _scope_ctx(storage, "sess-shared", config, paths)
     with capture_logs() as logs:
@@ -1123,7 +1123,7 @@ async def test_compact_scope_now_sizes_with_active_model_name_when_compaction_mo
     active = ScriptedModel([], identity=ModelIdentity(id="scripted-model", provider="openai"))
     summary_provider = ScriptedModel([], identity=ModelIdentity(id="other-model", provider="openai"))
     install_model_providers(monkeypatch, {"default": active, "other": summary_provider})
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", SummaryCalls(summary="xml"))
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", SummaryCalls(summary="xml"))
     sizer_model_names: list[str] = []
 
     def spy_sizer(model: Any, cfg: Any, model_name: str) -> RequestSizer:  # noqa: ANN401
@@ -1165,7 +1165,7 @@ async def _run_mid_turn(
 ) -> RunRecord:
     config, paths, store = env
     storage = store if scoped else None
-    mp.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    mp.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(mp, model)
     session = (storage.load_session(sid) if storage else None) or new_scope_session(
         session_id=sid,
@@ -1369,7 +1369,7 @@ def _fork_case(
     xml_fallback: ScriptedModel | None = None,
     on_usage: Any = None,  # noqa: ANN401
     timeout_s: float = 10.0,
-) -> tuple[ScriptedModel, Summarizer, list[RunRecord]]:
+) -> tuple[ScriptedModel, Summarizer, SummaryFork, list[RunRecord]]:
     fork_model = ScriptedModel([steps], identity=_ID)
     run = _warm_run(fork_model, ModelRequest(messages=()), 1_000)
     fork = SummaryFork(
@@ -1381,7 +1381,8 @@ def _fork_case(
     )
     return (
         fork_model,
-        _summarizer(xml_primary, fallback=xml_fallback, on_usage=on_usage, timeout_s=timeout_s, fork=fork),
+        _summarizer(xml_primary, fallback=xml_fallback, on_usage=on_usage, timeout_s=timeout_s),
+        fork,
         [run],
     )
 
@@ -1413,9 +1414,16 @@ async def test_fork_fallback_to_primary_xml() -> None:
     ]
     for steps, expected_xml, expected_reason, max_tokens, on_usage in cases:
         xml_primary = summary_model(expected_xml, model_id=_ID.id, provider=_ID.provider)
-        fork_model, summarizer, runs = _fork_case(steps, xml_primary, on_usage=on_usage)
+        fork_model, summarizer, fork, runs = _fork_case(steps, xml_primary, on_usage=on_usage)
         with capture_logs() as logs:
-            summary, _ = await summarize_runs(summarizer, None, runs, max_summary_tokens=max_tokens, model=fork_model)
+            summary, _ = await summarize_runs(
+                summarizer,
+                None,
+                runs,
+                fork=fork,
+                max_summary_tokens=max_tokens,
+                model=fork_model,
+            )
         assert (summary, len(xml_primary.requests)) == (expected_xml, 1)
         assert any(entry.get("fork_fallback_reason") == expected_reason for entry in logs)
 
@@ -1432,10 +1440,10 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
     # 1. ModelSafeguardRefusal WITH fallback -> jumps straight to fallback XML (never calls primary XML).
     xml_primary = summary_model("unused", model_id=_ID.id, provider=_ID.provider)
     xml_fallback = summary_model("xml-from-fallback", model_id="fallback-model", provider="openai")
-    _, summarizer, runs = _fork_case([_raise_step(refusal)], xml_primary, xml_fallback=xml_fallback)
+    _, summarizer, fork, runs = _fork_case([_raise_step(refusal)], xml_primary, xml_fallback=xml_fallback)
     with capture_logs() as logs:
-        summary, served = await summarize_runs(summarizer, None, runs)
-    assert (summary, served.model.name, xml_primary.requests, len(xml_fallback.requests)) == (
+        summary, served = await summarize_runs(summarizer, None, runs, fork=fork)
+    assert (summary, served.name, xml_primary.requests, len(xml_fallback.requests)) == (
         "xml-from-fallback",
         "fallback",
         [],
@@ -1450,9 +1458,9 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
     ]:
         err = ProviderUnavailable("transient", provider="openai")
         xml_primary = summary_model(err, "no-retry", model_id=_ID.id, provider=_ID.provider)
-        _, summarizer, runs = _fork_case(steps, xml_primary, timeout_s=timeout_s)
+        _, summarizer, fork, runs = _fork_case(steps, xml_primary, timeout_s=timeout_s)
         with capture_logs() as logs, pytest.raises(ProviderUnavailable):
-            await summarize_runs(summarizer, None, runs)
+            await summarize_runs(summarizer, None, runs, fork=fork)
         assert len(xml_primary.requests) == 1
         assert any(entry.get("fork_fallback_reason") == expected_reason for entry in logs)
 
@@ -1461,27 +1469,30 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
 async def test_fork_usage_save_failure_warns_and_fatal_errors_propagate() -> None:
     metrics = MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=20, cache_read_tokens=800))
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case(
+    _, summarizer, fork, runs = _fork_case(
         summary_steps(summary_turn("fork-ok", usage=metrics)),
         xml_primary,
         on_usage=_broken_usage,
     )
     with capture_logs() as logs:
-        summary, _ = await summarize_runs(summarizer, None, runs)
+        summary, _ = await summarize_runs(summarizer, None, runs, fork=fork)
     assert (summary, xml_primary.requests) == ("fork-ok", [])
     assert any(entry.get("event") == "compaction_summary_usage_save_failed" for entry in logs)
     assert any(entry.get("compaction_strategy") == "fork" and entry.get("cache_read_tokens") == 800 for entry in logs)
 
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case([_raise_step(AuthenticationFailed("bad key", provider="openai"))], xml_primary)
+    _, summarizer, fork, runs = _fork_case(
+        [_raise_step(AuthenticationFailed("bad key", provider="openai"))],
+        xml_primary,
+    )
     with pytest.raises(AuthenticationFailed):
-        await summarize_runs(summarizer, None, runs)
+        await summarize_runs(summarizer, None, runs, fork=fork)
     assert xml_primary.requests == []
 
     started = asyncio.Event()
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case([_wait_step(started)], xml_primary)
-    task = asyncio.create_task(summarize_runs(summarizer, None, runs))
+    _, summarizer, fork, runs = _fork_case([_wait_step(started)], xml_primary)
+    task = asyncio.create_task(summarize_runs(summarizer, None, runs, fork=fork))
     await started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1512,7 +1523,7 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
         summary=loaded.summary,
         runs=loaded.runs,
     )
-    summarizer = _summarizer(xml_primary, sid="sess-race", fork=fork)
+    summarizer = _summarizer(xml_primary, sid="sess-race")
 
     async def complete_outcome(outcome: Any) -> Any:  # noqa: ANN401
         return outcome
@@ -1531,5 +1542,63 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
             progress=None,
             complete=complete_outcome,
             model=concurrent_fork,
+            fork=fork,
         )
     assert (xml_primary.requests, summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-race")) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_passing_warm_fork_summary_is_tokenized_only_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warm fork summary passing max_summary_tokens is validated once in summarizer, not re-tokenized by callers."""
+    from mindroom.history.replay import estimate_summary_text_tokens  # noqa: PLC0415
+
+    _, _, storage = _fork_config(tmp_path)
+    template = ModelRequest(messages=())
+    fork_model = ScriptedModel([summary_steps("## Goal\nConcise fork summary")], identity=_ID)
+    seed_session(storage, _session("sess-once", runs=[_warm_run(fork_model, template, 1_000)]))
+    loaded = storage.load_session("sess-once")
+    assert loaded is not None
+    xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
+    fork = build_scope_fork(
+        sizer=RequestSizer(fork_model, "openai"),
+        template=template,
+        system_messages=_SYS,
+        context_window=100_000,
+        reserve_tokens=4_096,
+        scope=TEST_AGENT_SCOPE,
+        summary=loaded.summary,
+        runs=loaded.runs,
+    )
+    calls_count = 0
+
+    def counted_estimate(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+        nonlocal calls_count
+        calls_count += 1
+        return estimate_summary_text_tokens(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.history.summarizer.estimate_summary_text_tokens", counted_estimate)
+
+    async def complete_outcome(outcome: Any) -> Any:  # noqa: ANN401
+        return outcome
+
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=loaded,
+        mode="auto",
+        summarizer=_summarizer(xml_primary, sid="sess-once"),
+        available_history_budget=50_000,
+        max_summary_tokens=50_000,
+        before_tokens=1_000,
+        replay_window_tokens=100_000,
+        threshold_tokens=80_000,
+        progress=None,
+        complete=complete_outcome,
+        model=fork_model,
+        fork=fork,
+    )
+    assert outcome is not None
+    assert calls_count == 1
+    assert xml_primary.requests == []

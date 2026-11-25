@@ -16,8 +16,9 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.history.compaction import _summarize_chunk, compact_scope_history, scope_usage_recorder
+from mindroom.history.compaction import compact_scope_history, scope_usage_recorder
 from mindroom.history.storage import record_summary_usage
+from mindroom.history.summarizer import summarize_chunk
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
@@ -247,7 +248,7 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
             ),
         ],
     )
-    result = await _summarize_chunk(
+    result = await summarize_chunk(
         _summarizer(
             model,
             100_000,
@@ -292,7 +293,7 @@ async def test_usage_storage_timeout_cannot_issue_another_paid_summary(tmp_path:
         ],
     )
     with capture_logs() as logs:
-        result = await _summarize_chunk(
+        result = await summarize_chunk(
             _summarizer(
                 model,
                 100_000,

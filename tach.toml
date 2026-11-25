@@ -3339,22 +3339,35 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.history.summarizer"
+depends_on = [
+    "mindroom.failure_text",
+    "mindroom.history.replay",
+    "mindroom.history.summary_call",
+    "mindroom.history.summary_fork",
+    "mindroom.history.summary_input",
+    "mindroom.llm",
+    "mindroom.native_compaction",
+    "mindroom.providers.names",
+    "mindroom.providers.registry",
+]
+visibility = [
+    "mindroom.history.compaction",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+]
+
+[[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.session_storage.lanes",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",
-    "mindroom.history.summary_call",
-    "mindroom.history.summary_fork",
-    "mindroom.history.summary_input",
+    "mindroom.history.summarizer",
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.llm",
-    "mindroom.native_compaction",
-    "mindroom.providers.names",
-    "mindroom.providers.registry",
-    "mindroom.failure_text",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3385,9 +3398,9 @@ depends_on = [
     "mindroom.providers.names",
 ]
 visibility = [
-    "mindroom.history.compaction",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.runtime",
+    "mindroom.history.summarizer",
 ]
 
 [[modules]]
@@ -3433,7 +3446,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.request_size",
-    "mindroom.history.compaction",
+    "mindroom.history.summarizer",
     "mindroom.providers.openai",
 ]
 
@@ -3617,6 +3630,7 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.history.request_size",
     "mindroom.history.storage",
+    "mindroom.history.summarizer",
     "mindroom.history.summary_call",
     "mindroom.history.summary_fork",
     "mindroom.history.types",
@@ -9031,6 +9045,7 @@ visibility = [
     "mindroom.history.runtime",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
+    "mindroom.history.summarizer",
     "mindroom.teams",
 ]
 
@@ -9091,7 +9106,7 @@ depends_on = [
     "mindroom.usage.storage",
     "mindroom.history.request_messages",
 ]
-visibility = ["mindroom.history.compaction"]
+visibility = ["mindroom.history.summarizer"]
 
 [[modules]]
 path = "mindroom.participation"
@@ -11155,6 +11170,7 @@ depends_on = [
     "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.history.storage",
+    "mindroom.history.summarizer",
     "mindroom.history.summary_fork",
     "mindroom.history.summary_message",
     "mindroom.history.types",

@@ -26,18 +26,14 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     RuntimePaths,
 )
-from mindroom.history.compaction import (
-    Summarizer,
-    SummaryModel,
-    _summarize_chunk,
-    compact_scope_history,
-)
+from mindroom.history.compaction import compact_scope_history
 from mindroom.history.runtime import clear_manual_compaction_request
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import ChunkState, Summarizer, SummaryModel, summarize_chunk
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
     CompactionSummaryIncompleteError,
@@ -284,7 +280,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
 
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(side_effect=interrupted_summary),
         ),
         pytest.raises(RuntimeError, match="provider exploded"),
@@ -317,7 +313,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=restart_summary),
     ):
         await prepare_history_for_run_for_test(
@@ -719,16 +715,16 @@ async def test_summary_chunk_propagates_original_error_when_rebuilt_input_is_not
 
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=generate_summary,
         ),
         patch(
-            "mindroom.history.compaction.build_summary_input",
+            "mindroom.history.summarizer.build_summary_input",
             return_value=(initial_input, [run]),
         ) as rebuild_input,
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
-        await _summarize_chunk(
+        await summarize_chunk(
             _summarizer(summary_model(), 4_000),
             None,
             [run],
@@ -754,14 +750,14 @@ async def test_summary_chunk_honors_transient_fallthrough_for_shrink_message_at_
     retry_sleep = AsyncMock()
 
     with (
-        patch("mindroom.history.compaction.build_summary_input", return_value=("original request", [run])),
+        patch("mindroom.history.summarizer.build_summary_input", return_value=("original request", [run])),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=generate_summary,
         ),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
     ):
-        generated = await _summarize_chunk(
+        generated = await summarize_chunk(
             _summarizer(summary_model(), 4_000),
             None,
             [run],
@@ -799,8 +795,8 @@ async def test_summary_chunk_shrinks_around_a_large_durable_summary() -> None:
         side_effect=[CompactionSummaryOutputLimitError("renamed owned output-limit signal"), recovered_summary],
     )
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
-        generated = await _summarize_chunk(
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=generate_summary):
+        generated = await summarize_chunk(
             _summarizer(summary_model(), summary_input_budget),
             previous_summary,
             runs,
@@ -833,10 +829,10 @@ async def test_summary_chunk_propagates_error_when_no_smaller_progress_input_exi
     generate_summary = AsyncMock(side_effect=original_error)
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=generate_summary),
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
-        await _summarize_chunk(
+        await summarize_chunk(
             _summarizer(summary_model(), summary_input_budget),
             previous_summary,
             runs,
@@ -921,7 +917,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
     claude = counter_for_model(ModelIdentity(id="claude-sonnet-5", provider="anthropic"))
     load_o200k()
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=record_summary),
     ):
         outcome = await _compact(
@@ -965,7 +961,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         return "recovered summary"
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=flaky_summary),
     ):
         outcome = await _compact(
@@ -999,27 +995,26 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
     logger_mock = MagicMock()
 
     with (
-        patch("mindroom.history.compaction.build_summary_input", return_value=("original request", [run])),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
-        patch("mindroom.history.compaction.logger", logger_mock),
+        patch("mindroom.history.summarizer.build_summary_input", return_value=("original request", [run])),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.logger", logger_mock),
     ):
-        generated = await _summarize_chunk(
-            _summarizer(
-                primary,
-                4_000,
-                fallback=SummaryModel(fallback, "fallback-model", 4_000),
-                timeout_seconds=420.0,
-            ),
-            None,
-            [run],
+        summarizer = _summarizer(
+            primary,
+            4_000,
+            fallback=SummaryModel(fallback, "fallback-model", 4_000),
+            timeout_seconds=420.0,
         )
+        chunk_state = ChunkState(summarizer.model, summarizer.fallback)
+        generated = await summarize_chunk(summarizer, None, [run], state=chunk_state)
 
+    assert generated is not None
     assert generated.summary is recovered_summary
     assert generated.included_runs == [run]
-    assert generated.summarizer.model.model is fallback
-    assert generated.summarizer.model.name == "fallback-model"
-    assert generated.summarizer.fallback is None
+    assert generated.model.model is fallback
+    assert generated.model.name == "fallback-model"
+    assert chunk_state.fallback is None
     assert generate_summary.await_count == 2
     assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, fallback]
     assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
@@ -1067,11 +1062,11 @@ async def test_summary_chunk_propagates_fallback_refusal_or_failure(fallback_err
     )
 
     with (
-        patch("mindroom.history.compaction.build_summary_input", return_value=("original request", [run])),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.summarizer.build_summary_input", return_value=("original request", [run])),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=generate_summary),
         pytest.raises(type(fallback_error)) as raised,
     ):
-        await _summarize_chunk(
+        await summarize_chunk(
             _summarizer(primary, 4_000, fallback=SummaryModel(fallback, "fallback-model", 4_000)),
             None,
             [run],
@@ -1098,12 +1093,12 @@ async def test_summary_chunk_refusal_after_transient_retry_propagates_within_att
     retry_sleep = AsyncMock()
 
     with (
-        patch("mindroom.history.compaction.build_summary_input", return_value=("original request", [run])),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.build_summary_input", return_value=("original request", [run])),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         pytest.raises(ModelSafeguardRefusal) as raised,
     ):
-        await _summarize_chunk(
+        await summarize_chunk(
             _summarizer(primary, 4_000, fallback=SummaryModel(fallback, "fallback-model", 4_000)),
             None,
             [run],
@@ -1139,7 +1134,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
         return "recovered summary"
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=flaky_summary),
     ):
         outcome = await _compact(
@@ -1177,7 +1172,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     refuse_summary = AsyncMock(side_effect=ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()))
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=refuse_summary),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=refuse_summary),
         pytest.raises(ModelSafeguardRefusal),
     ):
         await _compact(
@@ -1215,11 +1210,11 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
 
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(side_effect=flaky_summary),
         ),
         patch(
-            "mindroom.history.compaction.build_summary_input",
+            "mindroom.history.summarizer.build_summary_input",
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
@@ -1261,7 +1256,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     generate_summary = AsyncMock()
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=generate_summary,
     ):
         outcome = await _compact(
@@ -1285,7 +1280,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     runtime_generate_summary = AsyncMock()
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=runtime_generate_summary,
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1324,7 +1319,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     time_out_summary = AsyncMock(side_effect=TimeoutError)
 
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=time_out_summary):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=time_out_summary):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1383,10 +1378,10 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     retry_sleep = AsyncMock()
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(side_effect=flaky_summary),
         ),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
     ):
         outcome = await _compact(
             storage,

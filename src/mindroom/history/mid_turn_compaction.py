@@ -19,18 +19,14 @@ from uuid import uuid4
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
-from mindroom.history.compaction import (
-    compact_running_turn,
-    load_summarizer,
-    scope_usage_recorder,
-    summarize_runs,
-)
+from mindroom.history.compaction import compact_running_turn, scope_usage_recorder
 from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import HistorySummaryBudgetError
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import run_scope_compaction_with_lifecycle
 from mindroom.history.storage import new_scope_session, read_fold_basis
+from mindroom.history.summarizer import load_summarizer, summarize_runs
 from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
     compaction_summary_message,
@@ -363,10 +359,10 @@ async def _summarize(
                     session_id=record.session_id or "",
                     scope=compaction.scope,
                     on_usage=_summary_usage_recorder(compaction, record),
-                    fork=_mid_turn_fork(policy, live_request),
                 ),
                 layout.previous_run_local_summary,
                 snapshots,
+                fork=_mid_turn_fork(policy, live_request),
                 max_summary_tokens=None if budget_limit is None else max(0, budget_limit - kept_tokens),
                 model=compaction.model,
             )
@@ -498,7 +494,6 @@ async def _compact_scope(
                     session.session_id,
                     initial_session=new_scope_session(session_id=session.session_id, scope=scope),
                 ),
-                fork=fork,
             ),
             # The size that triggered this compaction, so the history budget sees what the request needs.
             before_tokens=request_tokens,
@@ -511,6 +506,7 @@ async def _compact_scope(
             # Size the prospective rewritten request before SQLite commit.
             rewritten_request_tokens=size_rewritten,
             complete=complete,
+            fork=fork,
         )
 
     result = await run_scope_compaction_with_lifecycle(
