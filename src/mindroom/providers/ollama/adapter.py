@@ -22,7 +22,7 @@ from mindroom.llm.messages import stored_tool_call, tool_result_view, with_joine
 from mindroom.llm.provider import Capabilities, ModelIdentity, ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
+from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.identity import model_identity
 from mindroom.providers.media_files import read_media_bytes
@@ -126,6 +126,7 @@ class OllamaProvider:
         if not reply.done:
             # The stream ended before its done chunk, so the turn did not finish.
             return
+        stop_reason = _stop_reason(reply)
         for event in finished_turn(
             self.identity,
             timer,
@@ -133,7 +134,8 @@ class OllamaProvider:
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             usage=reply.usage,
-            stop_reason=_stop_reason(reply),
+            stop_reason=stop_reason,
+            raw_stop_reason=reply.done_reason if stop_reason in ABNORMAL_STOP_REASONS else None,
         ):
             yield event
 

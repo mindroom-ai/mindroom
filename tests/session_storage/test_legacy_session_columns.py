@@ -121,6 +121,27 @@ def _recorded(name: str) -> dict[str, Any]:
     return recorded
 
 
+def _usage_row_sort_key(entry: dict[str, Any]) -> tuple[str, float, str, str]:
+    """Canonical sort key for ``usage_rows`` entries (``iter_usage_storage_rows`` has no guaranteed row order)."""
+    since = -1.0 if entry["since"] is None else float(entry["since"])
+    return (
+        str(entry["mode"]),
+        since,
+        str(entry["row"].get("row_key", "")),
+        json.dumps(entry["row"], sort_keys=True),
+    )
+
+
+def _canonical_usage_rows(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return ``snapshot`` with ``usage_rows`` sorted canonically.
+
+    v2026.10.667 issued ``SELECT ... FROM sessions`` without ``ORDER BY``, so its ``since=None`` scan followed
+    ``rowid`` while ``since=0`` followed the ``PRIMARY KEY (session_id)`` index. Chunked reads (#4342) scan both in
+    explicit ``rowid`` order, so compare the per-``(mode, since)`` row sets rather than SQLite's incidental scan order.
+    """
+    return {**snapshot, "usage_rows": sorted(snapshot["usage_rows"], key=_usage_row_sort_key)}
+
+
 def _observed(name: str, root: Path) -> dict[str, Any]:
     with deterministic() as determinism:
         determinism.at(_STEPS[name])
@@ -138,9 +159,10 @@ def test_every_reader_reads_a_converted_database_as_the_release_that_wrote_it_re
     """Loads, history views, stored runs, metadata, updated sessions, and usage rows are what v2026.10.667 showed."""
     _restore(name, tmp_path)
 
-    observed = _observed(name, tmp_path)
+    observed = _canonical_usage_rows(_observed(name, tmp_path))
+    recorded = _canonical_usage_rows(_recorded(name))
 
-    assert first_difference(_recorded(name), observed) is None, first_difference(_recorded(name), observed)
+    assert first_difference(recorded, observed) is None, first_difference(recorded, observed)
 
 
 def test_a_team_database_reads_as_before_but_for_the_conversation_its_agent_path_started(tmp_path: Path) -> None:
@@ -168,6 +190,8 @@ def test_a_team_database_reads_as_before_but_for_the_conversation_its_agent_path
     }
     for entry in agent_path_rows:
         entry["row"]["entity_kind"] = "team"
+    recorded = _canonical_usage_rows(recorded)
+    observed = _canonical_usage_rows(observed)
     assert first_difference(recorded, observed) is None, first_difference(recorded, observed)
 
 

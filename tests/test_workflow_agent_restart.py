@@ -23,6 +23,7 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.structured import schema_prompt
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -357,7 +358,7 @@ async def test_script_tool_approval_shows_the_node_and_the_run_waiting(gated: Wo
 
     node = _node(gated)
     assert (node.state, node.waiting_on, gated.counting_tool.lines) == (WorkflowNodeState.WAITING, "approval", [])
-    assert (await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=0)).state == "waiting"
+    assert (await nodes_module.node_receipt(gated.engine, gated.attempt, receipt.id, wait=0)).state == "waiting"
     gated.resolver.hold_approvals.set()
 
     assert await gated.result("@0", "tool", _APPEND) == "appended"

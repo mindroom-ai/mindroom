@@ -20,6 +20,7 @@ from mindroom.script_runs.broker import (
     WorkflowAttemptRevokedError,
 )
 from mindroom.script_runs.models import ScriptRunRecord
+from mindroom.workflow_runs import nodes
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowEngine
 from mindroom.workflow_runs.models import NodeRequest
 from mindroom.workflow_runs.store import WorkflowRunStoreError
@@ -83,7 +84,7 @@ async def _authenticated(
     if engine is None:
         raise HTTPException(status_code=503, detail="Workflow gateway is unavailable.")
     try:
-        return engine, await asyncio.to_thread(engine.dispatch.broker.authenticate, script_run_id, authorization)
+        return engine, await asyncio.to_thread(engine.broker.authenticate, script_run_id, authorization)
     except WorkflowAttemptRevokedError as exc:
         # The process proved it is an attempt of ours, and a revoked one is told to exit as a replaced one is.
         raise HTTPException(status_code=409, detail="superseded") from exc
@@ -132,7 +133,7 @@ async def run_info(authenticated: _Attempt) -> dict[str, object]:
     """Return the run's ID, attempt number and arguments."""
     engine, attempt = authenticated
     with _refusals():
-        return await engine.calls.run_info(attempt)
+        return await nodes.run_info(engine, attempt)
 
 
 @router.get("/sources/{name}")
@@ -140,7 +141,7 @@ async def saved_source(name: str, authenticated: _Attempt) -> dict[str, str]:
     """Return a saved workflow's snapshotted bytes and SHA-256 for this attempt."""
     engine, attempt = authenticated
     with _refusals():
-        raw, sha256 = await engine.calls.saved_source(attempt, name)
+        raw, sha256 = await nodes.saved_source(engine, attempt, name)
     return {"name": name, "source_b64": base64.b64encode(raw).decode("ascii"), "sha256": sha256}
 
 
@@ -152,7 +153,8 @@ async def submit_node(request: Request, authenticated: _Attempt) -> Response:
     if isinstance(body, Response):
         return body
     with _refusals():
-        receipt = await engine.calls.submit_node(
+        receipt = await nodes.submit_node(
+            engine,
             attempt,
             NodeRequest(body.key, body.kind, dict(body.args), dict(body.meta)),
         )
@@ -170,7 +172,8 @@ async def node_receipt(
     engine, attempt = authenticated
     with _refusals():
         return asdict(
-            await engine.calls.node_receipt(
+            await nodes.node_receipt(
+                engine,
                 attempt,
                 node_id,
                 wait=min(max(wait, 0.0), 30.0),
@@ -184,7 +187,7 @@ async def node_result(node_id: str, authenticated: _Attempt) -> Response:
     """Return a node's whole result as JSON, from its row or from the file a large one was moved to."""
     engine, attempt = authenticated
     with _refusals():
-        node = await engine.calls.node(attempt, node_id)
+        node = await nodes.node_record(engine, attempt, node_id)
     if node.result_file is not None:
         return FileResponse(engine.store.directory / node.result_file, media_type="application/json")
     return JSONResponse(node.result)
@@ -198,7 +201,7 @@ async def append_log(request: Request, authenticated: _Attempt) -> Response:
     if isinstance(body, Response):
         return body
     with _refusals():
-        await engine.calls.append_log(attempt, body.text)
+        await nodes.append_log(engine, attempt, body.text)
     return JSONResponse({})
 
 
@@ -210,5 +213,5 @@ async def finish(request: Request, authenticated: _Attempt) -> Response:
     if isinstance(body, Response):
         return body
     with _refusals():
-        await engine.calls.finish(attempt, result=body.result, error=body.error)
+        await nodes.finish(engine, attempt, result=body.result, error=body.error)
     return JSONResponse({})

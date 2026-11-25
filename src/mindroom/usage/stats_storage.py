@@ -21,14 +21,8 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, table_names
-from mindroom.session_storage.usage_reader import (
-    read_only_snapshot,
-    recorded_meta,
-    stored_sessions,
-    stored_usage,
-    unreadable_layout,
-)
+from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames
+from mindroom.session_storage.usage_reader import read_stored_usage
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.storage import (
@@ -38,10 +32,10 @@ from mindroom.usage.storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator, Mapping, Sequence
 
     from mindroom.config.main import Config
-    from mindroom.session_storage.usage_reader import RecordedMeta, StoredSession
+    from mindroom.session_storage.usage_reader import RecordedMeta, StoredSession, StoredUsageRead
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.usage.storage import UsageKind
 
@@ -434,58 +428,66 @@ def iter_usage_storage_rows(
     ``since`` reads only snapshots last updated at or after that epoch time, which leaves out the undated usage a
     session had before the ledger.
 
-    The whole database is read in one snapshot that is closed before the first row is yielded, so the caller's work
-    between rows never holds the database's read lock, which writers wait for. All of the database's rows are
-    therefore held in memory at once.
+    All SQLite reads finish in bounded chunked read transactions and close the database before any row is decoded or
+    yielded, so writers in ``DELETE`` journal mode can commit between chunks and caller work never holds a read lock.
     """
-    yield from list(_read_usage_storage(source, since=since))
+    stored = _load_stored_usage(source, since=since)
+    if isinstance(stored, UsageStorageDiagnostic):
+        yield stored
+        return
+    # A dated read visits the sessions with a usage snapshot in range, or every one when there is no ledger.
+    rows = (
+        [row for row in stored.sessions if row.session_id in stored.usage_by_session]
+        if since is not None and stored.has_usage
+        else stored.sessions
+    )
+    if not rows:
+        return
+    # Check only once a row needs it, so a database without emitted sessions reads alike in every layout.
+    if stored.meta is None:
+        yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
+        return
+    for row in rows:
+        try:
+            yield _extract_row(
+                source,
+                row,
+                stored.meta,
+                payloads=stored.usage_by_session.get(row.session_id, ()),
+                has_usage=stored.has_usage,
+                since=since,
+            )
+        except (RecursionError, TypeError, ValueError):
+            yield _source_diagnostic(source, "partial", "malformed retained session")
 
 
-def _read_usage_storage(
+def _load_stored_usage(
     source: UsageStorageSource,
     *,
     since: float | None,
-) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-    """Yield the database's rows, and a diagnostic for what it could not read, while its snapshot is open."""
+) -> StoredUsageRead | UsageStorageDiagnostic:
+    """Complete all SQLite reads and close the connection, or return the diagnostic explaining why reading failed."""
     if not source.path.is_file():
-        yield _source_diagnostic(source, "absent", "database absent")
-        return
+        return _source_diagnostic(source, "absent", "database absent")
+    if _IDENTIFIER.fullmatch(source.names.sessions) is None:
+        return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
     try:
-        with read_only_snapshot(source.path) as connection:
-            problem = (
-                "session table unavailable"
-                if _IDENTIFIER.fullmatch(source.names.sessions) is None
-                else unreadable_layout(connection, source.names)
-            )
-            if problem is not None:
-                yield _source_diagnostic(source, "unsupported_schema", problem)
-                return
-            has_usage = source.names.usage in table_names(connection)
-            meta: RecordedMeta | None = None
-            # A dated read visits the sessions with a usage snapshot in range, or every one when there is no ledger.
-            rows = stored_sessions(connection, source.names, since=since if has_usage else None)
-            for row in rows:
-                # Read once a row needs it, so a database without sessions reads alike in every layout.
-                meta = meta or recorded_meta(connection, source.names)
-                if meta is None:
-                    yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
-                    return
-                try:
-                    yield _extract_row(source, row, meta, connection, has_usage=has_usage, since=since)
-                except (RecursionError, TypeError, ValueError):
-                    yield _source_diagnostic(source, "partial", "malformed retained session")
+        stored = read_stored_usage(source.path, source.names, since=since)
     except sqlite3.Error as error:
-        yield _sqlite_diagnostic(source, error)
+        return _sqlite_diagnostic(source, error)
     except OSError:
-        yield _source_diagnostic(source, "partial", "database unavailable")
+        return _source_diagnostic(source, "partial", "database unavailable")
+    if isinstance(stored, str):
+        return _source_diagnostic(source, "unsupported_schema", stored)
+    return stored
 
 
 def _extract_row(
     source: UsageStorageSource,
     row: StoredSession,
     meta: RecordedMeta,
-    connection: sqlite3.Connection,
     *,
+    payloads: Sequence[object],
     has_usage: bool,
     since: float | None,
 ) -> UsageSessionRow:
@@ -500,12 +502,9 @@ def _extract_row(
         raise ValueError
     runs, runs_available = (
         _read_runs(
-            connection,
-            source,
-            row_key,
+            payloads,
             row_requester=row_requester,
             include_team_members=source.scope == "team" and entity_kind == "team",
-            since=since,
         )
         if has_usage
         else ([], False)
@@ -523,18 +522,15 @@ def _extract_row(
 
 
 def _read_runs(
-    connection: sqlite3.Connection,
-    source: UsageStorageSource,
-    session_id: str,
+    payloads: Sequence[object],
     *,
     row_requester: str | None,
     include_team_members: bool,
-    since: float | None,
 ) -> tuple[list[UsageRunNode], bool]:
-    """Read one session's usage snapshots, reporting whether every snapshot was usable."""
+    """Decode one session's usage snapshots, reporting whether every snapshot was usable."""
     runs: list[UsageRunNode] = []
     runs_available = True
-    for payload in stored_usage(connection, source.names, session_id, since=since):
+    for payload in payloads:
         try:
             run = _extract_run(
                 _decoded_snapshot(payload),

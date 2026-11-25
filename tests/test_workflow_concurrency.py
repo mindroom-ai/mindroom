@@ -17,9 +17,9 @@ import pytest_asyncio
 from mindroom.approval import manager as approval_manager
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
-from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
-from mindroom.workflow_runs import dispatch as dispatch_module
+from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.replay import calling_node
@@ -75,7 +75,7 @@ def _append(line: str) -> dict[str, object]:
 
 async def _settled(stack: WorkflowStack, receipt: NodeReceipt) -> NodeReceipt:
     while receipt.state not in ("completed", "failed", "cancelled", "indeterminate"):
-        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await nodes_module.node_receipt(stack.engine, stack.attempt, receipt.id, wait=5)
     return receipt
 
 
@@ -243,9 +243,9 @@ async def test_agent_that_starts_in_the_place_a_tool_call_leaves_is_not_inside_t
     async def launch(*_args: object, **_kwargs: object) -> object:
         seen.append(calling_node())
         msg = "Seen."
-        raise agent_dispatch_module.AgentNodeError(msg)
+        raise agent_nodes.AgentNodeError(msg)
 
-    monkeypatch.setattr(agent_dispatch_module, "launch_child", launch)
+    monkeypatch.setattr(agent_nodes, "launch_child", launch)
     await stack.start(max_concurrent=1)
     gate = asyncio.Event()
     stack.counting_tool.after_effect = gate.wait
@@ -275,7 +275,7 @@ async def test_cancel_starts_no_queued_node(stack: WorkflowStack) -> None:
     assert _states(stack)[1:] == [_CANCELLED, _CANCELLED]
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
     # An ended run keeps no count of working calls behind.
-    assert stack.engine.live.places == {}
+    assert all(st.places is None for st in stack.engine._runs.values())
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_queued_agent_whose_node_ended_meanwhile_starts_nothing(stack: Wor
     gate.set()
 
     assert (await _settled(stack, first)).result == "done"
-    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine._runs[stack.run_id].places.working == set())
     assert (len(stack.models["watcher"].requests), _states(stack)[1]) == (1, _CANCELLED)
     assert len(stack.jobs.retained_jobs()) == 1
 
@@ -329,7 +329,7 @@ async def test_queued_tool_call_whose_node_ended_meanwhile_runs_nothing(stack: W
     written.set()
 
     assert (await _settled(stack, first)).result == "appended"
-    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine._runs[stack.run_id].places.working == set())
     assert (stack.counting_tool.lines, _states(stack)[1]) == (["a"], _CANCELLED)
 
 
@@ -344,7 +344,10 @@ async def test_attempt_that_failed_starts_no_queued_call_and_keeps_no_places(sta
 
     await stack.finish_attempt(error="KeyError: 'x'")
 
-    assert (stack.counting_tool.lines, stack.engine.live.places) == (["a"], {})
+    assert (stack.counting_tool.lines, [st.places for st in stack.engine._runs.values() if st.places is not None]) == (
+        ["a"],
+        [],
+    )
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
 
 
@@ -420,7 +423,7 @@ async def test_workflow_tool_calls_run_in_parallel(stack: WorkflowStack) -> None
 @pytest.mark.asyncio
 async def test_tool_rate_limit_delays_and_does_not_fail(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
     """A call above the attempt's calls per minute waits until the minute has room for it, and then runs."""
-    monkeypatch.setattr(dispatch_module, "_RATE_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(nodes_module, "_RATE_WAIT_SECONDS", 0.02)
     stack.limits = WorkflowLimits(max_tool_calls_per_minute=2)
     await stack.start()
     assert [await stack.result(f"@{n}", "tool", _COUNT) for n in range(2)] == [1, 2]
@@ -491,3 +494,52 @@ async def test_queued_call_retrying_owner_readiness_does_not_start_on_stopping_r
     node = stack.store.get_node(stack.run_id, "@2")
     assert node is not None
     assert (node.state, node.handle, len(stack.models["watcher"].requests)) == (_CANCELLED, None, 2)
+
+
+@pytest.mark.asyncio
+async def test_start_queued_survives_places_cleared_during_budget_check(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing state.places while check_budget awaits must not raise AttributeError in start_queued."""
+    await stack.start(max_concurrent=1)
+    places = stack.engine.places_for(stack.store.get_run(stack.run_id))
+    places.working.add("@1")
+    started = False
+
+    async def clear_places_during_budget(_run: object) -> bool:
+        stack.engine._runs[stack.run_id].places = None
+        return False
+
+    async def start() -> None:
+        nonlocal started
+        started = True
+
+    monkeypatch.setattr(stack.engine, "check_budget", clear_places_during_budget)
+    await stack.engine.start_queued(stack.run_id, "@1", start)
+    assert started
+    await stack.end_attempt(ScriptRunState.EXITED)
+
+
+@pytest.mark.asyncio
+async def test_restated_reads_places_once_on_worker_thread(stack: WorkflowStack) -> None:
+    """_restated must read st.places once so clearing it on the event loop cannot raise AttributeError."""
+    await stack.start(max_concurrent=1)
+    places = engine_module.Places(limit=1, working={"@0"})
+
+    class _VanishingPlaces:
+        reads = 0
+
+        @property
+        def places(self) -> engine_module.Places | None:
+            self.reads += 1
+            return places if self.reads == 1 else None
+
+    holder = _VanishingPlaces()
+    stack.engine._runs[stack.run_id] = holder  # type: ignore[assignment]
+    try:
+        assert stack.engine._restated(stack.run_id, (0.0, 0.0)) is False
+        assert holder.reads == 1
+    finally:
+        stack.engine._runs.pop(stack.run_id, None)
+    await stack.end_attempt(ScriptRunState.EXITED)

@@ -13,6 +13,7 @@ from mindroom.embeddings.errors import classified_embedder_error, is_embedder_au
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
+    MemoryNotFoundError,
     add_agent_memory,
     delete_agent_memory,
     get_agent_memory,
@@ -95,14 +96,19 @@ def _degraded_search_text(outcome: MemorySearchOutcome, config: Config) -> str:
 def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> str:
     """Log a failure and return what the model may see of it, without credentials.
 
-    A classified embedder failure becomes its fixed detail. Any other failure keeps its text with credentials
-    redacted, because a failed memory LLM call carries the provider's error body, which can quote the rejected key.
+    A classified embedder failure becomes its fixed detail, and a missing memory ID logs a warning without a
+    traceback. Any non-embedder failure keeps its text with credentials redacted, because a failed memory LLM call
+    carries the provider's error body, which can quote the rejected key.
     """
     if (detail := classified_embedder_error(exc)) is not None:
         logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
         return detail
+    detail = redact_sensitive_text(failure_text(exc))
+    if isinstance(exc, MemoryNotFoundError):
+        logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
+        return detail
     logger.exception(f"Failed to {action} memory via tool", error_type=type(exc).__name__, **context)
-    return redact_sensitive_text(failure_text(exc))
+    return detail
 
 
 class MemoryTools(Toolkit):
