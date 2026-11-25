@@ -35,7 +35,13 @@
       "stale": false,
       "tokens_7d": 14200000,
       "cost_usd_7d": null,
-      "cost_estimated": false
+      "cost_estimated": false,
+      "token_mix_7d": {
+        "input_tokens": 1200000,
+        "output_tokens": 600000,
+        "cache_read_tokens": 11200000,
+        "cache_write_tokens": 1200000
+      }
     },
     {
       "id": "codex:default",
@@ -68,7 +74,13 @@
       "stale": false,
       "tokens_7d": 9800000,
       "cost_usd_7d": null,
-      "cost_estimated": false
+      "cost_estimated": false,
+      "token_mix_7d": {
+        "input_tokens": 1800000,
+        "output_tokens": 700000,
+        "cache_read_tokens": 7300000,
+        "cache_write_tokens": 0
+      }
     },
     {
       "id": "openrouter:1",
@@ -91,7 +103,13 @@
       "stale": false,
       "tokens_7d": 6400000,
       "cost_usd_7d": 18.4,
-      "cost_estimated": true
+      "cost_estimated": true,
+      "token_mix_7d": {
+        "input_tokens": 2100000,
+        "output_tokens": 900000,
+        "cache_read_tokens": 3400000,
+        "cache_write_tokens": 0
+      }
     },
     {
       "id": "anthropic:default",
@@ -105,7 +123,13 @@
       "stale": false,
       "tokens_7d": 1200000,
       "cost_usd_7d": 3.25,
-      "cost_estimated": true
+      "cost_estimated": true,
+      "token_mix_7d": {
+        "input_tokens": 300000,
+        "output_tokens": 150000,
+        "cache_read_tokens": 650000,
+        "cache_write_tokens": 100000
+      }
     }
   ],
   "daily_7d": [
@@ -116,7 +140,10 @@
         "codex:default": 1200000,
         "openrouter:1": 900000
       },
-      "unattributed_tokens": 0
+      "unattributed_tokens": 0,
+      "cost_by_account": {
+        "openrouter:1": 2.6
+      }
     },
     {
       "day": "2026-11-18",
@@ -125,9 +152,122 @@
         "codex:default": 1500000,
         "openrouter:1": 850000
       },
-      "unattributed_tokens": 0
+      "unattributed_tokens": 0,
+      "cost_by_account": {
+        "openrouter:1": 2.45
+      }
     }
   ],
   "unattributed_tokens_7d": 0,
-  "unattributed_cost_usd_7d": null
+  "unattributed_cost_usd_7d": null,
+  "token_mix_7d": {
+    "input_tokens": 5400000,
+    "output_tokens": 2350000,
+    "cache_read_tokens": 22550000,
+    "cache_write_tokens": 1300000
+  },
+  "cache_savings_usd_7d": 6.85,
+  "top_models_7d": [
+    {
+      "provider": "OpenRouter",
+      "model": "google/gemini-3-pro",
+      "account_id": "openrouter:1",
+      "tokens_7d": 6400000,
+      "cost_usd_7d": 18.4,
+      "run_count": 142,
+      "token_mix_7d": {
+        "input_tokens": 2100000,
+        "output_tokens": 900000,
+        "cache_read_tokens": 3400000,
+        "cache_write_tokens": 0
+      },
+      "daily_tokens_7d": [900000, 850000]
+    },
+    {
+      "provider": "Anthropic",
+      "model": "claude-haiku-4-5",
+      "account_id": "anthropic:default",
+      "tokens_7d": 1200000,
+      "cost_usd_7d": 3.25,
+      "run_count": 68,
+      "token_mix_7d": {
+        "input_tokens": 300000,
+        "output_tokens": 150000,
+        "cache_read_tokens": 650000,
+        "cache_write_tokens": 100000
+      },
+      "daily_tokens_7d": [0, 0]
+    },
+    {
+      "provider": "Anthropic (Claude Code)",
+      "model": "claude-opus-4-6",
+      "account_id": "claude_code:default",
+      "tokens_7d": 14200000,
+      "cost_usd_7d": null,
+      "run_count": 210,
+      "token_mix_7d": {
+        "input_tokens": 1200000,
+        "output_tokens": 600000,
+        "cache_read_tokens": 11200000,
+        "cache_write_tokens": 1200000
+      },
+      "daily_tokens_7d": [1900000, 2100000]
+    },
+    {
+      "provider": "OpenAI Codex",
+      "model": "gpt-5.4",
+      "account_id": "codex:default",
+      "tokens_7d": 9800000,
+      "cost_usd_7d": null,
+      "run_count": 154,
+      "token_mix_7d": {
+        "input_tokens": 1800000,
+        "output_tokens": 700000,
+        "cache_read_tokens": 7300000,
+        "cache_write_tokens": 0
+      },
+      "daily_tokens_7d": [1200000, 1500000]
+    }
+  ],
+  "top_agents_7d": [
+    {
+      "entity": "code",
+      "tokens_7d": 18400000,
+      "cost_usd_7d": 14.2,
+      "run_count": 310,
+      "token_mix_7d": {
+        "input_tokens": 3100000,
+        "output_tokens": 1350000,
+        "cache_read_tokens": 13150000,
+        "cache_write_tokens": 800000
+      },
+      "daily_tokens_7d": [2300000, 2600000]
+    },
+    {
+      "entity": "research",
+      "tokens_7d": 8900000,
+      "cost_usd_7d": 7.45,
+      "run_count": 164,
+      "token_mix_7d": {
+        "input_tokens": 1650000,
+        "output_tokens": 700000,
+        "cache_read_tokens": 6250000,
+        "cache_write_tokens": 300000
+      },
+      "daily_tokens_7d": [1150000, 1250000]
+    },
+    {
+      "entity": "general",
+      "tokens_7d": 4300000,
+      "cost_usd_7d": null,
+      "run_count": 100,
+      "token_mix_7d": {
+        "input_tokens": 650000,
+        "output_tokens": 300000,
+        "cache_read_tokens": 3150000,
+        "cache_write_tokens": 200000
+      },
+      "daily_tokens_7d": [550000, 600000]
+    }
+  ]
 }

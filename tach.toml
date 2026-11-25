@@ -890,6 +890,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.history.request_size",
     "mindroom.providers.pipeline",
+    "mindroom.usage.provider_limits",
 ]
 
 [[modules]]
@@ -10578,6 +10579,7 @@ visibility = ["mindroom.usage.provider_limits"]
 [[modules]]
 path = "mindroom.usage.provider_limits"
 depends_on = [
+    "mindroom.model_usage",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.limit_store",
     "mindroom.usage.provider_accounts",

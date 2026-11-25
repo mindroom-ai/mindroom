@@ -94,6 +94,33 @@ export interface ProviderLimitWindow {
   detail?: string;
 }
 
+export interface TokenMix {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+export interface ModelUsage7d {
+  provider: string;
+  model: string;
+  account_id?: string;
+  tokens_7d: number;
+  cost_usd_7d: number | null;
+  run_count: number;
+  token_mix_7d?: TokenMix;
+  daily_tokens_7d?: number[];
+}
+
+export interface AgentUsage7d {
+  entity: string;
+  tokens_7d: number;
+  cost_usd_7d: number | null;
+  run_count: number;
+  token_mix_7d?: TokenMix;
+  daily_tokens_7d?: number[];
+}
+
 export interface ProviderLimitAccount {
   id: string;
   provider: string;
@@ -108,12 +135,15 @@ export interface ProviderLimitAccount {
   tokens_7d: number;
   cost_usd_7d: number | null;
   cost_estimated: boolean;
+  token_mix_7d?: TokenMix;
 }
 
 export interface ProviderUsageDailyRow {
   day: string;
   by_account: Record<string, number>;
   unattributed_tokens: number;
+  cost_by_account?: Record<string, number>;
+  unattributed_cost_usd?: number;
 }
 
 export interface ProviderUsageSnapshot {
@@ -125,4 +155,8 @@ export interface ProviderUsageSnapshot {
   daily_7d: ProviderUsageDailyRow[];
   unattributed_tokens_7d: number;
   unattributed_cost_usd_7d: number | null;
+  token_mix_7d?: TokenMix;
+  cache_savings_usd_7d?: number;
+  top_models_7d?: ModelUsage7d[];
+  top_agents_7d?: AgentUsage7d[];
 }

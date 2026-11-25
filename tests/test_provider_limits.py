@@ -20,11 +20,13 @@ import pytest
 from claude_agent_sdk import RateLimitEvent, RateLimitInfo
 from structlog.testing import capture_logs
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest
-from mindroom.llm.usage import TokenCounts
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.providers.claude_code.bridge import ToolBridge
 from mindroom.providers.claude_code.session import LiveSession
 from mindroom.providers.claude_code.turn import _Step
@@ -33,22 +35,25 @@ from mindroom.providers.openai.codex_auth import CodexAuthError
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import ResponsesSettings
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage import limit_store, provider_limits, provider_probes
 from mindroom.usage.limit_store import PassiveWindow, build_window, normalize_codex_scope_key
 from mindroom.usage.provider_limits import (
+    AgentUsage7d,
     DailyAccountUsage,
+    ModelUsage7d,
     ProviderLimitAccount,
     ProviderUsageSnapshot,
+    TokenMix,
     fit_to_device_budget,
     get_provider_usage_snapshot,
 )
 from mindroom.usage.stats import (
-    UsageCoverage,
     UsageDailyBreakdownRow,
     UsageModelBreakdownRow,
-    UsageReport,
 )
-from tests.conftest import test_runtime_paths
+from tests.conftest import persist_runs, test_runtime_paths
 
 CONTRACT_FIXTURE = Path(__file__).parent / "fixtures" / "provider_usage_contract.json"
 FIXED_NOW = datetime(2026, 11, 23, 20, 0, 0, tzinfo=UTC)
@@ -60,22 +65,14 @@ def _clean_stores() -> None:
     provider_limits.clear_cache()
 
 
-def _empty_report(daily: tuple[UsageDailyBreakdownRow, ...] = ()) -> UsageReport:
-    cov = UsageCoverage(scanned_sources=1, unavailable_sources=0)
-    return UsageReport(
-        scope="admin",
-        totals=TokenCounts(),
-        session_count=0,
-        breakdown=(),
-        coverage=cov,
-        model_breakdown=(),
-        model_coverage=cov,
-        cumulative_model_breakdown=(),
-        cumulative_model_coverage=cov,
-        user_breakdown=(),
-        daily_breakdown=daily,
-        daily_coverage=cov,
-    )
+type _DailyScan = tuple[tuple[UsageDailyBreakdownRow, ...], dict[str, tuple[UsageDailyBreakdownRow, ...]]]
+
+
+def _empty_daily_usage(
+    daily: tuple[UsageDailyBreakdownRow, ...] = (),
+    by_entity: dict[str, tuple[UsageDailyBreakdownRow, ...]] | None = None,
+) -> _DailyScan:
+    return daily, dict(by_entity or {})
 
 
 def _mock_httpx(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:  # noqa: ANN401
@@ -134,6 +131,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=14200000,
                 cost_usd_7d=None,
                 cost_estimated=False,
+                token_mix_7d=TokenMix(1200000, 600000, 11200000, 1200000),
             ),
             ProviderLimitAccount(
                 id="codex:default",
@@ -166,6 +164,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=9800000,
                 cost_usd_7d=None,
                 cost_estimated=False,
+                token_mix_7d=TokenMix(1800000, 700000, 7300000, 0),
             ),
             ProviderLimitAccount(
                 id="openrouter:1",
@@ -189,6 +188,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=6400000,
                 cost_usd_7d=18.4,
                 cost_estimated=True,
+                token_mix_7d=TokenMix(2100000, 900000, 3400000, 0),
             ),
             ProviderLimitAccount(
                 id="anthropic:default",
@@ -204,6 +204,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=1200000,
                 cost_usd_7d=3.25,
                 cost_estimated=True,
+                token_mix_7d=TokenMix(300000, 150000, 650000, 100000),
             ),
         ),
         daily_7d=(
@@ -211,15 +212,87 @@ def test_wire_contract_fixture_round_trip() -> None:
                 day="2026-11-17",
                 by_account={"claude_code:default": 1900000, "codex:default": 1200000, "openrouter:1": 900000},
                 unattributed_tokens=0,
+                cost_by_account={"openrouter:1": 2.6},
             ),
             DailyAccountUsage(
                 day="2026-11-18",
                 by_account={"claude_code:default": 2100000, "codex:default": 1500000, "openrouter:1": 850000},
                 unattributed_tokens=0,
+                cost_by_account={"openrouter:1": 2.45},
             ),
         ),
         unattributed_tokens_7d=0,
         unattributed_cost_usd_7d=None,
+        token_mix_7d=TokenMix(5400000, 2350000, 22550000, 1300000),
+        cache_savings_usd_7d=6.85,
+        top_models_7d=(
+            ModelUsage7d(
+                provider="OpenRouter",
+                model="google/gemini-3-pro",
+                account_id="openrouter:1",
+                tokens_7d=6400000,
+                cost_usd_7d=18.4,
+                run_count=142,
+                token_mix_7d=TokenMix(2100000, 900000, 3400000, 0),
+                daily_tokens_7d=(900000, 850000),
+            ),
+            ModelUsage7d(
+                provider="Anthropic",
+                model="claude-haiku-4-5",
+                account_id="anthropic:default",
+                tokens_7d=1200000,
+                cost_usd_7d=3.25,
+                run_count=68,
+                token_mix_7d=TokenMix(300000, 150000, 650000, 100000),
+                daily_tokens_7d=(0, 0),
+            ),
+            ModelUsage7d(
+                provider="Anthropic (Claude Code)",
+                model="claude-opus-4-6",
+                account_id="claude_code:default",
+                tokens_7d=14200000,
+                cost_usd_7d=None,
+                run_count=210,
+                token_mix_7d=TokenMix(1200000, 600000, 11200000, 1200000),
+                daily_tokens_7d=(1900000, 2100000),
+            ),
+            ModelUsage7d(
+                provider="OpenAI Codex",
+                model="gpt-5.4",
+                account_id="codex:default",
+                tokens_7d=9800000,
+                cost_usd_7d=None,
+                run_count=154,
+                token_mix_7d=TokenMix(1800000, 700000, 7300000, 0),
+                daily_tokens_7d=(1200000, 1500000),
+            ),
+        ),
+        top_agents_7d=(
+            AgentUsage7d(
+                entity="code",
+                tokens_7d=18400000,
+                cost_usd_7d=14.2,
+                run_count=310,
+                token_mix_7d=TokenMix(3100000, 1350000, 13150000, 800000),
+                daily_tokens_7d=(2300000, 2600000),
+            ),
+            AgentUsage7d(
+                entity="research",
+                tokens_7d=8900000,
+                cost_usd_7d=7.45,
+                run_count=164,
+                token_mix_7d=TokenMix(1650000, 700000, 6250000, 300000),
+                daily_tokens_7d=(1150000, 1250000),
+            ),
+            AgentUsage7d(
+                entity="general",
+                tokens_7d=4300000,
+                cost_usd_7d=None,
+                run_count=100,
+                token_mix_7d=TokenMix(650000, 300000, 3150000, 200000),
+                daily_tokens_7d=(550000, 600000),
+            ),
+        ),
     )
     assert snapshot.to_dict(request_id="req-provider-usage-1") == expected
     rest_payload = snapshot.to_dict()
@@ -394,7 +467,7 @@ async def test_codex_openrouter_and_payg_probes_and_gateway_guard(
 
     _mock_httpx(monkeypatch, _handler)
     monkeypatch.setattr(provider_probes, "borrow_codex_key", lambda **_kw: ("codex-tok", "acct-42"))
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
 
     secret_home = str(tmp_path / "super-secret-codex-dir")
     config = Config(
@@ -492,7 +565,7 @@ for line in sys.stdin:
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-must-be-scrubbed")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-must-be-scrubbed")
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
 
     config = Config(
         models={
@@ -628,7 +701,11 @@ async def test_7d_filtering_ambiguity_caching_stale_retention_and_budget_cap(
             ),
         ),
     )
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage(daily),
+    )
 
     now_mono = [100.0]
     monkeypatch.setattr(provider_limits, "_monotonic", lambda: now_mono[0])
@@ -789,7 +866,7 @@ async def test_openrouter_auth_header_override_and_zero_limit(
         return httpx.Response(500)
 
     _mock_httpx(monkeypatch, _handler)
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -852,7 +929,7 @@ async def test_claude_get_usage_low_percent_display_name_null_limits_and_unrelat
     assert provider_probes._parse_claude_usage({"rate_limits_available": False, "rate_limits": None}) == "unsupported"
 
     # Probe succeeds once, then unrelated model edit invalidates cache; next probe returns null rate_limits -> stale preserved.
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     mode = ["ok"]
 
     async def _fake_claude(_cli: str | None, now: datetime) -> provider_probes.ProbeResult:
@@ -902,7 +979,7 @@ async def test_openrouter_request_params_authorization_and_x_api_key_overrides(
         return httpx.Response(500)
 
     _mock_httpx(monkeypatch, _handler)
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -986,7 +1063,11 @@ async def test_payg_models_group_by_provider_route_without_leaking_secrets(
             ),
         ),
     )
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage(daily),
+    )
     config = Config(
         models={
             "haiku_a": ModelConfig(
@@ -1040,10 +1121,10 @@ async def test_snapshot_bounds_usage_scan_since_and_shields_single_flight_from_c
     release_probe = asyncio.Event()
     probe_calls = 0
 
-    def _fake_collect(**kwargs: object) -> UsageReport:
+    def _fake_collect(**kwargs: object) -> _DailyScan:
         since = kwargs.get("since")
         seen_since.append(since if isinstance(since, float) else None)
-        return _empty_report()
+        return _empty_daily_usage()
 
     async def _slow_probe(_cli: str | None, now: datetime) -> provider_probes.ProbeResult:
         nonlocal probe_calls
@@ -1066,7 +1147,7 @@ async def test_snapshot_bounds_usage_scan_since_and_shields_single_flight_from_c
             succeeded=True,
         )
 
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", _fake_collect)
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", _fake_collect)
     monkeypatch.setattr(provider_limits, "probe_claude_code", _slow_probe)
     config = Config(models={"opus": ModelConfig(provider="claude_code", id="claude-opus-4-6")})
     paths = test_runtime_paths(tmp_path)
@@ -1114,7 +1195,7 @@ async def test_openrouter_anthropic_custom_headers_and_env_auth_token_never_leak
         return httpx.Response(500)
 
     _mock_httpx(monkeypatch, _handler)
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     config = Config(
         models={
             "or_claude": ModelConfig(
@@ -1198,7 +1279,7 @@ async def test_openrouter_anthropic_sdk_env_overrides_ignore_dotenv_and_secret_f
         return httpx.Response(500)
 
     _mock_httpx(monkeypatch, _handler)
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     config = Config(
         models={
             "or_claude": ModelConfig(
@@ -1375,7 +1456,7 @@ async def test_codex_transient_refresh_error_preserves_last_good_reading_while_a
     _mock_httpx(monkeypatch, _handler)
     monkeypatch.setattr(provider_probes, "borrow_codex_key", _borrow)
     monkeypatch.setattr(provider_limits, "_monotonic", lambda: clock[0])
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", lambda **_kw: _empty_daily_usage())
     config = Config(models={"astra": ModelConfig(provider="codex", id="gpt-5.4")})
     paths = test_runtime_paths(tmp_path)
 
@@ -1404,7 +1485,7 @@ async def test_codex_transient_refresh_error_preserves_last_good_reading_while_a
     assert snap_revoked.accounts[0].windows == ()
 
 
-def _haiku_day_report(tokens: int) -> UsageReport:
+def _haiku_day_report(tokens: int) -> _DailyScan:
     totals = TokenCounts(input_tokens=tokens, output_tokens=0, total_tokens=tokens)
     row = UsageDailyBreakdownRow(
         date="2026-11-23",
@@ -1412,7 +1493,7 @@ def _haiku_day_report(tokens: int) -> UsageReport:
         run_count=1,
         model_breakdown=(UsageModelBreakdownRow("Anthropic", "claude-haiku-4-5", totals, 1),),
     )
-    return _empty_report((row,))
+    return _empty_daily_usage((row,))
 
 
 def _acct(snap: ProviderUsageSnapshot, account_id: str) -> ProviderLimitAccount:
@@ -1439,7 +1520,7 @@ def _setup_async_usage_env(
 
     monkeypatch.setattr(provider_limits, "_monotonic", lambda: clock[0])
     monkeypatch.setattr(provider_limits, "probe_claude_code", _fast_probe)
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", collect_fn)
+    monkeypatch.setattr(provider_limits, "collect_admin_daily_usage_with_entities", collect_fn)
     config = Config(
         models={
             "opus": ModelConfig(provider="claude_code", id="claude-opus-4-6"),
@@ -1461,7 +1542,7 @@ async def test_cold_slow_usage_scan_returns_partial_then_evicts_on_completion(
     """Slow cold 7d scan returns live windows with partial=True, caches partial during scan, then evicts on completion."""
     scan_calls, scan_started, release_scan = [0], threading.Event(), threading.Event()
 
-    def _slow_collect(**_kw: object) -> UsageReport:
+    def _slow_collect(**_kw: object) -> _DailyScan:
         scan_calls[0] += 1
         scan_started.set()
         release_scan.wait(timeout=5.0)
@@ -1510,7 +1591,7 @@ async def test_stale_while_revalidate_returns_cached_7d_and_refreshes_in_backgro
     """Expired 7d cache serves prior totals immediately while refreshing once in the background."""
     scan_calls, refresh_started, release_refresh = [0], threading.Event(), threading.Event()
 
-    def _collect(**_kw: object) -> UsageReport:
+    def _collect(**_kw: object) -> _DailyScan:
         scan_calls[0] += 1
         if scan_calls[0] == 1:
             return _haiku_day_report(1500)
@@ -1579,7 +1660,7 @@ async def test_failed_usage_scan_logs_warning_and_degrades_gracefully(
     prev_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
 
-    def _collect(**_kw: object) -> UsageReport:
+    def _collect(**_kw: object) -> _DailyScan:
         if mode[0] == "cold_fail":
             msg = "sqlite failed secret-token-value"
             raise RuntimeError(msg)
@@ -1633,8 +1714,432 @@ async def test_failed_usage_scan_logs_warning_and_degrades_gracefully(
         ] == [("warning", "OSError")]
         assert "secret-db-path" not in json.dumps(stale_logs)
         assert loop_errors == []
-        retained_daily, _ = next(iter(provider_limits._USAGE_REPORT_CACHE.values()))
+        (retained_daily, _), _ = next(iter(provider_limits._USAGE_REPORT_CACHE.values()))
         assert retained_daily[0].totals.total_tokens == 1500
     finally:
         release_fail.set()
         loop.set_exception_handler(prev_handler)
+
+
+def _sum_mixes(mixes: Any) -> TokenMix:  # noqa: ANN401
+    total = TokenMix()
+    for mix in mixes:
+        assert mix is not None
+        total = total.add(mix)
+    return total
+
+
+def _usage_run(
+    run_id: str,
+    provider: str,
+    model: str,
+    created_at: float,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    cache_read: int = 0,
+    cache_write: int = 0,
+) -> RunRecord:
+    return RunRecord(
+        run_id=run_id,
+        user_id="@alice:example.org",
+        model_provider=provider,
+        model=model,
+        created_at=created_at,
+        metrics=RunMetrics(
+            tokens=TokenCounts(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                total_tokens=total_tokens,
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end 7d analytics reconcile accounts, daily costs, models, agents, uncached input, and cache savings."""
+    monkeypatch.setattr(
+        provider_limits,
+        "probe_codex",
+        AsyncMock(return_value=provider_probes.ProbeResult(unavailable_reason="not_signed_in")),
+    )
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code"), "research": AgentConfig(display_name="Research")},
+        models={
+            "haiku": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                pricing=ModelPricing(input=2.0, output=6.0, cache_read=0.2, cache_write=2.5),
+            ),
+            "gpt": ModelConfig(
+                provider="openai",
+                id="gpt-5.4",
+                pricing=ModelPricing(input=5.0, output=15.0, cache_read=1.0),
+            ),
+            "codex_a": ModelConfig(
+                provider="codex",
+                id="gpt-5.4",
+                pricing=ModelPricing(input=4.0, output=12.0, cache_read=0.5),
+                extra_kwargs={"codex_home": str(tmp_path / "c1")},
+            ),
+            "codex_b": ModelConfig(provider="codex", id="gpt-5.4", extra_kwargs={"codex_home": str(tmp_path / "c2")}),
+            "flash": ModelConfig(provider="google", id="gemini-2.5-flash"),
+        },
+    )
+    old_ts = datetime(2026, 11, 10, 12, 0, tzinfo=UTC).timestamp()
+    day1_ts = datetime(2026, 11, 18, 9, 0, tzinfo=UTC).timestamp()
+    day2_ts = datetime(2026, 11, 23, 14, 0, tzinfo=UTC).timestamp()
+
+    # Long-lived "code" session updated today mixes an out-of-window Nov 10 run with in-window Anthropic & OpenAI runs.
+    persist_runs(
+        create_agent_state_storage("code", paths.storage_root / "agents" / "code"),
+        ConversationSession(kind="agent", session_id="long-lived", owner_id="code"),
+        _usage_run(
+            "run-old",
+            "Anthropic",
+            "claude-haiku-4-5",
+            old_ts,
+            input_tokens=90_000,
+            output_tokens=10_000,
+            cache_read=500_000,
+            total_tokens=600_000,
+        ),
+        # Anthropic reports cache outside input -> uncached stays 100k.
+        _usage_run(
+            "run-ant-1",
+            "Anthropic",
+            "claude-haiku-4-5",
+            day1_ts,
+            input_tokens=100_000,
+            output_tokens=50_000,
+            cache_read=400_000,
+            cache_write=200_000,
+            total_tokens=750_000,
+        ),
+        # OpenAI includes cache inside input -> uncached = 500k - 300k = 200k.
+        _usage_run(
+            "run-oai-1",
+            "OpenAI",
+            "gpt-5.4",
+            day2_ts,
+            input_tokens=500_000,
+            output_tokens=100_000,
+            cache_read=300_000,
+            total_tokens=600_000,
+        ),
+    )
+    # "research" mixes ambiguous priced Codex, priced Anthropic, and unpriced Google (cache inside input, no savings).
+    persist_runs(
+        create_agent_state_storage("research", paths.storage_root / "agents" / "research"),
+        ConversationSession(kind="agent", session_id="res-1", owner_id="research"),
+        _usage_run(
+            "run-cdx-1",
+            "OpenAI Codex",
+            "gpt-5.4",
+            day1_ts,
+            input_tokens=300_000,
+            output_tokens=50_000,
+            cache_read=200_000,
+            total_tokens=350_000,
+        ),
+        _usage_run(
+            "run-ant-2",
+            "Anthropic",
+            "claude-haiku-4-5",
+            day2_ts,
+            input_tokens=50_000,
+            output_tokens=25_000,
+            cache_read=100_000,
+            total_tokens=175_000,
+        ),
+        _usage_run(
+            "run-goog-1",
+            "Google",
+            "gemini-2.5-flash",
+            day2_ts,
+            input_tokens=80_000,
+            output_tokens=20_000,
+            cache_read=60_000,
+            total_tokens=100_000,
+        ),
+    )
+
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert snapshot.partial is False
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert (by_id["anthropic:default"].tokens_7d, by_id["anthropic:default"].cost_usd_7d) == (
+        925_000,
+        pytest.approx(1.35),
+    )
+    assert by_id["anthropic:default"].token_mix_7d == TokenMix(150_000, 75_000, 500_000, 200_000)
+    assert (by_id["openai:default"].tokens_7d, by_id["openai:default"].cost_usd_7d) == (600_000, pytest.approx(2.8))
+    assert by_id["openai:default"].token_mix_7d == TokenMix(200_000, 100_000, 300_000, 0)
+    assert (by_id["google:default"].tokens_7d, by_id["google:default"].cost_usd_7d) == (100_000, None)
+    assert by_id["google:default"].token_mix_7d == TokenMix(20_000, 20_000, 60_000, 0)
+    assert (by_id["codex:default"].token_mix_7d, by_id["codex:2"].token_mix_7d) == (None, None)
+    assert (snapshot.unattributed_tokens_7d, snapshot.unattributed_cost_usd_7d) == (350_000, pytest.approx(1.1))
+
+    assert [row.day for row in snapshot.daily_7d] == ["2026-11-18", "2026-11-23"]
+    assert (snapshot.daily_7d[0].cost_by_account, snapshot.daily_7d[0].unattributed_cost_usd) == (
+        {"anthropic:default": 1.08},
+        pytest.approx(1.1),
+    )
+    assert (snapshot.daily_7d[1].cost_by_account, snapshot.daily_7d[1].unattributed_cost_usd) == (
+        {"anthropic:default": 0.27, "openai:default": 2.8},
+        None,
+    )
+
+    expected_mix = TokenMix(470_000, 245_000, 1_060_000, 200_000)
+    assert snapshot.token_mix_7d == expected_mix
+    # Savings: Anthropic 500k*1.8 + OpenAI 300k*4.0 + Codex 200k*3.5 = 2.80 (Google unpriced contributes 0).
+    assert snapshot.cache_savings_usd_7d == pytest.approx(2.8)
+
+    assert [
+        (m.provider, m.model, m.account_id, m.cost_usd_7d, m.run_count, m.daily_tokens_7d)
+        for m in snapshot.top_models_7d
+    ] == [
+        ("OpenAI", "gpt-5.4", "openai:default", 2.8, 1, (0, 600_000)),
+        ("Anthropic", "claude-haiku-4-5", "anthropic:default", 1.35, 2, (750_000, 175_000)),
+        ("OpenAI Codex", "gpt-5.4", None, 1.1, 1, (350_000, 0)),
+        ("Google", "gemini-2.5-flash", "google:default", None, 1, (0, 100_000)),
+    ]
+    assert "account_id" not in snapshot.top_models_7d[2].to_dict()
+    assert [(a.entity, a.tokens_7d, a.cost_usd_7d, a.run_count, a.daily_tokens_7d) for a in snapshot.top_agents_7d] == [
+        ("code", 1_350_000, 3.88, 2, (750_000, 600_000)),
+        ("research", 625_000, 1.37, 3, (350_000, 275_000)),
+    ]
+
+    total_tokens = sum(a.tokens_7d for a in snapshot.accounts) + snapshot.unattributed_tokens_7d
+    assert (
+        total_tokens
+        == sum(m.tokens_7d for m in snapshot.top_models_7d)
+        == sum(a.tokens_7d for a in snapshot.top_agents_7d)
+        == 1_975_000
+    )
+    assert _sum_mixes(m.token_mix_7d for m in snapshot.top_models_7d) == expected_mix
+    assert _sum_mixes(a.token_mix_7d for a in snapshot.top_agents_7d) == expected_mix
+
+
+@pytest.mark.asyncio
+async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero mixes/savings omit cleanly, vertexai_claude keeps input uncached, legacy names merge, and lists cap at 12."""
+    model_rows = [
+        UsageModelBreakdownRow(
+            "VertexAI",
+            "custom-endpoint",
+            TokenCounts(input_tokens=400, output_tokens=100, cache_read_tokens=1000, total_tokens=1500),
+            1,
+        ),
+        UsageModelBreakdownRow(
+            "OpenAI Chat",
+            "gpt-5.4",
+            TokenCounts(input_tokens=300, output_tokens=100, cache_read_tokens=200, total_tokens=400),
+            2,
+        ),
+        UsageModelBreakdownRow(
+            "OpenAI",
+            "gpt-5.4",
+            TokenCounts(input_tokens=500, output_tokens=100, cache_read_tokens=200, total_tokens=600),
+            3,
+        ),
+        *[
+            UsageModelBreakdownRow(
+                "Google",
+                f"gemini-m-{i:02d}",
+                TokenCounts(input_tokens=100 + i, output_tokens=50, total_tokens=150 + i),
+                1,
+            )
+            for i in range(15)
+        ],
+    ]
+    daily = (
+        UsageDailyBreakdownRow(
+            "2026-11-23",
+            TokenCounts(total_tokens=sum(r.totals.total_tokens for r in model_rows)),
+            len(model_rows),
+            tuple(model_rows),
+        ),
+    )
+    by_entity = {
+        f"agent-{i:02d}": (
+            UsageDailyBreakdownRow(
+                "2026-11-23",
+                TokenCounts(input_tokens=100 + i, output_tokens=20, total_tokens=120 + i),
+                1,
+                (
+                    UsageModelBreakdownRow(
+                        "Google",
+                        f"gemini-m-{i:02d}",
+                        TokenCounts(input_tokens=100 + i, output_tokens=20, total_tokens=120 + i),
+                        1,
+                    ),
+                ),
+            ),
+        )
+        for i in range(15)
+    }
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage(daily, by_entity),
+    )
+    config = Config(
+        models={
+            "v_claude": ModelConfig(provider="vertexai_claude", id="custom-endpoint"),
+            "oai_a": ModelConfig(provider="openai", id="gpt-5.4", pricing=ModelPricing(input=2.0, output=4.0)),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(
+        config=config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        now=FIXED_NOW,
+    )
+    assert snapshot.cache_savings_usd_7d is None
+    assert "cache_savings_usd_7d" not in snapshot.to_dict()
+    assert _acct(snapshot, "vertexai_claude:default").token_mix_7d == TokenMix(400, 100, 1000, 0)
+    assert (
+        snapshot.top_models_7d[0].provider,
+        snapshot.top_models_7d[0].model,
+        snapshot.top_models_7d[0].run_count,
+        snapshot.top_models_7d[0].tokens_7d,
+    ) == (
+        "OpenAI",
+        "gpt-5.4",
+        5,
+        1000,
+    )
+    assert snapshot.top_models_7d[0].token_mix_7d == TokenMix(400, 200, 400, 0)
+    assert (len(snapshot.top_models_7d), len(snapshot.top_agents_7d)) == (12, 12)
+    assert [a.entity for a in snapshot.top_agents_7d[:3]] == ["agent-14", "agent-13", "agent-12"]
+
+    empty_wire = ProviderUsageSnapshot(
+        checked_at="2026-11-23T20:00:00Z",
+        partial=False,
+        accounts=(
+            ProviderLimitAccount(
+                "anthropic:default",
+                "anthropic",
+                "Anthropic",
+                None,
+                None,
+                (),
+                (),
+                None,
+                "2026-11-23T20:00:00Z",
+                False,
+                0,
+                None,
+                False,
+                TokenMix(),
+            ),
+        ),
+        daily_7d=(DailyAccountUsage("2026-11-23", {}, 0),),
+        unattributed_tokens_7d=0,
+        unattributed_cost_usd_7d=None,
+        token_mix_7d=TokenMix(),
+        cache_savings_usd_7d=0.0,
+    ).to_dict()
+    assert not ({"token_mix_7d", "cache_savings_usd_7d", "top_models_7d", "top_agents_7d"} & empty_wire.keys())
+    assert "token_mix_7d" not in empty_wire["accounts"][0]
+    assert not ({"cost_by_account", "unattributed_cost_usd"} & empty_wire["daily_7d"][0].keys())
+
+
+def test_fit_to_device_budget_progressive_shedding_order() -> None:
+    """fit_to_device_budget sheds optional rich analytics first, keeping daily_7d & accounts, before dropping daily_7d."""
+    mix = {"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 3000, "cache_write_tokens": 500}
+    rich_payload: dict[str, object] = {
+        "version": 1,
+        "request_id": "req-rich",
+        "checked_at": "2026-11-23T20:00:00Z",
+        "partial": False,
+        "accounts": [
+            {
+                "id": "anthropic:default",
+                "provider": "anthropic",
+                "display_name": "Anthropic",
+                "model_keys": [f"model-{i:03d}" for i in range(40)],
+                "windows": [],
+                "stale": False,
+                "tokens_7d": 5000,
+                "cost_usd_7d": 1.25,
+                "cost_estimated": True,
+                "token_mix_7d": dict(mix),
+            },
+        ],
+        "daily_7d": [
+            {
+                "day": f"2026-11-{d:02d}",
+                "by_account": {"anthropic:default": 1000 * d},
+                "unattributed_tokens": 50,
+                "cost_by_account": {"anthropic:default": round(0.2 * d, 4)},
+                "unattributed_cost_usd": 0.05,
+            }
+            for d in range(17, 24)
+        ],
+        "unattributed_tokens_7d": 350,
+        "unattributed_cost_usd_7d": 0.35,
+        "token_mix_7d": dict(mix),
+        "cache_savings_usd_7d": 0.42,
+        "top_models_7d": [
+            {
+                "provider": "Anthropic",
+                "model": f"claude-m-{i}",
+                "account_id": "anthropic:default",
+                "tokens_7d": 1000,
+                "cost_usd_7d": 1.0,
+                "run_count": 5,
+                "daily_tokens_7d": [100] * 7,
+            }
+            for i in range(8)
+        ],
+        "top_agents_7d": [
+            {
+                "entity": f"agent-{i}",
+                "tokens_7d": 1000,
+                "cost_usd_7d": 1.0,
+                "run_count": 5,
+                "daily_tokens_7d": [100] * 7,
+            }
+            for i in range(8)
+        ],
+    }
+
+    full_size = len(json.dumps(rich_payload).encode("utf-8"))
+    unmodified = fit_to_device_budget(rich_payload, max_bytes=full_size)
+    assert (unmodified == rich_payload, unmodified["partial"]) == (True, False)
+
+    # Stage 1: strips all rich analytics while preserving daily_7d tokens and all model_keys.
+    stage1 = fit_to_device_budget(rich_payload, max_bytes=full_size - 100)
+    assert stage1["partial"] is True
+    assert len(json.dumps(stage1).encode("utf-8")) <= full_size - 100
+    assert not ({"top_agents_7d", "top_models_7d", "token_mix_7d", "cache_savings_usd_7d"} & stage1.keys())
+    assert "token_mix_7d" not in stage1["accounts"][0]
+    assert len(stage1["daily_7d"]) == 7
+    assert all("cost_by_account" not in row and "unattributed_cost_usd" not in row for row in stage1["daily_7d"])
+    assert (stage1["daily_7d"][0]["by_account"], len(stage1["accounts"][0]["model_keys"])) == (
+        {"anthropic:default": 17000},
+        40,
+    )
+
+    # Stage 2: drops daily_7d while preserving all model_keys.
+    stage1_size = len(json.dumps(stage1).encode("utf-8"))
+    stage2 = fit_to_device_budget(rich_payload, max_bytes=stage1_size - 50)
+    assert (stage2["partial"], stage2["daily_7d"], len(stage2["accounts"][0]["model_keys"])) == (True, [], 40)
+
+    # Stage 3: trims model_keys.
+    stage2_size = len(json.dumps(stage2).encode("utf-8"))
+    stage3 = fit_to_device_budget(rich_payload, max_bytes=stage2_size - 100)
+    assert stage3["partial"] is True
+    assert stage3["daily_7d"] == []
+    assert len(stage3["accounts"][0]["model_keys"]) < 40
