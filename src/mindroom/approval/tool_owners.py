@@ -260,7 +260,7 @@ def _call_approval_authority(config: Config, tools: ToolRegistry, key: ToolKey) 
     names = (SHELL_FUNCTION, *approval_policy_names(config, tools, registered_toolkit, key.function))
     return (
         config.tool_approval.model_dump(exclude={"rules"}),
-        *(effective_tool_approval_policy(config, name) for name in names),
+        *((name, effective_tool_approval_policy(config, name)) for name in names),
     )
 
 

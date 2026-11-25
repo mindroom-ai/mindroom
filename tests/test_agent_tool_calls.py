@@ -1237,6 +1237,21 @@ async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
             expected_worker_target=runtime.resolve_worker_target(),
         )
 
+    # A republished alias with a new judged_as target refuses even when both targets' policies are equal.
+    runtime = bind_reload(
+        lambda cfg: setattr(
+            cfg.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="judged_target", action="require_approval")],
+        ),
+        current_tools=ToolRegistry({"actions": new_alias_meta}),
+    )
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
+
     # scheduler.run_scheduled_call ignores rules matching its own name, consistent with _approval_may_gate.
     runtime = bind_reload(
         lambda cfg: setattr(
