@@ -2515,6 +2515,7 @@ expose = [
     "WorkflowRunStore",
     "WorkflowRunStoreError",
     "owned_run",
+    "redact_json_text",
 ]
 
 [[modules]]
@@ -2566,6 +2567,7 @@ from = ["mindroom.workflow_runs.graph"]
 expose = [
     "AGENT_KINDS",
     "LOG_LINES",
+    "MESSAGE_LINES",
     "REPLACE",
     "Graph",
     "fit_snapshot",
@@ -2663,6 +2665,8 @@ expose = [
     "session_turn_message",
     "set_state",
     "valid_wait_seconds",
+    "visible_messages",
+    "visible_messages_with_omitted",
     "withdraw_unread",
 ]
 

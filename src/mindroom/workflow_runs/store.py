@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.sqlite_utils import begun, enter_wal
 from mindroom.workflow_runs.models import (
@@ -32,8 +33,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _BUSY_TIMEOUT_SECONDS = 10
+# The first SQLite release with a built-in ``octet_length``.
+_OCTET_LENGTH_VERSION = (3, 43, 0)
 _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
+_MAX_PREVIEW_JSON_BYTES = 16 * 1024
+_PREVIEW_CHARS = 200
 # The longest report a run keeps for the call it was taken from; a longer one is not kept.
 _MAX_KEPT_REPORT_CHARS = 64 * 1024
 _RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result", "claims"})
@@ -427,11 +432,17 @@ class WorkflowRunStore:
             )
         return inserted.rowcount == 1
 
-    def usage_summary(self, run_id: str, *, attempt: int | None = None) -> UsageSummary:
+    def usage_summary(
+        self,
+        run_id: str,
+        *,
+        attempt: int | None = None,
+        current_generations: Mapping[str, int] | None = None,
+    ) -> UsageSummary:
         """Read *run_id*'s usage ledger once: totals, optional *attempt* cost, per-node sums, and priced own turns."""
         with self.read_connection() as connection:
             rows = connection.execute(
-                "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
+                "SELECT key, generation, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
                 (run_id,),
             ).fetchall()
         all_entries: list[dict[str, Any]] = []
@@ -443,7 +454,8 @@ class WorkflowRunStore:
             all_entries.append(used)
             if attempt is None or row["attempt"] == attempt:
                 attempt_entries.append(used)
-            by_key.setdefault(row["key"], []).append(used)
+            if current_generations is None or current_generations.get(row["key"]) == row["generation"]:
+                by_key.setdefault(row["key"], []).append(used)
             if "sub:" not in str(row["turn"]) and (cost := used.get("cost_usd")) is not None:
                 turn_costs.append(cost)
         totals = _totals(all_entries)
@@ -455,22 +467,57 @@ class WorkflowRunStore:
             turn_costs=turn_costs,
         )
 
+    def node_previews(self, run_id: str, *, max_chars: int = _PREVIEW_CHARS) -> dict[str, str]:
+        """Return bounded, redacted result previews for completed non-stale agent, turn and tool nodes."""
+        if max_chars <= 0:
+            return {}
+        sql = (
+            (
+                "SELECT key, CAST(result_json AS BLOB) AS result_blob "
+                "FROM workflow_nodes "
+                "WHERE run_id = ? AND stale = 0 AND state = 'completed' "
+                "AND kind IN ('agent', 'turn', 'tool') AND result_file IS NULL "
+                "AND octet_length(result_json) <= ? AND result_json != 'null' "
+                "ORDER BY seq"
+            )
+            if sqlite3.sqlite_version_info >= _OCTET_LENGTH_VERSION
+            else (
+                "SELECT key, CAST(result_json AS BLOB) AS result_blob "
+                "FROM workflow_nodes "
+                "WHERE run_id = ? AND stale = 0 AND state = 'completed' "
+                "AND kind IN ('agent', 'turn', 'tool') AND result_file IS NULL "
+                "AND length(CAST(result_json AS BLOB)) <= ? AND result_json != 'null' "
+                "ORDER BY seq"
+            )
+        )
+        with self.read_connection() as connection:
+            rows = connection.execute(sql, (run_id, _MAX_PREVIEW_JSON_BYTES)).fetchall()
+        previews: dict[str, str] = {}
+        for row in rows:
+            with suppress(Exception):
+                if (preview := _format_node_preview(row["result_blob"], max_chars)) is not None:
+                    previews[row["key"]] = preview
+        return previews
+
     def append_log(self, run_id: str, epoch: int, text: str) -> None:
         """Append one line to a run's log, for the holder of *epoch*."""
         with self.write_transaction(run_id) as connection:
-            _fenced(connection, run_id, epoch)
+            run = _fenced(connection, run_id, epoch)
             connection.execute(
-                "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
-                (run_id, utc_timestamp(), text),
+                "INSERT INTO workflow_log (run_id, attempt, created_at, text) VALUES (?, ?, ?, ?)",
+                (run_id, run.attempt, utc_timestamp(), text),
             )
 
-    def log(self, run_id: str, limit: int = 50) -> list[str]:
-        """Return the newest *limit* lines of a run's log, oldest first."""
+    def log(self, run_id: str, limit: int = 50, *, attempt: int | None = None) -> list[str]:
+        """Return the newest *limit* lines of a run's log, oldest first; optional *attempt* narrows to one attempt."""
+        query = (
+            "SELECT text FROM workflow_log WHERE run_id = ? AND attempt = ? ORDER BY id DESC LIMIT ?"
+            if attempt is not None
+            else "SELECT text FROM workflow_log WHERE run_id = ? ORDER BY id DESC LIMIT ?"
+        )
+        params: tuple[object, ...] = (run_id, attempt, limit) if attempt is not None else (run_id, limit)
         with self.read_connection() as connection:
-            rows = connection.execute(
-                "SELECT text FROM workflow_log WHERE run_id = ? ORDER BY id DESC LIMIT ?",
-                (run_id, limit),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [row["text"] for row in reversed(rows)]
 
     def get_source(self, run_id: str, attempt: int, name: str) -> tuple[bytes, str] | None:
@@ -599,6 +646,8 @@ class WorkflowRunStore:
         connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=_BUSY_TIMEOUT_SECONDS)
         try:
             connection.row_factory = sqlite3.Row
+            if sqlite3.sqlite_version_info < _OCTET_LENGTH_VERSION:
+                connection.create_function("octet_length", 1, _octet_length, deterministic=True)
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("PRAGMA foreign_keys = ON")
             yield connection
@@ -893,6 +942,56 @@ _LIGHT_COLUMNS = ", ".join(
     for column in (_column(field.name, _NODE_JSON_FIELDS) for field in fields(WorkflowNode))
 )
 
+
+def _octet_length(value: object) -> int | None:
+    """Return a stored value's size in bytes, as SQLite 3.43's ``octet_length`` does."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return len(value)
+    return len(str(value).encode("utf-8", errors="surrogatepass"))
+
+
+def redact_json_text(text: str) -> str:
+    """If *text* parses as a JSON object or array, redact structured secret fields before re-serializing."""
+    stripped = text.strip()
+    if stripped and stripped[0] in "{[":
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict | list):
+                return json.dumps(redact_sensitive_data(parsed), ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
+def _format_node_preview(blob: bytes | str, max_chars: int) -> str | None:
+    """Decode, redact, and bound one node's JSON result for room display without crashing on bad UTF-8."""
+    raw = blob.decode("utf-8", errors="replace") if isinstance(blob, bytes) else blob
+    obj = json.loads(raw)
+    if obj is None:
+        return None
+    if isinstance(obj, str):
+        text = redact_json_text(obj)
+    elif isinstance(obj, dict) and isinstance(obj.get("output"), str):
+        text = redact_json_text(obj["output"])
+    elif isinstance(obj, dict | list):
+        text = json.dumps(redact_sensitive_data(obj), ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    trimmed = text.encode("utf-8", errors="replace").decode("utf-8").strip()
+    return redact_sensitive_text(trimmed, max_length=max_chars) if trimmed else None
+
+
+def _add_log_attempt(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_log)")}
+    if "attempt" not in columns:
+        connection.execute("ALTER TABLE workflow_log ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+        connection.execute(
+            "UPDATE workflow_log SET attempt = 1 "
+            "WHERE EXISTS (SELECT 1 FROM workflow_runs r WHERE r.run_id = workflow_log.run_id AND r.attempt = 1)",
+        )
+    connection.execute("CREATE INDEX IF NOT EXISTS workflow_log_run_attempt_idx ON workflow_log(run_id, attempt, id)")
+
+
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema,)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_log_attempt)
 SCHEMA_VERSION = len(_MIGRATIONS)
