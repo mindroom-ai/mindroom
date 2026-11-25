@@ -1265,6 +1265,55 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
     assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
 
 
+def test_service_config_reads_and_validates_forwarded_allow_ips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trusted proxy IPs/CIDRs default to loopback, allow opting out via empty string, and reject wildcards/invalid entries."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    for name in (
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("127.0.0.1", "::1")
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8, 127.0.0.1, ::1")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("10.0.0.0/8", "127.0.0.1", "::1")
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "   ")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ()
+
+    for invalid in ("*", "127.0.0.1,*", "not-an-ip", "10.0.0.1/8"):
+        monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", invalid)
+        with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"):
+            provisioning._load_service_config_from_env()
+
+
+def test_main_passes_forwarded_allow_ips_to_uvicorn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() enables uvicorn proxy headers only for configured trusted proxy IPs/CIDRs."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.setenv("MINDROOM_PROVISIONING_STATE_PATH", str(tmp_path / "state.sqlite3"))
+    for name in ("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_run(app: object, **kwargs: object) -> None:
+        calls.append({"app": app, **kwargs})
+
+    monkeypatch.setattr(provisioning.uvicorn, "run", _fake_run)
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8,127.0.0.1")
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is True
+    assert calls[-1]["forwarded_allow_ips"] == ["10.0.0.0/8", "127.0.0.1"]
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "")
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is False
+    assert calls[-1]["forwarded_allow_ips"] == []
+
+
 def _throttled_polls(monkeypatch: pytest.MonkeyPatch, interval_seconds: int) -> int:
     """Count polls the per-device limit rejects for one client polling at a fixed interval for two minutes."""
     now = [1000.0]
@@ -1858,6 +1907,74 @@ async def test_openid_userinfo_returns_local_user(tmp_path: Path, monkeypatch: p
     assert request.url.copy_with(query=None) == "https://mindroom.chat/_matrix/federation/v1/openid/userinfo"
     assert request.url.params["access_token"] == "openid-secret"  # noqa: S105
     assert "authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sub",
+    [
+        "@mindroom_dev:mindroom.chat",
+        "@mindroom_code_abcd2345:mindroom.chat",
+        "@MindRoom_router:mindroom.chat",
+        "@mindroom_:mindroom.chat",
+    ],
+)
+async def test_openid_userinfo_rejects_managed_agent_accounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sub: str,
+) -> None:
+    """Managed mindroom_* agent accounts cannot approve pairings or manage connections via OpenID."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(200, json={"sub": sub}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-agent")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Managed agent accounts cannot authenticate to the provisioning service"
+
+
+def test_agent_account_cannot_approve_device_pairing_or_list_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent account with a valid OpenID token gets 403 on approve and connections, while @mindroom stays allowed."""
+    token_to_user = {
+        "openid-agent": "@mindroom_code_abcd2345:mindroom.chat",
+        "openid-human": "@mindroom:mindroom.chat",
+    }
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        sub = token_to_user.get(request.url.params.get("access_token", ""))
+        if sub is None:
+            return httpx.Response(401, json={"errcode": "M_UNKNOWN_TOKEN"})
+        return httpx.Response(200, json={"sub": sub})
+
+    _install_homeserver(monkeypatch, _handler)
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/v1/local-mindroom/pair/device/start",
+            json={"client_name": "Work Laptop", "client_pubkey_or_fingerprint": "fp-1"},
+        ).json()
+        approved = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={OPENID_TOKEN_HEADER: "openid-agent"},
+        )
+        assert approved.status_code == 403
+        listed = client.get(
+            "/v1/local-mindroom/connections",
+            headers={OPENID_TOKEN_HEADER: "openid-agent"},
+        )
+        assert listed.status_code == 403
+        # A plain human username without the `mindroom_` prefix is still accepted.
+        human_ok = client.get(
+            "/v1/local-mindroom/connections",
+            headers={OPENID_TOKEN_HEADER: "openid-human"},
+        )
+        assert human_ok.status_code == 200
 
 
 @pytest.mark.asyncio

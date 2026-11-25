@@ -21,8 +21,9 @@ Authentication: browser users prove their identity with a Matrix OpenID token
 in the ``X-Matrix-OpenID-Token`` header. The chat client requests it from the
 user's homeserver (``/_matrix/client/v3/user/{userId}/openid/request_token``),
 and the service resolves it through its configured homeserver's
-``/_matrix/federation/v1/openid/userinfo`` endpoint, accepting only users on
-``MATRIX_SERVER_NAME``. An OpenID token grants no account access, so the
+``/_matrix/federation/v1/openid/userinfo`` endpoint, accepting only non-agent
+users on ``MATRIX_SERVER_NAME`` (managed ``mindroom_*`` agent accounts are
+rejected with 403). An OpenID token grants no account access, so the
 service never needs Matrix access tokens. It is still a short-lived bearer
 credential: until it expires, any OpenID relying party that validates tokens
 with the same homeserver (for example the MatrixRTC lk-jwt-service or an
@@ -105,6 +106,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -137,6 +139,7 @@ DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.sqlite3"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
+DEFAULT_FORWARDED_ALLOW_IPS = ("127.0.0.1", "::1")
 DEFAULT_APPROVE_URL = "https://chat.mindroom.chat/connect"
 OPENID_TOKEN_HEADER = "X-Matrix-OpenID-Token"  # noqa: S105
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
@@ -214,6 +217,7 @@ class ServiceConfig:
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: str | None = None
     approve_url: str = DEFAULT_APPROVE_URL
+    forwarded_allow_ips: tuple[str, ...] = DEFAULT_FORWARDED_ALLOW_IPS
 
 
 @dataclass(slots=True)
@@ -457,6 +461,21 @@ def _read_secret(*, env_name: str, file_env_name: str) -> str | None:
     return value or None
 
 
+def _parse_forwarded_allow_ips(raw: str | None) -> tuple[str, ...]:
+    """Parse trusted reverse-proxy IPs/CIDRs; unset defaults to loopback and empty disables proxy headers."""
+    if raw is None:
+        return DEFAULT_FORWARDED_ALLOW_IPS
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    for entry in entries:
+        try:
+            # Match uvicorn's strict network parsing so malformed CIDRs fail at startup instead of turning into literals.
+            ipaddress.ip_network(entry) if "/" in entry else ipaddress.ip_address(entry)
+        except ValueError as exc:
+            msg = f"MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS contains invalid IP or CIDR: {entry!r}"
+            raise ValueError(msg) from exc
+    return tuple(entries)
+
+
 def _load_service_config_from_env() -> ServiceConfig:
     matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "https://mindroom.chat").strip().rstrip("/")
     if not matrix_homeserver:
@@ -507,6 +526,7 @@ def _load_service_config_from_env() -> ServiceConfig:
     approve_url = (
         os.getenv("MINDROOM_PROVISIONING_APPROVE_URL", DEFAULT_APPROVE_URL).strip().rstrip("/") or DEFAULT_APPROVE_URL
     )
+    forwarded_allow_ips = _parse_forwarded_allow_ips(os.getenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"))
 
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
@@ -522,6 +542,7 @@ def _load_service_config_from_env() -> ServiceConfig:
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         approve_url=approve_url,
+        forwarded_allow_ips=forwarded_allow_ips,
     )
 
 
@@ -887,6 +908,11 @@ async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> s
     localpart, _, server_name = user_id[1:].partition(":")
     if not localpart or server_name != config.matrix_server_name:
         raise HTTPException(status_code=401, detail="Matrix OpenID token belongs to another server")
+    if localpart.lower().startswith(MANAGED_AGENT_USERNAME_PREFIX):
+        raise HTTPException(
+            status_code=403,
+            detail="Managed agent accounts cannot authenticate to the provisioning service",
+        )
     return user_id
 
 
@@ -1327,7 +1353,13 @@ def main() -> None:
     """Run the provisioning API with uvicorn."""
     config = _load_service_config_from_env()
     app = create_app(config)
-    uvicorn.run(app, host=config.listen_host, port=config.listen_port)
+    uvicorn.run(
+        app,
+        host=config.listen_host,
+        port=config.listen_port,
+        proxy_headers=bool(config.forwarded_allow_ips),
+        forwarded_allow_ips=list(config.forwarded_allow_ips),
+    )
 
 
 if __name__ == "__main__":
