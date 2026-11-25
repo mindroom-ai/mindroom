@@ -548,8 +548,11 @@ Rules:
 - Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
 - Incorporate relevant new information from <new_conversation>.
 - Keep retained wording stable when practical, but condense it when needed.
-- Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
+- State each detail once without repeating it across sections.
+- Preserve load-bearing operational and technical details discovered in the conversation and tool outputs — file/log/socket paths, host/SSH/URL access recipes, working commands/flags, function/class names, commit SHAs, Matrix/revision/event IDs, model names, config keys, numeric thresholds, ports, concrete rationales, and exact error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
+- Preserve explicit before -> after transitions when a requirement, setting, or plan was revised, and clearly distinguish established user decisions and approvals from pending agent proposals.
+- Do not copy generic standing instructions, style/workflow rules, or reference runbooks loaded via skills or tool outputs into `## Constraints` or `## Next Steps` unless a rule was specifically applied, constrained, or overridden for this task.
 - In Next Steps, put the work the user is still waiting for, such as an unanswered question or an unsent result or report, before the agent's own bookkeeping (notes, logs, snapshots), keeping any steps that work depends on ahead of it.
 - Do not invent facts.
 - If a section has no content, write `None.`
