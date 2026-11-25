@@ -498,10 +498,12 @@ uvx mindroom run
 
 When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu.
+1. Choose a Matrix server.
+   Press Enter for MindRoom Chat (`mindroom.chat`), or select `Custom Matrix server` to connect to your own homeserver by domain or URL (`.well-known` discovery and local pairing are detected automatically, or you can enter a registration token, shared secret, separate provisioning URL, and owner Matrix user ID).
+2. Pick a model provider from the menu.
    Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
    When nothing is detected, the default menu starts with OpenAI.
-2. Finish provider setup when needed:
+3. Finish provider setup when needed:
    - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
      MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
      MindRoom does not ask when the key is already set in your environment.
@@ -509,14 +511,15 @@ When no config exists and MindRoom runs in a terminal, it checks for local login
    - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
    - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
-MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` for the selected Matrix server (hosted `MATRIX_HOMESERVER=https://mindroom.chat` by default) and a starter `Mind` agent in a `Personal` room.
 
 ### 2. Approve pairing
 
-MindRoom prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+If you selected MindRoom Chat (`mindroom.chat`) or a custom server with local provisioning enabled, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your Matrix account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 After approval, MindRoom prints the approving account and asks `Is this your account?` before saving anything.
 Pair codes expire after 10 minutes, and `mindroom run` prints a new one when that happens.
+If you selected a custom server with direct registration (token, shared secret, or open registration), MindRoom skips pairing and registers agents directly.
 See [connect](https://docs.mindroom.chat/deployment/hosted-matrix/#connect) for pairing details, the credentials it saves, and how to revoke a pairing.
 
 ### 3. Choose how MindRoom keeps running
@@ -647,7 +650,7 @@ Prerequisites:
 ### Configuration
 
 Generate a starter with `mindroom config init --matrix-server self-hosted`, or write `config.yaml` yourself.
-A generated config contains `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholders; replace each with your quoted Matrix user ID, such as `"@alice:matrix.example.com"`, because only hosted pairing fills them in.
+If you generate the config non-interactively or skip the owner user ID prompt during interactive setup, replace each `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholder with your quoted Matrix user ID, such as `"@alice:matrix.example.com"` (servers with local pairing fill them in automatically on approval).
 See [Configuration](https://docs.mindroom.chat/configuration/#configuration-file) for where MindRoom looks for `config.yaml`.
 
 A minimal hand-written `config.yaml`:
@@ -28080,7 +28083,7 @@ Every command also prints its options with `--help`.
 
 Start MindRoom with your configuration.
 
-On first run in a terminal, `mindroom run` creates the hosted starter config, pairs with MindRoom Chat, and offers to install the [login service](#service).
+On first run in a terminal, `mindroom run` creates a starter config (defaulting to MindRoom Chat, or connecting to your own Matrix server), pairs when using hosted or local provisioning, and offers to install the [login service](#service).
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the setup questions and for unattended setup with `--provider` and `--service`.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
 On a hosted install, the dashboard becomes available after pairing is approved.
@@ -28103,11 +28106,12 @@ On a hosted install, the dashboard becomes available after pairing is approved.
 
  Set up on first run, pair, and start MindRoom.
 
- When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for
- the model provider in a terminal or taking it from --provider.
- An install on MindRoom Chat that is not paired yet pairs this machine with your account,
- and a first run in a terminal offers to keep running in the background at login (see
- --service).
+ When no config exists, MindRoom creates a starter config, asking for the Matrix server
+ (defaulting to MindRoom Chat) and model provider in a terminal, or using mindroom.chat
+ and --provider without one.
+ An install using hosted or local provisioning that is not paired yet pairs this machine
+ with your account, and a first run in a terminal offers to keep running in the
+ background at login (see --service).
  MindRoom then creates the agent accounts and rooms from config.yaml, keeps room
  memberships in sync, and starts the dashboard and API (disable with --no-api).
 
@@ -28232,12 +28236,12 @@ Create, view, edit, and validate `config.yaml`.
 ### config init
 
 Create a starter `config.yaml` and `.env` with the personal Mind agent, starter models, file-based memory, and sensible defaults.
-For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so use `config init` to choose presets up front, use a self-hosted homeserver, or create files without starting.
+`mindroom run` runs this setup interactively on first run when no config exists, so use `config init` to choose presets up front or create files without starting.
 
 | Option | Effect |
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
-| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
+| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). Omitting it in an interactive terminal (without `--provider`, `--no-input`, or `--print`) prompts you to choose between `mindroom.chat` and a custom Matrix server; passing `--matrix-server self-hosted` interactively prompts for your homeserver URL, server name, and registration or pairing settings. |
 | `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |

@@ -5792,6 +5792,7 @@ depends_on = [
     "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
+    "mindroom.cli.setup_matrix",
     "mindroom.cli.setup_wizard",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
@@ -5824,6 +5825,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
     "mindroom.cli.service",
+    "mindroom.cli.setup_matrix",
 ]
 
 [[modules]]
@@ -5853,6 +5855,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
+    "mindroom.cli.setup_matrix",
 ]
 
 [[modules]]
@@ -5864,6 +5867,15 @@ depends_on = [
     "mindroom.providers.openai",
 ]
 visibility = ["mindroom.cli.setup_wizard"]
+
+[[modules]]
+path = "mindroom.cli.setup_matrix"
+depends_on = [
+    "mindroom.cli.env_file",
+    "mindroom.cli.owner",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.config"]
 
 [[modules]]
 path = "mindroom.cli.setup_wizard"

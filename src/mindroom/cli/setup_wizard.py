@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from rich.markup import escape
 
 from mindroom import constants
-from mindroom.cli.interactive import Separator, confirm, secret, select
+from mindroom.cli.interactive import Separator, confirm, secret, select, text
 from mindroom.model_defaults import (
     CONFIG_INIT_ADDITIONAL_MODELS,
     CONFIG_INIT_HELPER_MODELS,
@@ -71,6 +71,10 @@ class _ConfirmFn(Protocol):
     def __call__(self, message: str, *, default: bool) -> bool: ...
 
 
+class _TextFn(Protocol):
+    def __call__(self, message: str, *, default: str = "") -> str: ...
+
+
 class _PrintLiteralFn(Protocol):
     def __call__(self, markup: str, text: object, suffix: str = "") -> None: ...
 
@@ -84,6 +88,7 @@ class WizardIO:
     select: _SelectFn = select
     confirm: _ConfirmFn = confirm
     secret: Callable[[str], str] = secret
+    text: _TextFn = text
 
 
 @dataclass(frozen=True)
@@ -361,14 +366,21 @@ def prompt_provider_choice(snapshot: DetectionSnapshot, *, select_fn: _SelectFn 
     return select_fn("Which model provider should your agents use?", choices)
 
 
-def print_setup_summary(selection: StarterModelSelection, *, io: WizardIO) -> None:
-    """Print a compact summary of configured models, router, and provider readiness."""
+def print_setup_summary(
+    selection: StarterModelSelection,
+    *,
+    io: WizardIO,
+    matrix_label: str | None = None,
+) -> None:
+    """Print a compact summary of configured Matrix server, models, router, and provider readiness."""
     default_label = selection.default_model.display_name or selection.default_model.id
     models = [f"default ({default_label})", *(name for name, _ in selection.additional_models)]
     router_model = selection.helper_model or "default"
     header = "Setup ready" if selection.ready else "Setup created"
     status = "[green]ready[/green]" if selection.ready else "[yellow]needs setup[/yellow]"
     io.console.print(f"\n[bold]{header}[/bold]")
+    if matrix_label:
+        io.print_literal("  Matrix: ", matrix_label)
     io.print_literal("  Models: ", ", ".join(models))
     io.console.print(f"  Router: {router_model}")
     io.console.print(f"  Status: {status}")

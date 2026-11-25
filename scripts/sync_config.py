@@ -10,6 +10,7 @@ import yaml
 
 from mindroom import model_defaults
 from mindroom.cli.config import _full_template
+from mindroom.cli.setup_matrix import unconfigured_self_hosted_matrix_selection
 
 ROOT_DIR = Path(__file__).parent.parent
 TARGET_PATH = ROOT_DIR / "cluster" / "k8s" / "instance" / "default-config.yaml"
@@ -21,7 +22,7 @@ HEADER = """\
 
 def saas_config() -> dict:
     """Return the config init starter adapted to hosted SaaS instances."""
-    template = _full_template("openrouter", matrix_server="self-hosted")
+    template = _full_template("openrouter", matrix_selection=unconfigured_self_hosted_matrix_selection())
     config = yaml.safe_load(template)
 
     # Hosted tenants choose from the central OpenRouter presets in the dashboard.
