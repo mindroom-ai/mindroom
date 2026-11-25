@@ -25,10 +25,22 @@ in
       description = "Matrix homeserver used for OpenID userinfo token verification and agent account registration.";
     };
 
+    homeserverApiUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional internal Matrix homeserver base URL for server-to-homeserver API calls; null uses matrixHomeserver.";
+    };
+
     matrixServerName = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Optional Matrix server_name override when it differs from matrixHomeserver host.";
+    };
+
+    requiredRoom = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional local Matrix room ID (!...) or local room alias (#local:server) required for OpenID provisioning access.";
     };
 
     matrixRegistrationTokenFile = lib.mkOption {
@@ -125,8 +137,12 @@ in
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
       } // lib.optionalAttrs (cfg.forwardedAllowIps != null) {
         MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS = lib.concatStringsSep "," cfg.forwardedAllowIps;
+      } // lib.optionalAttrs (cfg.homeserverApiUrl != null) {
+        MINDROOM_PROVISIONING_HOMESERVER_API_URL = cfg.homeserverApiUrl;
       } // lib.optionalAttrs (cfg.matrixServerName != null) {
         MATRIX_SERVER_NAME = cfg.matrixServerName;
+      } // lib.optionalAttrs (cfg.requiredRoom != null) {
+        MINDROOM_PROVISIONING_REQUIRED_ROOM = cfg.requiredRoom;
       } // lib.optionalAttrs (cfg.approveUrl != null) {
         MINDROOM_PROVISIONING_APPROVE_URL = cfg.approveUrl;
       } // lib.optionalAttrs (cfg.googleOAuthClientId != null) {
