@@ -310,7 +310,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(
             return_value="merged summary",
         ),
@@ -410,7 +410,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(
     summary_mock = AsyncMock()
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -451,7 +451,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(
             return_value="single run summary",
         ),
@@ -510,7 +510,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     assert stored.session_state == {"tool": "state"}
     assert stored.metadata == with_force_compaction({"other": "kept"})
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(return_value="summary")):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current question",
@@ -549,7 +549,7 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
     storage.update_metadata(other, lambda metadata: {**(metadata or {}), "other": "kept"})
 
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(return_value="summary")):
         await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current question",
@@ -841,7 +841,7 @@ async def test_compact_context_with_delegation_compacts_on_parent_resume(
 
     with (
         tool_runtime_context(runtime_context),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
     ):
         result = await ai.ai_response(turn_ctx, runtime_paths, config)
 

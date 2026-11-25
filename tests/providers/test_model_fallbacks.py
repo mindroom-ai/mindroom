@@ -24,7 +24,7 @@ from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
-from mindroom.history.compaction import SummaryModel, _summarize_chunk
+from mindroom.history.summarizer import SummaryModel, summarize_chunk
 from mindroom.history.summary_call import SummaryRetryPolicy, generate_compaction_summary
 from mindroom.llm.errors import (
     QUOTA_EXHAUSTED,
@@ -1277,7 +1277,7 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compaction retries transient primary once then fails over on final retry, and never retries the same refuser."""
-    from mindroom.history import compaction as compaction_module  # noqa: PLC0415
+    from mindroom.history import summarizer as compaction_module  # noqa: PLC0415
     from tests.history_helpers import _summarizer  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -1296,7 +1296,7 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
     # 1. Sustained 503 on primary: attempt 1 retries primary, final attempt fails over to healthy backup.
     primary = _Model("primary", [[_transient()], [_transient()]])
     backup = _Model("backup", [_answer("backup", "Compact summary.")])
-    chunk = await _summarize_chunk(_summarizer(_with_fallbacks(primary, backup), 16_000, name="primary"), None, runs)
+    chunk = await summarize_chunk(_summarizer(_with_fallbacks(primary, backup), 16_000, name="primary"), None, runs)
     assert chunk is not None
     assert chunk.summary == "Compact summary."
     assert (len(primary.requests), len(backup.requests)) == (2, 1)
@@ -1314,6 +1314,6 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
         fallback=SummaryModel(refusal_b, "backup", 16_000),
     )
     with pytest.raises(ModelSafeguardRefusal):
-        await _summarize_chunk(summarizer_same_b, None, runs)
+        await summarize_chunk(summarizer_same_b, None, runs)
     assert len(avail_b.requests) == 1
     assert refusal_b.requests == []

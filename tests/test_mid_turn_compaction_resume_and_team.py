@@ -91,7 +91,7 @@ RESUME_PROBE_TOOL = "compaction_resume_probe"
 @pytest.fixture
 def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
     calls = SummaryCalls()
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", calls)
     install_model_providers(monkeypatch, {"summary": summary_model()})
     return calls
 
@@ -974,7 +974,7 @@ async def test_a_member_run_whose_compaction_failed_leaves_its_sibling_run_compa
             raise RuntimeError(msg)
         return await summary_calls(summary_input=summary_input, **kwargs)
 
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_task_a)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", fail_task_a)
 
     chunks = await team.stream()
 

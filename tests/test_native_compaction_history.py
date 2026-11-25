@@ -16,6 +16,7 @@ from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.request_size import request_sizer
@@ -23,7 +24,6 @@ from mindroom.history.runtime import (
     ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import with_force_compaction
@@ -37,7 +37,7 @@ from mindroom.native_compaction import (
     ENCRYPTED_REPLAY_RESET_KEY,
     NATIVE_CHECKPOINT_KEY,
     NativeReplay,
-    checkpoint_summary,
+    iter_readable_checkpoints,
     native_replay,
     native_replay_messages,
     replay_basis,
@@ -89,10 +89,9 @@ _FRAME = request_frame("Continue")
 
 def _inputs(config: Config, entity: str = "test_agent") -> HistoryPreparationInputs:
     """Resolve the configured ``entity``'s history inputs."""
-    return resolve_entity_preparation_inputs(
+    return resolve_history_preparation_inputs(
         history_settings=config.resolve_scope(entity).history_settings,
         config=config,
-        runtime_paths=runtime_paths_for(config),
         active_model_name=entity_model_name(config, entity),
         active_context_window=None,
     )
@@ -462,7 +461,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     )
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         AsyncMock(return_value="Keep the recent instruction"),
     )
     model = responses_adapter(tmp_path, base_url="https://proxy.example/v1", store=True)
@@ -707,7 +706,9 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         [{"type": "compaction", "content": "Checkpoint."}],
         prepared.native_history.native_compaction,
     )
-    assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
+    assert list(iter_readable_checkpoints([_completed_run("checkpoint", messages=[answer])])) == [
+        (0, 0, replay_basis("Archived summary.", [later]), "Checkpoint."),
+    ]
 
 
 @pytest.mark.asyncio

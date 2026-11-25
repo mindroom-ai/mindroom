@@ -17,11 +17,11 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.history.compaction import _compaction_fallback_is_distinct
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
     resolve_history_execution_plan,
+    resolve_history_preparation_inputs,
 )
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
@@ -33,13 +33,13 @@ from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import _compaction_fallback_is_distinct
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
@@ -791,7 +791,7 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         _runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.history.compaction.logger.warning") as warning_mock:
+    with patch("mindroom.history.summarizer.logger.warning") as warning_mock:
         assert (
             _compaction_fallback_is_distinct(
                 config,
@@ -1350,12 +1350,10 @@ async def _prepare_then_finalize_with_a_larger_prompt(
     scope_context: ScopeSessionContext,
 ) -> PreparedHistoryState:
     """Prepare under a short system prompt, then plan replay for a final request whose prompt nearly fills the limit."""
-    resolved_inputs = resolve_entity_preparation_inputs(
+    resolved_inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=_agent_settings(config),
         active_model_name="default",
-        active_context_window=None,
     )
     limit = resolved_inputs.execution_plan.limit_tokens
     assert limit == 64_000 - 16_384
@@ -1412,7 +1410,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     install_model_providers(monkeypatch, {"default": summary_model()})
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(
                 return_value="merged summary",
             ),

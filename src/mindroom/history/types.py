@@ -174,6 +174,8 @@ class ResolvedHistoryExecutionPlan:
     compaction_fallback_model_name: str | None = None
     compaction_fallback_summary_input_budget_tokens: int | None = None
     compaction_context_window: int | None = None
+    active_model_name: str = ""
+    fit_limit_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -201,10 +203,11 @@ class CompactionDecision:
 
     mode: _CompactionDecisionMode
     reason: str
-    # The size of the reply's first request and the plan's trigger and limit it was compared with.
+    # The size of the reply's first request and the plan's trigger, limit, and numeric compaction target.
     request_tokens: int | None = None
     trigger_tokens: int | None = None
     limit_tokens: int | None = None
+    target_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -310,7 +313,11 @@ class CompactionLifecycle(Protocol):
 
 @dataclass(frozen=True)
 class CompactionOutcome:
-    """Completed compaction result used for lifecycle notices and tests."""
+    """Completed compaction result used for lifecycle notices and tests.
+
+    Pre-reply compactions report history-only token counts for ``before_tokens``, ``after_tokens``, and
+    ``history_budget_tokens``; mid-turn compactions report whole-request token counts.
+    """
 
     mode: CompactionMode
     session_id: str
@@ -400,3 +407,4 @@ class PreparedHistoryState:
     # The size of the run's first request as preparation found it.
     prepared_context_tokens: int | None = None
     native_history: NativeHistory | None
+    resolved_inputs: HistoryPreparationInputs | None = None

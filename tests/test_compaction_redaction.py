@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom import constants
-from mindroom.history.compaction import summarize_runs
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     _remove_redacted_event_from_history,
     read_scope_seen_event_ids,
     remove_history_of_redacted_events,
 )
+from mindroom.history.summarizer import summarize_runs
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -284,7 +284,7 @@ async def test_a_retired_legacy_summary_does_not_return_through_a_kept_checkpoin
     assert [run.run_id for run in kept.runs] == ["r1", "r2"]
     assert kept.summary is None
     summary_mock = AsyncMock(return_value="result")
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         await summarize_runs(_summarizer(), None, kept.runs)
     assert "RETIRED LEGACY CONTENT" not in summary_mock.await_args.kwargs["summary_input"]
 

@@ -32,13 +32,13 @@ from mindroom.constants import (
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.conversation_text import own_thread_message, thread_context_note
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.request_messages import TurnMessages, with_media
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
@@ -949,9 +949,8 @@ async def prepare_agent_execution_context(
         config=config,
         runtime_paths=runtime_paths,
         timezone=entity_timezone(config, agent_name),
-        resolved_inputs=resolve_entity_preparation_inputs(
+        resolved_inputs=resolve_history_preparation_inputs(
             config=config,
-            runtime_paths=runtime_paths,
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
             active_context_window=resolved_runtime_model.context_window,
@@ -1016,9 +1015,8 @@ async def prepare_bound_team_run_context(
         config=config,
         runtime_paths=runtime_paths,
         timezone=timezone,
-        resolved_inputs=resolve_entity_preparation_inputs(
+        resolved_inputs=resolve_history_preparation_inputs(
             config=config,
-            runtime_paths=runtime_paths,
             history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,

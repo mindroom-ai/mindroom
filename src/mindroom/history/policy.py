@@ -9,6 +9,7 @@ from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     CompactionAvailabilityReason,
     CompactionDecision,
+    HistoryPreparationInputs,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
@@ -40,20 +41,25 @@ def resolve_history_execution_plan(
     config: Config,
     history_settings: ResolvedHistorySettings,
     active_model_name: str,
-    active_context_window: int | None,
+    active_context_window: int | None = None,
 ) -> ResolvedHistoryExecutionPlan:
     """Resolve all history-budget policy for one run scope in one place.
 
     Its budgets bound a whole request, the system prompt, tools, history, and turn together, as providers report one.
     """
     compaction_config = history_settings.compaction_config
+    effective_active_window = (
+        active_context_window
+        if active_context_window is not None
+        else config.get_model_context_window(active_model_name)
+    )
     compaction_model_name = compaction_config.model or active_model_name
     compaction_context_window = config.get_model_context_window(compaction_model_name)
     if compaction_config.model is None and compaction_context_window is None:
         # Only the active model falls back to the runtime window; an explicit summary model has just its own.
-        compaction_context_window = active_context_window
+        compaction_context_window = effective_active_window
     replay_window_tokens = _resolve_replay_window(
-        active_context_window=active_context_window,
+        active_context_window=effective_active_window,
         configured_replay_window=compaction_config.replay_window_tokens,
     )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
@@ -76,6 +82,11 @@ def resolve_history_execution_plan(
             threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
             trigger_tokens = min(threshold_tokens, limit_tokens)
 
+    fit_window = effective_active_window if effective_active_window is not None else replay_window_tokens
+    fit_limit_tokens = (
+        context_budget_after_reserve(fit_window, compaction_config.reserve_tokens) if fit_window is not None else None
+    )
+
     return ResolvedHistoryExecutionPlan(
         automatic_compaction=history_settings.automatic_compaction,
         text_compaction_available=unavailable_reason is None,
@@ -92,6 +103,27 @@ def resolve_history_execution_plan(
         compaction_fallback_model_name=compaction_config.fallback_model,
         compaction_fallback_summary_input_budget_tokens=fallback_summary_input_budget_tokens,
         compaction_context_window=compaction_context_window,
+        active_model_name=active_model_name,
+        fit_limit_tokens=fit_limit_tokens,
+    )
+
+
+def resolve_history_preparation_inputs(
+    *,
+    config: Config,
+    history_settings: ResolvedHistorySettings,
+    active_model_name: str,
+    active_context_window: int | None = None,
+) -> HistoryPreparationInputs:
+    """Resolve history settings and execution plan for one run scope."""
+    return HistoryPreparationInputs(
+        history_settings=history_settings,
+        execution_plan=resolve_history_execution_plan(
+            config=config,
+            history_settings=history_settings,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        ),
     )
 
 
@@ -121,7 +153,7 @@ def classify_compaction_decision(  # noqa: PLR0911
     if force_compact_before_next_run:
         if not plan.text_compaction_available:
             return decision(mode="none", reason="forced_unavailable")
-        return decision(mode="required", reason="forced")
+        return decision(mode="required", reason="forced", target_tokens=limit)
     if not plan.automatic_compaction:
         return decision(mode="none", reason="auto_disabled")
     if not plan.text_compaction_available:
@@ -131,13 +163,13 @@ def classify_compaction_decision(  # noqa: PLR0911
     if request_tokens <= trigger:
         return decision(mode="none", reason="under_trigger")
     if limit is not None and request_tokens > limit:
-        return decision(mode="required", reason="request_exceeds_limit")
+        return decision(mode="required", reason="request_exceeds_limit", target_tokens=limit)
     if not allow_native_compaction:
         # Compaction leaves the summary, so a trigger the request reaches with the summary alone (or one the static
         # prompt reaches) cannot be met and would rewrite the summary every reply.
         if summary_request_tokens >= trigger:
             return decision(mode="none", reason="trigger_unreachable")
-        return decision(mode="required", reason="over_trigger_native_disabled")
+        return decision(mode="required", reason="over_trigger_native_disabled", target_tokens=trigger)
     return decision(mode="none", reason="within_limit")
 
 
@@ -209,6 +241,16 @@ def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int
     """Return the usable context budget after the clamped reserve."""
     normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens)
+
+
+def fork_input_limit_tokens(context_window: int, reserve_tokens: int) -> int:
+    """Return the max input tokens for a cache-warm fork request, or 0 for non-positive windows."""
+    if context_window <= 0:
+        return 0
+    effective_reserve = max(reserve_tokens, min(4_096, context_window // 2))
+    fit_limit = context_budget_after_reserve(context_window, effective_reserve)
+    safety_margin = min(4_096, context_window // 50)
+    return max(0, fit_limit - safety_margin)
 
 
 def _resolve_replay_window(

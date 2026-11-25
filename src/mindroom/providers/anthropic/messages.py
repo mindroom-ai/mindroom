@@ -39,6 +39,8 @@ from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
+    EXTENDED_PROMPT_CACHE_TTL_SECONDS,
+    STANDARD_PROMPT_CACHE_TTL_SECONDS,
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
     ModelIdentity,
@@ -917,6 +919,13 @@ def _claude_capabilities(
         ),
         # Only a model that keeps API version 2023-06-01 sends sampling controls (``_SAMPLING_CONTROL_NAMES``).
         provider_default_sampling=not _keeps_legacy_api_version(route, model_id, settings),
+        prompt_cache_ttl_seconds=(
+            None
+            if not settings.cache_system_prompt
+            else (
+                EXTENDED_PROMPT_CACHE_TTL_SECONDS if settings.extended_cache_time else STANDARD_PROMPT_CACHE_TTL_SECONDS
+            )
+        ),
     )
 
 

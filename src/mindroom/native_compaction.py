@@ -15,7 +15,7 @@ from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
@@ -147,17 +147,23 @@ def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], rout
     return replay_basis(summary, runs)
 
 
-def checkpoint_summary(message: Message, basis: str) -> str | None:
-    """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
-
-    Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
-    """
+def _readable_checkpoint_summary(message: Message) -> tuple[str, str] | None:
+    """Return ``(basis, summary_text)`` when ``message`` carries a readable checkpoint with a recorded basis."""
     state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
-    if not isinstance(state, dict) or state.get("basis") != basis:
+    if not isinstance(state, dict) or not isinstance(basis := state.get("basis"), str):
         return None
     items = checkpoint_items(message, state.get("route"))
     content = items[0].get("content") if items else None
-    return content if isinstance(content, str) else None
+    return (basis, content) if isinstance(content, str) else None
+
+
+def iter_readable_checkpoints(runs: Sequence[AnyRunRecord]) -> Iterator[tuple[int, int, str, str]]:
+    """Yield ``(run_index, message_position, recorded_basis, summary_text)`` newest-first for readable checkpoints."""
+    for index in range(len(runs) - 1, -1, -1):
+        messages = runs[index].messages
+        for position in range(len(messages) - 1, -1, -1):
+            if (checkpoint := _readable_checkpoint_summary(messages[position])) is not None:
+                yield index, position, checkpoint[0], checkpoint[1]
 
 
 def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Message]:

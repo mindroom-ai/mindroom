@@ -824,7 +824,7 @@ async def test_a_reply_compacts_before_its_first_request_to_make_room_for_its_at
     ]
     seed_session(storage, _session("session-1", runs=runs))
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
         _, request = await _reply_with(_ARCHIVE, provider, config, runtime_paths, prompt="Read the archive.")
 
     assert any("merged summary" in str(message.content) for message in request.messages)
@@ -979,7 +979,7 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     assert session is not None
     storage.update_metadata(session, with_force_compaction)
     # The compaction model builds as the agent's provider; its summary is the patched one.
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
         compacted_turn = await system_prompt_of_turn("Third prompt")
     assert "Fact two." in compacted_turn
     assert any("merged summary" in str(message.content) for message in provider.model.requests[-1].messages)

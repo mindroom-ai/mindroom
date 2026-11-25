@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.resolution import entity_model_name
-from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.policy import resolve_history_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.history.types import HistoryScope
@@ -73,12 +74,10 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     session.metadata = with_force_compaction(session.metadata)
     storage = create_session_storage(turn.agent_name, turn.config, turn.runtime_paths, execution_identity=None)
     seed_session(storage, session)
-    inputs = resolve_entity_preparation_inputs(
+    inputs = resolve_history_preparation_inputs(
         config=turn.config,
-        runtime_paths=turn.runtime_paths,
         history_settings=turn.config.resolve_scope(turn.agent_name).history_settings,
         active_model_name=entity_model_name(turn.config, turn.agent_name),
-        active_context_window=None,
     )
     recorder = Recorder(responder=scenario.responder)
 

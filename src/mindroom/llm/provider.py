@@ -46,6 +46,10 @@ class ModelIdentity:
     endpoint: str | None = None
 
 
+STANDARD_PROMPT_CACHE_TTL_SECONDS = 240.0
+EXTENDED_PROMPT_CACHE_TTL_SECONDS = 3300.0
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
@@ -57,7 +61,9 @@ class Capabilities:
     prompt, without which an update keeps no prefix. ``sticky_replay_recovery`` returns a copy of a failed request
     without provider-encrypted replay state when a sticky-upstream failure calls for resending it that way, else None;
     the answer to that retry records the route's ``replay_reset_scope``, from which the route's replay and its size
-    read where encrypted state starts over (``native_compaction.native_replay``).
+    read where encrypted state starts over (``native_compaction.native_replay``). ``prompt_cache_ttl_seconds`` is the
+    conservative warm prompt-cache lifetime in seconds for prefix reuse, or None when caching is disabled or
+    unsupported by the route.
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -69,6 +75,7 @@ class Capabilities:
     system_updates: Callable[[ModelRequest], bool] | None = None
     sticky_replay_recovery: Callable[[ModelRequest, ProviderError], ModelRequest | None] | None = None
     replay_reset_scope: str | None = None
+    prompt_cache_ttl_seconds: float | None = STANDARD_PROMPT_CACHE_TTL_SECONDS
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -532,6 +539,8 @@ def count_turn_usage(metrics: RunMetrics, turn: ModelTurn, default: ModelIdentit
 
 
 __all__ = [
+    "EXTENDED_PROMPT_CACHE_TTL_SECONDS",
+    "STANDARD_PROMPT_CACHE_TTL_SECONDS",
     "STRUCTURED_OUTPUT_TOOL",
     "Capabilities",
     "DeferredTools",

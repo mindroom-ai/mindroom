@@ -521,6 +521,7 @@ def _agent_loop_hooks(
             # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
             checkpoints=not ctx.inline_tools,
             memory_copy=prepared.memory_copy,
+            history_inputs=prepared.prepared_history.resolved_inputs,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
