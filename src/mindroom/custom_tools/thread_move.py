@@ -30,7 +30,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.inline_media import filter_inline_media_for_html
+from mindroom.matrix.inline_media import filter_inline_media_for_html, register_inline_media
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
@@ -197,6 +197,9 @@ class ThreadMoveTools(Toolkit):
                     message=f"Copied {copied} of {len(prepared.plan)} messages before a send failed.",
                     **partial,
                 )
+            if isinstance(inline_media := planned.get(INLINE_MEDIA_CONTENT_KEY), dict):
+                for mxc_uri, encrypted_file in inline_media.items():
+                    register_inline_media(prepared.target_room_id, mxc_uri, encrypted_file)
             previous_event_id = delivered.event_id
         assert new_root_id is not None
 

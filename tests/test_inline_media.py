@@ -520,3 +520,29 @@ async def test_model_read_boundaries_strip_inline_media_keys(tmp_path: Path) -> 
     assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]
     assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]["m.new_content"]
     assert "k-secret-value" not in json.dumps(api_payload)
+
+
+def test_attach_inline_media_ignores_data_src_attribute() -> None:
+    """Only a real src attribute on <img> matches, not hyphenated attributes like data-src."""
+    room_id = "!enc:localhost"
+    fake = _encrypted_file("mxc://hs/fake")
+    real = _encrypted_file("mxc://hs/real")
+    register_inline_media(room_id, "mxc://hs/fake", fake)
+    register_inline_media(room_id, "mxc://hs/real", real)
+
+    only_data_src = {
+        "msgtype": "m.text",
+        "body": "lazy",
+        "format": "org.matrix.custom.html",
+        "formatted_body": '<p><img data-src="mxc://hs/fake" alt="lazy"></p>',
+    }
+    assert INLINE_MEDIA_CONTENT_KEY not in attach_inline_media(only_data_src, room_id, room_encrypted=True)
+
+    both_attrs = {
+        "msgtype": "m.text",
+        "body": "both",
+        "format": "org.matrix.custom.html",
+        "formatted_body": '<p><img data-src="mxc://hs/fake" src="mxc://hs/real" alt="both"></p>',
+    }
+    attached = attach_inline_media(both_attrs, room_id, room_encrypted=True)
+    assert attached[INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/real": real}

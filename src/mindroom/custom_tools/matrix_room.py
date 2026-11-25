@@ -485,6 +485,10 @@ class MatrixRoomTools(Toolkit):
         """Read the previews, and with `include_summaries` the summaries, of the rows to return, and list them."""
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         for row, event in rows:
+            source_room_id = cast("str", row.get("room_id", room_id))
+            if isinstance(event, nio.MegolmEvent) and source_room_id != context.room_id:
+                row["body_preview"] = "[encrypted]"
+                continue
             try:
                 row["body_preview"] = await thread_root_body_preview(
                     event,
@@ -492,7 +496,7 @@ class MatrixRoomTools(Toolkit):
                     config=context.config,
                     runtime_paths=context.runtime_paths,
                     trusted_sender_ids=trusted_sender_ids,
-                    room_id=cast("str", row.get("room_id", room_id)),
+                    room_id=source_room_id,
                 )
             except Exception:
                 if "room_id" not in row:  # A named listing fails as it always has.

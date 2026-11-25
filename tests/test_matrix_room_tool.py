@@ -2202,13 +2202,14 @@ def _install_fake_megolm_decrypt(
     client: AsyncMock,
     plaintexts: dict[str, dict[str, object]],
     *,
-    expected_room_id: str = "!room:localhost",
+    expected_room_ids: set[str] | None = None,
 ) -> MagicMock:
     """Install a decrypt_event double that mirrors nio: requires room_id and strips unsigned."""
+    allowed_rooms = expected_room_ids or {"!room:localhost"}
     client.olm = MagicMock()
 
     def _decrypt(event: nio.MegolmEvent) -> nio.Event:
-        if not event.room_id or event.room_id != expected_room_id:
+        if not event.room_id or event.room_id not in allowed_rooms:
             msg = f"Unexpected room_id {event.room_id!r}"
             raise nio.EncryptionError(msg)
         content = plaintexts.get(event.event_id)
@@ -2550,3 +2551,61 @@ async def test_threads_encrypted_root_body_preview_decrypts_and_falls_back() -> 
         ("$root_edited_missing", "[encrypted]"),
         ("$root_missing", "[encrypted]"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_encrypted_root_body_preview_cross_room_stays_redacted() -> None:
+    """Cross-room listings keep [encrypted] root previews while still computing workflow labels."""
+    ctx = _all_rooms_context()
+    persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: nio.RoomGetStateResponse(events=[_ENCRYPTION_STATE], room_id=room_id),
+    )
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    shared_question = _encrypted_wire_event("$shared_q", sender=_AGENT_ID, ts=now_ms)
+    decrypt_mock = _install_fake_megolm_decrypt(
+        ctx.client,
+        {
+            "$here_root": {"msgtype": "m.text", "body": "Calling room secret"},
+            "$shared_root": {"msgtype": "m.text", "body": "Other room secret"},
+            "$shared_q": {"msgtype": "m.text", "body": "Pick one", **_question_prompt()},
+        },
+        expected_room_ids={"!room:localhost", "!shared:localhost"},
+    )
+    pages = _pages(
+        {
+            "!room:localhost": ([_encrypted_root("$here_root", sender="@user:localhost", ts=now_ms - 2000)], None),
+            "!shared:localhost": (
+                [
+                    _encrypted_root(
+                        "$shared_root",
+                        sender="@user:localhost",
+                        ts=now_ms - 1000,
+                        latest_event=shared_question,
+                    ),
+                ],
+                None,
+            ),
+        },
+    )
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, new=pages), patch(_APPROVAL_STORE, return_value=None):
+        all_payload = json.loads(
+            await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow="all"),
+        )
+        other_payload = json.loads(
+            await MatrixRoomTools().matrix_room(action="threads", room_id="!shared:localhost", workflow="all"),
+        )
+
+    assert [
+        (row["room_id"], row["thread_id"], row["body_preview"], row["workflow"], row["why"])
+        for row in all_payload["threads"]
+    ] == [
+        ("!shared:localhost", "$shared_root", "[encrypted]", "needs_you", "question"),
+        ("!room:localhost", "$here_root", "Calling room secret", "needs_you", "your_turn"),
+    ]
+    assert [
+        (row["thread_id"], row["body_preview"], row["workflow"], row["why"]) for row in other_payload["threads"]
+    ] == [("$shared_root", "[encrypted]", "needs_you", "question")]
+    assert "$shared_root" not in [call.args[0].event_id for call in decrypt_mock.call_args_list]

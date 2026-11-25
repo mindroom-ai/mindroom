@@ -15,7 +15,7 @@ from mindroom.constants import INLINE_MEDIA_CONTENT_KEY
 _MAX_ENTRIES = 512
 _LOCK = Lock()
 _REGISTRY: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
-_IMG_SRC_PATTERN = re.compile(r"""<img\b[^>]*?\bsrc=(?:"(mxc://[^"]+)"|'(mxc://[^']+)')""", re.IGNORECASE)
+_IMG_SRC_PATTERN = re.compile(r"""<img\b[^>]*?(?<![\w-])src=(?:"(mxc://[^"]+)"|'(mxc://[^']+)')""", re.IGNORECASE)
 
 
 def register_inline_media(room_id: str, mxc_uri: str, encrypted_file: Mapping[str, Any]) -> None:

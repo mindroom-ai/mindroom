@@ -24,7 +24,6 @@ from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio, File, Video, is_document_mime_type, named_mime_type
 from mindroom.matrix.client_delivery import (
     MatrixDeliveryFailure,
-    can_send_to_encrypted_room,
     resolve_room_encryption_outcome,
     send_file_message,
     send_runtime_encrypted_media_message,
@@ -755,14 +754,12 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if not can_send_to_encrypted_room(context.client, context.room_id, operation="inline_image") or isinstance(
-            room_encrypted := await resolve_room_encryption_outcome(
-                context.client,
-                context.room_id,
-                operation="inline_image",
-            ),
-            MatrixDeliveryFailure,
-        ):
+        room_encrypted = await resolve_room_encryption_outcome(
+            context.client,
+            context.room_id,
+            operation="inline_image",
+        )
+        if isinstance(room_encrypted, MatrixDeliveryFailure):
             return _attachment_tool_payload(
                 "error",
                 message="Inline images cannot be sent to this room right now. Send the image as an attachment with matrix_message instead.",
