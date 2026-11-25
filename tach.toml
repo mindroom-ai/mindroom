@@ -700,6 +700,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.client_visible_messages",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -3143,6 +3144,7 @@ visibility = [
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
     "mindroom.approval.manager",
+    "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.matrix_helpers",
@@ -5241,6 +5243,7 @@ path = "mindroom.matrix.client_visible_messages"
 depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.visible_body",
@@ -7880,6 +7883,7 @@ from = ["mindroom.matrix.voice_message"]
 expose = [
     "ResolvedVisibleMessage",
     "bundled_replacement_candidates",
+    "decrypt_wire_event_source",
     "extract_visible_edit_body",
     "is_visible_room_message",
     "message_preview",

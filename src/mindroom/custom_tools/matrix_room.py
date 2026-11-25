@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from collections import defaultdict, deque
@@ -12,8 +13,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import nio
 from aiohttp import ClientError
+from nio.api import RelationshipType
 
 from mindroom.approval.manager import get_approval_store
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, room_access_allowed
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -21,6 +24,8 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
+    bundled_replacement_candidates,
+    decrypt_wire_event_source,
     message_preview,
     thread_root_body_preview,
     trusted_visible_sender_ids,
@@ -29,10 +34,18 @@ from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_summary.state import current_thread_summary
-from mindroom.thread_workflow import latest_reply_question_ts, room_thread_facts, thread_workflow
+from mindroom.thread_workflow import (
+    QUESTION_WAITS_MS,
+    latest_reply_question_ts,
+    reply_question_ts,
+    room_thread_facts,
+    thread_workflow,
+)
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -49,6 +62,7 @@ class MatrixRoomTools(Toolkit):
     _MAX_THREAD_LIMIT: ClassVar[int] = 50
     # Each summary reads a whole thread, which is a homeserver walk the first time; a few at once keep a full page fast.
     _SUMMARY_READ_CONCURRENCY: ClassVar[int] = 6
+    _TITLE_NOTICE_BACKWALK_LIMIT: ClassVar[int] = 5
     _MAX_STATE_EVENTS: ClassVar[int] = 100
 
     def __init__(self) -> None:
@@ -310,6 +324,16 @@ class MatrixRoomTools(Toolkit):
             )
         except Exception as exc:
             raise RoomThreadsPageError(response=f"Failed to read pending approvals: {exc}") from exc
+        question_times = await self._resolve_question_times(
+            context.client,
+            room_id,
+            thread_roots,
+            facts=facts,
+            approvals=approvals,
+            bot_ids=bot_ids,
+            requester_ids=requester_ids,
+            now=now,
+        )
         return {
             event.event_id: thread_workflow(
                 facts.get(event.event_id, {}),
@@ -317,12 +341,186 @@ class MatrixRoomTools(Toolkit):
                 replying=event.event_id in replying,
                 approval_ts=approvals.get(event.event_id),
                 # A question counts only in a thread the requester started (design decision 8).
-                question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids, requester_ids)
-                if event.sender in requester_ids and isinstance(event.source, dict)
-                else None,
+                question_ts=question_times.get(event.event_id),
             )
             for event in thread_roots
         }
+
+    async def _resolve_question_times(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        thread_roots: list[nio.Event],
+        *,
+        facts: Mapping[str, dict[str, Any]],
+        approvals: Mapping[str, int],
+        bot_ids: Collection[str],
+        requester_ids: Collection[str],
+        now: int,
+    ) -> dict[str, int | None]:
+        question_times: dict[str, int | None] = {}
+        backwalk_thread_ids: list[str] = []
+        for event in thread_roots:
+            fact = facts.get(event.event_id, {})
+            if (
+                event.sender not in requester_ids
+                or not isinstance(event.source, dict)
+                or fact.get("resolved_ts") is not None
+                or approvals.get(event.event_id) is not None
+                or fact.get("has_background_approval")
+            ):
+                continue
+            question_ts, needs_backwalk = self._bundled_question_ts(
+                client,
+                room_id,
+                self._thread_metadata(event.source),
+                bot_ids=bot_ids,
+                requester_ids=requester_ids,
+                now=now,
+            )
+            question_times[event.event_id] = question_ts
+            if needs_backwalk:
+                backwalk_thread_ids.append(event.event_id)
+
+        if backwalk_thread_ids:
+            reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
+
+            async def resolve_backwalk(thread_id: str) -> tuple[str, int | None]:
+                async with reads:
+                    return thread_id, await self._question_ts_before_title_notice(
+                        client,
+                        room_id,
+                        thread_id,
+                        bot_ids=bot_ids,
+                        requester_ids=requester_ids,
+                    )
+
+            question_times.update(
+                await asyncio.gather(*(resolve_backwalk(thread_id) for thread_id in backwalk_thread_ids)),
+            )
+        return question_times
+
+    @staticmethod
+    def _is_thread_summary_notice(event_source: Mapping[str, Any]) -> bool:
+        content = event_source.get("content")
+        return (
+            event_source.get("type") == "m.room.message"
+            and isinstance(content, dict)
+            and content.get("msgtype") == "m.notice"
+            and isinstance(content.get(THREAD_SUMMARY_CONTENT_KEY), dict)
+        )
+
+    @staticmethod
+    def _decrypt_bot_reply(
+        client: nio.AsyncClient,
+        raw_reply: Mapping[str, Any],
+        *,
+        room_id: str,
+        bot_ids: Collection[str],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        """Decrypt one bot reply and its newest same-sender bundled edit, failing closed on missing keys."""
+        sender = raw_reply.get("sender")
+        if not isinstance(sender, str) or sender not in bot_ids:
+            return None
+        # Read bundled edits before decrypting: nio drops `unsigned` on the decrypted event.
+        raw_edits = [c for c in bundled_replacement_candidates(raw_reply) if c.get("sender") == sender]
+        reply = decrypt_wire_event_source(client, raw_reply, room_id=room_id)
+        if reply is None or reply.get("type") != "m.room.message":
+            return None
+        reply_event_id = reply.get("event_id") or raw_reply.get("event_id")
+        edit: dict[str, Any] | None = None
+        for candidate in raw_edits:
+            resolved = candidate
+            if candidate.get("type") == "m.room.encrypted":
+                decrypted_edit = decrypt_wire_event_source(client, candidate, room_id=room_id)
+                if decrypted_edit is None:
+                    return None
+                resolved = decrypted_edit
+            content = resolved.get("content")
+            if not isinstance(content, dict):
+                continue
+            relates_to = content.get("m.relates_to")
+            if isinstance(relates_to, dict) and (
+                relates_to.get("rel_type") != "m.replace"
+                or (isinstance(reply_event_id, str) and relates_to.get("event_id") != reply_event_id)
+            ):
+                continue
+            if isinstance(content.get("m.new_content"), dict):
+                edit = resolved
+                break
+        return reply, edit
+
+    @classmethod
+    def _bundled_question_ts(
+        cls,
+        client: nio.AsyncClient,
+        room_id: str,
+        thread_metadata: Mapping[str, Any],
+        *,
+        bot_ids: Collection[str],
+        requester_ids: Collection[str],
+        now: int,
+    ) -> tuple[int | None, bool]:
+        """Return ``(question_ts, needs_title_notice_backwalk)`` from the thread root's bundled metadata."""
+        if isinstance(thread_metadata.get("io.mindroom.latest_reply"), dict):
+            return latest_reply_question_ts(thread_metadata, bot_ids, requester_ids), False
+        raw_reply = thread_metadata.get("latest_event")
+        if not isinstance(raw_reply, dict):
+            return None, False
+        decrypted = cls._decrypt_bot_reply(client, raw_reply, room_id=room_id, bot_ids=bot_ids)
+        if decrypted is None:
+            return None, False
+        reply, edit = decrypted
+        if cls._is_thread_summary_notice(reply):
+            ts = raw_reply.get("origin_server_ts")
+            within_window = not isinstance(ts, int) or isinstance(ts, bool) or ts > now - QUESTION_WAITS_MS
+            return None, within_window
+        return reply_question_ts(reply, bot_ids, requester_ids, edit=edit), False
+
+    async def _question_ts_before_title_notice(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        thread_id: str,
+        *,
+        bot_ids: Collection[str],
+        requester_ids: Collection[str],
+    ) -> int | None:
+        """Walk newest thread replies past title notices to the first substantive reply."""
+        try:
+            relations = client.room_get_event_relations(
+                room_id,
+                thread_id,
+                RelationshipType.thread,
+                direction=nio.MessageDirection.back,
+                limit=self._TITLE_NOTICE_BACKWALK_LIMIT,
+            )
+            async with contextlib.aclosing(relations):
+                scanned = 0
+                async for related in relations:
+                    scanned += 1
+                    if scanned > self._TITLE_NOTICE_BACKWALK_LIMIT:
+                        return None
+                    if isinstance(related, nio.RedactedEvent):
+                        continue
+                    raw = related.source if isinstance(related.source, dict) else None
+                    if raw is None or related.sender not in bot_ids:
+                        return None
+                    decrypted = self._decrypt_bot_reply(client, raw, room_id=room_id, bot_ids=bot_ids)
+                    if decrypted is None:
+                        return None
+                    reply, edit = decrypted
+                    if self._is_thread_summary_notice(reply):
+                        continue
+                    return reply_question_ts(reply, bot_ids, requester_ids, edit=edit)
+        except (nio.ProtocolError, ClientError, TimeoutError):
+            logger.debug(
+                "matrix_room_threads_title_backwalk_failed",
+                room_id=room_id,
+                thread_id=thread_id,
+                exc_info=True,
+            )
+        return None
 
     def _thread_rows(
         self,
@@ -358,6 +556,7 @@ class MatrixRoomTools(Toolkit):
                     config=context.config,
                     runtime_paths=context.runtime_paths,
                     trusted_sender_ids=trusted_sender_ids,
+                    room_id=cast("str", row.get("room_id", room_id)),
                 )
             except Exception:
                 if "room_id" not in row:  # A named listing fails as it always has.
@@ -584,7 +783,7 @@ class MatrixRoomTools(Toolkit):
         - room-info: Room metadata + current thread_id, reply_to_event_id, requester_id, agent_name.
         - members: Joined members with display names and power levels.
         - agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message="...")` (separate from `run_subagent` allowlist).
-        - threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow="all"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: questions only in unencrypted rooms; single runtime; filtered pages may be shorter than `limit`. `room_id="all"` spans all shared rooms (one page/room; pair with `workflow="needs_you"` for "what needs me?").
+        - threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow="all"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: single runtime; filtered pages may be shorter than `limit`. `room_id="all"` spans all shared rooms (one page/room; pair with `workflow="needs_you"` for "what needs me?").
         - state: Specific state event (`event_type` + optional `state_key`), or summary of all state events (`m.room.member` elided).
         """
         if isinstance(context := tool_context_or_error(self._payload, "Matrix room"), str):

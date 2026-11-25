@@ -69,6 +69,7 @@ def _make_context(
     )
     client = AsyncMock()
     client.rooms = {}
+    client.olm = None
     client.user_id = "@mindroom_general:localhost"
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse(events=[], room_id=room_id))
     return make_test_tool_runtime_context(
@@ -544,11 +545,13 @@ async def test_threads_precompute_trusted_sender_ids_once_for_previews() -> None
         config: Config,
         runtime_paths: object,
         trusted_sender_ids: frozenset[str],
+        room_id: str | None = None,
     ) -> str:
         assert client is ctx.client
         assert config is ctx.config
         assert runtime_paths == ctx.runtime_paths
         assert trusted_sender_ids is trusted_sender_ids_for_assertion
+        assert room_id == ctx.room_id
         return event.body
 
     trusted_sender_ids_for_assertion = trusted_sender_ids
@@ -1271,6 +1274,7 @@ async def test_threads_skips_malformed_roots() -> None:
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
         trusted_sender_ids=ANY,
+        room_id=ctx.room_id,
     )
     mock_warning.assert_called_once()
 
@@ -2160,3 +2164,333 @@ async def test_threads_named_room_reports_an_unreadable_approval_journal() -> No
     assert payload["status"] == "error"
     assert payload["action"] == "threads"
     assert "threads" not in payload
+
+
+def _encrypted_wire_event(
+    event_id: str,
+    *,
+    sender: str,
+    ts: int,
+    unsigned: dict[str, object] | None = None,
+    relates_to: dict[str, object] | None = None,
+    room_id: str | None = None,
+) -> dict[str, object]:
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": f"cipher-{event_id}",
+        "device_id": "DEV1",
+        "sender_key": "curve25519-key",
+        "session_id": f"sess-{event_id}",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
+    raw: dict[str, object] = {
+        "type": "m.room.encrypted",
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": ts,
+        "content": content,
+    }
+    if room_id is not None:
+        raw["room_id"] = room_id
+    if unsigned is not None:
+        raw["unsigned"] = unsigned
+    return raw
+
+
+def _install_fake_megolm_decrypt(
+    client: AsyncMock,
+    plaintexts: dict[str, dict[str, object]],
+    *,
+    expected_room_id: str = "!room:localhost",
+) -> MagicMock:
+    """Install a decrypt_event double that mirrors nio: requires room_id and strips unsigned."""
+    client.olm = MagicMock()
+
+    def _decrypt(event: nio.MegolmEvent) -> nio.Event:
+        if not event.room_id or event.room_id != expected_room_id:
+            msg = f"Unexpected room_id {event.room_id!r}"
+            raise nio.EncryptionError(msg)
+        content = plaintexts.get(event.event_id)
+        if content is None:
+            msg = f"Missing Megolm session for {event.event_id}"
+            raise nio.EncryptionError(msg)
+        decrypted_content = dict(content)
+        wire_relates = event.source.get("content", {}).get("m.relates_to")
+        if "m.relates_to" not in decrypted_content and isinstance(wire_relates, dict):
+            decrypted_content["m.relates_to"] = wire_relates
+        parsed = nio.Event.parse_event(
+            {
+                "type": "m.room.message",
+                "event_id": event.event_id,
+                "sender": event.sender,
+                "origin_server_ts": event.server_timestamp,
+                "content": decrypted_content,
+            },
+        )
+        assert isinstance(parsed, nio.Event)
+        parsed.decrypted = True
+        return parsed
+
+    client.decrypt_event = MagicMock(side_effect=_decrypt)
+    return client.decrypt_event
+
+
+def _question_prompt() -> dict[str, object]:
+    return interactive_prompt_content(
+        InteractivePrompt(
+            creator_agent="general",
+            question_text="Pick one",
+            options={"👍": "a", "1": "a"},
+            option_labels={"👍": "A", "1": "A"},
+            source_event_id="$src",
+        ),
+    )
+
+
+def _encrypted_root(
+    event_id: str,
+    *,
+    sender: str = "@user:localhost",
+    ts: int = 1000,
+    latest_event: dict[str, object] | None = None,
+    bundled_edit: dict[str, object] | None = None,
+    room_id: str | None = None,
+) -> nio.MegolmEvent:
+    relations: dict[str, object] = {}
+    if latest_event is not None:
+        relations["m.thread"] = {"count": 1, "latest_event": latest_event}
+    if bundled_edit is not None:
+        relations["m.replace"] = bundled_edit
+    raw = _encrypted_wire_event(
+        event_id,
+        sender=sender,
+        ts=ts,
+        unsigned={"m.relations": relations} if relations else None,
+        room_id=room_id,
+    )
+    parsed = nio.Event.parse_event(raw)
+    assert isinstance(parsed, nio.MegolmEvent)
+    return parsed
+
+
+@pytest.mark.asyncio
+async def test_threads_encrypted_latest_event_question_streamed_edit_missing_key_and_human_reply() -> None:
+    """Encrypted threads detect questions from latest_event and bundled encrypted edits, failing closed and skipping human decrypts."""
+    ctx = _workflow_context([])
+    persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    prompt = _question_prompt()
+
+    direct_q = _encrypted_wire_event("$q_direct", sender=_AGENT_ID, ts=now_ms)
+    streamed_edit = _encrypted_wire_event(
+        "$q_edit",
+        sender=_AGENT_ID,
+        ts=now_ms + 10,
+        relates_to={"rel_type": "m.replace", "event_id": "$q_stream"},
+    )
+    streamed_q = _encrypted_wire_event(
+        "$q_stream",
+        sender=_AGENT_ID,
+        ts=now_ms,
+        unsigned={"m.relations": {"m.replace": streamed_edit}},
+    )
+    unreadable_edit = _encrypted_wire_event(
+        "$q_bad_edit",
+        sender=_AGENT_ID,
+        ts=now_ms + 10,
+        relates_to={"rel_type": "m.replace", "event_id": "$q_edited_unreadable"},
+    )
+    edited_unreadable = _encrypted_wire_event(
+        "$q_edited_unreadable",
+        sender=_AGENT_ID,
+        ts=now_ms,
+        unsigned={"m.relations": {"m.replace": unreadable_edit}},
+    )
+    missing_key_q = _encrypted_wire_event("$q_missing", sender=_AGENT_ID, ts=now_ms)
+    human_reply = _encrypted_wire_event("$human_reply", sender="@user:localhost", ts=now_ms)
+
+    decrypt_mock = _install_fake_megolm_decrypt(
+        ctx.client,
+        {
+            "$t_direct": {"msgtype": "m.text", "body": "Direct thread"},
+            "$t_stream": {"msgtype": "m.text", "body": "Streamed thread"},
+            "$t_missing_edit": {"msgtype": "m.text", "body": "Unreadable edit thread"},
+            "$t_missing_reply": {"msgtype": "m.text", "body": "Missing key thread"},
+            "$t_human": {"msgtype": "m.text", "body": "Human answered thread"},
+            "$q_direct": {"msgtype": "m.text", "body": "Pick one", **prompt},
+            "$q_stream": {"msgtype": "m.text", "body": "Thinking..."},
+            "$q_edit": {
+                "msgtype": "m.text",
+                "body": "* Pick one",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "Pick one",
+                    "com.mindroom.acting_requester": "@user:localhost",
+                    **prompt,
+                },
+            },
+            "$q_edited_unreadable": {"msgtype": "m.text", "body": "Pick one", **prompt},
+        },
+    )
+    roots = [
+        _encrypted_root("$t_direct", latest_event=direct_q),
+        _encrypted_root("$t_stream", latest_event=streamed_q),
+        _encrypted_root("$t_missing_edit", latest_event=edited_unreadable),
+        _encrypted_root("$t_missing_reply", latest_event=missing_key_q),
+        _encrypted_root("$t_human", latest_event=human_reply),
+    ]
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=(roots, None)),
+        patch(_APPROVAL_STORE, return_value=None),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="needs_you"))
+
+    assert payload["status"] == "ok"
+    assert [(row["thread_id"], row["why"]) for row in payload["threads"]] == [
+        ("$t_direct", "question"),
+        ("$t_stream", "question"),
+        ("$t_missing_edit", "your_turn"),
+        ("$t_missing_reply", "your_turn"),
+        ("$t_human", "your_turn"),
+    ]
+    decrypted_ids = [call.args[0].event_id for call in decrypt_mock.call_args_list]
+    assert "$human_reply" not in decrypted_ids
+    ctx.client.room_get_event_relations.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_threads_encrypted_title_notice_backwalk() -> None:
+    """When an encrypted title notice shadows a question, one bounded /relations walk finds it and stops on human or unreadable replies."""
+    ctx = _workflow_context([])
+    persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    prompt = _question_prompt()
+    title_content = {
+        "msgtype": "m.notice",
+        "body": "Thread title",
+        "io.mindroom.thread_summary": {"version": 1, "summary": "Thread title"},
+    }
+
+    notice_q = _encrypted_wire_event("$notice_q", sender=_AGENT_ID, ts=now_ms)
+    notice_answered = _encrypted_wire_event("$notice_answered", sender=_AGENT_ID, ts=now_ms)
+    notice_unreadable = _encrypted_wire_event("$notice_unreadable", sender=_AGENT_ID, ts=now_ms)
+
+    q_edit = _encrypted_wire_event(
+        "$walk_q_edit",
+        sender=_AGENT_ID,
+        ts=now_ms - 10,
+        relates_to={"rel_type": "m.replace", "event_id": "$walk_q"},
+    )
+    walk_q = nio.Event.parse_event(
+        _encrypted_wire_event(
+            "$walk_q",
+            sender=_AGENT_ID,
+            ts=now_ms - 20,
+            unsigned={"m.relations": {"m.replace": q_edit}},
+        ),
+    )
+    walk_human = nio.Event.parse_event(_encrypted_wire_event("$walk_human", sender="@user:localhost", ts=now_ms - 15))
+    walk_unreadable = nio.Event.parse_event(_encrypted_wire_event("$walk_missing", sender=_AGENT_ID, ts=now_ms - 15))
+    walk_older_q = nio.Event.parse_event(_encrypted_wire_event("$walk_older_q", sender=_AGENT_ID, ts=now_ms - 30))
+
+    decrypt_mock = _install_fake_megolm_decrypt(
+        ctx.client,
+        {
+            "$notice_q": title_content,
+            "$notice_answered": title_content,
+            "$notice_unreadable": title_content,
+            "$walk_q": {"msgtype": "m.text", "body": "Thinking..."},
+            "$walk_q_edit": {
+                "msgtype": "m.text",
+                "body": "* Pick one",
+                "m.new_content": {"msgtype": "m.text", "body": "Pick one", **prompt},
+            },
+            "$walk_older_q": {"msgtype": "m.text", "body": "Pick one", **prompt},
+        },
+    )
+
+    relations_by_thread: dict[str, list[nio.Event]] = {
+        "$t_q": [nio.Event.parse_event(notice_q), walk_q],
+        "$t_answered": [nio.Event.parse_event(notice_answered), walk_human, walk_older_q],
+        "$t_unreadable": [nio.Event.parse_event(notice_unreadable), walk_unreadable, walk_older_q],
+    }
+
+    def _relations(_room_id: str, event_id: str, *_args: object, **_kwargs: object) -> object:
+        async def _gen() -> object:
+            for item in relations_by_thread[event_id]:
+                yield item
+
+        return _gen()
+
+    ctx.client.room_get_event_relations = MagicMock(side_effect=_relations)
+    roots = [
+        _encrypted_root("$t_q", latest_event=notice_q),
+        _encrypted_root("$t_answered", latest_event=notice_answered),
+        _encrypted_root("$t_unreadable", latest_event=notice_unreadable),
+    ]
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=(roots, None)),
+        patch(_APPROVAL_STORE, return_value=None),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="needs_you"))
+
+    assert [(row["thread_id"], row["why"]) for row in payload["threads"]] == [
+        ("$t_q", "question"),
+        ("$t_answered", "your_turn"),
+        ("$t_unreadable", "your_turn"),
+    ]
+    decrypted_ids = [call.args[0].event_id for call in decrypt_mock.call_args_list]
+    assert "$walk_human" not in decrypted_ids
+    assert "$walk_older_q" not in decrypted_ids
+
+
+@pytest.mark.asyncio
+async def test_threads_encrypted_root_body_preview_decrypts_and_falls_back() -> None:
+    """Encrypted thread roots decrypt their preview (including bundled edits) and fall back to [encrypted] on missing keys."""
+    ctx = _make_context()
+    root_edit = _encrypted_wire_event(
+        "$root_edit",
+        sender="@user:localhost",
+        ts=2000,
+        relates_to={"rel_type": "m.replace", "event_id": "$root_edited"},
+    )
+    unreadable_edit = _encrypted_wire_event(
+        "$root_bad_edit",
+        sender="@user:localhost",
+        ts=2000,
+        relates_to={"rel_type": "m.replace", "event_id": "$root_edited_missing"},
+    )
+    _install_fake_megolm_decrypt(
+        ctx.client,
+        {
+            "$root_plain": {"msgtype": "m.text", "body": "Decrypted thread root"},
+            "$root_edited": {"msgtype": "m.text", "body": "Original draft"},
+            "$root_edit": {
+                "msgtype": "m.text",
+                "body": "* Edited encrypted root",
+                "m.new_content": {"msgtype": "m.text", "body": "Edited encrypted root"},
+            },
+            "$root_edited_missing": {"msgtype": "m.text", "body": "Stale draft"},
+        },
+    )
+    roots = [
+        _encrypted_root("$root_plain"),
+        _encrypted_root("$root_edited", bundled_edit=root_edit),
+        _encrypted_root("$root_edited_missing", bundled_edit=unreadable_edit),
+        _encrypted_root("$root_missing"),
+    ]
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=(roots, None)):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads"))
+
+    assert [(row["thread_id"], row["body_preview"]) for row in payload["threads"]] == [
+        ("$root_plain", "Decrypted thread root"),
+        ("$root_edited", "Edited encrypted root"),
+        ("$root_edited_missing", "[encrypted]"),
+        ("$root_missing", "[encrypted]"),
+    ]

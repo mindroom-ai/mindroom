@@ -405,6 +405,9 @@ async def get_room_threads_page(
 ) -> tuple[list[nio.Event], str | None]:
     """Fetch a single page of thread roots for a room."""
     response = await _room_threads_page(client, room_id, RoomThreadsResponse, limit=limit, page_token=page_token)
+    for event in response.thread_roots:
+        if isinstance(event, nio.MegolmEvent) and not event.room_id:
+            event.room_id = room_id
     return response.thread_roots, response.next_batch
 
 

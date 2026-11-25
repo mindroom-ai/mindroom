@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import ACTING_REQUESTER_KEY
@@ -23,7 +24,7 @@ from mindroom.thread_tags import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection
 
     import nio
 
@@ -31,7 +32,8 @@ if TYPE_CHECKING:
     from mindroom.thread_tags import ThreadTagRecord
 
 # The client's QUESTION_WAITS_MS: an unanswered question stops counting after seven days.
-_QUESTION_WAITS_MS = 7 * 24 * 60 * 60 * 1000
+QUESTION_WAITS_MS = 7 * 24 * 60 * 60 * 1000
+_QUESTION_WAITS_MS = QUESTION_WAITS_MS
 _JOB_FIELDS = ("job_id", "kind", "tool", "status", "started_at")
 
 
@@ -165,26 +167,29 @@ def thread_workflow(
     return classify_thread_workflow(status, now)
 
 
-def latest_reply_question_ts(
-    thread_metadata: Mapping[str, Any],
+def reply_question_ts(
+    reply: Mapping[str, Any],
     bot_ids: Collection[str],
     requester_ids: Collection[str] = (),
+    *,
+    edit: Mapping[str, Any] | None = None,
 ) -> int | None:
-    """Return when the root's bundled newest reply, as its newest own edit shows it, asked the requester a question.
+    """Return when one bot reply, as its newest own edit shows it, asked the requester a question.
 
     A reply that names another person as its acting requester asks that person, as the client skips it.
     """
-    reply = thread_metadata.get("io.mindroom.latest_reply")
-    sender = reply.get("sender") if isinstance(reply, dict) else None
-    if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
+    sender = reply.get("sender")
+    if not isinstance(sender, str) or sender not in bot_ids:
         return None
-    # A malformed edit is ignored, so the original's question and time stand.
-    edits = [c for c in bundled_replacement_candidates(reply) if c.get("sender") == sender]
-    ok = [
-        c for c in edits if isinstance(c.get("content"), dict) and isinstance(c["content"].get("m.new_content"), dict)
-    ]
-    edit = ok[0] if ok else None
-    shown = edit["content"]["m.new_content"] if edit is not None else None
+    valid_edit = (
+        edit
+        if isinstance(edit, Mapping)
+        and edit.get("sender") == sender
+        and isinstance(edit.get("content"), dict)
+        and isinstance(edit["content"].get("m.new_content"), dict)
+        else None
+    )
+    shown = valid_edit["content"]["m.new_content"] if valid_edit is not None else None
     # As the client's readInteractiveQuestion: the shown content's prompt, else the original's.
     payloads = [c.get("io.mindroom.interactive") for c in (shown, reply.get("content")) if isinstance(c, dict)]
     prompt = next((payload for payload in payloads if payload is not None), None)
@@ -202,5 +207,25 @@ def latest_reply_question_ts(
         and any(isinstance(value, str) and not re.fullmatch("[0-9]+", str(key)) for key, value in options.items())
     ):
         return None
-    ts = (edit or reply).get("origin_server_ts")
+    ts = (valid_edit or reply).get("origin_server_ts")
     return ts if isinstance(ts, int) and not isinstance(ts, bool) else None
+
+
+def latest_reply_question_ts(
+    thread_metadata: Mapping[str, Any],
+    bot_ids: Collection[str],
+    requester_ids: Collection[str] = (),
+) -> int | None:
+    """Return when the root's bundled newest reply, as its newest own edit shows it, asked the requester a question."""
+    reply = thread_metadata.get("io.mindroom.latest_reply")
+    if not isinstance(reply, dict):
+        reply = thread_metadata.get("latest_event")
+    sender = reply.get("sender") if isinstance(reply, dict) else None
+    if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
+        return None
+    # A malformed edit is ignored, so the original's question and time stand.
+    edits = [c for c in bundled_replacement_candidates(reply) if c.get("sender") == sender]
+    ok = [
+        c for c in edits if isinstance(c.get("content"), dict) and isinstance(c["content"].get("m.new_content"), dict)
+    ]
+    return reply_question_ts(reply, bot_ids, requester_ids, edit=ok[0] if ok else None)
