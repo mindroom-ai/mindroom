@@ -48,7 +48,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Operator (Matrix ID: @mindroom_operator:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n- Not confined by file_access (only a worker isolates them): `shell`.\n\nOperate the build machine.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Explain each command before running it.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\n- To create or edit your own skills, write `skills/<skill-name>/SKILL.md` in your workspace (with YAML frontmatter `name` and `description`, plus optional `scripts/` and `references/`). Never write to bundled, plugin, or user skill dirs (e.g. `~/.mindroom/skills`); workspace skills take precedence and load on your next run.\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\n- Inside shell commands, `mindroom-agent` calls your other tools by name, so one script can combine many calls; run `mindroom-agent --help` for usage.",
+          "content": "<your_role>\n## Your Identity\nYou are Operator (Matrix ID: @mindroom_operator:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n- Not confined by file_access (only a worker isolates them): `shell`.\n\nOperate the build machine.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Explain each command before running it.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\n- To create or edit your own skills, write `skills/<skill-name>/SKILL.md` in your workspace (with YAML frontmatter `name` and `description`, plus optional `scripts/` and `references/`). Never write to bundled, plugin, or user skill dirs (e.g. `~/.mindroom/skills`); workspace skills take precedence and load on your next run.\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\n- Inside shell commands, `mindroom-agent` calls your other tools by name, so one script can combine many calls; run `mindroom-agent --help` for usage.",
           "role": "system"
         },
         {
@@ -161,7 +161,7 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing scheduled task by replacing its timing and content.",
+          "description": "Edit an existing pending scheduled task using patch semantics.\nOmitted parameters keep their existing values. One-time tasks cannot switch\nto cron and cron tasks cannot switch to one-time; provide at most one of\n`execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -169,9 +169,71 @@
                 "type": "string",
                 "description": "The ID of the task to edit (from list_schedules)."
               },
-              "request": {
-                "type": "string",
-                "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+              "message": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New trigger message posted when the schedule fires."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New short label for schedule listings."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time ISO 8601 datetime with a time component\n(valid only for one-time schedules)."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour (valid only for one-time\nschedules)."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New 5-field cron expression evaluated in `timezone` (valid only\nfor cron schedules)."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New IANA timezone name (e.g. \"America/Los_Angeles\"). For\nlegacy UTC cron schedules, also pass `cron` in the target timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -182,7 +244,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
+                "description": "New max recent thread messages included per fire (0 for\nno history). Cannot be combined with `clear_history_limit=True`."
+              },
+              "clear_history_limit": {
+                "type": "boolean",
+                "description": "Set to `True` to remove an existing history limit\nand restore unlimited history."
               },
               "silent": {
                 "anyOf": [
@@ -193,7 +259,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
+                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or `NO_REPLY` finals while keeping\nfindings, failures, and independently sent tool messages visible."
               },
               "model": {
                 "anyOf": [
@@ -204,7 +270,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Pass an empty string to restore\nnormal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -220,8 +286,7 @@
               }
             },
             "required": [
-              "task_id",
-              "request"
+              "task_id"
             ]
           }
         },
@@ -464,17 +529,72 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
+          "description": "Schedule a one-time or recurring task with structured timing parameters.\nProvide exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
-              "request": {
+              "message": {
                 "type": "string",
-                "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                "description": "Exact trigger message posted when the schedule fires (non-empty).\nInclude `@agent_name` or `@team_name` if targeting specific responders."
               },
               "new_thread": {
                 "type": "boolean",
                 "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time run timestamp as an ISO 8601 datetime with a time\ncomponent (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive\n\"2026-11-25T09:00:00\" interpreted in `timezone`). Must be in the\nfuture; include an explicit UTC offset during DST transitions."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time relative delay in positive seconds (>= 1),\ne.g. 900 for 15 minutes, 3600 for 1 hour."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Recurring 5-field cron expression (`minute hour day month weekday`,\ne.g. \"0 9 * * 1-5\"), evaluated in `timezone` (DST-safe)."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional short human-readable label for schedule listings;\ndefaults to trimmed `message`."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional IANA timezone name (e.g. \"America/Los_Angeles\");\ndefaults to this agent's configured timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -485,18 +605,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
+                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for unlimited history."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                "type": "boolean",
+                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or ends with `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -523,7 +636,7 @@
               }
             },
             "required": [
-              "request",
+              "message",
               "new_thread"
             ]
           }

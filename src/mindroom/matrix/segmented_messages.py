@@ -127,13 +127,13 @@ def _chunk_mentions(source: Mapping[str, Any], body: str) -> dict[str, Any] | No
     return chunk_mentions or None
 
 
-def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
+def _render_segment_html(source: Mapping[str, Any], body: str, *, enable_footnotes: bool = True) -> str:
     """Render one chunk, restoring mention pills its plain body cannot carry.
 
     Substitution is boundary-aware and skips code regions: a user ID appearing
     as literal text (code span, URL path) is content, not a mention.
     """
-    formatted = markdown_to_html(body)
+    formatted = markdown_to_html(body, enable_footnotes=enable_footnotes)
     pills = _mention_pills(source)
     if not pills:
         return formatted
@@ -149,13 +149,14 @@ def _rich_text_content(
     body: str,
     *,
     relation: Mapping[str, Any] | None = None,
+    enable_footnotes: bool = True,
 ) -> dict[str, Any]:
     """Build one normal rich-text content payload from one body chunk."""
     content = {key: value for key, value in source.items() if key not in _SEGMENT_DROPPED_KEYS}
     content.setdefault("msgtype", "m.text")
     content["body"] = body
     content["format"] = "org.matrix.custom.html"
-    content["formatted_body"] = _render_segment_html(source, body)
+    content["formatted_body"] = _render_segment_html(source, body, enable_footnotes=enable_footnotes)
     mentions = _chunk_mentions(source, body)
     if mentions is not None:
         content["m.mentions"] = mentions
@@ -164,7 +165,13 @@ def _rich_text_content(
     return content
 
 
-def _edit_content_chunk(content: dict[str, Any], source: dict[str, Any], body: str) -> dict[str, Any]:
+def _edit_content_chunk(
+    content: dict[str, Any],
+    source: dict[str, Any],
+    body: str,
+    *,
+    enable_footnotes: bool = True,
+) -> dict[str, Any]:
     """Build the first edit event with one complete rich-text chunk.
 
     The outer envelope keeps the source edit's own ``m.mentions`` -- for an
@@ -172,7 +179,7 @@ def _edit_content_chunk(content: dict[str, Any], source: dict[str, Any], body: s
     re-notify recipients an earlier revision already mentioned. The resolved
     per-chunk set lives under ``m.new_content``.
     """
-    replacement = _rich_text_content(source, body)
+    replacement = _rich_text_content(source, body, enable_footnotes=enable_footnotes)
     edit = {key: value for key, value in content.items() if key not in _INTERNAL_STREAM_KEYS}
     edit["body"] = f"* {body}"
     edit["format"] = "org.matrix.custom.html"
@@ -187,6 +194,7 @@ def _continuation_content(
     *,
     thread_id: str | None,
     reply_to_event_id: str | None,
+    enable_footnotes: bool = True,
 ) -> dict[str, Any]:
     """Build a continuation that recovery cannot mistake for a fresh answer.
 
@@ -199,7 +207,7 @@ def _continuation_content(
     relation = (
         build_thread_relation(thread_id, latest_thread_event_id=reply_to_event_id or thread_id) if thread_id else None
     )
-    content = _rich_text_content(source, body, relation=relation)
+    content = _rich_text_content(source, body, relation=relation, enable_footnotes=enable_footnotes)
     # The reply's compactions are shown once, on its first segment.
     content.pop(COMPACTIONS_CONTENT_KEY, None)
     return content
@@ -360,6 +368,39 @@ def _count_segments(first: dict[str, Any], visible_first: dict[str, Any], count:
         del visible_first[SEGMENT_COUNT_KEY]
 
 
+def _segment_builders(
+    content: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    is_edit: bool,
+    continuation_thread_id: str | None,
+    continuation_reply_to_event_id: str | None,
+    enable_footnotes: bool,
+) -> tuple[Callable[[str], dict[str, Any]], Callable[[str], dict[str, Any]]]:
+    """Return ``(first_build, continuation_build)`` callables for one segmentation pass."""
+
+    def first_build(chunk: str) -> dict[str, Any]:
+        if is_edit:
+            return _edit_content_chunk(content, source, chunk, enable_footnotes=enable_footnotes)
+        return _rich_text_content(
+            source,
+            chunk,
+            relation=source.get("m.relates_to"),
+            enable_footnotes=enable_footnotes,
+        )
+
+    def continuation_build(chunk: str) -> dict[str, Any]:
+        return _continuation_content(
+            source,
+            chunk,
+            thread_id=continuation_thread_id,
+            reply_to_event_id=continuation_reply_to_event_id,
+            enable_footnotes=enable_footnotes,
+        )
+
+    return first_build, continuation_build
+
+
 def segment_matrix_content(
     content: dict[str, Any],
     *,
@@ -387,19 +428,14 @@ def segment_matrix_content(
         return None
     continuation_target = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=False)
 
-    def first_build(chunk: str) -> dict[str, Any]:
-        if is_edit:
-            return _edit_content_chunk(content, source, chunk)
-        return _rich_text_content(source, chunk, relation=source.get("m.relates_to"))
-
-    def continuation_build(chunk: str) -> dict[str, Any]:
-        return _continuation_content(
-            source,
-            chunk,
-            thread_id=continuation_thread_id,
-            reply_to_event_id=continuation_reply_to_event_id,
-        )
-
+    first_build, continuation_build = _segment_builders(
+        content,
+        source,
+        is_edit=is_edit,
+        continuation_thread_id=continuation_thread_id,
+        continuation_reply_to_event_id=continuation_reply_to_event_id,
+        enable_footnotes=True,
+    )
     chunks = _split_body(
         source["body"],
         first_build,
@@ -407,6 +443,24 @@ def segment_matrix_content(
         first_target=first_target,
         continuation_target=continuation_target,
     )
+    if chunks is not None and len(chunks) > 1 and "[^" in source["body"]:
+        # Splitting across events can separate `[^1]` from `[^1]: ...`, which would make footnote_plugin drop
+        # unreferenced definitions; re-split and render without footnotes so sizing matches what is sent.
+        first_build, continuation_build = _segment_builders(
+            content,
+            source,
+            is_edit=is_edit,
+            continuation_thread_id=continuation_thread_id,
+            continuation_reply_to_event_id=continuation_reply_to_event_id,
+            enable_footnotes=False,
+        )
+        chunks = _split_body(
+            source["body"],
+            first_build,
+            continuation_build,
+            first_target=first_target,
+            continuation_target=continuation_target,
+        )
     if chunks is None:
         return None
     trace = message_tool_trace(source)

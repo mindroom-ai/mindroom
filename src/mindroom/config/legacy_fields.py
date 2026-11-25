@@ -189,11 +189,19 @@ RETIRED_DEFAULTS_FIELDS = frozenset({"max_preload_chars"})
 # Handling: Drop them before validation, so a config that still overrides them loads and the next dashboard save
 #   removes them.
 # Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_cut_markers.
+#
+# LEGACY_COMPAT: Retired natural-language workflow schedule parser prompt.
+# Legacy format: prompts.WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE overrode the LLM prompt used to parse `!schedule`
+#   and `scheduler` natural-language strings into `ScheduledWorkflow` JSON.
+# Last legacy release: v2026.11.574; replacement: unreleased; structured scheduler tool calls parse no model prompt.
+# Handling: Drop it before validation, so a config that still overrides it loads and the next dashboard save removes it.
+# Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_schedule_parse_prompt.
 RETIRED_PROMPT_NAMES = frozenset(
     {
         "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     },
 )
 
@@ -479,7 +487,7 @@ def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
 # LEGACY_COMPAT: Retired `dynamic_workflow` toolkit alias and its `allowed_tools` override.
 # Legacy format: `defaults.tools` and `agents.<name>.tools` accepted `dynamic_workflow` (optionally with an
 #   `allowed_tools` override restricting participant tools under the deleted Dynamic Workflows engine).
-# Last legacy release: v2026.11.585; replacement: unreleased; aliases `dynamic_workflow` to `workflow` and deletes
+# Last legacy release: v2026.11.590; replacement: unreleased; aliases `dynamic_workflow` to `workflow` and deletes
 #   the old Dynamic Workflows engine.
 # Handling: Canonicalize `dynamic_workflow` to `workflow` via TOOL_ALIASES, strip `allowed_tools` from entries
 #   authored under the legacy alias, and log one concise deprecation warning per config load.
@@ -510,7 +518,7 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # LEGACY_COMPAT: Retired function names of the deleted `dynamic_workflow` toolkit in `tool_approval.rules`.
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
-# Last legacy release: v2026.11.585; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
+# Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
 #   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
 # Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
 #   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision

@@ -426,7 +426,7 @@ async def test_watch_thread_initializes_checkpoint_and_reports_already_in_state(
         tags={"resolved": ThreadTagRecord(set_by="@owner:example.org", set_at=now)},
     )
     get_tags_mock = AsyncMock(side_effect=[None, tagged_state, ThreadTagsError("homeserver down")])
-    monkeypatch.setattr("mindroom.custom_tools.triggers.get_thread_tags", get_tags_mock)
+    monkeypatch.setattr("mindroom.reactive_triggers.management.get_thread_tags", get_tags_mock)
 
     tool = TriggersTools()
     with tool_runtime_context(
@@ -637,6 +637,10 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         assert reenabled["trigger"]["enabled"] is True
         orchestrator.reactive_triggers.notify_work.assert_called_once()
 
+        reenabled_direct = _payload(await tool.triggers(action="set_enabled", trigger_id="direct-1", enabled=True))
+        assert reenabled_direct["tool"] == "triggers"
+        assert reenabled_direct["trigger"]["enabled"] is True
+
     # Non-owner non-admin cannot disable or delete another owner's reactive trigger
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
         other_list = _payload(await tool.triggers(action="list"))
@@ -679,6 +683,7 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
         worker_target=None,
     )
     assert isinstance(built_by_alias, TriggersTools)
+    assert triggers_tools is module_triggers_tools
     assert triggers_tools() is TriggersTools
 
 
@@ -729,7 +734,7 @@ async def test_watch_thread_removed_transition_and_origin_rejected(
         tags={"blocked": ThreadTagRecord(set_by="@owner:example.org", set_at=now)},
     )
     monkeypatch.setattr(
-        "mindroom.custom_tools.triggers.get_thread_tags",
+        "mindroom.reactive_triggers.management.get_thread_tags",
         AsyncMock(side_effect=[None, tagged_state]),
     )
     tool = TriggersTools()
@@ -953,53 +958,6 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
 
 
 @pytest.mark.asyncio
-async def test_triggers_tool_factory_and_async_disable_trigger(tmp_path: Path) -> None:
-    """The triggers tool factory exports TriggersTools without duplicate alias metadata and uses async disable_trigger."""
-    registry = builtin_tool_registry()
-    assert triggers_tools is module_triggers_tools
-    assert triggers_tools() is TriggersTools
-    assert "triggers" in registry.entries
-    assert "external_trigger_manager" not in registry.entries
-
-    _record_rooms(tmp_path)
-    tool = TriggersTools()
-    absent_state = ThreadTagsState(room_id="!lobby:example.org", thread_root_id="$thread1", tags={})
-    with (
-        tool_runtime_context(_context(tmp_path)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
-    ):
-        created_direct = _payload(
-            await tool.triggers(action="create", trigger_id="direct-toggle", public_key=_PUBLIC_KEY),
-        )
-        assert created_direct["tool"] == "triggers"
-        assert created_direct["status"] == "ok"
-        created_tag = _payload(
-            await tool.triggers(
-                action="watch_thread",
-                prompt="Follow up",
-                thread_id="$thread1",
-                trigger_id="tag-toggle",
-            ),
-        )
-        assert created_tag["tool"] == "triggers"
-        assert created_tag["status"] == "ok"
-
-        disabled_direct = _payload(await tool.triggers(action="set_enabled", trigger_id="direct-toggle", enabled=False))
-        assert disabled_direct["tool"] == "triggers"
-        assert disabled_direct["trigger"]["enabled"] is False
-        reenabled_direct = _payload(await tool.triggers(action="set_enabled", trigger_id="direct-toggle", enabled=True))
-        assert reenabled_direct["tool"] == "triggers"
-        assert reenabled_direct["trigger"]["enabled"] is True
-
-        disabled_tag = _payload(await tool.triggers(action="set_enabled", trigger_id="tag-toggle", enabled=False))
-        assert disabled_tag["tool"] == "triggers"
-        assert disabled_tag["trigger"]["enabled"] is False
-        reenabled_tag = _payload(await tool.triggers(action="set_enabled", trigger_id="tag-toggle", enabled=True))
-        assert reenabled_tag["tool"] == "triggers"
-        assert reenabled_tag["trigger"]["enabled"] is True
-
-
-@pytest.mark.asyncio
 async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_path: Path) -> None:
     """watch_thread normalizes tag='needs_review' to 'needs-review' and rejects invalid tag names cleanly."""
     _record_rooms(tmp_path)
@@ -1013,7 +971,7 @@ async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_pa
 
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=existing_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=existing_state)),
     ):
         created = _payload(
             await tool.triggers(
@@ -1051,7 +1009,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
 
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         res = _payload(
             await tool.triggers(
@@ -1089,7 +1047,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
     # Scenario A: thread reopened offline while disabled -> disable_trigger(enabled=True) refreshes checkpoint to False
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled["status"] == "ok", reenabled
@@ -1105,7 +1063,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
         )
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=present_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=present_state)),
     ):
         reenabled2 = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled2["status"] == "ok", reenabled2
@@ -1504,12 +1462,8 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
     )
     tool = TriggersTools()
     store = ReactiveTriggerStore(_runtime_paths(tmp_path))
-    absent_state = ThreadTagsState(room_id="!lobby:example.org", thread_root_id="$thread_root:example.org", tags={})
 
-    with (
-        tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
-    ):
+    with tool_runtime_context(_context(tmp_path, config=config)):
         await tool.triggers(
             action="watch_room",
             trigger_id="test-room",
@@ -1797,17 +1751,9 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     client = _room_state_client(room_members=live_members)
     other_bot = SimpleNamespace(agent_name="other", running=True, client=client)
     orch = _make_orchestrator(bots={"other": other_bot})
-    absent_state = ThreadTagsState(
-        room_id="!other-room:example.org",
-        thread_root_id="$priv_thread:example.org",
-        tags={},
-    )
 
     # Owner watches private room A (!other-room) targeting room B (!lobby), plus lobby and github
-    with (
-        tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
-    ):
+    with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
         assert (
             _payload(
                 await tool.triggers(

@@ -700,7 +700,6 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -737,7 +736,6 @@ visibility = [
     "mindroom.post_response_effects",
     "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
-    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.thread_summary",
 ]
@@ -1038,7 +1036,6 @@ visibility = [
     "mindroom.approval.execution",
     "mindroom.teams",
     "mindroom.routing",
-    "mindroom.scheduling.tasks",
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice.handler",
@@ -1830,6 +1827,7 @@ depends_on = [
 path = "mindroom.api.external_triggers"
 depends_on = [
     "mindroom.bounded_bytes",
+    "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
@@ -2096,6 +2094,7 @@ expose = ["bind_workflow_engine", "router"]
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.api.agent_profiles",
+    "mindroom.api.room_triggers",
     "mindroom.api.agent_terminals",
     "mindroom.api.app_state",
     "mindroom.api.auth_user",
@@ -2164,6 +2163,18 @@ depends_on = [
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.turn_model",
+]
+
+[[modules]]
+path = "mindroom.api.room_triggers"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.config_lifecycle",
+    "mindroom.matrix.state",
+    "mindroom.plugin_http",
+    "mindroom.reactive_triggers.management",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
 ]
 
 [[modules]]
@@ -6178,18 +6189,12 @@ depends_on = [
 path = "mindroom.scheduling.tasks"
 depends_on = [
     "mindroom.config.models",
-    "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.conversation_hydration",
-    "mindroom.matrix.conversation_reads",
-    "mindroom.providers.registry",
-    "mindroom.agent_loop.helper",
-    "mindroom.llm",
     "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
-    "mindroom.failure_text",
     "mindroom.config.resolution",
+    "mindroom.scheduling.recurring_schedule",
     "mindroom.tool_system.plugins",
     "mindroom.matrix.state_failures",
 ]
@@ -6229,6 +6234,7 @@ depends_on = []
 visibility = [
     "mindroom.scheduling.executor",
     "mindroom.scheduling.runtime",
+    "mindroom.scheduling.tasks",
 ]
 
 [[modules]]
@@ -6236,7 +6242,6 @@ path = "mindroom.tool_system.runtime_context"
 depends_on = [
     "mindroom.hooks",
     "mindroom.runtime_resolution",
-    "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",
@@ -8035,7 +8040,6 @@ expose = [
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
-    "build_scheduling_runtime_from_tool_runtime_context",
     "current_execution_identity",
     "current_plugins",
     "detached_tool_scope",
@@ -9583,7 +9587,7 @@ depends_on = [
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
-    "mindroom.room_steward",
+    "mindroom.plugin_http",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 
@@ -11405,6 +11409,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.reactive_triggers.management"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.reactive_triggers.matching"
 depends_on = [
     "mindroom.constants",
@@ -11463,6 +11475,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
     "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",

@@ -785,7 +785,7 @@ def resolve_tool_settings(
     #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
     # LEGACY_COMPAT: Dashboard-saved `allowed_tools` under service `dynamic_workflow`.
     # Legacy format: Operators could save `allowed_tools` on the Tools page under service `dynamic_workflow`.
-    # Last legacy release: v2026.11.585; replacement: unreleased; `workflow` inherits its caller's tools.
+    # Last legacy release: v2026.11.590; replacement: unreleased; `workflow` inherits its caller's tools.
     # Handling: Ignore retired `allowed_tools` stored under `dynamic_workflow` so `workflow` still builds cleanly;
     #   keep rejecting any other stored key under `dynamic_workflow` and all other aliases.
     # Coverage: tests/test_dynamic_workflow_alias.py::test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow.

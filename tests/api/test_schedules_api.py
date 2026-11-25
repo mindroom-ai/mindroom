@@ -17,11 +17,12 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from mindroom.api import config_lifecycle, main
+from mindroom.api.schedules import _task_response, _task_response_sort_key
 from mindroom.config.main import Config
 from mindroom.matrix.state import update_matrix_state
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
-from tests.conftest import make_matrix_client_mock
+from tests.conftest import make_matrix_client_mock, test_runtime_paths
 from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
@@ -45,6 +46,8 @@ def _task(
     history_limit: int | None = None,
     silent: bool = False,
     timezone: str | None = None,
+    cron_timezone: str | None = None,
+    status: str = "pending",
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -63,11 +66,12 @@ def _task(
         new_thread=new_thread,
         silent=silent,
         timezone=timezone,
+        cron_timezone=cron_timezone,
     )
     return ScheduledTaskRecord(
         task_id=task_id,
         room_id="test_room",
-        status="pending",
+        status=status,
         created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
         workflow=workflow,
     )
@@ -839,3 +843,115 @@ def test_edit_whose_state_write_is_refused_is_a_server_error(test_client: TestCl
 
     assert response.status_code == 500
     assert response.json()["detail"] == "I need moderator rights in this room to save schedules."
+
+
+def test_task_response_derives_display_fields_and_sort_order(tmp_path: Path) -> None:
+    """API task responses should derive display fields and sort pending tasks first."""
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    runtime_paths = test_runtime_paths(tmp_path)
+    once_record = _task(
+        "once123",
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 2, 9, 30, tzinfo=UTC),
+        message="one-time message",
+        description="One-time task",
+        new_thread=True,
+        status="cancelled",
+    )
+    cron_record = _task(
+        "cron123",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        message="cron message",
+        description="Cron task",
+        thread_id="$thread1",
+    )
+
+    once_response = _task_response(once_record, timezone="UTC", runtime_paths=runtime_paths, current_time=current_time)
+    cron_response = _task_response(cron_record, timezone="UTC", runtime_paths=runtime_paths, current_time=current_time)
+
+    assert once_response.task_id == "once123"
+    assert once_response.status == "cancelled"
+    assert once_response.next_run_at == datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
+    assert once_response.cron_expression is None
+    assert once_response.new_thread is True
+    assert once_response.silent is False
+    assert cron_response.cron_expression == "0 9 * * *"
+    assert cron_response.cron_description == "At 09:00 (UTC)"
+    assert cron_response.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
+    assert cron_response.created_by == "@user:localhost"
+    assert cron_response.thread_id == "$thread1"
+    assert cron_response.silent is False
+    assert sorted([once_response, cron_response], key=_task_response_sort_key) == [cron_response, once_response]
+
+
+def test_list_and_update_schedules_expose_and_preserve_cron_timezone(test_client: TestClient) -> None:
+    """GET exposes read-only timezone/cron_timezone and PUT preserves existing cron_timezone and created_by."""
+    _record_test_room()
+    local_cron = _task(
+        "local123",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        timezone="America/Los_Angeles",
+        cron_timezone="America/Los_Angeles",
+    )
+    legacy_cron = _task(
+        "legacy12",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        timezone="America/Los_Angeles",
+        cron_timezone=None,
+    )
+
+    with (
+        _served_by(AsyncMock()),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=[local_cron, legacy_cron]),
+    ):
+        listed = test_client.get("/api/schedules")
+
+    assert listed.status_code == 200
+    by_id = {task["task_id"]: task for task in listed.json()["tasks"]}
+    assert by_id["local123"]["timezone"] == "America/Los_Angeles"
+    assert by_id["local123"]["cron_timezone"] == "America/Los_Angeles"
+    assert by_id["local123"]["cron_description"] == "At 09:00 (America/Los_Angeles)"
+    assert by_id["legacy12"]["timezone"] == "America/Los_Angeles"
+    assert by_id["legacy12"]["cron_timezone"] is None
+    assert by_id["legacy12"]["cron_description"] != "At 09:00 (America/Los_Angeles)"
+
+    async def echo_save(
+        *,
+        workflow: ScheduledWorkflow,
+        existing_task: ScheduledTaskRecord,
+        **_kwargs: object,
+    ) -> ScheduledTaskRecord:
+        return ScheduledTaskRecord(
+            task_id=existing_task.task_id,
+            room_id=existing_task.room_id,
+            status="pending",
+            created_at=existing_task.created_at,
+            workflow=workflow,
+        )
+
+    save_mock = AsyncMock(side_effect=echo_save)
+    with (
+        _served_by(AsyncMock()),
+        patch("mindroom.api.schedules.require_scheduled_task", side_effect=[legacy_cron, local_cron]),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
+    ):
+        keep_legacy = test_client.put(
+            "/api/schedules/legacy12",
+            json={"room_id": "test_room", "cron_expression": "30 10 * * *"},
+        )
+        keep_local = test_client.put(
+            "/api/schedules/local123",
+            json={"room_id": "test_room", "cron_expression": "30 10 * * *"},
+        )
+
+    assert keep_legacy.status_code == 200
+    assert keep_legacy.json()["cron_timezone"] is None
+    assert keep_legacy.json()["created_by"] == "@user:localhost"
+
+    assert keep_local.status_code == 200
+    assert keep_local.json()["cron_timezone"] == "America/Los_Angeles"
+    assert keep_local.json()["cron_description"] == "At 10:30 (America/Los_Angeles)"
+    assert keep_local.json()["created_by"] == "@user:localhost"

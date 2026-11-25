@@ -19,11 +19,10 @@ from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.hooks import HookBindings
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.errors import ScheduledTaskNotFoundError, SchedulingError
-from mindroom.scheduling.tasks import SchedulingRuntime, _extract_mentioned_agents_from_text
+from mindroom.scheduling.tasks import _extract_mentioned_agents_from_text
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
 from tests.agent_tool_helpers import toolkit_offers
@@ -92,7 +91,7 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     """The model-facing schema must not silently choose a delivery scope."""
     function = toolkit_offers(SchedulerTools(), "schedule")
 
-    assert set(function.parameters["required"]) == {"request", "new_thread"}
+    assert set(function.parameters["required"]) == {"message", "new_thread"}
     properties = function.parameters["properties"]
     new_thread_description = properties["new_thread"]["description"].lower()
     silent_description = properties["silent"]["description"].lower()
@@ -103,12 +102,12 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     assert SILENT_SCHEDULE_NO_REPLY_TOKEN.lower() in silent_description
     assert "findings" in silent_description
     assert "failures" in silent_description
-    assert "infer" in silent_description
+    assert "defaults to `false`" in silent_description
 
 
 @pytest.mark.asyncio
 async def test_scheduler_tool_uses_shared_backend() -> None:
-    """Tool should call the same scheduling backend path as !schedule, running saved tasks on the orchestrator's runtime."""
+    """Tool should call the scheduling backend path, running saved tasks on the orchestrator's runtime."""
     tools = SchedulerTools()
     config = _general_config()
     orchestrator = MagicMock()
@@ -126,15 +125,23 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         ) as mock_schedule,
         tool_runtime_context(context),
     ):
-        result = await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
+        result = await tools.schedule(
+            message="check deployment",
+            new_thread=False,
+            execute_at="2026-11-25T15:00:00Z",
+        )
         new_thread_result = await tools.schedule(
-            "tomorrow at 4pm check deployment",
+            message="check deployment",
             new_thread=True,
+            delay_seconds=3600,
+            description="Hourly check",
+            timezone="America/Los_Angeles",
             silent=True,
         )
         limited_result = await tools.schedule(
-            "every 25 minutes poll the queue",
+            message="poll the queue",
             new_thread=False,
+            cron="*/25 * * * *",
             history_limit=0,
             model="cheap",
         )
@@ -146,51 +153,43 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     first_call = mock_schedule.await_args_list[0].kwargs.copy()
     second_call = mock_schedule.await_args_list[1].kwargs.copy()
     third_call = mock_schedule.await_args_list[2].kwargs.copy()
-    expected_runtime = SchedulingRuntime(
-        client=context.client,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        room=context.room,
-        conversation_reader=context.conversation_reader,
-        agent_reply_memberships=context.agent_reply_memberships,
-        responder_candidates_for_room=context.responder_candidates_for_current_room,
-        task_runtime=orchestrator.scheduled_tasks,
-        agent_name=context.agent_name,
-    )
     for call_kwargs in (first_call, second_call, third_call):
-        assert call_kwargs.pop("runtime") == expected_runtime
+        assert call_kwargs.pop("context") == context
     assert first_call == {
-        "room_id": context.room_id,
-        "thread_id": context.resolved_thread_id,
-        "scheduled_by": context.requester_id,
-        "full_text": "tomorrow at 3pm check deployment",
+        "message": "check deployment",
         "new_thread": False,
+        "execute_at": "2026-11-25T15:00:00Z",
+        "delay_seconds": None,
+        "cron": None,
+        "description": None,
+        "timezone": None,
         "history_limit": None,
-        "silent": None,
+        "silent": False,
         "model": None,
-        "source_event_id": "$answered",
     }
     assert second_call == {
-        "room_id": context.room_id,
-        "thread_id": context.resolved_thread_id,
-        "scheduled_by": context.requester_id,
-        "full_text": "tomorrow at 4pm check deployment",
+        "message": "check deployment",
         "new_thread": True,
+        "execute_at": None,
+        "delay_seconds": 3600,
+        "cron": None,
+        "description": "Hourly check",
+        "timezone": "America/Los_Angeles",
         "history_limit": None,
         "silent": True,
         "model": None,
-        "source_event_id": "$answered",
     }
     assert third_call == {
-        "room_id": context.room_id,
-        "thread_id": context.resolved_thread_id,
-        "scheduled_by": context.requester_id,
-        "full_text": "every 25 minutes poll the queue",
+        "message": "poll the queue",
         "new_thread": False,
+        "execute_at": None,
+        "delay_seconds": None,
+        "cron": "*/25 * * * *",
+        "description": None,
+        "timezone": None,
         "history_limit": 0,
-        "silent": None,
+        "silent": False,
         "model": "cheap",
-        "source_event_id": "$answered",
     }
 
 
@@ -220,8 +219,7 @@ async def test_scheduler_tool_reuses_failed_turn_membership_snapshot() -> None:
 
     assert not await ensure_room_membership_synced(client, room, sender_id=requester_id)
 
-    runtime = build_scheduling_runtime_from_tool_runtime_context(context)
-    candidates = await runtime.responder_candidates_for_room(room, requester_id)
+    candidates = await context.responder_candidates_for_current_room(room, requester_id)
 
     assert candidates == [general_id]
     assert client.joined_members.await_count == 1
@@ -232,23 +230,30 @@ async def test_scheduler_tool_uses_current_config_for_authorization() -> None:
     """A long-lived tool context must not schedule with its construction-time policy."""
     tools = SchedulerTools()
     old_config = _general_config()
-    current_config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="Current Agent")}))
+    current_config = bind_runtime_paths(
+        Config(
+            timezone="America/Los_Angeles",
+            agents={"general": AgentConfig(display_name="Current Agent", rooms=["!room:localhost"])},
+        ),
+        runtime_paths_for(old_config),
+    )
+    general_id = entity_ids(current_config, runtime_paths_for(old_config))["general"]
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=general_id.full_id)
+    room.add_member(general_id.full_id, "Current Agent", None)
+    room.members_synced = True
+    client = make_matrix_client_mock(user_id=general_id.full_id)
+    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$state", "!room:localhost"))
     context = replace(
         _make_context(old_config),
+        client=client,
+        room=room,
         config_provider=lambda: current_config,
     )
 
-    with (
-        patch(
-            "mindroom.custom_tools.scheduler.schedule_task",
-            new=AsyncMock(return_value="✅ Scheduled"),
-        ) as mock_schedule,
-        tool_runtime_context(context),
-    ):
-        await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
+    with tool_runtime_context(context):
+        result = await tools.schedule(message="check deployment", new_thread=False, cron="0 9 * * *")
 
-    runtime = mock_schedule.await_args.kwargs["runtime"]
-    assert runtime.config is current_config
+    assert "America/Los_Angeles" in result
 
 
 @pytest.mark.asyncio
@@ -265,58 +270,71 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         ) as mock_edit,
         tool_runtime_context(context),
     ):
-        result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
+        result = await tools.edit_schedule(
+            "task123",
+            message="check deployment",
+            execute_at="2026-11-25T09:00:00Z",
+        )
         limited_result = await tools.edit_schedule(
             "task123",
-            "keep the same schedule",
+            description="Updated label",
             history_limit=5,
             silent=True,
         )
-        visible_result = await tools.edit_schedule("task123", "make it visible", silent=False, model="cheap")
+        visible_result = await tools.edit_schedule(
+            "task123",
+            cron="0 10 * * *",
+            timezone="America/Los_Angeles",
+            clear_history_limit=True,
+            silent=False,
+            model="cheap",
+        )
 
     assert "Updated" in result
     assert "Updated" in limited_result
     assert "Updated" in visible_result
-    expected_runtime = SchedulingRuntime(
-        client=context.client,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        room=context.room,
-        conversation_reader=context.conversation_reader,
-        agent_reply_memberships=context.agent_reply_memberships,
-        responder_candidates_for_room=context.responder_candidates_for_current_room,
-        agent_name=context.agent_name,
-    )
     assert mock_edit.await_count == 3
     first_call = mock_edit.await_args_list[0].kwargs.copy()
     second_call = mock_edit.await_args_list[1].kwargs.copy()
     third_call = mock_edit.await_args_list[2].kwargs.copy()
     for call_kwargs in (first_call, second_call, third_call):
-        assert call_kwargs.pop("runtime") == expected_runtime
+        assert call_kwargs.pop("context") == context
     assert first_call == {
-        "room_id": context.room_id,
         "task_id": "task123",
-        "full_text": "tomorrow at 9am check deployment",
-        "scheduled_by": context.requester_id,
+        "message": "check deployment",
+        "description": None,
+        "execute_at": "2026-11-25T09:00:00Z",
+        "delay_seconds": None,
+        "cron": None,
+        "timezone": None,
         "history_limit": None,
+        "clear_history_limit": False,
         "silent": None,
         "model": None,
     }
     assert second_call == {
-        "room_id": context.room_id,
         "task_id": "task123",
-        "full_text": "keep the same schedule",
-        "scheduled_by": context.requester_id,
+        "message": None,
+        "description": "Updated label",
+        "execute_at": None,
+        "delay_seconds": None,
+        "cron": None,
+        "timezone": None,
         "history_limit": 5,
+        "clear_history_limit": False,
         "silent": True,
         "model": None,
     }
     assert third_call == {
-        "room_id": context.room_id,
         "task_id": "task123",
-        "full_text": "make it visible",
-        "scheduled_by": context.requester_id,
+        "message": None,
+        "description": None,
+        "execute_at": None,
+        "delay_seconds": None,
+        "cron": "0 10 * * *",
+        "timezone": "America/Los_Angeles",
         "history_limit": None,
+        "clear_history_limit": True,
         "silent": False,
         "model": "cheap",
     }
@@ -386,7 +404,7 @@ async def _call(name: str, arguments: dict[str, object]) -> CallResult:
 
 
 _NEEDS_ROOM = [
-    ("schedule", {"request": "in 10 minutes check logs", "new_thread": False}),
+    ("schedule", {"message": "check logs", "new_thread": False, "delay_seconds": 600}),
     (
         "schedule_tool_call",
         {
@@ -396,7 +414,7 @@ _NEEDS_ROOM = [
             "description": "Morning DM",
         },
     ),
-    ("edit_schedule", {"task_id": "task123", "request": "in 10 minutes check logs"}),
+    ("edit_schedule", {"task_id": "task123", "delay_seconds": 600}),
 ]
 
 
@@ -425,13 +443,13 @@ async def test_scheduler_call_outside_a_conversation_fails(name: str, arguments:
         (
             "schedule",
             "schedule_task",
-            {"request": "next message", "new_thread": False},
+            {"message": "next message", "new_thread": False, "delay_seconds": 60},
             SchedulingError("Failed to schedule: schedule is not valid"),
         ),
         (
             "edit_schedule",
             "edit_scheduled_task",
-            {"task_id": "task123", "request": "tomorrow at 9am check deployment"},
+            {"task_id": "task123", "message": "check deployment"},
             SchedulingError("Failed to edit task `task123`."),
         ),
         (
@@ -490,3 +508,35 @@ async def test_listing_schedules_needs_no_room() -> None:
         result = await _call("list_schedules", {})
 
     assert (result.status, result.value) == ("ok", "listed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "operation", "arguments"),
+    [
+        ("schedule", "schedule_task", {"message": "ping", "new_thread": False, "delay_seconds": True}),
+        (
+            "schedule",
+            "schedule_task",
+            {"message": "ping", "new_thread": False, "delay_seconds": 60, "history_limit": True},
+        ),
+        ("edit_schedule", "edit_scheduled_task", {"task_id": "task123", "delay_seconds": True}),
+        ("edit_schedule", "edit_scheduled_task", {"task_id": "task123", "history_limit": True}),
+    ],
+)
+async def test_scheduler_tool_rejects_booleans_for_integer_parameters(
+    name: str,
+    operation: str,
+    arguments: dict[str, object],
+) -> None:
+    """The offered scheduler tool rejects booleans for integer parameters instead of coercing True to 1."""
+    config = _general_config()
+    with (
+        patch(f"mindroom.custom_tools.scheduler.{operation}", new=AsyncMock()) as backend,
+        tool_runtime_context(_make_context(config)),
+    ):
+        result = await _call(name, arguments)
+
+    assert result.status == "failed"
+    assert "Input should be a valid integer" in (result.failure_text or "")
+    backend.assert_not_awaited()

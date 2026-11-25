@@ -5,7 +5,7 @@ icon: lucide/terminal-square
 # Chat Commands
 
 Chat commands are messages starting with `/` that you type in any Matrix room where MindRoom agents or teams are present.
-Every command also works with `!` instead of `/` (`!help`, `!schedule ...`), everywhere, including clients such as Element that intercept unknown `/` commands before they are sent.
+Every command also works with `!` instead of `/` (`!help`, `!list_schedules`, etc.), everywhere, including clients such as Element that intercept unknown `/` commands before they are sent.
 Use them to get help, manage schedules, switch models or modes, manage room encryption, and, when enabled, change configuration from chat.
 This page lists every command and fully covers `/help`, `/hi`, and `/config`; the other commands are documented on the linked pages.
 
@@ -15,10 +15,8 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 |---------|-------------|---------|
 | `/help [topic]` | Get help on commands or a specific topic | [`/help`](#help) |
 | `/hi` | Show the welcome message again | [`/hi`](#hi) |
-| `/schedule <task>` | Schedule a task or reminder | [Scheduling](scheduling.md#schedule) |
 | `/list_schedules` | List pending scheduled tasks | [Scheduling](scheduling.md#list_schedules) |
 | `/cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](scheduling.md#cancel_schedule) |
-| `/edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](scheduling.md#edit_schedule) |
 | `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `/answer [id] <answer>` | Answer a question a workflow run asked you in this thread, with an option's number or text; the ID is needed only when several questions are open | [Questions](tools/workflows.md#questions) |
@@ -69,7 +67,7 @@ Any other command sent by an agent for you is refused with `❌ Agents cannot ru
 /help config
 ```
 
-**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 

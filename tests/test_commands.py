@@ -14,7 +14,6 @@ import pytest
 from mindroom.authorization import (
     ReplyMembershipPendingError,
     ensure_room_membership_synced,
-    responder_candidate_entities_from_cached_room,
 )
 from mindroom.commands.handler import generate_welcome_message_for_room, handle_command
 from mindroom.commands.parsing import (
@@ -36,12 +35,10 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.room_settings import observe_room_settings_event
 from tests.authorization_helpers import (
-    isolated_membership_index,
     make_test_command_handler_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_reader_mock,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -66,7 +63,7 @@ if TYPE_CHECKING:
 
 WELCOME_QUICK_COMMAND_LINES = [
     "\u2022 `/hi` - Show this welcome message again",
-    "\u2022 `/schedule <time> <message>` - Schedule tasks and reminders",
+    "\u2022 `/list_schedules` - List scheduled tasks",
     "\u2022 `/help [topic]` - Get detailed help",
 ]
 
@@ -164,25 +161,15 @@ def test_reload_plugins_command() -> None:
         assert command.args == {}
 
 
-def test_schedule_command() -> None:
-    """Test schedule command parsing."""
-    # Basic schedule with time and message
-    command = _parse("!schedule in 5 minutes Check the deployment")
-    assert command is not None
-    assert command.type == CommandType.SCHEDULE
-    assert command.args["full_text"] == "in 5 minutes Check the deployment"
-
-    # Schedule with just time expression
-    command = _parse("!schedule tomorrow")
-    assert command is not None
-    assert command.type == CommandType.SCHEDULE
-    assert command.args["full_text"] == "tomorrow"
-
-    # Schedule with complex expression
-    command = _parse("!schedule tomorrow at 3pm Send the weekly report")
-    assert command is not None
-    assert command.type == CommandType.SCHEDULE
-    assert command.args["full_text"] == "tomorrow at 3pm Send the weekly report"
+def test_removed_schedule_and_edit_schedule_commands() -> None:
+    """!schedule and !edit_schedule are removed: bang forms parse as UNKNOWN, slash forms stay conversation."""
+    for text in (
+        "!schedule in 5 minutes Check the deployment",
+        "!edit_schedule abc123 in 10 minutes check deployment",
+    ):
+        command = _parse(text)
+        assert command is not None
+        assert command.type == CommandType.UNKNOWN
 
 
 def test_list_schedules_command() -> None:
@@ -312,26 +299,6 @@ def test_cancel_schedule_command() -> None:
     assert command.args["cancel_all"] is True
 
 
-def test_edit_schedule_command() -> None:
-    """Test edit schedule command parsing."""
-    command = _parse("!edit_schedule abc123 in 10 minutes check deployment")
-    assert command is not None
-    assert command.type == CommandType.EDIT_SCHEDULE
-    assert command.args["task_id"] == "abc123"
-    assert command.args["full_text"] == "in 10 minutes check deployment"
-
-    command = _parse("!edit-schedule task42 tomorrow at 9am @finance market update")
-    assert command is not None
-    assert command.type == CommandType.EDIT_SCHEDULE
-    assert command.args["task_id"] == "task42"
-    assert command.args["full_text"] == "tomorrow at 9am @finance market update"
-
-    command = _parse("!EDIT_SCHEDULE id999 every weekday at 8am check alerts")
-    assert command is not None
-    assert command.type == CommandType.EDIT_SCHEDULE
-    assert command.args["task_id"] == "id999"
-
-
 @pytest.mark.parametrize(
     "text",
     [
@@ -352,8 +319,8 @@ def test_edit_schedule_command() -> None:
         "!cancel_job all",
         "!answer q3fa91c Yes",
         "!help schedule",
-        "!schedule in 5 minutes\nmultiline task",
-        "🎤 !schedule in 5 minutes check",
+        "!list_schedules",
+        "🎤 !cancel_schedule abc123",
         "  !hi  ",
     ],
 )
@@ -392,9 +359,9 @@ def test_unknown_bang_command_stays_unknown() -> None:
 
 def test_slash_command_keeps_original_raw_text() -> None:
     """``raw_text`` carries the text as typed, after voice-prefix removal."""
-    command = command_parser.parse("🎤 /schedule tomorrow check")
+    command = command_parser.parse("🎤 /cancel_schedule abc123")
     assert command is not None
-    assert command.raw_text == "/schedule tomorrow check"
+    assert command.raw_text == "/cancel_schedule abc123"
 
 
 @pytest.mark.parametrize(
@@ -428,27 +395,19 @@ def test_get_command_help() -> None:
     # General help
     help_text = get_command_help()
     assert "Available Commands" in help_text
-    assert "/schedule" in help_text
+    assert "/schedule <task>" not in help_text
     assert "/help" in help_text
     assert "/list_schedules" in help_text
     assert "/cancel_schedule" in help_text
-    assert "/edit_schedule" in help_text
+    assert "/edit_schedule" not in help_text
     assert "/skill" not in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")
-    assert "Schedule Command" in schedule_help
-    assert "Usage:" in schedule_help
-    assert "Simple Reminders:" in schedule_help
-    assert "Agent and Team Workflows:" in schedule_help
-    assert "in 5 minutes" in schedule_help
-    assert "Requires an explicit recurring polling cadence" in schedule_help
-    assert "Automatically converts to smart polling" not in schedule_help
-    assert "silently" in schedule_help
-    assert "quietly" in schedule_help
-    assert "hide their trigger" in schedule_help
-    assert "NO_REPLY" in schedule_help
-    assert "visible by default" in schedule_help
+    assert "**Scheduling**" in schedule_help
+    assert "`scheduler`" in schedule_help
+    assert "/list_schedules" in schedule_help
+    assert "/cancel_schedule" in schedule_help
 
     list_schedules_help = get_command_help("list_schedules")
     assert "List Schedules Command" in list_schedules_help
@@ -456,13 +415,6 @@ def test_get_command_help() -> None:
     cancel_help = get_command_help("cancel_schedule")
     assert "Cancel Schedule Command" in cancel_help
     assert "cancel_schedule" in cancel_help
-
-    edit_help = get_command_help("edit_schedule")
-    assert "Edit Schedule Command" in edit_help
-    assert "edit_schedule" in edit_help
-    assert "make this schedule silent" in edit_help
-    assert "make this schedule visible" in edit_help
-    assert "silent-delivery mode" in edit_help
 
     reload_help = get_command_help("reload-plugins")
     assert "Reload Plugins Command" in reload_help
@@ -481,7 +433,7 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
     """Compact command docs preserve the existing welcome quick-command wording."""
     assert (
         get_compact_command_entries(
-            (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP),
+            (CommandType.HI, CommandType.LIST_SCHEDULES, CommandType.HELP),
             format_code=True,
         )
         == WELCOME_QUICK_COMMAND_LINES
@@ -618,7 +570,6 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!adhoc:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
@@ -672,7 +623,6 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
@@ -697,68 +647,6 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
     response_text = send_response.await_args.args[0]
     assert "\u2022 **Code** (alias `code`): Writes code" in response_text
     assert "\u2022 **Research**" not in response_text
-
-
-@pytest.mark.asyncio
-async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_path: Path) -> None:
-    """Live scheduling must not retry a failed membership refresh from the same turn."""
-    config = Config()
-    runtime_paths = _test_runtime_paths(tmp_path)
-    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router"})
-    membership_index = isolated_membership_index()
-    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
-    room.add_member("@mindroom_router:localhost", "Router", None)
-    room.add_member("@alice:localhost", "Alice", None)
-    client = AsyncMock()
-    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
-    send_response = AsyncMock(return_value="$schedule-response")
-    command = Command(
-        type=CommandType.SCHEDULE,
-        args={"full_text": "in 5 minutes check logs"},
-        raw_text="!schedule in 5 minutes check logs",
-    )
-    event = SimpleNamespace(
-        sender="@alice:localhost",
-        event_id="$schedule",
-        body=command.raw_text,
-        source={"content": {"body": command.raw_text}},
-    )
-
-    async def cached_responder_candidates(candidate_room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
-        return responder_candidate_entities_from_cached_room(
-            candidate_room,
-            sender_id,
-            config,
-            runtime_paths,
-            membership_index,
-        )
-
-    context = make_test_command_handler_context(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
-        stable_target=MessageTarget.resolve(room.room_id, None, event.event_id),
-        record_handled_turn=AsyncMock(),
-        record_command_result=AsyncMock(),
-        send_response=send_response,
-        responder_candidates_for_room=cached_responder_candidates,
-        agent_reply_memberships=membership_index,
-    )
-
-    assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
-
-    await handle_command(
-        context=context,
-        room=room,
-        event=event,
-        command=command,
-        requester_user_id=event.sender,
-    )
-
-    assert client.joined_members.await_count == 1
-    assert "No agents or teams" in send_response.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -841,7 +729,6 @@ async def test_desktop_command_resolves_exact_agent_from_room_candidates(
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),

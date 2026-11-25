@@ -37,7 +37,7 @@ from mindroom.steward_duties import put_room_state_as_steward
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.approval_card_helpers import card_view
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import approval_manager_for_test, make_conversation_reader_mock, test_runtime_paths
+from tests.conftest import approval_manager_for_test, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -227,7 +227,6 @@ async def _send(
         config=config or Config(),
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event", room_mode=room_mode),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
