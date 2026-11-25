@@ -45,7 +45,6 @@ from mindroom.llm.messages import (
     REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
-    read_model_provenance,
     usage_sums_attempts,
 )
 from mindroom.llm.provider import (
@@ -54,6 +53,7 @@ from mindroom.llm.provider import (
     StreamTracker,
     TextDelta,
     TurnCompleted,
+    answering_identity,
 )
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
@@ -312,7 +312,7 @@ def _accept_turn(
     for prior_identity, prior_metrics in tracker.prior_usage:
         _count_request(metrics, prior_metrics, prior_identity)
     state.messages.append(message)
-    answered = _answering_identity(message, tracker.identity)
+    answered = answering_identity(message, tracker.identity)
     _stamp_answering_model(state.record, answered, tracker.model_name)
     _count_request(metrics, message.metrics, answered)
     state.request_index += 1
@@ -579,7 +579,7 @@ def _keep_unaccepted(
         _count_request(metrics, prior_metrics, prior_identity)
     if turn is not None:
         sums_attempts = usage_sums_attempts(turn.message.provider_data)
-        answered = _answering_identity(turn.message, tracker.identity)
+        answered = answering_identity(turn.message, tracker.identity)
         _stamp_answering_model(record, answered, tracker.model_name)
         _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
         return
@@ -667,13 +667,6 @@ def _keep_cut_off(
     if billed is not None:
         message.metrics = billed
         _count_request(metrics, billed, identity)
-
-
-def _answering_identity(message: Message, identity: ModelIdentity) -> ModelIdentity:
-    """Return the model the provider stamped on ``message`` as having answered it, else ``identity``."""
-    if (answered := read_model_provenance(message.provider_data)) is None:
-        return identity
-    return replace(identity, id=answered.model_id, provider=answered.provider)
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:

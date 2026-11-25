@@ -9,8 +9,8 @@ import pytest
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from pydantic import BaseModel, Field
 
-from mindroom.agent_loop.structured import json_output_prompt, output_format_prompt, parse_structured
-from mindroom.llm.provider import Capabilities
+from mindroom.agent_loop.structured import output_format_prompt, parse_structured
+from mindroom.llm.provider import Capabilities, json_output_prompt
 from mindroom.routing import _RoutingSuggestion
 from mindroom.teams.formation import _TeamModeDecision
 from mindroom.thread_summary.generation import _ThreadEnrichment, _ThreadSummary

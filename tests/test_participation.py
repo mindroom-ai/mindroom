@@ -262,18 +262,16 @@ async def test_decision_failover_records_usage_under_answering_model() -> None:
     from mindroom.llm.provider import ModelIdentity, UsageReported  # noqa: PLC0415
     from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream  # noqa: PLC0415
     from mindroom.providers.pipeline.wrapped import WrappedProvider  # noqa: PLC0415
+    from tests.scripted_agent_helpers import raising  # noqa: PLC0415
 
     primary_id = ModelIdentity(id="primary-m", provider="Anthropic")
     fallback_id = ModelIdentity(id="fallback-m", provider="OpenAI")
+    quota = ProviderError("quota", provider="Anthropic", status_code=429, code=QUOTA_EXHAUSTED)
 
-    class _QuotaFail(ScriptedModel):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            self.requests.append(request)
-            yield UsageReported(usage(15, 3))
-            msg = "quota"
-            raise ProviderError(msg, provider="Anthropic", status_code=429, code=QUOTA_EXHAUSTED)
-
-    primary = _QuotaFail([], identity=primary_id)
+    primary = ScriptedModel(
+        [[UsageReported(usage(15, 3)), raising(quota)], [UsageReported(usage(15, 3)), raising(quota)]],
+        identity=primary_id,
+    )
     fallback = ScriptedModel(
         [answer(_RESPOND, usage(25, 5)), answer("Reply", usage(10, 2))],
         identity=fallback_id,
@@ -290,6 +288,7 @@ async def test_decision_failover_records_usage_under_answering_model() -> None:
 
     _, record = await _reply(chained, ParticipationGate())
 
+    assert (len(primary.requests), len(fallback.requests)) == (2, 2)
     assert record.metrics is not None
     by_model = {
         (entry.provider, entry.id): (entry.tokens.input_tokens, entry.tokens.output_tokens)

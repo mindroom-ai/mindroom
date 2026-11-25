@@ -22,7 +22,7 @@ from mindroom.llm.errors import (
     ProviderError,
     incomplete_stream_error,
 )
-from mindroom.llm.messages import Message, read_model_provenance
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelIdentity,
     ModelRequest,
@@ -30,6 +30,7 @@ from mindroom.llm.provider import (
     RequestOverrides,
     StreamTracker,
     TurnCompleted,
+    answering_identity,
 )
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -195,13 +196,7 @@ def _summary_usage_entries(
     """Return every billed ``(identity, metrics)`` entry for a summary request."""
     entries = list(tracker.prior_usage)
     if completed is not None:
-        provenance = read_model_provenance(completed.message.provider_data)
-        identity = (
-            ModelIdentity(id=provenance.model_id, provider=provenance.provider)
-            if provenance is not None
-            else tracker.identity
-        )
-        entries.append((identity, completed.message.metrics))
+        entries.append((answering_identity(completed.message, tracker.identity), completed.message.metrics))
     elif tracker.reported.received is not None and tracker.reported.received.reported:
         entries.append((tracker.identity, tracker.reported.received))
     elif isinstance(failure, ModelSafeguardRefusal):

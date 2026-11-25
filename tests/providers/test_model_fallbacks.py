@@ -37,7 +37,6 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
     fails_over,
-    is_transient_status,
 )
 from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message, model_provenance
 from mindroom.llm.provider import (
@@ -82,7 +81,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import StreamEvent, TokenCounter
+    from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
 
 type _Step = StreamEvent | BaseException | Callable[[], None]
 
@@ -160,6 +159,37 @@ def _request(**fields: object) -> ModelRequest:
 
 def _text(events: list[StreamEvent]) -> str:
     return "".join(event.text for event in events if isinstance(event, TextDelta))
+
+
+async def _persisted_run(
+    model: ModelProvider,
+    *,
+    run_id: str = "run",
+    session_id: str = "session",
+    raises: type[BaseException] | None = None,
+) -> RunRecord:
+    saved: list[RunRecord] = []
+
+    async def persist(record: RunRecord) -> None:
+        saved.append(record)
+
+    spec = AgentSpec(id="code", name="Code", model=model, system_messages=(), toolkits=())
+    stream = run_agent(
+        spec,
+        [Message(role="user", content="hello")],
+        ctx=RunContext(run_id=run_id, session=UnstoredSession(session_id)),
+        persist=persist,
+        request_template=EMPTY_REQUEST,
+    )
+    if raises is not None:
+        with pytest.raises(raises):
+            async for _ in stream:
+                pass
+    else:
+        async for _ in stream:
+            pass
+    [record] = saved
+    return record
 
 
 @pytest.mark.asyncio
@@ -310,11 +340,6 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
             ),
         },
     )
-    saved: list[RunRecord] = []
-
-    async def persist(record: RunRecord) -> None:
-        saved.append(record)
-
     primary_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000))
     fallback_usage = MessageMetrics(tokens=TokenCounts(input_tokens=500_000, total_tokens=500_000))
     primary = _Model("paid", [[UsageReported(primary_usage, final=False), _quota()]])
@@ -336,18 +361,8 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
         ],
     )
     fallback.identity = ModelIdentity(id="gpt-6-mini", provider="OpenAI")
-    spec = AgentSpec(id="code", name="Code", model=_with_fallbacks(primary, fallback), system_messages=(), toolkits=())
 
-    async for _ in run_agent(
-        spec,
-        [Message(role="user", content="hello")],
-        ctx=RunContext(run_id="run", session=UnstoredSession("session")),
-        persist=persist,
-        request_template=EMPTY_REQUEST,
-    ):
-        pass
-
-    [record] = saved
+    record = await _persisted_run(_with_fallbacks(primary, fallback))
     assert (record.model_provider, record.model, record.model_name) == ("OpenAI", "gpt-6-mini", "cheap")
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 1_500_000
@@ -478,32 +493,11 @@ async def test_the_run_records_and_publishes_the_model_that_answered() -> None:
             "bedrock": ModelConfig(provider="anthropic", id="bedrock-id", display_name="Bedrock", context_window=9000),
         },
     )
-    saved: list[RunRecord] = []
-
-    async def persist(record: RunRecord) -> None:
-        saved.append(record)
-
     answer = Message(role="assistant", content="hi", provider_data=model_provenance("bedrock-id", "Anthropic"))
     answer.metrics = MessageMetrics(tokens=TokenCounts(input_tokens=3, total_tokens=3))
     fallback = _Model("bedrock", [[TextDelta("hi"), TurnCompleted(message=answer, stop_reason="end")]])
-    spec = AgentSpec(
-        id="code",
-        name="Code",
-        model=_with_fallbacks(_Model("merlin", [[_quota()]]), fallback),
-        system_messages=(),
-        toolkits=(),
-    )
 
-    async for _ in run_agent(
-        spec,
-        [Message(role="user", content="hello")],
-        ctx=RunContext(run_id="run", session=UnstoredSession("session")),
-        persist=persist,
-        request_template=EMPTY_REQUEST,
-    ):
-        pass
-
-    [record] = saved
+    record = await _persisted_run(_with_fallbacks(_Model("merlin", [[_quota()]]), fallback))
     assert (record.model, record.model_provider, record.model_name) == ("bedrock-id", "Anthropic", "bedrock")
     assert [(entry.id, entry.provider) for entry in (record.metrics.details or {})["model"]] == [
         ("bedrock-id", "Anthropic"),
@@ -530,40 +524,27 @@ async def test_the_run_records_and_publishes_the_model_that_answered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_fallback_cut_off_after_output_counts_its_usage_under_the_fallback() -> None:
-    saved: list[RunRecord] = []
-
-    async def persist(record: RunRecord) -> None:
-        saved.append(record)
-
+@pytest.mark.parametrize("with_usage", [True, False], ids=["with-usage", "without-usage"])
+async def test_a_fallback_cut_off_after_output_records_the_fallback(*, with_usage: bool) -> None:
     billed = MessageMetrics(tokens=TokenCounts(input_tokens=100, total_tokens=100))
-    fallback = _Model("fallback", [[UsageReported(billed, final=False), TextDelta("partial"), _transient()]])
-    spec = AgentSpec(
-        id="code",
-        name="Code",
-        model=_with_fallbacks(_Model("primary", [[_quota()]]), fallback),
-        system_messages=(),
-        toolkits=(),
+    steps: list[_Step] = [TextDelta("partial"), _transient()]
+    if with_usage:
+        steps.insert(0, UsageReported(billed, final=False))
+    fallback = _Model("fallback", [steps])
+
+    record = await _persisted_run(
+        _with_fallbacks(_Model("primary", [[_quota()]]), fallback),
+        raises=ProviderUnavailable,
     )
 
-    with pytest.raises(ProviderUnavailable):
-        async for _ in run_agent(
-            spec,
-            [Message(role="user", content="hello")],
-            ctx=RunContext(run_id="run", session=UnstoredSession("session")),
-            persist=persist,
-            request_template=EMPTY_REQUEST,
-        ):
-            pass
-
-    [record] = saved
+    assert (record.model, record.model_provider, record.model_name) == ("fallback-id", "fallback-provider", "fallback")
     cut_off = record.messages[-1]
     assert (cut_off.provider_data or {})["mindroom_model"] == {"id": "fallback-id", "provider": "fallback-provider"}
+    expected_usage = [("fallback-id", "fallback-provider", 100)] if with_usage else []
     assert [
-        (entry.id, entry.provider, entry.tokens.input_tokens) for entry in (record.metrics.details or {})["model"]
-    ] == [
-        ("fallback-id", "fallback-provider", 100),
-    ]
+        (entry.id, entry.provider, entry.tokens.input_tokens)
+        for entry in (record.metrics.details or {}).get("model", [])
+    ] == expected_usage
 
 
 def _broken_build() -> _Model:
@@ -730,27 +711,40 @@ def test_invalid_fallbacks_fail_config_load(models: dict[str, dict[str, object]]
 # --- Codex's usage limit ------------------------------------------------------------------------------------------
 
 
-def _codex_429(body: dict[str, object]) -> openai.RateLimitError:
+def _codex_429(body: dict[str, object]) -> openai.OpenAIError:
     request = httpx2.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
     return openai.RateLimitError("Error code: 429", response=httpx2.Response(429, request=request), body=body)
 
 
+def _codex_stream_error(body: dict[str, object]) -> openai.OpenAIError:
+    request = httpx2.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+    return openai.APIError("The usage limit has been reached", request=request, body=body)
+
+
 @pytest.mark.parametrize(
-    "reset",
-    [{"resets_in_seconds": 7200}, {"resets_at": "now+7200"}],
-    ids=["resets-in", "resets-at"],
+    ("make_error", "reset", "expected_seconds"),
+    [
+        (_codex_429, {"resets_in_seconds": 7200}, 7200),
+        (_codex_429, {"resets_at": "now+7200"}, 7200),
+        (_codex_stream_error, {"resets_in_seconds": 1800}, 1800),
+    ],
+    ids=["resets-in", "resets-at", "stream-api-error"],
 )
-def test_codex_usage_limit_is_quota_exhausted_until_its_reset(reset: dict[str, object]) -> None:
+def test_codex_usage_limit_is_quota_exhausted_until_its_reset(
+    make_error: Callable[[dict[str, object]], openai.OpenAIError],
+    reset: dict[str, object],
+    expected_seconds: int,
+) -> None:
     if reset.get("resets_at") == "now+7200":
         reset = {"resets_at": int(time.time()) + 7200}
     body = {"type": "usage_limit_reached", "message": "The usage limit has been reached", **reset}
 
-    error = provider_error(_codex_429(body), provider="Codex")
+    error = provider_error(make_error(body), provider="Codex")
 
     assert type(error) is ProviderError
     assert error.code == QUOTA_EXHAUSTED
     assert not error.retryable
-    assert error.retry_after_seconds == pytest.approx(7200, abs=5)
+    assert error.retry_after_seconds == pytest.approx(expected_seconds, abs=5)
     assert fails_over(error)
 
 
@@ -889,40 +883,48 @@ async def test_portable_replay_works_when_primary_recovers_after_fallback_tool_c
 @pytest.mark.asyncio
 async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_details() -> None:
     """OpenRouter Chat strips foreign signed/encrypted reasoning while preserving each candidate's own."""
-    a_details = [
-        {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 0, "data": "sealed-a"},
-        {
-            "type": "reasoning.text",
-            "format": "anthropic-claude-v1",
-            "index": 1,
-            "text": "Signed A",
-            "signature": "sig-a",
-        },
-        {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 2, "summary": "Summary A"},
-    ]
-    b_details = [
-        {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 0, "data": "sealed-b"},
-        {
-            "type": "reasoning.text",
-            "format": "anthropic-claude-v1",
-            "index": 1,
-            "text": "Signed B",
-            "signature": "sig-b",
-        },
-        {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 2, "summary": "Summary B"},
-    ]
-    a_turn = Message(
-        role="assistant",
-        content="Checking A.",
-        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
-        provider_data={"reasoning_details": a_details},
-    )
-    b_tool_turn = Message(
-        role="assistant",
-        content="Checking B.",
-        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
-        provider_data={"reasoning_details": b_details},
-    )
+
+    def _or_turn(tag: str, call_id: str) -> tuple[list[dict[str, object]], Message]:
+        details: list[dict[str, object]] = [
+            {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 0, "data": f"sealed-{tag}"},
+            {
+                "type": "reasoning.text",
+                "format": "anthropic-claude-v1",
+                "index": 1,
+                "text": f"Signed {tag.upper()}",
+                "signature": f"sig-{tag}",
+            },
+            {
+                "type": "reasoning.summary",
+                "format": "openai-responses-v1",
+                "index": 2,
+                "summary": f"Summary {tag.upper()}",
+            },
+        ]
+        msg = Message(
+            role="assistant",
+            content=f"Checking {tag.upper()}.",
+            tool_calls=[{"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+            provider_data={"reasoning_details": details},
+        )
+        return details, msg
+
+    def _or_chat_kwargs(sent: ModelRequest) -> dict[str, object]:
+        return chat_request_kwargs(
+            model_id="openai/gpt-6",
+            messages=sent.messages,
+            tools=(),
+            tool_choice=None,
+            output_schema=None,
+            structured_output="native",
+            settings=ChatSettings(),
+            wire=ChatWire(route="openrouter", system_role="system"),
+            provider="OpenRouter",
+            fallback_model=sent.fallback_model,
+        )
+
+    a_details, a_turn = _or_turn("a", "call_1")
+    b_details, b_tool_turn = _or_turn("b", "call_2")
     primary = _Model("or-a", [[_transient()], [_transient()], _answer("or-a", "recovered")])
     fallback = _Model("or-b", [[TurnCompleted(message=b_tool_turn, stop_reason="tool_use")], _answer("or-b", "done")])
     provider = _with_fallbacks(primary, fallback)
@@ -943,46 +945,24 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
     await drain(provider, ModelRequest(messages=t2_messages))
     sent_to_b = fallback.requests[1]
     assert (sent_to_b.strip_encrypted_replay, sent_to_b.fallback_model) == (True, "or-b")
-    b_kwargs = chat_request_kwargs(
-        model_id="openai/gpt-6",
-        messages=sent_to_b.messages,
-        tools=(),
-        tool_choice=None,
-        output_schema=None,
-        structured_output="native",
-        settings=ChatSettings(),
-        wire=ChatWire(route="openrouter", system_role="system"),
-        provider="OpenRouter",
-        fallback_model=sent_to_b.fallback_model,
-    )
-    assert b_kwargs["messages"][1]["reasoning_details"] == [a_details[2]]
-    assert b_kwargs["messages"][3]["reasoning_details"] == b_details
-    assert [call["id"] for call in b_kwargs["messages"][1]["tool_calls"]] == ["call_1"]
-    assert [call["id"] for call in b_kwargs["messages"][3]["tool_calls"]] == ["call_2"]
+    b_messages = cast("list[dict[str, object]]", _or_chat_kwargs(sent_to_b)["messages"])
+    assert b_messages[1]["reasoning_details"] == [a_details[2]]
+    assert b_messages[3]["reasoning_details"] == b_details
+    assert [call["id"] for call in cast("list[dict[str, object]]", b_messages[1]["tool_calls"])] == ["call_1"]
+    assert [call["id"] for call in cast("list[dict[str, object]]", b_messages[3]["tool_calls"])] == ["call_2"]
 
     # Turn 2b: primary A recovers -> keeps A's own signed reasoning, strips B's foreign signed reasoning.
     await drain(provider, ModelRequest(messages=t2_messages))
     sent_to_a = primary.requests[2]
     assert (sent_to_a.strip_encrypted_replay, sent_to_a.fallback_model) == (False, None)
-    a_kwargs = chat_request_kwargs(
-        model_id="openai/gpt-6",
-        messages=sent_to_a.messages,
-        tools=(),
-        tool_choice=None,
-        output_schema=None,
-        structured_output="native",
-        settings=ChatSettings(),
-        wire=ChatWire(route="openrouter", system_role="system"),
-        provider="OpenRouter",
-        fallback_model=sent_to_a.fallback_model,
-    )
-    assert a_kwargs["messages"][1]["reasoning_details"] == a_details
-    assert a_kwargs["messages"][3]["reasoning_details"] == [b_details[2]]
+    a_messages = cast("list[dict[str, object]]", _or_chat_kwargs(sent_to_a)["messages"])
+    assert a_messages[1]["reasoning_details"] == a_details
+    assert a_messages[3]["reasoning_details"] == [b_details[2]]
 
 
 @pytest.mark.asyncio
-async def test_same_id_backup_account_level_and_cut_off_without_usage() -> None:
-    """Exact configured references survive same-ID accounts, @level, and usage-free cut-offs."""
+async def test_same_id_backup_account_and_level_metadata() -> None:
+    """Exact configured references survive same-ID accounts and @level references."""
     config = Config(
         models={
             "gpt": ModelConfig(provider="openai", id="gpt-6", api_key="key-a", fallbacks=["gpt-backup"]),
@@ -1008,11 +988,6 @@ async def test_same_id_backup_account_level_and_cut_off_without_usage() -> None:
     )
 
     # 1. Same-ID backup account stamps exact backup reference and fallback_from.
-    saved: list[RunRecord] = []
-
-    async def persist(record: RunRecord) -> None:
-        saved.append(record)
-
     primary = _Model("gpt", [[_quota()]])
     primary.identity = ModelIdentity(id="gpt-6", provider="OpenAI")
     backup = _Model(
@@ -1032,17 +1007,7 @@ async def test_same_id_backup_account_level_and_cut_off_without_usage() -> None:
         ],
     )
     backup.identity = ModelIdentity(id="gpt-6", provider="OpenAI")
-    spec = AgentSpec(id="code", name="Code", model=_with_fallbacks(primary, backup), system_messages=(), toolkits=())
-
-    async for _ in run_agent(
-        spec,
-        [Message(role="user", content="hello")],
-        ctx=RunContext(run_id="r1", session=UnstoredSession("s1")),
-        persist=persist,
-        request_template=EMPTY_REQUEST,
-    ):
-        pass
-    [record] = saved
+    record = await _persisted_run(_with_fallbacks(primary, backup), run_id="r1", session_id="s1")
     assert record.model_name == "gpt-backup"
     metadata = build_ai_run_metadata_content(
         config=config,
@@ -1085,89 +1050,38 @@ async def test_same_id_backup_account_level_and_cut_off_without_usage() -> None:
         "fallback_from": "opus@xhigh",
     }
 
-    # 3. Cut-off fallback that emitted text without reporting usage still updates record.model & record.model_name.
-    saved.clear()
-    cut_off_fallback = _Model("backup", [[TextDelta("partial"), _transient()]])
-    cut_spec = AgentSpec(
-        id="code",
-        name="Code",
-        model=_with_fallbacks(_Model("opus", [[_quota()]]), cut_off_fallback),
-        system_messages=(),
-        toolkits=(),
-    )
-    with pytest.raises(ProviderUnavailable):
-        async for _ in run_agent(
-            cut_spec,
-            [Message(role="user", content="hello")],
-            ctx=RunContext(run_id="r3", session=UnstoredSession("s1")),
-            persist=persist,
-            request_template=EMPTY_REQUEST,
-        ):
-            pass
-    [cut_record] = saved
-    assert (cut_record.model, cut_record.model_provider, cut_record.model_name) == (
-        "backup-id",
-        "backup-provider",
-        "backup",
+
+def _cooldown_config(**overrides: object) -> Config:
+    primary: dict[str, object] = {
+        "provider": "openai",
+        "id": "gpt-6",
+        "api_key": "k",
+        "host": "https://a.example",
+        "fallbacks": ["bad-cred"],
+        **overrides,
+    }
+    return Config(
+        models={
+            "default": ModelConfig.model_validate(primary),
+            "bad-cred": ModelConfig(provider="openai", id="gpt-6", api_key="env:MISSING_CRED"),
+        },
     )
 
 
 @pytest.mark.asyncio
-async def test_cooldown_ownership_committed_reset_max_deadline_and_stream_api_error(
+async def test_cooldown_ownership_committed_reset_and_max_deadline(
     runtime_paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cooldowns isolate replaced routes/keys, remember committed resets, never shorten, and parse stream APIError."""
+    """Cooldowns isolate replaced routes/keys, remember committed resets, and never shorten."""
     # 1. Pure in-memory cooldown key rotates when provider, id, or host changes and performs no credential reads.
     from mindroom.providers import registry as provider_registry  # noqa: PLC0415
 
-    cfg_base = Config(
-        models={
-            "default": ModelConfig(
-                provider="openai",
-                id="gpt-6",
-                api_key="k",
-                host="https://a.example",
-                fallbacks=["bad-cred"],
-            ),
-            "bad-cred": ModelConfig(provider="openai", id="gpt-6", api_key="env:MISSING_CRED"),
-        },
-    )
-    cfg_host = Config(
-        models={
-            "default": ModelConfig(
-                provider="openai",
-                id="gpt-6",
-                api_key="k",
-                host="https://b.example",
-                fallbacks=["bad-cred"],
-            ),
-            "bad-cred": ModelConfig(provider="openai", id="gpt-6", api_key="env:MISSING_CRED"),
-        },
-    )
-    cfg_id = Config(
-        models={
-            "default": ModelConfig(
-                provider="openai",
-                id="gpt-6-mini",
-                api_key="k",
-                host="https://a.example",
-                fallbacks=["bad-cred"],
-            ),
-            "bad-cred": ModelConfig(provider="openai", id="gpt-6", api_key="env:MISSING_CRED"),
-        },
-    )
-    cfg_provider = Config(
-        models={
-            "default": ModelConfig(
-                provider="openrouter",
-                id="gpt-6",
-                api_key="k",
-                host="https://a.example",
-                fallbacks=["bad-cred"],
-            ),
-            "bad-cred": ModelConfig(provider="openai", id="gpt-6", api_key="env:MISSING_CRED"),
-        },
+    configs = (
+        _cooldown_config(),
+        _cooldown_config(host="https://b.example"),
+        _cooldown_config(id="gpt-6-mini"),
+        _cooldown_config(provider="openrouter"),
     )
     store_reads: list[str] = []
     real_dashboard_key = provider_registry.model_with_dashboard_key
@@ -1182,7 +1096,7 @@ async def test_cooldown_ownership_committed_reset_max_deadline_and_stream_api_er
             "partial[object]",
             cast("WrappedProvider", build_model_provider(cfg, runtime_paths, "default")).stage,
         ).keywords["cooldown_key"]
-        for cfg in (cfg_base, cfg_host, cfg_id, cfg_provider)
+        for cfg in configs
     ]
     assert len(set(keys)) == 4
     assert "bad-cred" not in store_reads
@@ -1199,17 +1113,6 @@ async def test_cooldown_ownership_committed_reset_max_deadline_and_stream_api_er
     assert fallback_stage._COOLDOWN_UNTIL["primary"] == long_until
     await drain(provider, _request())
     assert (len(primary.requests), len(fallback.requests)) == (1, 1)
-
-    # 3. Streamed openai.APIError preserves Codex body reset hints, and shared transient classifier includes 409.
-    stream_err = openai.APIError(
-        "The usage limit has been reached",
-        request=httpx2.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
-        body={"type": "usage_limit_reached", "message": "The usage limit has been reached", "resets_in_seconds": 1800},
-    )
-    normalized = provider_error(stream_err, provider="Codex")
-    assert normalized.code == QUOTA_EXHAUSTED
-    assert normalized.retry_after_seconds == pytest.approx(1800)
-    assert is_transient_status(409)
 
 
 @pytest.mark.asyncio
@@ -1245,16 +1148,7 @@ async def test_build_model_provider_enforces_exact_level_on_budget_fallback(
     def _build_fake(_cfg: Config, _paths: RuntimePaths, ref: str, **_kw: object) -> _Model:
         if ref.startswith("free"):
             return _Model(ref, [[_quota()]])
-        model = _Model(ref, [_answer(ref, f"answered:{ref}")])
-        orig_stream = model.stream
-
-        async def _counted(req: ModelRequest) -> AsyncIterator[StreamEvent]:
-            calls.append(ref)
-            async for ev in orig_stream(req):
-                yield ev
-
-        model.stream = _counted  # type: ignore[method-assign]
-        return model
+        return _Model(ref, [[partial(calls.append, ref), *_answer(ref, f"answered:{ref}")]])
 
     monkeypatch.setattr(provider_registry, "_build_single_provider", _build_fake)
     identity = ToolExecutionIdentity(

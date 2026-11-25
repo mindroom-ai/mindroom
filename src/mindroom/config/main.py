@@ -550,31 +550,29 @@ class Config(BaseModel):
             if len(set(model.fallbacks)) != len(model.fallbacks):
                 msg = f"models.{name}.fallbacks must not repeat a model"
                 raise ValueError(msg)
-        if cycle := self._fallback_cycle():
-            msg = f"models fallbacks form a cycle: {' -> '.join(cycle)}"
-            raise ValueError(msg)
+        self._validate_fallback_cycles()
         return self
 
-    def _fallback_cycle(self) -> list[str] | None:
-        """Return a cycle that following fallbacks reaches, or None; each model is explored once."""
+    def _validate_fallback_cycles(self) -> None:
+        """Raise ``ValueError`` when following ``fallbacks`` reaches a cycle; each model is explored once."""
         done: set[str] = set()
         path: list[str] = []
 
-        def visit(name: str) -> list[str] | None:
+        def visit(name: str) -> None:
             path.append(name)
             for fallback in self.models[name].fallbacks:
                 if fallback in path:
-                    return [*path[path.index(fallback) :], fallback]
-                if fallback not in done and (cycle := visit(fallback)):
-                    return cycle
+                    cycle = [*path[path.index(fallback) :], fallback]
+                    msg = f"models fallbacks form a cycle: {' -> '.join(cycle)}"
+                    raise ValueError(msg)
+                if fallback not in done:
+                    visit(fallback)
             path.pop()
             done.add(name)
-            return None
 
         for name in self.models:
-            if name not in done and (cycle := visit(name)):
-                return cycle
-        return None
+            if name not in done:
+                visit(name)
 
     @model_validator(mode="after")
     def validate_budgets(self) -> Config:

@@ -172,7 +172,6 @@ def _merged[T: BaseModel](candidates: list[str], schema: type[T]) -> T | None:
 
 
 __all__ = [
-    "json_output_prompt",
     "output_format_prompt",
     "parse_structured",
     "structured_answer_text",

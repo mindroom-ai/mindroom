@@ -54,15 +54,15 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import drain
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
+from tests.scripted_agent_helpers import raising
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import StreamEvent
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.members import BuiltTeam
 
@@ -557,25 +557,11 @@ async def test_capped_user_cannot_fail_over_from_unpriced_primary_to_priced_fall
     paths = _runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
 
-    calls: list[str] = []
-
-    class _QuotaFailModel(ScriptedModel):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            self.requests.append(request)
-            calls.append(self.identity.id)
-            msg = "quota"
-            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
-            yield  # pragma: no cover
-
-    class _CountingModel(ScriptedModel):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            calls.append(self.identity.id)
-            async for event in super().stream(request):
-                yield event
-
+    opus_identity = model_identity(config.models["opus"])
+    quota_error = ProviderError("quota", provider=opus_identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
     models_by_ref = {
-        "opus": _QuotaFailModel([], identity=model_identity(config.models["opus"])),
-        "bedrock-opus": _CountingModel([answer("paid")], identity=model_identity(config.models["bedrock-opus"])),
+        "opus": ScriptedModel([[raising(quota_error)]], identity=opus_identity),
+        "bedrock-opus": ScriptedModel([answer("paid")], identity=model_identity(config.models["bedrock-opus"])),
     }
     monkeypatch.setattr(
         provider_registry,
@@ -606,7 +592,8 @@ async def test_capped_user_cannot_fail_over_from_unpriced_primary_to_priced_fall
     with tool_runtime_context(context), pytest.raises(ProviderError):
         await drain(reusable_build.spec.model, ModelRequest(messages=(Message(role="user", content="hello"),)))
 
-    assert calls == ["opus-sub"]
+    assert len(models_by_ref["opus"].requests) == 1
+    assert models_by_ref["bedrock-opus"].requests == []
 
 
 def test_context_scope_precedence_and_restoration(tmp_path: Path) -> None:

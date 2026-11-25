@@ -24,8 +24,8 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.media import rendered_label
-from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message, is_media_follow_up, read_model_provenance
-from mindroom.llm.provider import ModelIdentity, complete
+from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message, is_media_follow_up
+from mindroom.llm.provider import complete, count_turn_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
@@ -201,15 +201,7 @@ async def _reply_model_decision(
             replace(state.request(decision_messages), tool_choice="none"),
         )
         assert state.record.metrics is not None
-        for prior_identity, prior_metrics in turn.prior_usage:
-            state.record.metrics.add(prior_metrics, model_id=prior_identity.id, provider=prior_identity.provider)
-        provenance = read_model_provenance(turn.message.provider_data)
-        identity = (
-            ModelIdentity(id=provenance.model_id, provider=provenance.provider)
-            if provenance is not None
-            else (turn.identity or model.identity)
-        )
-        state.record.metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
+        count_turn_usage(state.record.metrics, turn, model.identity)
         if turn.tool_calls or not isinstance(turn.message.content, str):
             return ParticipationDecision(action="error", reason="invalid_decision")
         return parse_decision(turn.message.content)

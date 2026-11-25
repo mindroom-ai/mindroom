@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured, structured_answer_text
 from mindroom.llm.messages import Message, ModelProvenance, read_model_provenance, usage_sums_attempts
-from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
+from mindroom.llm.provider import ModelRequest, RequestOverrides, complete, count_turn_usage
 from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.logging_config import get_logger
 
@@ -72,14 +72,9 @@ async def complete_prompt[T: BaseModel](
     )
     reply = turn.message
     provenance = read_model_provenance(reply.provider_data)
-    fallback_identity = turn.identity or provider.identity
-    answering_id = provenance.model_id if provenance is not None else fallback_identity.id
-    answering_provider = provenance.provider if provenance is not None else fallback_identity.provider
     capabilities = turn.capabilities or provider.capabilities
     metrics = RunMetrics(duration=perf_counter() - started)
-    for prior_identity, prior_metrics in turn.prior_usage:
-        metrics.add(prior_metrics, model_id=prior_identity.id, provider=prior_identity.provider)
-    metrics.add(turn.usage, model_id=answering_id, provider=answering_provider)
+    answered = count_turn_usage(metrics, turn, provider.identity)
     text = turn.content if schema is None else structured_answer_text(turn, capabilities)
     lenient = capabilities.structured_output == "json_mode"
     parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
@@ -88,13 +83,13 @@ async def complete_prompt[T: BaseModel](
     requests: tuple[RequestUsage, ...] = ()
     if not usage_sums_attempts(reply.provider_data):
         answering_provenance = provenance or (
-            ModelProvenance(model_id=answering_id, provider=answering_provider) if turn.identity is not None else None
+            ModelProvenance(model_id=answered.id, provider=answered.provider) if turn.identity is not None else None
         )
         requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=answering_provenance),)
     usage = HelperUsage(
         run_id=run_id or str(uuid4()),
-        model=answering_id,
-        provider=answering_provider,
+        model=answered.id,
+        provider=answered.provider,
         metrics=metrics,
         requests=requests,
     )

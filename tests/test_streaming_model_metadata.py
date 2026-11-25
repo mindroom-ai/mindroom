@@ -79,7 +79,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _plain_request, _target
-from tests.scripted_agent_helpers import registered_toolkit
+from tests.scripted_agent_helpers import raising, registered_toolkit
 from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
@@ -1273,20 +1273,20 @@ async def test_capped_approval_resume_blocks_priced_fallback(
 ) -> None:
     """An approval resume after the requester hits their cap sends zero requests to a priced fallback."""
     from mindroom.budgets.monitor import BudgetMonitor  # noqa: PLC0415
-    from mindroom.config.models import ModelPricing  # noqa: PLC0415
     from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
-    from mindroom.llm.provider import ModelRequest, StreamEvent  # noqa: PLC0415
     from mindroom.providers import registry as provider_registry  # noqa: PLC0415
+    from tests.budget_helpers import set_month_spend  # noqa: PLC0415
 
     del echo_tool
     real_build = provider_registry.build_model_provider
     gated_call = calls(tool_call("echo", "call-1", text="hi"))
+    quota = ProviderError("quota", provider="openai", status_code=429, code=QUOTA_EXHAUSTED)
     turn = await _setup_turn(
         tmp_path,
         monkeypatch,
         tools=[_ECHO_TOOL],
         budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10.0),
-        scripts={"default": [gated_call], "large": [answer("must not run")]},
+        scripts={"default": [gated_call, [raising(quota)]], "large": [answer("must not run")]},
     )
     config = turn.bot.config
     config.models["default"] = config.models["default"].model_copy(update={"fallbacks": ["large"]})
@@ -1297,31 +1297,9 @@ async def test_capped_approval_resume_blocks_priced_fallback(
         rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
     )
     config.background_tool_jobs.enabled = False
-    from tests.budget_helpers import set_month_spend  # noqa: PLC0415
 
     monitor = BudgetMonitor(runtime_paths=runtime_paths_for(config), config_provider=lambda: config)
     monkeypatch.setattr(turn.runner.deps.runtime.orchestrator, "_budgets", monitor)
-
-    class _PauseThenQuotaModel(ScriptedModel):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            if self.turns:
-                async for event in super().stream(request):
-                    yield event
-                return
-            self.requests.append(request)
-            msg = "quota"
-            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
-
-    priced_calls: list[str] = []
-
-    class _CountingPaidModel(ScriptedModel):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            priced_calls.append(self.identity.id)
-            async for event in super().stream(request):
-                yield event
-
-    turn.models["default"] = _PauseThenQuotaModel([gated_call], identity=turn.models["default"].identity)
-    turn.models["large"] = _CountingPaidModel([answer("must not run")], identity=turn.models["large"].identity)
     monkeypatch.setattr(provider_registry, "build_model_provider", real_build)
     monkeypatch.setattr(
         provider_registry,
@@ -1340,7 +1318,8 @@ async def test_capped_approval_resume_blocks_priced_fallback(
         set_month_spend(monitor, {_REQUESTER: 15.0})
         await _approve_and_resume(turn, continuation, asyncio.Event())
 
-        assert priced_calls == []
+        assert len(turn.models["default"].requests) == 2
+        assert turn.models["large"].requests == []
     finally:
         await shutdown_approval_runtime()
 

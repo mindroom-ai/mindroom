@@ -549,19 +549,12 @@ class ResponsesStream:
     _summary_part: tuple[str, int] | None = None
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
-        if event.type == "error":
-            return _response_error(
-                event.code,
-                event.message,
-                provider=self.provider,
-                retry_after=body_retry_after(getattr(event, "model_extra", None)),
-            )
-        failure = event.response.error
-        return _response_error(
-            failure.code if failure is not None else None,
-            failure.message if failure is not None else None,
+        failure = event if event.type == "error" else event.response.error
+        return classify_provider_error(
+            getattr(failure, "message", None) or "OpenAI Responses stream failed",
             provider=self.provider,
-            retry_after=body_retry_after(getattr(failure, "model_extra", None)) if failure is not None else None,
+            code=getattr(failure, "code", None),
+            retry_after_seconds=body_retry_after(getattr(failure, "model_extra", None)),
         )
 
     def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:
@@ -647,22 +640,6 @@ class ResponsesStream:
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         return self.parts
-
-
-def _response_error(
-    code: str | None,
-    message: str | None,
-    *,
-    provider: str,
-    retry_after: float | None = None,
-) -> ProviderError:
-    """Return the error a failed response reports: its code names the failure, as an error type does elsewhere."""
-    return classify_provider_error(
-        message or "OpenAI Responses stream failed",
-        provider=provider,
-        code=code,
-        retry_after_seconds=retry_after,
-    )
 
 
 def usage_report(event: ResponseStreamEvent) -> UsageReported | None:

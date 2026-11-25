@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, fails_over
@@ -108,10 +108,6 @@ def _with_structured_output_prompt(
     return replace(request, messages=tuple(messages))
 
 
-def _cooling(key: str, now: float) -> bool:
-    return _COOLDOWN_UNTIL.get(key, 0.0) > now
-
-
 def _remember_reset(key: str, error: ProviderError) -> None:
     if (hint := error.retry_after_seconds) is not None and hint > 0:
         until = time.monotonic() + hint
@@ -123,7 +119,10 @@ def _clear_cooldown(key: str, seen_until: float | None) -> None:
         _COOLDOWN_UNTIL.pop(key, None)
 
 
-def _log_fallback(error: ProviderError, *, from_model: str, to_model: str) -> None:
+def _log_fallback(failure: tuple[str, ProviderError] | None, *, to_model: str) -> None:
+    if failure is None:
+        return
+    from_model, error = failure
     logger.warning(
         "model_fallback_used",
         from_model=from_model,
@@ -138,39 +137,6 @@ def _log_fallback(error: ProviderError, *, from_model: str, to_model: str) -> No
 
 def _fits(provider: ModelProvider, request: ModelRequest, context_window: int | None) -> bool:
     return context_window is None or provider.request_tokens(request) <= context_window
-
-
-@dataclass(slots=True)
-class _Attempt:
-    """What one model's stream handed the caller so far: whether it committed, and the usage it reported."""
-
-    committed: bool = False
-    usage: ReportedUsage = field(default_factory=ReportedUsage)
-
-
-async def _attempt_stream(
-    provider: ModelProvider,
-    sent: ModelRequest,
-    *,
-    model_name: str,
-    fallback: bool,
-    attempt: _Attempt,
-) -> AsyncIterator[StreamEvent]:
-    """Stream one model's attempt, announcing the selected model and stamping fallback turns."""
-    yield ModelSelected(identity=provider.identity, model_name=model_name, capabilities=provider.capabilities)
-    events = provider.stream(sent)
-    async with closing_async_stream(events):
-        async for event in events:
-            attempt.usage.observe(event)
-            attempt.committed = attempt.committed or commits_attempt(event)
-            if fallback and isinstance(event, TurnCompleted):
-                message = event.message
-                message.provider_data = {
-                    **(message.provider_data or {}),
-                    REWRITTEN_ATTEMPT_KEY: True,
-                    FALLBACK_MODEL_KEY: model_name,
-                }
-            yield event
 
 
 async def _sendable(
@@ -214,34 +180,19 @@ async def _sendable(
     return provider, sent
 
 
-def _in_turn(members: Sequence[ChainModel], *, model_name: str) -> list[ChainModel]:
-    """Return ``members`` in order, those cooling down after the rest, as a last resort."""
-    now = time.monotonic()
-    cooling = [member for member in members if _cooling(member.cooldown_key, now)]
-    if cooling:
-        logger.debug("model_fallback_cooldown", model=model_name, cooling=[member.name for member in cooling])
-    return [member for member in members if member not in cooling] + cooling
-
-
-async def _resolve_member(
-    member: ChainModel,
-    inner: ModelProvider,
-    request: ModelRequest,
+def _in_turn(
+    primary: ChainModel,
+    chain: Sequence[ChainModel],
     *,
-    model_name: str,
-) -> tuple[ModelProvider, ModelRequest, bool] | None:
-    """Return ``(provider, sent_request, is_fallback)`` for ``member``, or None when a fallback is skipped."""
-    if member.name == model_name:
-        return inner, _primary_request(request), False
-    target = await _sendable(
-        member,
-        request,
-        primary_structured_output=inner.capabilities.structured_output,
-    )
-    if target is None:
-        return None
-    provider, sent = target
-    return provider, sent, True
+    allow_fallback: Callable[[str], bool] | None,
+) -> list[ChainModel]:
+    """Return ``primary`` and eligible ``chain`` members in order, those cooling down after the rest."""
+    members = [primary, *(member for member in chain if allow_fallback is None or allow_fallback(member.name))]
+    now = time.monotonic()
+    cooling = [member for member in members if _COOLDOWN_UNTIL.get(member.cooldown_key, 0.0) > now]
+    if cooling:
+        logger.debug("model_fallback_cooldown", model=primary.name, cooling=[member.name for member in cooling])
+    return [member for member in members if member not in cooling] + cooling
 
 
 async def fallback_stream(
@@ -260,37 +211,51 @@ async def fallback_stream(
     immediately on retryable errors too. Fallback turns are marked so later requests never reuse foreign continuation
     or encrypted replay state.
     """
-    eligible = [member for member in chain if allow_fallback is None or allow_fallback(member.name)]
     primary = ChainModel(model_name, None, lambda: inner, cooldown_key)
-    members = _in_turn([primary, *eligible], model_name=model_name)
+    members = _in_turn(primary, chain, allow_fallback=allow_fallback)
     # A success clears only the cooldown this request saw, not one a concurrent request set since.
     seen = {member.cooldown_key: _COOLDOWN_UNTIL.get(member.cooldown_key) for member in members}
     failure: tuple[str, ProviderError] | None = None
     for member in members:
-        resolved = await _resolve_member(member, inner, request, model_name=model_name)
-        if resolved is None:
+        is_fallback = member is not primary
+        target = (
+            await _sendable(member, request, primary_structured_output=inner.capabilities.structured_output)
+            if is_fallback
+            else (inner, _primary_request(request))
+        )
+        if target is None:
             continue
-        provider, sent, is_fallback = resolved
-        if failure is not None:
-            _log_fallback(failure[1], from_model=failure[0], to_model=member.name)
-        attempt = _Attempt()
-        stream = _attempt_stream(provider, sent, model_name=member.name, fallback=is_fallback, attempt=attempt)
+        provider, sent = target
+        _log_fallback(failure, to_model=member.name)
+        committed = False
+        usage = ReportedUsage()
         try:
-            async with closing_async_stream(stream):
-                async for event in stream:
+            yield ModelSelected(identity=provider.identity, model_name=member.name, capabilities=provider.capabilities)
+            events = provider.stream(sent)
+            async with closing_async_stream(events):
+                async for event in events:
+                    usage.observe(event)
+                    committed = committed or commits_attempt(event)
+                    if is_fallback and isinstance(event, TurnCompleted):
+                        message = event.message
+                        message.provider_data = {
+                            **(message.provider_data or {}),
+                            REWRITTEN_ATTEMPT_KEY: True,
+                            FALLBACK_MODEL_KEY: member.name,
+                        }
                     yield event
         except ProviderError as error:
             defer_transient = request.overrides.transient_retries == "caller" and error.retryable
             can_fail_over = fails_over(error) and not defer_transient
             if can_fail_over:
                 _remember_reset(member.cooldown_key, error)
-            if attempt.committed or not can_fail_over:
+            if committed or not can_fail_over:
                 raise
             failure = (member.name, error)
         else:
             _clear_cooldown(member.cooldown_key, seen[member.cooldown_key])
             return
-        if (report := attempt.usage.settle()) is not None:
+        if (report := usage.settle()) is not None:
             yield report
     # The request's own model is never skipped, so a failure ends the chain.
     assert failure is not None

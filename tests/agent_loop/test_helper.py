@@ -31,12 +31,14 @@ from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agno_parity.golden_files import turn_message
 from tests.fakes.request_sizing import PlainRequestSizing
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import fake_token_counter
+from tests.scripted_agent_helpers import raising
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.llm.provider import TokenCounter
+    from mindroom.llm.provider import StructuredOutput, TokenCounter
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic")
 LUNA = ModelIdentity(id="gpt-6-luna", provider="OpenAI")
@@ -240,94 +242,75 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_complete_prompt_fails_over_between_unlike_structured_output_providers() -> None:
+@pytest.mark.parametrize(
+    ("from_mode", "to_mode", "fallback_identity", "raw_answer", "expected", "expect_json_prompt"),
+    [
+        (
+            "native",
+            "forced_tool",
+            ModelIdentity(id="llama-4", provider="Groq"),
+            '{"answer": "yes", "confidence": 9}',
+            _Verdict(answer="yes", confidence=9),
+            False,
+        ),
+        (
+            "native",
+            "json_mode",
+            LUNA,
+            '```json\n{"answer": "no"}\n```',
+            _Verdict(answer="no"),
+            True,
+        ),
+        (
+            "json_mode",
+            "forced_tool",
+            ModelIdentity(id="llama-4", provider="Groq"),
+            '{"answer": "maybe"}',
+            _Verdict(answer="maybe"),
+            False,
+        ),
+    ],
+    ids=["native-to-forced-tool", "native-to-json-mode", "json-mode-to-forced-tool"],
+)
+async def test_complete_prompt_fails_over_between_unlike_structured_output_providers(
+    from_mode: StructuredOutput,
+    to_mode: StructuredOutput,
+    fallback_identity: ModelIdentity,
+    raw_answer: str,
+    expected: _Verdict,
+    *,
+    expect_json_prompt: bool,
+) -> None:
     """Failing over between unlike structured-output routes adapts prompt & decoding and records the answering model."""
-
-    @dataclass
-    class _FailingProvider(_RecordingProvider):
-        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-            self.requests.append(request)
-            msg = "quota"
-            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
-            yield  # pragma: no cover
-
-    # 1. Native primary -> forced_tool fallback: decoded from tool arguments, HelperUsage names fallback.
-    primary_native = _FailingProvider(
-        answer="",
+    quota = ProviderError("quota", provider="Codex", status_code=429, code=QUOTA_EXHAUSTED)
+    primary = ScriptedModel(
+        [[raising(quota)]],
         identity=ModelIdentity(id="gpt-6-sol", provider="Codex"),
-        capabilities=Capabilities(structured_output="native"),
+        capabilities=Capabilities(structured_output=from_mode),
     )
-    fallback_tool = _RecordingProvider(
-        answer='{"answer": "yes", "confidence": 9}',
-        identity=ModelIdentity(id="llama-4", provider="Groq"),
-        capabilities=Capabilities(structured_output="forced_tool"),
+    fallback = _RecordingProvider(
+        answer=raw_answer,
+        identity=fallback_identity,
+        capabilities=Capabilities(structured_output=to_mode),
     )
     chained = WrappedProvider(
-        primary_native,
+        primary,
         partial(
             fallback_stream,
-            model_name="sol",
-            chain=(ChainModel("groq", None, lambda: fallback_tool, "groq"),),
-            cooldown_key="sol",
+            model_name="primary",
+            chain=(ChainModel("fallback", None, lambda: fallback, "fallback"),),
+            cooldown_key="primary",
         ),
     )
 
     result = await complete_prompt(chained, "Is it raining?", instructions=["Decide."], schema=_Verdict, run_id="h-1")
 
-    assert result.content == _Verdict(answer="yes", confidence=9)
-    assert (result.usage.model, result.usage.provider) == ("llama-4", "Groq")
+    assert result.content == expected
+    assert (result.usage.model, result.usage.provider) == (fallback_identity.id, fallback_identity.provider)
     [details] = result.usage.metrics.to_dict()["details"]["model"]
-    assert (details["id"], details["provider"]) == ("llama-4", "Groq")
-
-    # 2. Native primary -> json_mode fallback: JSON schema prompt is added and fenced output is parsed leniently.
-    fallback_json = _RecordingProvider(
-        answer='```json\n{"answer": "no"}\n```',
-        identity=LUNA,
-        capabilities=Capabilities(structured_output="json_mode"),
-    )
-    chained_json = WrappedProvider(
-        primary_native,
-        partial(
-            fallback_stream,
-            model_name="sol",
-            chain=(ChainModel("luna", None, lambda: fallback_json, "luna"),),
-            cooldown_key="sol",
-        ),
-    )
-
-    result_json = await complete_prompt(chained_json, "Is it raining?", instructions=["Decide."], schema=_Verdict)
-
-    assert result_json.content == _Verdict(answer="no")
-    assert "<json_schema>" in str(fallback_json.requests[0].messages[0].content)
-    assert (result_json.usage.model, result_json.usage.provider) == ("gpt-6-luna", "OpenAI")
-
-    # 3. json_mode primary -> forced_tool fallback: JSON schema prompt is stripped before sending to forced_tool.
-    primary_json = _FailingProvider(
-        answer="",
-        identity=IDENTITY,
-        capabilities=Capabilities(structured_output="json_mode"),
-    )
-    fallback_tool_2 = _RecordingProvider(
-        answer='{"answer": "maybe"}',
-        identity=ModelIdentity(id="llama-4", provider="Groq"),
-        capabilities=Capabilities(structured_output="forced_tool"),
-    )
-    chained_stripped = WrappedProvider(
-        primary_json,
-        partial(
-            fallback_stream,
-            model_name="claude",
-            chain=(ChainModel("groq", None, lambda: fallback_tool_2, "groq"),),
-            cooldown_key="claude",
-        ),
-    )
-
-    result_stripped = await complete_prompt(
-        chained_stripped,
-        "Is it raining?",
-        instructions=["Decide."],
-        schema=_Verdict,
-    )
-
-    assert result_stripped.content == _Verdict(answer="maybe")
-    assert fallback_tool_2.requests[0].messages[0].content == "Decide."
+    assert (details["id"], details["provider"]) == (fallback_identity.id, fallback_identity.provider)
+    system = str(fallback.requests[0].messages[0].content)
+    if expect_json_prompt:
+        assert "<json_schema>" in system
+    else:
+        assert system == "Decide."

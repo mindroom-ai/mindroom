@@ -100,13 +100,6 @@ def body_retry_after(body: object) -> float | None:
     return None
 
 
-def _retry_after(headers: Mapping[str, str], body: object) -> float | None:
-    """Return the ``Retry-After`` hint, else the reset a Codex usage-limit body names, in seconds from now."""
-    if (hint := retry_after_seconds(headers)) is not None:
-        return hint
-    return body_retry_after(body)
-
-
 def provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the normalized error for one SDK or transport failure; ``provider`` is the route's provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
@@ -117,13 +110,14 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         message, code, error_type = _error_fields(error.body)
         if message is None:
             message = error.response.text or str(error)
+        retry_after = retry_after_seconds(error.response.headers)
         return classify_provider_error(
             message,
             provider=provider,
             status_code=error.status_code,
             code=code,
             error_type=error_type,
-            retry_after_seconds=_retry_after(error.response.headers, error.body),
+            retry_after_seconds=retry_after if retry_after is not None else body_retry_after(error.body),
         )
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.

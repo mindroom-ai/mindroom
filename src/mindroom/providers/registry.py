@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 
 from mindroom.config.models import (
     fallback_order,
-    fallback_reference,
     split_model_reference,
     unsupported_level_message,
 )
@@ -186,10 +185,13 @@ def _budget_allows_fallback(
     bound_requester: str | None,
     candidate_ref: str,
 ) -> bool:
-    from mindroom.budgets.monitor import fallback_allowed_under_budget  # noqa: PLC0415
+    from mindroom.budgets.monitor import budget_model  # noqa: PLC0415
 
     requester_id = bound_requester if bound_requester is not None else current_requester_id()
-    return fallback_allowed_under_budget(config, runtime_paths, current_budget_monitor(), requester_id, candidate_ref)
+    return (
+        budget_model(config, runtime_paths, current_budget_monitor(), requester_id, candidate_ref, log_fallback=False)
+        == candidate_ref
+    )
 
 
 def _cooldown_key(config: Config, model_name: str) -> str:
@@ -213,7 +215,7 @@ def fallback_chain(
     name, level = split_model_reference(model_name)
     chain: list[ChainModel] = []
     for fallback in fallback_order(config.models, name):
-        reference = fallback_reference(config.models, fallback, level)
+        reference = f"{fallback}@{level}" if level is not None and f"{fallback}@{level}" in config.models else fallback
         # Built once per chain, on its first failover, and logged at debug since that happens per request.
         build = cache(
             partial(

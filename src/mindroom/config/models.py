@@ -1133,12 +1133,6 @@ def fallback_order(models: Mapping[str, ModelConfig], name: str) -> list[str]:
     return order
 
 
-def fallback_reference(models: Mapping[str, ModelConfig], fallback: str, level: str | None) -> str:
-    """Return ``fallback@level`` when ``level`` is set and ``fallback`` offers it, else ``fallback``."""
-    reasoning = models[fallback].reasoning
-    return f"{fallback}@{level}" if level is not None and reasoning and level in reasoning.levels else fallback
-
-
 def unsupported_level_message(models: Mapping[str, ModelConfig], reference: object) -> str | None:
     """Describe why ``name@level`` is rejected when ``name`` exists but ``level`` is not one of its levels."""
     if not isinstance(reference, str):

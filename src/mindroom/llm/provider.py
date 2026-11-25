@@ -7,7 +7,7 @@ Per-request state travels in ``ModelRequest`` rather than on the adapter, so ada
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.llm.errors import incomplete_stream_error
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
-    from mindroom.llm.usage import MessageMetrics
+    from mindroom.llm.usage import MessageMetrics, RunMetrics
 
 type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
@@ -368,7 +368,6 @@ class StreamTracker:
     identity: ModelIdentity
     model_name: str | None = None
     capabilities: Capabilities | None = None
-    selected: bool = False
     answered: bool = False
     reported: ReportedUsage = field(default_factory=ReportedUsage)
     prior_usage: list[tuple[ModelIdentity, MessageMetrics]] = field(default_factory=list)
@@ -382,7 +381,6 @@ class StreamTracker:
             self.identity = event.identity
             self.model_name = event.model_name
             self.capabilities = event.capabilities
-            self.selected = True
             self.answered = False
         elif isinstance(event, UsageReported):
             self.reported.observe(event)
@@ -511,8 +509,26 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         stop_reason=completed.stop_reason,
         capabilities=tracker.capabilities,
         prior_usage=tuple(tracker.prior_usage),
-        identity=tracker.identity if tracker.selected else None,
+        identity=tracker.identity if tracker.model_name is not None else None,
     )
+
+
+def answering_identity(message: Message, default: ModelIdentity) -> ModelIdentity:
+    """Return the model the provider stamped on ``message`` as having answered it, else ``default``."""
+    from mindroom.llm.messages import read_model_provenance  # noqa: PLC0415 - keep llm.provider slim at import time
+
+    if (answered := read_model_provenance(message.provider_data)) is None:
+        return default
+    return replace(default, id=answered.model_id, provider=answered.provider)
+
+
+def count_turn_usage(metrics: RunMetrics, turn: ModelTurn, default: ModelIdentity) -> ModelIdentity:
+    """Record ``turn``'s failed-attempt and answering usage on ``metrics`` and return the answering identity."""
+    for prior_identity, prior_metrics in turn.prior_usage:
+        metrics.add(prior_metrics, model_id=prior_identity.id, provider=prior_identity.provider)
+    answered = answering_identity(turn.message, turn.identity or default)
+    metrics.add(turn.usage, model_id=answered.id, provider=answered.provider)
+    return answered
 
 
 __all__ = [
@@ -543,7 +559,9 @@ __all__ = [
     "TransientRetries",
     "TurnCompleted",
     "UsageReported",
+    "answering_identity",
     "complete",
+    "count_turn_usage",
     "hosted_tool_started",
     "json_output_prompt",
     "structured_output_tools",

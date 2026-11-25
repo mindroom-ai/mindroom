@@ -95,26 +95,6 @@ def _scan_fingerprint(config: Config, runtime_paths: RuntimePaths) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _over_budget_standing(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    monitor: BudgetMonitor | None,
-    requester_id: str | None,
-) -> tuple[str, float, float] | None:
-    """Return ``(canonical_requester_id, spend, limit)`` when ``requester_id`` has reached their cap, else None."""
-    budgets = config.budgets
-    if budgets is None or requester_id is None:
-        return None
-    canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
-    if canonical_requester_id is None:
-        return None
-    limit = _budget_limit_usd(budgets, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
-    if limit is None:
-        return None
-    spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
-    return (canonical_requester_id, spend, limit) if spend >= limit else None
-
-
 def _is_budget_fallback_ref(config: Config, ref: str, fallback_model: str) -> bool:
     """Return whether ``ref`` matches ``budgets.fallback_model``, respecting an explicit ``@level``."""
     if fallback_model in (ref, split_model_reference(ref)[0]):
@@ -127,22 +107,6 @@ def _is_budget_fallback_ref(config: Config, ref: str, fallback_model: str) -> bo
         and model_cfg.reasoning is not None
         and fallback_model == f"{base}@{model_cfg.reasoning.default}"
     )
-
-
-def fallback_allowed_under_budget(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    monitor: BudgetMonitor | None,
-    requester_id: str | None,
-    model_ref: str,
-) -> bool:
-    """Return whether fallback candidate ``model_ref`` is permitted under ``requester_id``'s budget."""
-    budgets = config.budgets
-    if budgets is None or not _is_priced(config, model_ref):
-        return True
-    if _is_budget_fallback_ref(config, model_ref, budgets.fallback_model):
-        return True
-    return _over_budget_standing(config, runtime_paths, monitor, requester_id) is None
 
 
 def budget_model(
@@ -167,10 +131,15 @@ def budget_model(
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
     if _is_budget_fallback_ref(config, model_name, budgets.fallback_model) or not _is_priced(config, model_name):
         return model_name
-    standing = _over_budget_standing(config, runtime_paths, monitor, requester_id)
-    if standing is None:
+    canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
+    if canonical_requester_id is None:
         return model_name
-    canonical_requester_id, spend, limit = standing
+    limit = _budget_limit_usd(budgets, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
+    if limit is None:
+        return model_name
+    spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
+    if spend < limit:
+        return model_name
     if log_fallback:
         logger.info(
             "budget_fallback_applied",

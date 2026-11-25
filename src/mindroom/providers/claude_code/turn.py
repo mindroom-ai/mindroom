@@ -296,9 +296,6 @@ def _turn_failure(
         f"{text} (Claude Code already retried the request.)",
         provider=provider,
         status_code=status,
-        code=classified.code,
-        provider_code=classified.provider_code,
-        retry_after_seconds=classified.retry_after_seconds,
         already_retried=True,
     )
 
