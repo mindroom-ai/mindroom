@@ -449,10 +449,10 @@ class ChatUITools(Toolkit):
         """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
         Use a canvas when seeing or clicking beats reading or typing.
-        Prefer show_canvas over ASCII art or Mermaid fences, since chat Markdown
-        does not render Mermaid. For a quick choice between a few options, just ask
-        in your reply. The page cannot load any website, so it cannot show the user
-        a real website. Pass the page as
+        Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams.
+        For a quick choice between a few options, just ask in your reply.
+        The page cannot load any website, so it cannot show the user a real website.
+        Pass the page as
         ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
         ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
         supported. Only show pages you wrote: a canvas appears as yours and whatever

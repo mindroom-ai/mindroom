@@ -4563,6 +4563,18 @@ def test_config_ignores_overrides_of_the_retired_cut_markers() -> None:
     assert config.prompts == {"PERSONALITY_CONTEXT_SECTION_HEADING": "## Files"}
 
 
+def test_config_ignores_overrides_of_the_retired_schedule_parse_prompt() -> None:
+    """Overrides of the retired WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE still load, and a save drops them."""
+    config = Config(
+        prompts={
+            "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": "Legacy prompt {request}",
+            "PERSONALITY_CONTEXT_SECTION_HEADING": "## Files",
+        },
+    )
+
+    assert config.prompts == {"PERSONALITY_CONTEXT_SECTION_HEADING": "## Files"}
+
+
 def test_a_curation_prompt_override_with_retired_placeholders_names_them() -> None:
     """The curation prompt lost its MEMORY.md line and token placeholders; an override still using them says which."""
     with pytest.raises(ValidationError, match=r"Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):

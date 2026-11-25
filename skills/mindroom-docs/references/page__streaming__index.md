@@ -33,7 +33,8 @@ A homeserver relays them when its `/_matrix/client/versions` lists `io.mindroom.
 MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](https://docs.mindroom.chat/tools/agent-orchestration/#running-subagents) and Dynamic Workflow participant with its text and tool calls as they happen, then how it ended.
 Tool call details appear there only when the reply that started the subagent shows its tool calls.
 It needs a homeserver that relays live updates, and is empty when they are off or the conversation is not in a Matrix room.
-Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below, and the Sub-agents panel shows nothing for subagents that start afterwards.
+The graph of a [workflow run](https://docs.mindroom.chat/tools/workflows/#the-run-in-the-room) is sent the same way, as `io.mindroom.workflow` frames from the run's agent, within the same budget as that agent's sub-agent frames in the room.
+Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below, the Sub-agents panel shows nothing for subagents that start afterwards, and a workflow run shows its card only.
 
 ## Configuration
 

@@ -23,7 +23,11 @@ from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,6 +109,7 @@ class ExternalTriggerRecord(BaseModel):
     max_body_bytes: int = Field(ge=1024, le=262144)
     created_at: int
     updated_at: int
+    last_fired_at: int | None = None
 
     @field_validator("owner_user_id")
     @classmethod
@@ -235,6 +240,11 @@ class ExternalTriggerStore:
     def store_path(self) -> Path:
         """Return the on-disk trigger store path."""
         return self._store_path
+
+    def get_record(self, trigger_id: str) -> ExternalTriggerRecord | None:
+        """Return one trigger record by ID, or None if not found."""
+        with advisory_file_lock(self._lock_path, exclusive=False):
+            return self._read_records().triggers.get(trigger_id)
 
     def list_records(self, *, owner_user_id: str | None = None) -> list[ExternalTriggerRecord]:
         """Return trigger records, optionally filtered by owner."""
@@ -422,6 +432,18 @@ class ExternalTriggerStore:
             records.triggers.pop(trigger_id)
             self._write_records(records)
 
+    def record_fired(self, trigger_id: str, *, expected_uid: str, fired_at: int) -> None:
+        """Record one successful, non-duplicate delivery timestamp if the same trigger still exists."""
+        with advisory_file_lock(self._lock_path):
+            records = self._read_records()
+            record = records.triggers.get(trigger_id)
+            if record is None or record.uid != expected_uid:
+                return
+            records.triggers[trigger_id] = _validate_record_update(
+                record.model_copy(update={"last_fired_at": fired_at}),
+            )
+            self._write_records(records)
+
     def consume_single_use(self, trigger_id: str, *, expected_uid: str) -> None:
         """Delete the same single-use trigger that produced a delivery snapshot."""
         with advisory_file_lock(self._lock_path):
@@ -438,8 +460,7 @@ class ExternalTriggerStore:
 
     def is_current_replay_scope(self, trigger_id: str, replay_scope: str) -> bool:
         """Return whether ``replay_scope`` still authenticates deliveries for ``trigger_id``."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
-            record = self._read_records().triggers.get(trigger_id)
+        record = self.get_record(trigger_id)
         return record is not None and _replay_scope(record) == replay_scope
 
     def delivery_snapshot(
@@ -450,8 +471,7 @@ class ExternalTriggerStore:
         config_generation: int,
     ) -> TriggerDeliverySnapshot | None:
         """Return one delivery snapshot after revalidating against current config."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
-            record = self._read_records().triggers.get(trigger_id)
+        record = self.get_record(trigger_id)
         if record is None:
             return None
         try:
@@ -497,7 +517,8 @@ class ExternalTriggerStore:
         if record is None:
             msg = f"external trigger not found: {trigger_id}"
             raise ExternalTriggerStoreError(msg)
-        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(
+        actor_ids = equivalent_requester_ids(actor_user_id, config, self._runtime_paths)
+        if record.owner_user_id not in actor_ids and not is_external_trigger_administrator(
             config,
             self._runtime_paths,
             actor_user_id,

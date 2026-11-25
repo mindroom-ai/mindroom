@@ -28,7 +28,7 @@ from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.room_settings_helpers import RoomStateHomeserver, set_room_model_override
 
@@ -75,7 +75,6 @@ def _room_model_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
