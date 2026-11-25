@@ -43,12 +43,12 @@ type IndependentUsageKind = Literal[
 # Legacy format: Pre-removal Dynamic Workflow participant turns wrote usage rows with `"kind": "dynamic_workflow"`.
 # Last legacy release: v2026.11.590; replacement: unreleased; the Dynamic Workflows engine was removed.
 # Handling: Keep `"dynamic_workflow"` outside `IndependentUsageKind` so nothing new writes it, while including it in
-#   `LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical rows keep counting in usage reports and budgets.
+#   `_LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical rows keep counting in usage reports and budgets.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_legacy_dynamic_workflow_usage_row_is_preserved.
 # LEGACY_COMPAT: Historical `schedule_parse` helper usage rows in `system.db`.
 # Legacy format: Usage rows with `kind == "schedule_parse"` written by the removed natural-language schedule parser.
 # Last legacy release: v2026.11.574; replacement: unreleased; structured scheduler tool calls parse no model prompt.
-# Handling: Keep `schedule_parse` in `LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical `system.db`
+# Handling: Keep `schedule_parse` in `_LEGACY_USAGE_KINDS`, `UsageKind`, and `USAGE_KINDS` so historical `system.db`
 #   rows still read and aggregate cleanly, while removing it from `IndependentUsageKind` so no new writer can emit it.
 # Coverage: tests/test_usage_stats_storage.py::test_retired_schedule_parse_usage_rows_still_read_and_aggregate.
 _LEGACY_USAGE_KINDS: frozenset[str] = frozenset({"dynamic_workflow", "schedule_parse"})

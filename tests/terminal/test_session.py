@@ -190,6 +190,7 @@ async def test_idle_watcher_reaps_polled_exit_before_forgetting_session(
     loop = asyncio.get_running_loop()
     session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     _, viewer = session.attach()
+    await asyncio.sleep(0)
     session.write(b"exit 3\n")
     async with asyncio.timeout(10):
         while session._process.poll() is None:  # noqa: ASYNC110 - waiting for child exit without waking the poller

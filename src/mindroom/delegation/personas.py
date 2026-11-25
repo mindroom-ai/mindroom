@@ -118,7 +118,7 @@ def _inline_persona(
 
 
 def _parse_profile(name: str, content: str) -> _PersonaProfile:
-    """Parse one profile file; ``PersonaError`` carries the reason it is invalid."""
+    """Parse one profile file; ``_PersonaError`` carries the reason it is invalid."""
     try:
         frontmatter, body = parse_skill_markdown(content)
     except SkillMarkdownError as exc:
@@ -222,7 +222,7 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
 
 
 def _load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
-    """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
+    """Read one named profile, raising ``_PersonaError`` with the user-facing reason."""
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
         raise _PersonaError(msg)

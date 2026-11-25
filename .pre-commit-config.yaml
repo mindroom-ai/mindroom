@@ -141,4 +141,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json|frontend/src/components/Usage/__fixtures__/providerUsageContract\.json)$
