@@ -14,11 +14,15 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
-from mindroom.attachments.storage import AttachmentRecord, format_attachment_annotation, format_attachments_prompt
+from mindroom.attachments.storage import (
+    AttachmentRecord,
+    format_attachment_annotation,
+    format_attachments_prompt,
+    format_omitted_inline_files_note,
+)
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.execution_preparation import _omitted_inline_files_note
 from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.summary_message import compaction_summary_message
@@ -762,13 +766,13 @@ async def test_omitted_inline_file_notes_reach_the_judge_without_names_or_ids(
     """Omitted inline-file notes scrub filenames and attachment IDs on both replayed and current turns."""
     gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
     replayed_listing = format_attachments_prompt([_record("att_file1", "file", "export.json")])
-    replayed_note = _omitted_inline_files_note(
+    replayed_note = format_omitted_inline_files_note(
         [File(id="att_file1", content=b"x" * 2_000_000, filename="export.json")],
     )
-    current_note_with_id = _omitted_inline_files_note(
+    current_note_with_id = format_omitted_inline_files_note(
         [File(id="att_file2", content=b"y" * 2_000_000, filename="quarterly-report.pdf")],
     )
-    current_note_without_id = _omitted_inline_files_note(
+    current_note_without_id = format_omitted_inline_files_note(
         [File(content=b"z" * 2_000_000, filename="notes.csv")],
     )
     messages = [

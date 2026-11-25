@@ -6676,7 +6676,7 @@ Pruning never deletes workspace files, the source files of registered attachment
 
 - **Incoming media size**: received files must be at most 64 MiB (67,108,864 bytes), including after decryption; send a smaller file if one is rejected.
   Homeservers and model providers may set lower limits.
-- **Auto-inlined files per turn**: incoming text files are included inline automatically up to 32,000 estimated tokens per turn, and all incoming files (text, PDFs, and other documents) share a cap of half the remaining context headroom when a context or replay window applies; PDFs are sized by page count rather than byte size.
+- **Auto-inlined files per turn**: incoming text files are included inline automatically up to 50 KiB (51,200 bytes) per turn (matching the inline tool-output threshold), and all incoming files (text, PDFs, and other documents) share a cap of half the remaining context headroom when a context or replay window applies; PDFs are sized by page count rather than byte size.
   Larger files are omitted from the inline prompt with a note telling the agent to save or inspect them with `get_attachment` instead.
 - **Earlier media per turn**: a turn fetches at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
   An earlier file that fails to download is not tried again for an hour.

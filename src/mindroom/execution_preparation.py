@@ -11,11 +11,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import PreparedTools
-from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
+from mindroom.attachments.storage import (
+    attachment_records_for_visible_message,
+    format_attachment_annotation,
+    format_omitted_inline_files_note,
+)
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     ORIGINAL_SENDER_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
     SOURCE_KIND_KEY,
@@ -42,7 +47,6 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
-from mindroom.llm.media import rendered_label
 from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
@@ -58,7 +62,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
-from mindroom.token_counting.requests import file_byte_size, file_tokens_within_budget
+from mindroom.token_counting.requests import file_tokens_within_budget
 from mindroom.tool_jobs.execution import offered_definitions
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
@@ -101,21 +105,6 @@ _NON_TURN_NOTICE_CONTENT_KEYS = (
     UI_ACTION_CONTENT_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
 )
-# Soft default ceiling for incoming text ``File`` attachments auto-inlined on a single turn's prompt.
-MAX_AUTO_INLINE_FILE_TOKENS = 32_000
-_ATTACHMENT_ID_PREFIX = "att_"
-# Format matched by ``participation_hook._OMITTED_INLINE_FILES`` to scrub omitted names and IDs from external judges.
-_INLINE_FILE_OMITTED_MARKER = "[Inline file attachment omitted]"
-_INLINE_FILE_OMITTED_BASE_GUIDANCE = (
-    "Not included inline because it exceeds the inline attachment budget. "
-    "Do not claim to have read the omitted file content."
-)
-_INLINE_FILE_OMITTED_TOOL_GUIDANCE = (
-    " Use get_attachment(attachment_id, mindroom_output_path=...) to save and inspect it selectively with tools, "
-    "or get_attachment(attachment_id, view=True) if full viewing is needed. "
-    "If attachment tools are unavailable, ask the user for a smaller excerpt."
-)
-_INLINE_FILE_OMITTED_NO_ID_GUIDANCE = " Ask the user for a smaller excerpt."
 
 
 class _PartialReplyKind(str, Enum):
@@ -711,34 +700,6 @@ async def _finalize_prepared_history(
     )
 
 
-def _format_byte_size(size_bytes: int) -> str:
-    """Return a concise, byte-stable human-readable byte size."""
-    for unit, threshold in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
-        if size_bytes >= threshold:
-            return f"{size_bytes / threshold:.1f} {unit}"
-    return f"{size_bytes} B"
-
-
-def _omitted_inline_files_note(omitted_files: Sequence[File]) -> str:
-    """Return a concise, byte-stable sanitized note naming files omitted from inline prompt media."""
-    labels: list[str] = []
-    has_attachment_id = False
-    for file in omitted_files:
-        raw_name = file.filename or file.name
-        label = (raw_name and rendered_label(raw_name)) or "file"
-        is_attachment = file.id.startswith(_ATTACHMENT_ID_PREFIX)
-        has_attachment_id = has_attachment_id or is_attachment
-        details = [
-            *([rendered_label(file.id)] if is_attachment else []),
-            *([_format_byte_size(size)] if (size := file_byte_size(file)) is not None else []),
-        ]
-        labels.append(f"{label} ({', '.join(details)})" if details else label)
-    guidance = _INLINE_FILE_OMITTED_BASE_GUIDANCE + (
-        _INLINE_FILE_OMITTED_TOOL_GUIDANCE if has_attachment_id else _INLINE_FILE_OMITTED_NO_ID_GUIDANCE
-    )
-    return f"{_INLINE_FILE_OMITTED_MARKER}\nOmitted files: {', '.join(labels)}.\n{guidance}"
-
-
 def _with_prompt_note(turn: TurnMessages, note: str | None) -> TurnMessages:
     """Append ``note`` to ``turn.prompt`` outside any ``<msg>`` tag so every request of the turn carries it."""
     if not note:
@@ -757,8 +718,9 @@ def _select_inline_file_media(
 ) -> tuple[MediaInputs, str | None]:
     """Keep incoming ``media.files`` within the turn's auto-inline file budgets, preserving non-file media untouched.
 
-    Text files are bounded by both ``MAX_AUTO_INLINE_FILE_TOKENS`` and half the remaining headroom below ``limit``.
-    PDFs and binary documents are bounded only by half the remaining headroom (unbounded when ``limit`` is None).
+    Text files are bounded by both ``DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES`` (50 KiB) and half the remaining
+    headroom below ``limit``. PDFs and binary documents are bounded only by half the remaining headroom (unbounded
+    when ``limit`` is None).
     """
     if not media.files:
         return media, None
@@ -772,26 +734,25 @@ def _select_inline_file_media(
 
     kept_files: list[File] = []
     omitted_files: list[File] = []
-    remaining_text = MAX_AUTO_INLINE_FILE_TOKENS
+    remaining_text_bytes = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
     for file in media.files:
         counted = file_tokens_within_budget(
             model.token_counter,
             file,
-            text_budget=remaining_text,
+            text_byte_budget=remaining_text_bytes,
             headroom_budget=remaining_headroom,
         )
         if counted is not None:
-            tokens, is_text = counted
+            tokens, text_bytes_used = counted
             kept_files.append(file)
-            if is_text:
-                remaining_text -= tokens
+            remaining_text_bytes -= text_bytes_used
             if remaining_headroom is not None:
                 remaining_headroom -= tokens
         else:
             omitted_files.append(file)
     if not omitted_files:
         return media, None
-    return replace(media, files=tuple(kept_files)), _omitted_inline_files_note(omitted_files)
+    return replace(media, files=tuple(kept_files)), format_omitted_inline_files_note(omitted_files)
 
 
 async def _select_inline_file_media_off_loop(

@@ -24,10 +24,12 @@ from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
+from mindroom.constants import (
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import (
-    MAX_AUTO_INLINE_FILE_TOKENS,
     _PreparedExecutionContext,
     render_prepared_messages_text,
 )
@@ -989,8 +991,8 @@ async def test_oversized_text_file_is_omitted_early_while_small_file_and_non_fil
     assert "get_attachment" in content
     assert "mindroom_output_path" in content
     assert "view=True" in content
-    # Early-exit chunked counting never tokenizes the full 2 MiB JSON payload.
-    assert sum(tokenized_lengths) < 400_000
+    # Oversized JSON is skipped by byte size without ever passing its 2 MiB payload to the tokenizer.
+    assert max(tokenized_lengths, default=0) < 10_000
 
     # Omission note sits outside <msg> so stored conversation utterances keep only the user's words.
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -1073,8 +1075,8 @@ async def test_fallback_thread_replay_reselects_inline_files_after_persisted_rep
 async def test_auto_inline_file_budget_tracks_replay_window_headroom_and_enforces_default_cap(
     tmp_path: Path,
 ) -> None:
-    """Budget shrinks to headroom // 2 below 32k when replay_window_tokens is tight, and enforces 32k with limit=None."""
-    # 1M model window with 200k replay_window_tokens and ~166k-token stored summary -> ~30k headroom -> ~15k file budget.
+    """Budget shrinks to headroom // 2 below 50 KiB worth of tokens when tight, and enforces 50 KiB with limit=None."""
+    # 1M model window with 200k replay_window_tokens and ~180k-token stored summary -> ~16k headroom -> ~8k file budget.
     config, runtime_paths = _make_config(
         tmp_path / "capped",
         defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=4_000, replay_window_tokens=200_000),
@@ -1083,10 +1085,11 @@ async def test_auto_inline_file_budget_tracks_replay_window_headroom_and_enforce
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
-    seed_summary(storage, session, _SCOPE, "s" * (166_000 * 4))
+    seed_summary(storage, session, _SCOPE, "s" * (180_000 * 4))
 
-    medium_20k = File(id="att_med", content=b"m" * (20_000 * 4), filename="medium.txt", mime_type="text/plain")
-    small_10k = File(id="att_small", content=b"k" * (10_000 * 4), filename="small.txt", mime_type="text/plain")
+    # Both files are under 50 KiB, but 40 KB (~10k tokens) exceeds headroom // 2 (~8k) while 20 KB (~5k) fits.
+    medium_40kb = File(id="att_med", content=b"m" * 40_000, filename="medium.txt", mime_type="text/plain")
+    small_20kb = File(id="att_small", content=b"k" * 20_000, filename="small.txt", mime_type="text/plain")
     with _no_memory():
         prepared = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-1"),
@@ -1094,28 +1097,30 @@ async def test_auto_inline_file_budget_tracks_replay_window_headroom_and_enforce
             runtime_paths=runtime_paths,
             config=config,
             scope_context=_scope_context(config, runtime_paths),
-            media=MediaInputs(files=(medium_20k, small_10k)),
+            media=MediaInputs(files=(medium_40kb, small_20kb)),
         )
-    assert prepared.media.files == (small_10k,)
+    assert prepared.media.files == (small_20kb,)
     assert "medium.txt (att_med," in prepared.prompt_text
 
-    # With context_window=None (limit=None), the 32k text ceiling enforces aggregate text tokens across multiple files.
+    # With context_window=None (limit=None), two 30 KiB text files exceed the 50 KiB text cap while a PDF still inlines.
     unbounded_config, unbounded_paths = _make_config(tmp_path / "unbounded", context_window=None)
-    part1 = File(id="att_p1", content=b"a" * (20_000 * 4), filename="part1.txt", mime_type="text/plain")
-    part2 = File(id="att_p2", content=b"b" * (20_000 * 4), filename="part2.txt", mime_type="text/plain")
+    part1 = File(id="att_p1", content=b"a" * (30 * 1024), filename="part1.txt", mime_type="text/plain")
+    part2 = File(id="att_p2", content=b"b" * (30 * 1024), filename="part2.txt", mime_type="text/plain")
+    pdf = File(id="att_pdf", content=blank_pdf(10), filename="report.pdf", mime_type="application/pdf")
     with _no_memory():
         prepared_unbounded = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-2"),
-            prompt="Check both parts.",
+            prompt="Check all attachments.",
             runtime_paths=unbounded_paths,
             config=unbounded_config,
             scope_context=None,
-            media=MediaInputs(files=(part1, part2)),
+            media=MediaInputs(files=(part1, part2, pdf)),
         )
-    assert MAX_AUTO_INLINE_FILE_TOKENS == 32_000
-    assert prepared_unbounded.media.files == (part1,)
+    assert DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES == 50 * 1024
+    assert prepared_unbounded.media.files == (part1, pdf)
     assert "part2.txt (att_p2," in prepared_unbounded.prompt_text
     assert "part1.txt" not in prepared_unbounded.prompt_text
+    assert "report.pdf" not in prepared_unbounded.prompt_text
 
 
 @pytest.mark.asyncio
