@@ -242,3 +242,34 @@ def test_hmac_event_source_config_rejects_invalid_fields(overrides: dict[str, ob
                 },
             },
         )
+
+
+def test_github_event_source_default_allowed_events_include_pr_and_ci_events() -> None:
+    """GitHubEventSourceConfig default allowed_events includes comment, review comment, and check_run events."""
+    config = Config.model_validate(
+        {
+            **_base_config(),
+            "external_trigger_policy": {
+                "event_sources": {
+                    "gh": {
+                        "kind": "github",
+                        "secret_env": "GH_SECRET",
+                        "allowed_repos": ["mindroom-ai/mindroom"],
+                    },
+                },
+            },
+        },
+    )
+    src = config.external_trigger_policy.event_sources["gh"]
+    assert src.kind == "github"
+    assert src.allowed_events == [
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "issue_comment",
+        "check_run",
+        "check_suite",
+        "release",
+        "issues",
+        "push",
+    ]
