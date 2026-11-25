@@ -76,10 +76,11 @@ def _has_rowid(connection: sqlite3.Connection, table: str) -> bool:
 
 
 def _has_supported_columns(connection: sqlite3.Connection, table: str, required: frozenset[str]) -> bool:
-    columns = table_columns(connection, table)
+    # ``table_xinfo`` includes generated/hidden columns that ``table_info`` omits, which can still shadow ``rowid``.
+    all_columns = {row[1].lower() for row in connection.execute(f"PRAGMA table_xinfo({quote_identifier(table)})")}
     return (
-        required.issubset(columns)
-        and not ({column.lower() for column in columns} & _ROWID_ALIASES)
+        required.issubset(table_columns(connection, table))
+        and not (all_columns & _ROWID_ALIASES)
         and _has_rowid(connection, table)
     )
 
@@ -128,6 +129,9 @@ def _iter_rowid_chunks(
     chunk_size: int,
     prefix_params: tuple[object, ...] = (),
 ) -> Iterator[list[tuple[object, ...]]]:
+    if not isinstance(max_rowid, int):
+        msg = "unexpected non-integer rowid cursor"
+        raise sqlite3.DatabaseError(msg)
     last_rowid: int | None = None
     while True:
         bound_sql = "rowid <= ?" if last_rowid is None else "rowid > ? AND rowid <= ?"
@@ -157,7 +161,8 @@ def _usage_chunk_template(usage_table: str, *, since: float | None) -> tuple[str
         )
     # Bound raw scanned rows by rowid before evaluating ``since`` so sparse date ranges release the read lock.
     return (
-        "SELECT rowid, session_id, CASE WHEN matched THEN usage_data ELSE NULL END, matched FROM ("  # noqa: S608
+        "SELECT rowid, CASE WHEN matched THEN session_id ELSE NULL END, "  # noqa: S608
+        "CASE WHEN matched THEN usage_data ELSE NULL END, matched FROM ("
         f"SELECT rowid, session_id, usage_data, CASE WHEN {_USAGE_SINCE_CONDITION} THEN 1 ELSE 0 END AS matched "
         f"FROM {usage_table} WHERE {{bound}} ORDER BY rowid LIMIT ?) ORDER BY rowid",
         (since,),

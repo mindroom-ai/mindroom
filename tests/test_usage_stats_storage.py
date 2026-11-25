@@ -859,6 +859,12 @@ def test_a_table_missing_a_column_the_read_needs_is_reported(
             "session schema unsupported",
         ),
         (
+            "code_sessions",
+            "rowid TEXT GENERATED ALWAYS AS ('x') VIRTUAL, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (session_id) VALUES ('session-1')",
+            "session schema unsupported",
+        ),
+        (
             "code_sessions_usage",
             "rowid TEXT, id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
             "INSERT INTO code_sessions_usage (rowid, id, session_id, run_id, usage_data) VALUES ('x', 1, 'session-1', 'r1', '{}')",
@@ -871,7 +877,13 @@ def test_a_table_missing_a_column_the_read_needs_is_reported(
             "usage schema unsupported",
         ),
     ],
-    ids=["sessions-text-rowid", "sessions-duplicate-int-rowid", "usage-text-rowid", "usage-oid-alias"],
+    ids=[
+        "sessions-text-rowid",
+        "sessions-duplicate-int-rowid",
+        "sessions-generated-rowid",
+        "usage-text-rowid",
+        "usage-oid-alias",
+    ],
 )
 def test_shadowed_rowid_column_is_reported_as_unsupported_schema(
     tmp_path: Path,
@@ -962,7 +974,7 @@ def test_without_rowid_table_is_reported_as_unsupported_schema(
 
 
 def test_dated_read_ignores_out_of_range_session_with_invalid_utf8_user_id(tmp_path: Path) -> None:
-    """A dated read never selects user_id from out-of-range sessions, so invalid UTF-8 there cannot break it."""
+    """A dated read ignores invalid UTF-8 in out-of-range session user_id and unmatched usage session_id."""
     storage = create_agent_state_storage("code", tmp_path)
     old_ts = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
     since_ts = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
@@ -971,9 +983,17 @@ def test_dated_read_ignores_out_of_range_session_with_invalid_utf8_user_id(tmp_p
     _seed_usage_rows(storage.path, session_id="recent-session", rows=[("recent-run", recent_ts)])
     with closing(connect_conversation_database(storage.path, timeout=1.0)) as writer, begun(writer, write=True):
         writer.execute("UPDATE code_sessions SET user_id = CAST(X'80' AS TEXT) WHERE session_id = 'old-session'")
+        writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES (CAST(X'80' AS TEXT), 1)")
+        writer.execute(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (CAST(X'80' AS TEXT), ?, ?)",
+            ("old-bad-sid-run", json.dumps({**_run(), "run_id": "old-bad-sid-run", "created_at": old_ts})),
+        )
         writer.execute("UPDATE code_sessions SET user_id = '@alice:example.test' WHERE session_id = 'recent-session'")
         assert writer.execute(
             "SELECT typeof(user_id), hex(CAST(user_id AS BLOB)) FROM code_sessions WHERE session_id = 'old-session'",
+        ).fetchone() == ("text", "80")
+        assert writer.execute(
+            "SELECT typeof(session_id), hex(CAST(session_id AS BLOB)) FROM code_sessions_usage WHERE run_id = 'old-bad-sid-run'",
         ).fetchone() == ("text", "80")
 
     (row,) = iter_usage_storage_rows(_source(storage.path), since=since_ts)
