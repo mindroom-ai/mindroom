@@ -1,6 +1,6 @@
 """One-shot helper model calls: one request without the caller's tools, optionally read into a structured-output schema.
 
-Routing, team-mode selection, schedule parsing, thread summaries, room topics, knowledge-graph extraction, memory
+Routing, team-mode selection, thread summaries, room topics, knowledge-graph extraction, memory
 flushes, and voice normalization each send one request like this.
 Provider errors propagate as ``mindroom.llm.errors`` exceptions instead of becoming an errored run.
 """

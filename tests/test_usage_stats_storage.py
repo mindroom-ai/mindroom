@@ -41,7 +41,6 @@ from mindroom.usage.stats_storage import (
     iter_usage_storage_rows,
 )
 from mindroom.usage.storage import (
-    _RETIRED_USAGE_KINDS,
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_OWNER,
     SYSTEM_USAGE_STORAGE_NAME,
@@ -1004,7 +1003,6 @@ def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
 def test_retired_schedule_parse_usage_rows_still_read_and_aggregate(tmp_path: Path) -> None:
     """Historical `schedule_parse` helper rows in `system.db` still load and aggregate cleanly."""
     assert "schedule_parse" not in get_args(IndependentUsageKind.__value__)
-    assert "schedule_parse" in _RETIRED_USAGE_KINDS
     assert "schedule_parse" in USAGE_KINDS
 
     paths = resolve_runtime_paths(

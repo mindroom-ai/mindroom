@@ -143,6 +143,21 @@ describe("Schedules", () => {
       screen.getByText(/At 09:00 \(America\/Los_Angeles\)/),
     ).toBeInTheDocument();
 
+    fireEvent.change(
+      screen.getByLabelText("Cron Expression (America/Los_Angeles)"),
+      { target: { value: "30 10 * * *" } },
+    );
+    expect(
+      screen.queryByText(/At 09:00 \(America\/Los_Angeles\)/),
+    ).not.toBeInTheDocument();
+    fireEvent.change(
+      screen.getByLabelText("Cron Expression (America/Los_Angeles)"),
+      { target: { value: "0 9 * * *" } },
+    );
+    expect(
+      screen.getByText(/At 09:00 \(America\/Los_Angeles\)/),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByText("Visible status check"));
     expect(
       screen.getByLabelText("Cron Expression (UTC (legacy))"),

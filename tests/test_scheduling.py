@@ -31,7 +31,6 @@ from mindroom.scheduling.tasks import (
     ScheduledWorkflow,
     _parse_cron_schedule,
     build_edited_scheduled_workflow,
-    build_scheduled_task_read_model,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     edit_scheduled_task,
@@ -42,7 +41,6 @@ from mindroom.scheduling.tasks import (
     persist_scheduled_task_state,
     save_edited_scheduled_task,
     schedule_task,
-    scheduled_task_read_sort_key,
     scheduled_task_timezone,
 )
 from tests.authorization_helpers import (
@@ -239,50 +237,6 @@ def _assistant_config(runtime_paths: RuntimePaths) -> tuple[Config, dict[str, Ma
         runtime_paths,
     )
     return config, entity_ids(config, runtime_paths)
-
-
-def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> None:
-    """Schedule read models should preserve API-visible derived fields."""
-    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-    once_record = _record(
-        "once123",
-        ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime(2026, 1, 2, 9, 30, tzinfo=UTC),
-            message="one-time message",
-            description="One-time task",
-            new_thread=True,
-        ),
-        status="cancelled",
-    )
-    cron_record = _record(
-        "cron123",
-        ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
-            message="cron message",
-            description="Cron task",
-            created_by="@user:server",
-            thread_id="$thread1",
-        ),
-    )
-
-    once_model = build_scheduled_task_read_model(once_record, timezone="UTC", current_time=current_time)
-    cron_model = build_scheduled_task_read_model(cron_record, timezone="UTC", current_time=current_time)
-
-    assert once_model.task_id == "once123"
-    assert once_model.status == "cancelled"
-    assert once_model.next_run_at == datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
-    assert once_model.cron_expression is None
-    assert once_model.new_thread is True
-    assert once_model.silent is False
-    assert cron_model.cron_expression == "0 9 * * *"
-    assert cron_model.cron_description == "At 09:00 (UTC)"
-    assert cron_model.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
-    assert cron_model.created_by == "@user:server"
-    assert cron_model.thread_id == "$thread1"
-    assert cron_model.silent is False
-    assert sorted([once_model, cron_model], key=scheduled_task_read_sort_key) == [cron_model, once_model]
 
 
 def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() -> None:
@@ -2539,12 +2493,13 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
     assert legacy_task.workflow.cron_timezone is None
     assert scheduled_task_timezone(legacy_task.workflow, config) == "America/Los_Angeles"
     # 17:00 UTC is 09:00 in Los Angeles in winter and 10:00 in summer, never the 18:00 or 19:00 of Amsterdam.
-    read_model = build_scheduled_task_read_model(
-        legacy_task,
-        timezone=scheduled_task_timezone(legacy_task.workflow, config),
-        current_time=datetime(2027, 1, 15, tzinfo=UTC),
+    assert (
+        legacy_task.workflow.cron_description(
+            scheduled_task_timezone(legacy_task.workflow, config),
+            datetime(2027, 1, 15, tzinfo=UTC),
+        )
+        == "At 09:00 (America/Los_Angeles)"
     )
-    assert read_model.cron_description == "At 09:00 (America/Los_Angeles)"
 
     with (
         patch(
@@ -2952,8 +2907,8 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         assert moved.workflow.timezone == "Europe/Berlin"
         assert moved.workflow.cron_timezone == "Europe/Berlin"
 
-        # 6. Cron-only tool edit preserves an API-updated cron_timezone and leaves timezone untouched
-        la_cron = ScheduledWorkflow(
+        # 6. Cron-only tool edit preserves an existing cron_timezone distinct from timezone and leaves timezone untouched
+        split_tz_cron = ScheduledWorkflow(
             schedule_type="cron",
             cron_schedule=CronSchedule(minute="0", hour="9"),
             message="la standup",
@@ -2961,31 +2916,16 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
             created_by="@alice:server",
             room_id="!test:server",
             timezone="America/Los_Angeles",
-            cron_timezone="America/Los_Angeles",
+            cron_timezone="Europe/Berlin",
         )
         await persist_scheduled_task_state(
             client=client,
             owner_id=None,
             room_id="!test:server",
             task_id="api_tz1",
-            workflow=la_cron,
+            workflow=split_tz_cron,
             writers=state_writers,
             config=config,
-        )
-        api_existing = await get_scheduled_task(client, "!test:server", "api_tz1", runtime_paths)
-        assert api_existing is not None
-        api_edited = build_edited_scheduled_workflow(
-            api_existing.workflow,
-            room_id="!test:server",
-            cron_timezone="Europe/Berlin",
-        )
-        await save_edited_scheduled_task(
-            client=client,
-            workflow=api_edited,
-            config=config,
-            existing_task=api_existing,
-            runtime_paths=runtime_paths,
-            writers=state_writers,
         )
         await edit_scheduled_task(
             ctx,

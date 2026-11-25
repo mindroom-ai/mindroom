@@ -73,21 +73,6 @@ type DateParts = {
   second: number;
 };
 
-function parseDateTimeInput(localDateTime: string): DateParts | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(localDateTime);
-  if (!match) return null;
-
-  const [, year, month, day, hour, minute] = match;
-  return {
-    year: Number(year),
-    month: Number(month),
-    day: Number(day),
-    hour: Number(hour),
-    minute: Number(minute),
-    second: 0,
-  };
-}
-
 function formatDateTimeInput(parts: DateParts): string {
   const year = String(parts.year).padStart(4, "0");
   const month = String(parts.month).padStart(2, "0");
@@ -178,16 +163,16 @@ function getTimezoneOffsetMs(date: Date, timezone: string): number | null {
 }
 
 function toUtcIso(localDateTime: string, timezone: string): string | null {
-  if (!localDateTime) return null;
-  const parsed = parseDateTimeInput(localDateTime);
-  if (!parsed) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(localDateTime);
+  if (!match) return null;
 
+  const [, year, month, day, hour, minute] = match;
   const wallClockAsUtc = Date.UTC(
-    parsed.year,
-    parsed.month - 1,
-    parsed.day,
-    parsed.hour,
-    parsed.minute,
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
     0,
   );
   let utcTimestamp = wallClockAsUtc;
@@ -227,17 +212,14 @@ function formatDateTime(isoDate: string | null, timezone: string): string {
   }
 }
 
-function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
+function toDraft(task: ScheduleTask): ScheduleDraft {
   return {
     task_id: task.task_id,
     room_id: task.room_id,
     message: task.message,
     description: task.description,
     schedule_type: task.schedule_type,
-    execute_at_input: toTimezoneDateTimeInput(
-      task.execute_at,
-      task.timezone || timezone,
-    ),
+    execute_at_input: toTimezoneDateTimeInput(task.execute_at, task.timezone),
     cron_expression: task.cron_expression ?? "",
     silent: task.silent,
   };
@@ -316,10 +298,10 @@ export function Schedules() {
   }, [load]);
 
   useEffect(() => {
-    const saved = selectedTask ? toDraft(selectedTask, timezone) : null;
+    const saved = selectedTask ? toDraft(selectedTask) : null;
     setDraft(saved);
     setSavedDraft(saved);
-  }, [selectedTask, timezone]);
+  }, [selectedTask]);
 
   useEffect(() => {
     if (!selectedTaskId) return;
@@ -405,7 +387,7 @@ export function Schedules() {
       if (draft.execute_at_input !== savedDraft.execute_at_input) {
         const executeAtIso = toUtcIso(
           draft.execute_at_input,
-          selectedTask.timezone || timezone,
+          selectedTask.timezone,
         );
         if (!executeAtIso) {
           toast({
@@ -748,7 +730,7 @@ export function Schedules() {
               {draft.schedule_type === "once" ? (
                 <FieldGroup
                   label="Run At"
-                  helperText={`One-time execution timestamp (${selectedTask.timezone || timezone})`}
+                  helperText={`One-time execution timestamp (${selectedTask.timezone})`}
                   htmlFor="schedule-once-time"
                 >
                   <Input
@@ -763,11 +745,12 @@ export function Schedules() {
               ) : (
                 <FieldGroup
                   label={`Cron Expression (${selectedTask.cron_timezone ?? "UTC (legacy)"})`}
-                  helperText={
-                    selectedTask.cron_description
-                      ? `${selectedTask.cron_description}. Format: minute hour day month weekday (for example: 0 9 * * 1-5)`
-                      : "Format: minute hour day month weekday (for example: 0 9 * * 1-5)"
-                  }
+                  helperText={`${
+                    selectedTask.cron_description &&
+                    draft.cron_expression === selectedTask.cron_expression
+                      ? `${selectedTask.cron_description}. `
+                      : ""
+                  }Format: minute hour day month weekday (for example: 0 9 * * 1-5)`}
                   htmlFor="schedule-cron"
                 >
                   <Input

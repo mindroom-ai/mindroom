@@ -113,7 +113,7 @@ class ScheduledTaskRuntime:
             return False
         runner = _TaskRunner(self, owner, workflow.room_id, task_id)
         run = runner.run_once(workflow) if workflow.schedule_type == "once" else runner.run_cron(workflow)
-        # A schedule outlives the tool call or command that creates it, and a turn's contextvars hold its Agent and tools.
+        # A schedule outlives the tool call that creates it, and a turn's contextvars hold its Agent and tools.
         self._runners[task_id] = (runner, asyncio.create_task(run, name=f"scheduled_task_{task_id}", context=Context()))
         return True
 

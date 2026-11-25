@@ -38,10 +38,8 @@ export interface UpdateScheduleRequest {
   room_id: string;
   message?: string;
   description?: string;
-  schedule_type?: ScheduleType;
   execute_at?: string;
   cron_expression?: string;
-  cron_timezone?: string;
   silent?: boolean;
 }
 

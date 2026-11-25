@@ -267,6 +267,31 @@ class ScheduledWorkflow(BaseModel):
             return value.replace(tzinfo=UTC)
         return value
 
+    def cron_description(self, timezone: str, current_time: datetime | None = None) -> str | None:
+        """Describe this workflow's cron schedule in wall time, or None when it has no cron schedule."""
+        if self.schedule_type != "cron" or self.cron_schedule is None:
+            return None
+        return self.cron_schedule.to_natural_language(
+            timezone,
+            current_time,
+            cron_timezone=scheduled_cron_timezone(self),
+        )
+
+    def next_run_at(self, current_time: datetime | None = None) -> datetime | None:
+        """Return the next UTC run time for this workflow, or None if it cannot be computed."""
+        if self.schedule_type == "once":
+            return self.execute_at
+        if self.cron_schedule is None:
+            return None
+        try:
+            return next_cron_run_utc(
+                self.cron_schedule.to_cron_string(),
+                current_time or datetime.now(UTC),
+                scheduled_cron_timezone(self),
+            )
+        except CroniterError:
+            return None
+
 
 def scheduled_task_timezone(workflow: ScheduledWorkflow, config: Config) -> str:
     """Return the timezone a task's times are interpreted and shown in: its own, else the global one."""
@@ -291,30 +316,6 @@ class ScheduledTaskRecord:
     # Matrix ID of the bot that runs the task. A record read from a room always has one: a task stored without an
     # owner reads with its last writer (`_runtime_authored_task_content`). None only on a record built without a read.
     owner_id: str | None = None
-
-
-@dataclass(frozen=True)
-class ScheduledTaskReadModel:
-    """Display-neutral scheduled task fields derived from persisted state."""
-
-    task_id: str
-    room_id: str
-    status: str
-    schedule_type: Literal["once", "cron"]
-    execute_at: datetime | None
-    next_run_at: datetime | None
-    cron_expression: str | None
-    cron_description: str | None
-    timezone: str
-    cron_timezone: str | None
-    description: str
-    message: str
-    history_limit: int | None
-    thread_id: str | None
-    new_thread: bool
-    silent: bool
-    created_by: str | None
-    created_at: datetime | None
 
 
 def _require_context_room(context: ToolRuntimeContext) -> nio.MatrixRoom:
@@ -379,15 +380,6 @@ def _resolve_model(model: str | None, *, existing_model: str | None, config: Con
     return selected
 
 
-def _validate_cron_expression(cron_expression: str, *, cron_timezone: str) -> None:
-    """Raise SchedulingError if ``cron_expression`` cannot fire in ``cron_timezone``."""
-    try:
-        next_cron_run_utc(cron_expression, datetime.now(UTC), cron_timezone)
-    except (ValueError, CroniterError) as e:
-        msg = f"Invalid cron expression: {e!s}"
-        raise SchedulingError(msg) from e
-
-
 def _parse_cron_schedule(cron_expression: str, *, cron_timezone: str) -> CronSchedule:
     """Parse and validate a 5-field cron expression in ``cron_timezone``."""
     raw = cron_expression.strip()
@@ -396,12 +388,19 @@ def _parse_cron_schedule(cron_expression: str, *, cron_timezone: str) -> CronSch
         _raise_schedule_edit_error(
             "Invalid cron expression: Cron expression must have exactly 5 fields: minute hour day month weekday",
         )
-    _validate_cron_expression(raw, cron_timezone=cron_timezone)
+    try:
+        next_cron_run_utc(raw, datetime.now(UTC), cron_timezone)
+    except (ValueError, CroniterError) as e:
+        msg = f"Invalid cron expression: {e!s}"
+        raise SchedulingError(msg) from e
     return CronSchedule(minute=fields[0], hour=fields[1], day=fields[2], month=fields[3], weekday=fields[4])
 
 
-def _parse_execute_at(execute_at: str, *, timezone: str) -> datetime:
-    """Parse an ISO 8601 datetime with a time component into a future UTC instant."""
+def _parse_execute_at(execute_at: str, *, timezone: str | None) -> datetime:
+    """Parse an ISO 8601 datetime with a time component into a future UTC instant.
+
+    When ``timezone`` is None, ``execute_at`` must include an explicit UTC offset.
+    """
     raw = execute_at.strip()
     if not any(sep in raw for sep in ("T", "t", " ")):
         raise SchedulingError(_EXECUTE_AT_FORMAT_ERROR)
@@ -411,6 +410,8 @@ def _parse_execute_at(execute_at: str, *, timezone: str) -> datetime:
         raise SchedulingError(_EXECUTE_AT_FORMAT_ERROR) from exc
     if parsed.tzinfo is not None:
         resolved = parsed.astimezone(UTC)
+    elif timezone is None:
+        _raise_schedule_edit_error("execute_at must include a UTC offset, e.g. 2026-10-04T09:00:00-04:00.")
     else:
         zone = ZoneInfo(timezone)
         local = parsed.replace(tzinfo=zone)
@@ -443,58 +444,7 @@ def _parse_once_time(*, execute_at: str | None, delay_seconds: int | None, timez
         raise SchedulingError(msg) from exc
 
 
-def build_scheduled_task_read_model(
-    task: ScheduledTaskRecord,
-    *,
-    timezone: str,
-    current_time: datetime | None = None,
-) -> ScheduledTaskReadModel:
-    """Build API/chat-neutral display fields for a scheduled task, described in `timezone` wall time."""
-    workflow = task.workflow
-    cron_expression = workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None
-    cron_tz = scheduled_cron_timezone(workflow)
-    cron_description = (
-        workflow.cron_schedule.to_natural_language(timezone, current_time, cron_timezone=cron_tz)
-        if workflow.cron_schedule
-        else None
-    )
-    next_run_at = workflow.execute_at if workflow.schedule_type == "once" else None
-    if workflow.schedule_type == "cron" and cron_expression:
-        try:
-            next_run_at = next_cron_run_utc(cron_expression, current_time or datetime.now(UTC), cron_tz)
-        except CroniterError:
-            next_run_at = None
-
-    return ScheduledTaskReadModel(
-        task_id=task.task_id,
-        room_id=task.room_id,
-        status=task.status,
-        schedule_type=workflow.schedule_type,
-        execute_at=workflow.execute_at,
-        next_run_at=next_run_at,
-        cron_expression=cron_expression,
-        cron_description=cron_description,
-        timezone=timezone,
-        cron_timezone=workflow.cron_timezone,
-        description=workflow.description,
-        message=workflow.message,
-        history_limit=workflow.history_limit,
-        thread_id=workflow.thread_id,
-        new_thread=workflow.new_thread,
-        silent=workflow.silent,
-        created_by=workflow.created_by,
-        created_at=task.created_at,
-    )
-
-
-def scheduled_task_read_sort_key(task: ScheduledTaskReadModel) -> tuple[int, datetime]:
-    """Sort pending tasks first, then by next execution time."""
-    status_rank = 0 if task.status == "pending" else 1
-    scheduled_time = task.next_run_at or datetime.max.replace(tzinfo=UTC)
-    return (status_rank, scheduled_time)
-
-
-def build_edited_scheduled_workflow(  # noqa: C901, PLR0912
+def build_edited_scheduled_workflow(
     existing_workflow: ScheduledWorkflow,
     room_id: str,
     *,
@@ -503,43 +453,29 @@ def build_edited_scheduled_workflow(  # noqa: C901, PLR0912
     schedule_type: Literal["once", "cron"] | None = None,
     execute_at: datetime | None = None,
     cron_expression: str | None = None,
-    timezone: str | None = None,
-    cron_timezone: str | None = None,
-    history_limit: int | None = None,
-    clear_history_limit: bool = False,
     silent: bool | None = None,
-    model: str | None = None,
-    created_by: str | None = None,
 ) -> ScheduledWorkflow:
     """Build a validated patch-style workflow edit while preserving immutable metadata."""
     if schedule_type and schedule_type != existing_workflow.schedule_type:
         _raise_schedule_edit_error(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
-    if history_limit is not None and clear_history_limit:
-        _raise_schedule_edit_error("Cannot set both history_limit and clear_history_limit.")
-    _validate_history_limit(history_limit)
-    validated_timezone = _validate_timezone(timezone) if timezone is not None else None
-    validated_cron_timezone = _validate_timezone(cron_timezone) if cron_timezone is not None else None
 
-    resolved_schedule_type = existing_workflow.schedule_type
-    if resolved_schedule_type == "once":
+    if existing_workflow.schedule_type == "once":
         if cron_expression is not None:
             _raise_schedule_edit_error("cron_expression is only valid for cron schedules")
-        if validated_cron_timezone is not None:
-            _raise_schedule_edit_error("cron_timezone is only valid for cron schedules")
         resolved_execute_at = execute_at or existing_workflow.execute_at
         if resolved_execute_at is None:
             _raise_schedule_edit_error("execute_at is required for one-time schedules")
+        if resolved_execute_at.tzinfo is None:
+            resolved_execute_at = resolved_execute_at.replace(tzinfo=UTC)
         cron_schedule = None
-        resolved_cron_timezone = None
     else:
         if execute_at is not None:
             _raise_schedule_edit_error("execute_at is only valid for one-time schedules")
-        resolved_cron_timezone = validated_cron_timezone or existing_workflow.cron_timezone
-        cron_schedule = existing_workflow.cron_schedule
-        if cron_expression is not None:
-            cron_schedule = _parse_cron_schedule(cron_expression, cron_timezone=resolved_cron_timezone or "UTC")
-        elif cron_schedule is not None and validated_cron_timezone is not None:
-            _validate_cron_expression(cron_schedule.to_cron_string(), cron_timezone=validated_cron_timezone)
+        cron_schedule = (
+            _parse_cron_schedule(cron_expression, cron_timezone=scheduled_cron_timezone(existing_workflow))
+            if cron_expression is not None
+            else existing_workflow.cron_schedule
+        )
         if cron_schedule is None:
             _raise_schedule_edit_error("cron_expression is required for cron schedules")
         resolved_execute_at = None
@@ -548,23 +484,14 @@ def build_edited_scheduled_workflow(  # noqa: C901, PLR0912
     if not message_value:
         _raise_schedule_edit_error("message cannot be empty")
     description_value = (description if description is not None else existing_workflow.description).strip()
-    if resolved_execute_at is not None and resolved_execute_at.tzinfo is None:
-        resolved_execute_at = resolved_execute_at.replace(tzinfo=UTC)
     return existing_workflow.model_copy(
         update={
             "execute_at": resolved_execute_at,
             "cron_schedule": cron_schedule,
             "message": message_value,
             "description": description_value or message_value,
-            "history_limit": None
-            if clear_history_limit
-            else (existing_workflow.history_limit if history_limit is None else history_limit),
-            "model": existing_workflow.model if model is None else (model or None),
-            "created_by": created_by or existing_workflow.created_by,
             "room_id": room_id,
             "silent": existing_workflow.silent if silent is None else silent,
-            "timezone": validated_timezone or existing_workflow.timezone,
-            "cron_timezone": resolved_cron_timezone,
         },
     )
 
@@ -871,14 +798,7 @@ async def persist_scheduled_task_state(
         "task_id": task_id,
         "revision": revision,
         "workflow": workflow.model_dump_json(),
-        "cron_description": (
-            workflow.cron_schedule.to_natural_language(
-                scheduled_task_timezone(workflow, config),
-                cron_timezone=scheduled_cron_timezone(workflow),
-            )
-            if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
-            else None
-        ),
+        "cron_description": workflow.cron_description(scheduled_task_timezone(workflow, config)),
         "status": status,
         "created_at": (created_at or datetime.now(UTC)).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
@@ -974,12 +894,12 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
 
 
 def _extract_mentioned_agents_from_text(
-    full_text: str,
+    message: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Extract valid agent mentions from scheduling text."""
-    mentioned_user_ids = parse_mentions_in_text(full_text, config, runtime_paths)[1]
+    """Extract valid agent mentions from a scheduled message."""
+    mentioned_user_ids = parse_mentions_in_text(message, config, runtime_paths)[1]
     # Text without mentions does not need prepared Matrix accounts.
     if not mentioned_user_ids:
         return []
@@ -1004,13 +924,13 @@ def _scheduled_task_response_text(
     task_id: str,
     config: Config,
 ) -> str:
-    """Render the stable response persisted with one command-owned mutation."""
+    """Render the confirmation message for a scheduled or edited task."""
     timezone = scheduled_task_timezone(workflow, config)
     if workflow.schedule_type == "once" and workflow.execute_at:
         response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, timezone)}\n"
     elif workflow.cron_schedule:
         cron_tz = scheduled_cron_timezone(workflow)
-        natural_desc = workflow.cron_schedule.to_natural_language(timezone, cron_timezone=cron_tz)
+        natural_desc = workflow.cron_description(timezone)
         cron_str = workflow.cron_schedule.to_cron_string()
         response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
         response_text += f"   _(Cron: `{cron_str}` {cron_tz})_\n"
@@ -1195,22 +1115,6 @@ def _scheduled_call_trigger_message(
     return message
 
 
-def _parse_send_time(execute_at: str) -> datetime:
-    """Return the future UTC send time, or raise why it cannot be used."""
-    try:
-        send_at = datetime.fromisoformat(execute_at)
-    except ValueError as exc:
-        msg = "execute_at must be an ISO 8601 date and time, e.g. 2026-10-04T09:00:00-04:00."
-        raise SchedulingError(msg) from exc
-    if send_at.tzinfo is None:
-        msg = "execute_at must include a UTC offset, e.g. 2026-10-04T09:00:00-04:00."
-        raise SchedulingError(msg)
-    if send_at <= datetime.now(UTC):
-        msg = "execute_at must be in the future."
-        raise SchedulingError(msg)
-    return send_at.astimezone(UTC)
-
-
 async def _checked_scheduled_call(
     context: ToolRuntimeContext,
     *,
@@ -1227,7 +1131,7 @@ async def _checked_scheduled_call(
     if agent_name not in config.agents:
         msg = "Only an agent, not a team, can schedule a pre-approved tool call."
         raise SchedulingError(msg)
-    send_at = _parse_send_time(execute_at)
+    send_at = _parse_execute_at(execute_at, timezone=None)
     approver_id = resolve_tool_approval_approver(config, runtime_paths, scheduled_by)
     if approver_id is None:
         msg = "Only a human requester can pre-approve a scheduled tool call."
@@ -1380,7 +1284,7 @@ def _resolve_tool_edit_schedule(
     cron: str | None,
     timezone: str | None,
 ) -> tuple[datetime | None, str | None, str | None]:
-    """Resolve tool-edit timing and timezone fields before passing them to ``build_edited_scheduled_workflow``."""
+    """Resolve tool-edit timing and timezone fields."""
     if sum(value is not None for value in (execute_at, delay_seconds, cron)) > 1:
         _raise_schedule_edit_error("Provide at most one of execute_at, delay_seconds, or cron.")
     validated_tz = _validate_timezone(timezone) if timezone is not None else None
@@ -1388,7 +1292,7 @@ def _resolve_tool_edit_schedule(
         parse_tz = validated_tz or scheduled_task_timezone(existing, config)
         return (
             _parse_once_time(execute_at=execute_at, delay_seconds=delay_seconds, timezone=parse_tz),
-            validated_tz,
+            validated_tz or existing.timezone,
             None,
         )
 
@@ -1397,16 +1301,18 @@ def _resolve_tool_edit_schedule(
             f"Cannot set execute_at or delay_seconds on a cron schedule. {_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR}.",
         )
     if cron is not None:
-        resolved_cron_tz = validated_tz or existing.cron_timezone or scheduled_task_timezone(existing, config)
-        new_tz = validated_tz or (resolved_cron_tz if existing.timezone is None else None)
-        return None, new_tz, resolved_cron_tz
+        new_cron_tz = validated_tz or existing.cron_timezone or scheduled_task_timezone(existing, config)
+        new_tz = validated_tz or (new_cron_tz if existing.timezone is None else existing.timezone)
+        return None, new_tz, new_cron_tz
     if validated_tz is not None:
         if existing.cron_timezone is None:
             _raise_schedule_edit_error(
                 "Cannot update timezone on a legacy UTC cron schedule without also passing `cron` in the target timezone.",
             )
+        if existing.cron_schedule is not None:
+            _parse_cron_schedule(existing.cron_schedule.to_cron_string(), cron_timezone=validated_tz)
         return None, validated_tz, validated_tz
-    return None, None, None
+    return None, existing.timezone, existing.cron_timezone
 
 
 async def edit_scheduled_task(
@@ -1438,6 +1344,9 @@ async def edit_scheduled_task(
     config = context.current_config
 
     try:
+        if history_limit is not None and clear_history_limit:
+            _raise_schedule_edit_error("Cannot set both history_limit and clear_history_limit.")
+        _validate_history_limit(history_limit)
         selected_model = _resolve_model(model, existing_model=existing.model, config=config)
         resolved_execute_at, new_tz, new_cron_tz = _resolve_tool_edit_schedule(
             existing,
@@ -1447,20 +1356,27 @@ async def edit_scheduled_task(
             cron=cron,
             timezone=timezone,
         )
+        tool_updated = existing.model_copy(
+            update={
+                "timezone": new_tz,
+                "cron_timezone": new_cron_tz,
+                "history_limit": (
+                    None
+                    if clear_history_limit
+                    else (existing.history_limit if history_limit is None else history_limit)
+                ),
+                "model": selected_model,
+                "created_by": context.requester_id,
+            },
+        )
         updated_workflow = build_edited_scheduled_workflow(
-            existing,
+            tool_updated,
             room_id=room_id,
             message=message,
             description=description,
             execute_at=resolved_execute_at,
             cron_expression=cron,
-            timezone=new_tz,
-            cron_timezone=new_cron_tz,
-            history_limit=history_limit,
-            clear_history_limit=clear_history_limit,
             silent=silent,
-            model="" if model is not None and selected_model is None else selected_model,
-            created_by=context.requester_id,
         )
         if existing == updated_workflow.model_copy(update={"created_by": existing.created_by}):
             _raise_schedule_edit_error("No changes specified for this scheduled task.")
@@ -1528,14 +1444,7 @@ async def list_scheduled_tasks(  # noqa: C901
             if workflow.schedule_type == "once" and workflow.execute_at:
                 time_str = _format_scheduled_time(workflow.execute_at, timezone)
             else:
-                time_str = (
-                    workflow.cron_schedule.to_natural_language(
-                        timezone,
-                        cron_timezone=scheduled_cron_timezone(workflow),
-                    )
-                    if workflow.cron_schedule
-                    else "recurring"
-                )
+                time_str = workflow.cron_description(timezone) or "recurring"
 
             msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
                 "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
