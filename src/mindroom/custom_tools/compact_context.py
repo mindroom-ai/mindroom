@@ -86,4 +86,5 @@ class CompactContextTools(Toolkit):
             execution_identity=self._execution_identity,
             active_model_name=active_model_name,
             room_id=room_id,
+            thread_id=thread_id,
         )

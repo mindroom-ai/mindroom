@@ -94,6 +94,7 @@ def resume_inputs(
     user_id: str | None,
     model_name: str,
     history_scope: HistoryScope | None,
+    compaction_requests: set[HistoryScope] | None = None,
 ) -> tuple[list[Message], Callable[[str], RunContext]]:
     """Return the resume request of ``paused`` where ``storage`` stores it, and the context of its resumed run.
 
@@ -112,6 +113,7 @@ def resume_inputs(
             session=session,
             history_scope=history_scope,
             model_name=model_name,
+            compaction_requests=set() if compaction_requests is None else compaction_requests,
         ),
     )
 
@@ -129,6 +131,7 @@ def resume_from_session(
     persist: Persist[RunRecord],
     request_template: ModelRequest,
     model_name: str,
+    compaction_requests: set[HistoryScope] | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Resume ``paused`` where ``storage`` stores it with ``decisions``: the history ``plan`` replays, then the request.
 
@@ -144,6 +147,7 @@ def resume_from_session(
         user_id=user_id,
         model_name=model_name,
         history_scope=None,
+        compaction_requests=compaction_requests,
     )
     return resume_agent(
         spec,
@@ -237,6 +241,10 @@ class ResumeRunner:
         return configured_replay_plan(history_settings=self.build.history_settings, estimated_tokens=0)
 
     @cached_property
+    def _compaction_requests(self) -> set[HistoryScope]:
+        return set()
+
+    @cached_property
     def _hooks(self) -> LoopHooks:
         return agent_loop_hooks(
             self.build,
@@ -277,6 +285,7 @@ class ResumeRunner:
             persist=persist_into(None, self.storage),
             request_template=template,
             model_name=self.model_name,
+            compaction_requests=self._compaction_requests,
         )
         return with_resumed_turn_log_context(events)
 

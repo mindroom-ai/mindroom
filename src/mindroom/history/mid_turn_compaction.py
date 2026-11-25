@@ -221,8 +221,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             live_request,
             messages[:leading],
         )
-    requested = compaction.scope in state.run.compaction_requests
-    state.run.compaction_requests.discard(compaction.scope)
+    requested = _consume_request(state.run.compaction_requests, compaction.scope)
     if compaction.stopped and not requested:
         return
     policy = _policy(compaction, forced=requested)
@@ -263,6 +262,13 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             run_id=state.record.run_id,
         )
         compaction.stopped = True
+
+
+def _consume_request(requests: set[HistoryScope] | None, scope: HistoryScope) -> bool:
+    if requests is None or scope not in requests:
+        return False
+    requests.discard(scope)
+    return True
 
 
 def _disable_native_compaction(state: LoopState, *, requested: bool) -> None:

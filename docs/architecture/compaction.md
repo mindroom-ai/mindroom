@@ -26,7 +26,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   A team turn records the events it consumed only in its stored run, as an agent turn does, because a second copy in session metadata would outlive the runs an edit removes and hide their messages from the regenerated turn.
   For the same reason, seen ids that earlier releases copied into session metadata are not read: every event that history still represents is also held by its stored run or summary row.
 - A manual compaction request (`/compact`, or `compact_context` called outside a running turn) is one flag that the compacting reply clears, not a request id, because no reply of the scope can run alongside the one compacting; the [Limitations](#limitations) name the one writer that can.
-  Inside a running turn, `compact_context` instead records the target `HistoryScope` in the run's shared `compaction_requests` set so the mid-turn hook compacts immediately before the next model request of that scope (including warm-cache fork compaction and inline reply compaction reporting), bypassing automatic-compaction enablement and size thresholds.
+  Inside a running turn, `compact_context` runs directly in the loop (never as a detached background job) and signals the run's shared per-turn request set so the mid-turn hook compacts immediately before the next model request of that scope (including warm-cache fork compaction and inline reply compaction reporting), bypassing automatic-compaction enablement and size thresholds.
 - A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
 - The summary replays as the first history message instead of inside the system prompt, so a compaction never changes the cached prompt prefix, and minimal agents with a string system message see it too.
   After a mid-turn compaction it follows that turn's prompt instead, in the rewritten request, its resume, and later turns while that run replays first, because a fast model that reads the prompt last restarts the request even when the summary records it finished (evidence in `docs/dev/2026-10-10-compaction-unification-design.md`).
@@ -67,7 +67,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Limitations
 
-A `compact_context` call running as a background tool job can request compaction while a later reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
+A next-reply compaction request made outside a running turn can land while a reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
 Stored history grows until the conversation is deleted.
 On a route whose model window exceeds its replay window, a refused fold can leave a request over the model's window when one tool batch outgrows that gap (tools with output files save outputs above 50 KiB by default to the workspace, so it takes several large parallel outputs or a tool without that support), and the reply then fails with a provider error.
 Storing the summary in that case was rejected, because it would answer that reply but fail every later reply that replays it.

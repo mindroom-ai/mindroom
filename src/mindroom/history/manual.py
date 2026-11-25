@@ -34,6 +34,7 @@ async def request_compaction_before_next_reply(
     execution_identity: ToolExecutionIdentity | None,
     active_model_name: str | None,
     room_id: str | None,
+    thread_id: str | None = None,
 ) -> str:
     """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
 
@@ -49,6 +50,7 @@ async def request_compaction_before_next_reply(
         execution_identity=execution_identity,
         active_model_name=active_model_name,
         room_id=room_id,
+        thread_id=thread_id,
     )
     if unavailable is not None:
         return f"Error: Compaction is unavailable for this scope because {unavailable}."

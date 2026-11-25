@@ -127,6 +127,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         session=session,
         metadata=deepcopy(persisted.metadata),
         model_name=continuation.runtime_model_name,
+        compaction_requests=None,
     )
     turn = ResponseTurnContext(
         entity_label=continuation.entity_name,
