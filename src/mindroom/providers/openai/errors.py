@@ -7,6 +7,7 @@ codes are preserved so user-facing messages and compaction can still tell failur
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import MediaKind
 
 __all__ = [
+    "body_retry_after",
     "provider_error",
     "rejected_media",
     "sdk_failures",
@@ -84,6 +86,27 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
     )
 
 
+def body_retry_after(body: object) -> float | None:
+    """Return the reset a Codex usage-limit error body names, in seconds from now, or None.
+
+    The Codex backend names it as ``resets_in_seconds`` or as a ``resets_at`` Unix time, and sends no header.
+    """
+    fields = cast("Mapping[str, Any]", body) if isinstance(body, Mapping) else {}
+    seconds, at = fields.get("resets_in_seconds"), fields.get("resets_at")
+    if isinstance(seconds, int | float) and not isinstance(seconds, bool) and seconds > 0:
+        return float(seconds)
+    if isinstance(at, int | float) and not isinstance(at, bool) and (remaining := at - time.time()) > 0:
+        return remaining
+    return None
+
+
+def _retry_after(headers: Mapping[str, str], body: object) -> float | None:
+    """Return the ``Retry-After`` hint, else the reset a Codex usage-limit body names, in seconds from now."""
+    if (hint := retry_after_seconds(headers)) is not None:
+        return hint
+    return body_retry_after(body)
+
+
 def provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the normalized error for one SDK or transport failure; ``provider`` is the route's provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
@@ -100,12 +123,18 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
             status_code=error.status_code,
             code=code,
             error_type=error_type,
-            retry_after_seconds=retry_after_seconds(error.response.headers),
+            retry_after_seconds=_retry_after(error.response.headers, error.body),
         )
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
         message, code, error_type = _error_fields(error.body)
-        return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
+        return classify_provider_error(
+            message or error.message,
+            provider=provider,
+            code=code,
+            error_type=error_type,
+            retry_after_seconds=body_retry_after(error.body),
+        )
     return ProviderError(failure_text(error), provider=provider)
 
 

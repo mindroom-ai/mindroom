@@ -92,7 +92,7 @@ async def test_a_summary_whose_provider_reported_no_usage_records_none() -> None
     """A response that is timed but carries no counters reported no usage, so the summary records none."""
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(usage: MessageMetrics) -> None:
+    async def on_usage(_identity: object, usage: MessageMetrics) -> None:
         recorded.append(usage)
 
     await generate_compaction_summary(

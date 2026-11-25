@@ -60,6 +60,7 @@ class ProviderError(Exception):
         provider_code: str | None = None,
         retry_after_seconds: float | None = None,
         rejected_media: frozenset[str] = frozenset(),
+        already_retried: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -68,6 +69,7 @@ class ProviderError(Exception):
         self.provider_code = provider_code
         self.retry_after_seconds = retry_after_seconds
         self.rejected_media = rejected_media
+        self.already_retried = already_retried
         self.replay_stripped = False
         # The retry stage's internal budget, typed ``object`` to keep ``providers.pipeline`` out of this module.
         self.retry_budget: object | None = None
@@ -141,6 +143,7 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
         usage: MessageMetrics,
         message: str | None = None,
         provider_code: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         if message is None:
             message = (
@@ -156,6 +159,35 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
             provider_code=provider_code,
         )
         self.usage = usage
+        self.model_id = model_id
+
+
+# Statuses after which an unchanged request can succeed: request timeout, OpenAI's transient conflict (409),
+# and every 5xx server error (including Anthropic 529 overloaded and CDN 520-524 origin failures).
+_TRANSIENT_CLIENT_STATUSES = frozenset({408, 409})
+_SERVER_ERROR_RANGE = range(500, 600)
+
+
+def is_transient_status(status: int | None) -> bool:
+    """Return whether HTTP ``status`` indicates a transient provider error (408, 409, or 5xx)."""
+    return status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE
+
+
+def fails_over(error: ProviderError) -> bool:
+    """Return whether ``error`` means the provider cannot serve now, so another model may answer the request."""
+    if error.code in {QUOTA_EXHAUSTED, TOKENS_PER_MINUTE}:
+        return True
+    if isinstance(error, ContextWindowExceeded):
+        return False
+    if isinstance(error, RateLimited | ProviderUnavailable | AuthenticationFailed):
+        return True
+    if error.already_retried:
+        return True
+    return (
+        type(error) is ProviderError
+        and error.code is None
+        and (error.status_code == 429 or is_transient_status(error.status_code))
+    )
 
 
 __all__ = [
@@ -175,6 +207,8 @@ __all__ = [
     "ProviderError",
     "ProviderUnavailable",
     "RateLimited",
+    "fails_over",
     "incomplete_stream_error",
     "incomplete_turn_error",
+    "is_transient_status",
 ]

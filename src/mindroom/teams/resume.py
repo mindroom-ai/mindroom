@@ -55,7 +55,7 @@ from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.approval.resume import ResumeDecisions
@@ -75,6 +75,11 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _notify_model(on_model_changed: Callable[[str], None] | None, model_name: str | None) -> None:
+    if on_model_changed is not None and model_name is not None:
+        on_model_changed(model_name)
 
 
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
@@ -317,6 +322,7 @@ async def continue_paused_team_run(
     progress: ProgressPublisher | None,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    on_model_changed: Callable[[str], None] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
@@ -352,6 +358,7 @@ async def continue_paused_team_run(
     try:
         set_consumption_storage(scope.storage_factory)
         persisted = _stored_paused_team_run(scope, run_id)
+        _notify_model(on_model_changed, persisted.model_name)
         decided = approval_decisions(approval_calls)
         tools = current_plugins(config, runtime_paths).tools
         async with asyncio.TaskGroup() as recovery:
@@ -439,6 +446,7 @@ async def continue_paused_team_run(
                     replay_plan=plan,
                     prompt_id=None,
                     checkpoints=False,
+                    on_model_changed=on_model_changed,
                 ),
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
@@ -475,9 +483,12 @@ async def continue_paused_team_run(
         # a failed member run's reason; a run that paused again shows nothing more.
         for run in (continued, *continued.ended_member_runs):
             attempt.show_unshown_handover(run)
-        paused = paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())
-        if paused is not None:
-            return continued_team_pause(presentation, paused, quiet=quiet)
+        if (paused := paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())) is not None:
+            return replace(
+                continued_team_pause(presentation, paused, quiet=quiet),
+                runtime_model_name=model_name,
+                answering_model_name=continued.model_name,
+            )
         if continued.status is not RunStatus.completed:
             # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
             raise pause_without_approval_error(continued, entity_label="team")

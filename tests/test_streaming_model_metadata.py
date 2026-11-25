@@ -1266,6 +1266,163 @@ async def test_approval_pause_resumed_stream_progress_and_final_carry_model_meta
 
 
 @pytest.mark.asyncio
+async def test_approval_pause_and_resume_badges_track_fallback_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """Fallback model badges survive approval pause writes, resumed progress writes, and final metadata."""
+    from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
+    from mindroom.llm.provider import ModelRequest, StreamEvent  # noqa: PLC0415
+    from mindroom.providers import registry as provider_registry  # noqa: PLC0415
+
+    del echo_tool
+    real_build = provider_registry.build_model_provider
+    resume_gate = asyncio.Event()
+    resumed_answer = _gated_answer("Resumed ", resume_gate, "finished.")
+    gated_call = calls(tool_call("echo", "call-1", text="hi"))
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [], "large": [gated_call], "cheap": [resumed_answer]},
+    )
+    config = turn.bot.config
+    config.models["default"] = config.models["default"].model_copy(update={"fallbacks": ["large", "cheap"]})
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    config.background_tool_jobs.enabled = False
+
+    class _QuotaWhenExhausted(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            if self.turns:
+                async for event in super().stream(request):
+                    yield event
+                return
+            self.requests.append(request)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+
+    monkeypatch.setattr(provider_registry, "build_model_provider", real_build)
+    turn.models["default"] = _QuotaWhenExhausted([], identity=turn.models["default"].identity)
+    turn.models["large"] = _QuotaWhenExhausted([gated_call], identity=turn.models["large"].identity)
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, ref, **_kw: turn.models[ref],
+    )
+
+    _install_approval_store(turn)
+    expected_pause_model = model_payload(config, "large")
+    expected_resume_model = model_payload(config, "cheap")
+    request = _plain_request(_target())
+    try:
+        assert await turn.runner.generate_response(request) == Owned()
+
+        pause_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_APPROVAL_PENDING]
+        assert pause_writes
+        _assert_provisional_ai_run(pause_writes[-1], expected_pause_model)
+
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        assert continuation.runtime_model_name == "default"
+
+        resumed_writes = await _approve_and_resume(turn, continuation, resume_gate)
+        resumed_streaming = [w for w in resumed_writes if _stream_status(w) == STREAM_STATUS_STREAMING]
+        assert resumed_streaming
+        _assert_provisional_ai_run(resumed_streaming[-1], expected_resume_model)
+
+        final_write = resumed_writes[-1]
+        assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
+        final_ai_run = _ai_run(final_write)
+        assert final_ai_run is not None
+        assert final_ai_run["model"] == {**expected_resume_model, "fallback_from": "default"}
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+async def test_capped_approval_resume_blocks_priced_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """An approval resume after the requester hits their cap sends zero requests to a priced fallback."""
+    from mindroom.budgets.monitor import BudgetMonitor  # noqa: PLC0415
+    from mindroom.config.models import ModelPricing  # noqa: PLC0415
+    from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
+    from mindroom.llm.provider import ModelRequest, StreamEvent  # noqa: PLC0415
+    from mindroom.providers import registry as provider_registry  # noqa: PLC0415
+
+    del echo_tool
+    real_build = provider_registry.build_model_provider
+    gated_call = calls(tool_call("echo", "call-1", text="hi"))
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10.0),
+        scripts={"default": [gated_call], "large": [answer("must not run")]},
+    )
+    config = turn.bot.config
+    config.models["default"] = config.models["default"].model_copy(update={"fallbacks": ["large"]})
+    config.models["large"] = config.models["large"].model_copy(
+        update={"pricing": ModelPricing(input=5, output=25)},
+    )
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    config.background_tool_jobs.enabled = False
+    from tests.budget_helpers import set_month_spend  # noqa: PLC0415
+
+    monitor = BudgetMonitor(runtime_paths=runtime_paths_for(config), config_provider=lambda: config)
+    monkeypatch.setattr(turn.runner.deps.runtime.orchestrator, "_budgets", monitor)
+
+    class _PauseThenQuotaModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            if self.turns:
+                async for event in super().stream(request):
+                    yield event
+                return
+            self.requests.append(request)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+
+    priced_calls: list[str] = []
+
+    class _CountingPaidModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            priced_calls.append(self.identity.id)
+            async for event in super().stream(request):
+                yield event
+
+    turn.models["default"] = _PauseThenQuotaModel([gated_call], identity=turn.models["default"].identity)
+    turn.models["large"] = _CountingPaidModel([answer("must not run")], identity=turn.models["large"].identity)
+    monkeypatch.setattr(provider_registry, "build_model_provider", real_build)
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, ref, **_kw: turn.models[ref],
+    )
+
+    _install_approval_store(turn)
+    request = _plain_request(_target())
+    try:
+        assert await turn.runner.generate_response(request) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+
+        # Requester crosses cap before approving and resuming.
+        set_month_spend(monitor, {_REQUESTER: 15.0})
+        await _approve_and_resume(turn, continuation, asyncio.Event())
+
+        assert priced_calls == []
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
 async def test_approval_failure_note_carries_terminal_ai_run_with_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

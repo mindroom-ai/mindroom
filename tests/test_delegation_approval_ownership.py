@@ -33,6 +33,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -472,3 +473,105 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
     ]
     assert (trace[0].result_preview or "").startswith("Child finished.")
     assert trace[1].result_preview == '{"operation": "addition", "result": 5.0}'
+
+
+@pytest.mark.asyncio
+async def test_resumed_delegated_child_fallback_updates_active_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a paused delegated child fails over on approval resume, note_child_active_model receives the backup."""
+    from mindroom.config.models import ModelConfig  # noqa: PLC0415
+    from mindroom.delegation import execution as delegation_execution  # noqa: PLC0415
+    from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
+    from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent  # noqa: PLC0415
+    from mindroom.providers import registry as provider_registry  # noqa: PLC0415
+
+    paths = _runtime_paths(tmp_path)
+    config = native_delegation_config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", tools=[], delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child", tools=[{"calculator": {"defer": True}}]),
+        },
+        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
+    )
+    config.models["default"] = ModelConfig(provider="synthetic", id="primary-id", fallbacks=["backup"])
+    config.models["backup"] = ModelConfig(provider="synthetic", id="backup-id")
+    entity_ids(config, paths)
+    identity = _identity()
+
+    class _PauseThenQuota(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            if self.turns:
+                async for event in super().stream(request):
+                    yield event
+                return
+            self.requests.append(request)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+
+    child_primary = _PauseThenQuota([calls(_deferred_call("child-add", "add", a=2, b=3))])
+    child_backup = ScriptedModel(
+        [answer("Backup finished.")],
+        identity=ModelIdentity(id="backup-id", provider="Backup"),
+    )
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add 2 and 3")), answer("Done.")],
+    )
+    real_build = provider_registry.build_model_provider
+
+    def _single(_cfg: Config, _paths: RuntimePaths, ref: str, **kwargs: object) -> ScriptedModel:
+        exec_id = kwargs.get("execution_identity")
+        agent = getattr(exec_id, "agent_name", None)
+        if agent == "leader":
+            return parent
+        return child_backup if ref == "backup" else child_primary
+
+    monkeypatch.setattr(provider_registry, "build_model_provider", real_build)
+    monkeypatch.setattr(provider_registry, "_build_single_provider", _single)
+
+    observed_models: list[str] = []
+    real_note = delegation_execution.note_child_active_model
+
+    def _spy_note(child: object, model_name: str) -> None:
+        observed_models.append(model_name)
+        real_note(child, model_name)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(delegation_execution, "note_child_active_model", _spy_note)
+
+    paused = await respond("leader", "Delegate", config=config, runtime_paths=paths, identity=identity, run_id="p-fb")
+    assert isinstance(paused, PausedAttempt)
+    (pending,) = paused.tools
+    call = ApprovalCall(
+        tool_call_id=pending.tool_call_id,
+        tool_name="add",
+        invoking_agent="child",
+        toolkit_name="calculator",
+        expires_at_ns=2**62,
+        arguments_digest=approval_arguments_digest(pending.tool_args),
+    )
+    continuation = approval_continuation(
+        approval_id="approval-fb",
+        run_id=paused.run_id,
+        session_id=paused.session_id,
+        entity_name="leader",
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=decided_calls((call,), {call.tool_call_id: True}),
+        runtime_model_name=paused.runtime_model_name,
+        delegation_storage_bindings=paused.delegation_storage_bindings,
+    )
+    result = await approval_executor(config, paths).continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+        tool_context=_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="leader"),
+        tool_trace_collector=[],
+        quiet=False,
+        progress=None,
+        system_enrichment_items=(),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert "backup" in observed_models

@@ -324,7 +324,13 @@ async def media_fallback_stream(
 
     def without_rejected_media(error: ProviderError) -> Retry | None:
         nonlocal failure, sent_broad, removed_kinds
-        if sent_broad or not remaining or error.retryable or error.code in _NOT_MEDIA_RELATED_CODES:
+        if (
+            sent_broad
+            or not remaining
+            or error.retryable
+            or error.already_retried
+            or error.code in _NOT_MEDIA_RELATED_CODES
+        ):
             return None
         log = partial(
             logger.warning,

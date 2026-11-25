@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
 from mindroom.attachments.ids import unique_attachment_ids
+from mindroom.budgets import bind_budget_scope
 from mindroom.hooks import (
     CustomEventContext,
     HookBindings,
@@ -100,14 +101,25 @@ def current_requester_id() -> str | None:
     return context.requester_id if context is not None else None
 
 
+def _read_budget_scope(
+    context: ToolRuntimeContext | DetachedRequesterContext,
+) -> tuple[BudgetMonitor | None, str | None]:
+    return (context.budget_monitor, context.requester_id)
+
+
 @contextmanager
 def detached_requester_context(context: DetachedRequesterContext | None) -> Iterator[None]:
     """Bind detached authority for an operation without leaking between requests."""
     token = _DETACHED_REQUESTER_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _DETACHED_REQUESTER_CONTEXT.reset(token)
+    budget = bind_budget_scope(
+        None if context is None else (lambda: _read_budget_scope(context)),
+        detached=True,
+    )
+    with budget:
+        try:
+            yield
+        finally:
+            _DETACHED_REQUESTER_CONTEXT.reset(token)
 
 
 @dataclass(frozen=True)
@@ -754,10 +766,12 @@ async def emit_custom_event(
 def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
     """Set shared tool runtime context for the current async execution scope."""
     token = _TOOL_RUNTIME_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _TOOL_RUNTIME_CONTEXT.reset(token)
+    budget = bind_budget_scope(None if context is None else (lambda: _read_budget_scope(context)))
+    with budget:
+        try:
+            yield
+        finally:
+            _TOOL_RUNTIME_CONTEXT.reset(token)
 
 
 @contextmanager

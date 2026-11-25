@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +12,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.structured import output_format_prompt
-from mindroom.llm.errors import ProviderUnavailable
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, ModelProvenance
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
@@ -26,6 +27,8 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agno_parity.golden_files import turn_message
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.token_counter import fake_token_counter
@@ -234,3 +237,138 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
 
     with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await complete_prompt(provider, "Thread: ...", instructions=["Summarize."])
+
+
+@pytest.mark.asyncio
+async def test_complete_prompt_fails_over_between_unlike_structured_output_providers() -> None:
+    """Failing over between unlike structured-output routes adapts prompt & decoding and records the answering model."""
+
+    @dataclass
+    class _FailingProvider(_RecordingProvider):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+            yield  # pragma: no cover
+
+    # 1. Native primary -> forced_tool fallback: decoded from tool arguments, HelperUsage names fallback.
+    primary_native = _FailingProvider(
+        answer="",
+        identity=ModelIdentity(id="gpt-6-sol", provider="Codex"),
+        capabilities=Capabilities(structured_output="native"),
+    )
+    fallback_tool = _RecordingProvider(
+        answer='{"answer": "yes", "confidence": 9}',
+        identity=ModelIdentity(id="llama-4", provider="Groq"),
+        capabilities=Capabilities(structured_output="forced_tool"),
+    )
+    chained = WrappedProvider(
+        primary_native,
+        partial(
+            fallback_stream,
+            model_name="sol",
+            chain=(ChainModel("groq", None, lambda: fallback_tool, "groq"),),
+            cooldown_key="sol",
+        ),
+    )
+
+    result = await complete_prompt(chained, "Is it raining?", instructions=["Decide."], schema=_Verdict, run_id="h-1")
+
+    assert result.content == _Verdict(answer="yes", confidence=9)
+    assert (result.usage.model, result.usage.provider) == ("llama-4", "Groq")
+    [details] = result.usage.metrics.to_dict()["details"]["model"]
+    assert (details["id"], details["provider"]) == ("llama-4", "Groq")
+
+    # 2. Native primary -> json_mode fallback: JSON schema prompt is added and fenced output is parsed leniently.
+    fallback_json = _RecordingProvider(
+        answer='```json\n{"answer": "no"}\n```',
+        identity=LUNA,
+        capabilities=Capabilities(structured_output="json_mode"),
+    )
+    chained_json = WrappedProvider(
+        primary_native,
+        partial(
+            fallback_stream,
+            model_name="sol",
+            chain=(ChainModel("luna", None, lambda: fallback_json, "luna"),),
+            cooldown_key="sol",
+        ),
+    )
+
+    result_json = await complete_prompt(chained_json, "Is it raining?", instructions=["Decide."], schema=_Verdict)
+
+    assert result_json.content == _Verdict(answer="no")
+    assert "<json_schema>" in str(fallback_json.requests[0].messages[0].content)
+    assert (result_json.usage.model, result_json.usage.provider) == ("gpt-6-luna", "OpenAI")
+
+    # 3. json_mode primary -> forced_tool fallback: JSON schema prompt is stripped before sending to forced_tool.
+    primary_json = _FailingProvider(
+        answer="",
+        identity=IDENTITY,
+        capabilities=Capabilities(structured_output="json_mode"),
+    )
+    fallback_tool_2 = _RecordingProvider(
+        answer='{"answer": "maybe"}',
+        identity=ModelIdentity(id="llama-4", provider="Groq"),
+        capabilities=Capabilities(structured_output="forced_tool"),
+    )
+    chained_stripped = WrappedProvider(
+        primary_json,
+        partial(
+            fallback_stream,
+            model_name="claude",
+            chain=(ChainModel("groq", None, lambda: fallback_tool_2, "groq"),),
+            cooldown_key="claude",
+        ),
+    )
+
+    result_stripped = await complete_prompt(
+        chained_stripped,
+        "Is it raining?",
+        instructions=["Decide."],
+        schema=_Verdict,
+    )
+
+    assert result_stripped.content == _Verdict(answer="maybe")
+    assert fallback_tool_2.requests[0].messages[0].content == "Decide."
+
+    # 4. Failed primary whose usage sums retries counts in metrics, not as a single RequestUsage row.
+    @dataclass
+    class _RetriedFailingProvider(_RecordingProvider):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            yield UsageReported(
+                MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=5)),
+                final=True,
+                sums_attempts=True,
+            )
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+
+    retried_primary = _RetriedFailingProvider(
+        answer="",
+        identity=ModelIdentity(id="gpt-6-sol", provider="Codex"),
+        capabilities=Capabilities(structured_output="native"),
+    )
+    fallback_after_retry = _RecordingProvider(
+        answer='{"answer": "yes"}',
+        identity=ModelIdentity(id="llama-4", provider="Groq"),
+        capabilities=Capabilities(structured_output="forced_tool"),
+    )
+    chained_retry = WrappedProvider(
+        retried_primary,
+        partial(
+            fallback_stream,
+            model_name="sol",
+            chain=(ChainModel("groq", None, lambda: fallback_after_retry, "groq"),),
+            cooldown_key="sol",
+        ),
+    )
+    retry_result = await complete_prompt(chained_retry, "Is it raining?", schema=_Verdict)
+    detail_ids = {
+        (d["provider"], d["id"]): d["input_tokens"] for d in retry_result.usage.metrics.to_dict()["details"]["model"]
+    }
+    assert detail_ids == {("Codex", "gpt-6-sol"): 40, ("Groq", "llama-4"): 12}
+    assert [(r.model.provider, r.model.model_id) for r in retry_result.usage.requests if r.model is not None] == [
+        ("Groq", "llama-4"),
+    ]

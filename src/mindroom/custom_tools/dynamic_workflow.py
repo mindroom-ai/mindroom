@@ -19,7 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_a
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
-from mindroom.config.models import split_model_reference, unsupported_level_message
+from mindroom.config.models import fallback_reference, split_model_reference, unsupported_level_message
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.dynamic_workflow_context import (
@@ -113,6 +113,7 @@ class _WorkflowRun:
     requests: dict[str, PersonaRequest] = field(default_factory=dict)
     children: dict[str, DelegationChild] = field(default_factory=dict)
     function_owners: dict[str, dict[str, frozenset[str]]] = field(default_factory=dict)
+    model_permissions: tuple[str, ...] = ()
 
 
 _MINIMAL_SPEC_EXAMPLE = (
@@ -289,10 +290,15 @@ class DynamicWorkflowTools(Toolkit):
         state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context)
+
+            def validate_spec(spec: WorkflowSpec) -> None:
+                state.requests.update(_validate_workflow_policy_for_context(context, spec))
+                state.model_permissions = tuple(spec.permissions.models or ())
+
             service = DynamicWorkflowService(
                 store,
                 participant_executor=_participant_executor(context, state),
-                spec_validator=lambda spec: state.requests.update(_validate_workflow_policy_for_context(context, spec)),
+                spec_validator=validate_spec,
             )
             run = await service.run_workflow(
                 workflow_id=workflow_id,
@@ -385,10 +391,35 @@ async def _execute_participant(
     match participant:
         case RoomAgentParticipant():
             return ParticipantOutput(
-                await _execute_room_agent_participant(context, participant, prompt, run_key=state.run_key),
+                await _execute_room_agent_participant(
+                    context,
+                    participant,
+                    prompt,
+                    run_key=state.run_key,
+                    model_permissions=state.model_permissions,
+                ),
             )
         case SubagentParticipant():
             return await _execute_subagent_participant(context, participant, prompt, state)
+
+
+def _restrict_workflow_fallbacks(
+    config: Config,
+    context: ToolRuntimeContext,
+    model_ref: str,
+    model_permissions: tuple[str, ...],
+) -> Config:
+    """Filter model fallback chains to candidates admitted by workflow model permissions."""
+    if not model_permissions:
+        return config
+    _, level = split_model_reference(model_ref)
+    permissions = list(model_permissions)
+
+    def allow_fallback(name: str) -> bool:
+        ref = _canonical_model_ref(context, fallback_reference(config.models, name, level))
+        return _permissions_admit(context, ref, permissions) or _budget_admits(context, ref, permissions)
+
+    return config.with_filtered_fallbacks(allow_fallback)
 
 
 async def _execute_room_agent_participant(
@@ -397,6 +428,7 @@ async def _execute_room_agent_participant(
     prompt: str,
     *,
     run_key: str,
+    model_permissions: tuple[str, ...] = (),
 ) -> object:
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
@@ -406,6 +438,7 @@ async def _execute_room_agent_participant(
         context,
         agent_name,
         session_id,
+        model_permissions,
     )
     return await _run_room_agent_turn(participant_context, build, prompt)
 
@@ -414,6 +447,7 @@ def _build_room_agent_participant(
     context: ToolRuntimeContext,
     agent_name: str,
     session_id: str,
+    model_permissions: tuple[str, ...] = (),
 ) -> tuple[ToolRuntimeContext, AgentBuild]:
     """Resolve a room agent's model and build it; both walk the filesystem, so callers run this off the event loop."""
     model = resolve_turn_model(
@@ -422,8 +456,15 @@ def _build_room_agent_participant(
         _participant_scope(context, agent_name),
         TurnBudget(monitor=context.budget_monitor, requester_id=context.requester_id),
     )
+    restricted_config = _restrict_workflow_fallbacks(
+        context.config,
+        context,
+        model.model_name,
+        model_permissions,
+    )
     participant_context = replace(
         context,
+        config=restricted_config,
         agent_name=agent_name,
         active_model_name=model.model_name,
         target=replace(context.target, session_id=session_id),
@@ -433,7 +474,7 @@ def _build_room_agent_participant(
 
     build = create_agent(
         agent_name,
-        context.config,
+        restricted_config,
         context.runtime_paths,
         execution_identity=participant_context.execution_identity,
         knowledge=None,
@@ -516,12 +557,6 @@ async def _execute_subagent_participant(
     owners = state.function_owners[participant_id]
     if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed, owners=owners):
         raise DynamicWorkflowExecutionError(error)
-    approval_config = _participant_run_config(
-        context,
-        owners,
-        allowed=allowed,
-        reads_skills=bool(persona.skills),
-    )
     owner = context.execution_identity
     child = prepare_child_turn(
         context.agent_name,
@@ -536,6 +571,17 @@ async def _execute_subagent_participant(
         agent_mode=request.agent_mode,
         previous=previous,
         persona=persona,
+    )
+    approval_config = _restrict_workflow_fallbacks(
+        _participant_run_config(
+            context,
+            owners,
+            allowed=allowed,
+            reads_skills=bool(persona.skills),
+        ),
+        context,
+        child.model_name,
+        state.model_permissions,
     )
     try:
         result = await run_direct_child_turn(

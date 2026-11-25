@@ -6,7 +6,8 @@ Per-request state travels in ``ModelRequest`` rather than on the adapter, so ada
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.llm.errors import incomplete_stream_error
@@ -100,6 +101,15 @@ class ToolSpec:
 STRUCTURED_OUTPUT_TOOL = "structured_output"
 
 
+def json_output_prompt(schema: type[BaseModel]) -> str:
+    """Return the system-message prompt that asks a JSON-mode model for an object matching ``schema``."""
+    json_schema = json.dumps(schema.model_json_schema(), indent=2, ensure_ascii=False)
+    return (
+        "Answer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it."
+        f"\n<json_schema>\n{json_schema}\n</json_schema>"
+    )
+
+
 def structured_output_tools(
     structured_output: StructuredOutput,
     schema: type[BaseModel] | None,
@@ -134,6 +144,7 @@ class RequestOverrides:
 
     temperature: float | None = None
     caller_retries: bool = False
+    fallback_on_retryable: bool = False
     prompt_cache: bool = True
     omit_thinking_setting: bool = False
 
@@ -199,6 +210,7 @@ class ModelRequest:
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
     strip_encrypted_replay: bool = False
+    fallback_model: str | None = None
     # The retry stage's internal budget, typed ``object`` to keep ``providers.pipeline`` out of this module.
     retry_budget: object | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
@@ -272,6 +284,15 @@ def hosted_tool_started(name: str) -> StreamProgress:
     return StreamProgress(commits=not name.startswith(_READ_ONLY_HOSTED_TOOL_PREFIXES))
 
 
+@dataclass(frozen=True, slots=True)
+class ModelSelected:
+    """A fallback chain started streaming an attempt on ``model_name`` with ``identity`` and ``capabilities``."""
+
+    identity: ModelIdentity
+    model_name: str
+    capabilities: Capabilities
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TurnCompleted:
     """The last stream event: the finished assistant message with its metrics and provider data.
@@ -286,7 +307,9 @@ class TurnCompleted:
     raw_stop_reason: str | None = None
 
 
-type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | TurnCompleted
+type StreamEvent = (
+    TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | ModelSelected | TurnCompleted
+)
 
 
 @dataclass(slots=True)
@@ -332,12 +355,49 @@ class ReportedUsage:
         return report
 
 
+@dataclass(frozen=True, slots=True)
+class AttemptUsage:
+    """One failed attempt's reported usage before a fallback chain switched to another model."""
+
+    identity: ModelIdentity
+    metrics: MessageMetrics
+    sums_attempts: bool = False
+
+
+@dataclass(slots=True)
+class StreamTracker:
+    """Tracks the active model identity, reference, capabilities, and per-attempt usage across fallback switches."""
+
+    identity: ModelIdentity
+    model_name: str | None = None
+    capabilities: Capabilities | None = None
+    selected: bool = False
+    reported: ReportedUsage = field(default_factory=ReportedUsage)
+    prior_usage: list[AttemptUsage] = field(default_factory=list)
+
+    def observe(self, event: StreamEvent) -> None:
+        """Update tracker state for one stream event."""
+        if isinstance(event, ModelSelected):
+            if (received := self.reported.received) is not None and received.reported:
+                self.prior_usage.append(AttemptUsage(self.identity, received, self.reported.sums_attempts))
+            self.reported = ReportedUsage()
+            self.identity = event.identity
+            self.model_name = event.model_name
+            self.capabilities = event.capabilities
+            self.selected = True
+        elif isinstance(event, UsageReported):
+            self.reported.observe(event)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelTurn:
     """One finished model turn, as ``complete`` returns it."""
 
     message: Message
     stop_reason: StopReason | None
+    capabilities: Capabilities | None = None
+    prior_usage: tuple[AttemptUsage, ...] = ()
+    identity: ModelIdentity | None = None
 
     @property
     def content(self) -> str:
@@ -438,22 +498,32 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
     adapter's stream raises it here.
     """
     completed: TurnCompleted | None = None
+    tracker = StreamTracker(provider.identity)
     async for event in provider.stream(request):
+        tracker.observe(event)
         if isinstance(event, TurnCompleted):
             completed = event
     if completed is None:
-        raise incomplete_stream_error(provider=provider.identity.provider)
-    return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
+        raise incomplete_stream_error(provider=tracker.identity.provider)
+    return ModelTurn(
+        message=completed.message,
+        stop_reason=completed.stop_reason,
+        capabilities=tracker.capabilities,
+        prior_usage=tuple(tracker.prior_usage),
+        identity=tracker.identity if tracker.selected else None,
+    )
 
 
 __all__ = [
     "STRUCTURED_OUTPUT_TOOL",
+    "AttemptUsage",
     "Capabilities",
     "DeferredTools",
     "MediaKind",
     "ModelIdentity",
     "ModelProvider",
     "ModelRequest",
+    "ModelSelected",
     "ModelTurn",
     "NativeCompactionReplay",
     "NativeHistoryRoute",
@@ -463,6 +533,7 @@ __all__ = [
     "StopReason",
     "StreamEvent",
     "StreamProgress",
+    "StreamTracker",
     "StructuredOutput",
     "TextDelta",
     "TokenCounter",
@@ -473,5 +544,6 @@ __all__ = [
     "UsageReported",
     "complete",
     "hosted_tool_started",
+    "json_output_prompt",
     "structured_output_tools",
 ]

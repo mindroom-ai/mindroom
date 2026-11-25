@@ -42,12 +42,22 @@ from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
     CUT_OFF_TEXT_KEY,
+    PRIOR_ATTEMPTS_KEY,
     REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
+    read_model_provenance,
     usage_sums_attempts,
 )
-from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    ModelRequest,
+    ModelSelected,
+    ReasoningDelta,
+    StreamTracker,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+)
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
@@ -156,6 +166,7 @@ class LoopHooks:
     after_tool_batch: tuple[AfterToolBatchHook, ...] = ()
     on_resume_entry: tuple[AfterToolBatchHook, ...] = ()
     on_loop_end: LoopEndHook | None = None
+    on_model_changed: Callable[[str], None] | None = None
 
 
 NO_HOOKS = LoopHooks()
@@ -230,8 +241,16 @@ async def run_model_loop(
             break
         request = state.request()
         progress.last_request = request
+        outcome = _StreamOutcome(tracker=StreamTracker(identity))
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, metrics)
+        events = _stream_turn(
+            model,
+            request,
+            messages,
+            state.record,
+            outcome,
+            on_model_changed=hooks.on_model_changed,
+        )
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -242,7 +261,7 @@ async def run_model_loop(
                     yield event
         assert turn is not None
         message = turn.message
-        _accept_turn(message, state, progress, identity)
+        _accept_turn(message, state, progress, outcome)
         if not message.tool_calls:
             break
         batch_events = _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn)
@@ -296,17 +315,33 @@ def _accept_turn(
     message: Message,
     state: LoopState,
     progress: _Progress,
-    identity: ModelIdentity,
+    outcome: _StreamOutcome,
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a turn without text, leaves the content as it was.
+    Each failed fallback attempt's usage stays attributed to the model that billed it; the finished message counts
+    under the answering model, whose identity and configured reference are stamped on the run record.
     """
     metrics = state.record.metrics
     assert metrics is not None
+    prior_requests: list[dict[str, object]] = []
+    for prior in outcome.tracker.prior_usage:
+        _count_request(metrics, prior.metrics, prior.identity)
+        if not prior.sums_attempts and prior.metrics.reported:
+            prior_requests.append(
+                {
+                    "created_at": message.created_at,
+                    "metrics": prior.metrics.to_dict(),
+                    "model": prior.identity.id,
+                    "model_provider": prior.identity.provider,
+                },
+            )
+    if prior_requests:
+        message.provider_data = {**(message.provider_data or {}), PRIOR_ATTEMPTS_KEY: prior_requests}
     state.messages.append(message)
-    _count_request(metrics, message.metrics, identity)
+    answered = _answering_identity(message, outcome.tracker.identity)
+    outcome.stamp_record(state.record, answered)
+    _count_request(metrics, message.metrics, answered)
     state.request_index += 1
     if message.content is not None:
         _add_text(message.get_content_string(), state, progress)
@@ -498,63 +533,118 @@ def _batch_stops_run(messages: Sequence[Message]) -> bool:
     return False
 
 
+@dataclass(slots=True)
+class _StreamOutcome:
+    """Pairs ``StreamTracker`` with live-model notification and cut-off output tracking."""
+
+    tracker: StreamTracker
+    active_answered: bool = False
+    notified_model_name: str | None = None
+
+    def note_answered(self, on_model_changed: Callable[[str], None] | None) -> None:
+        """Mark the active candidate as having emitted output and notify live model observers once."""
+        self.active_answered = True
+        model_name = self.tracker.model_name
+        if on_model_changed is not None and model_name is not None and model_name != self.notified_model_name:
+            self.notified_model_name = model_name
+            on_model_changed(model_name)
+
+    def stamp_record(self, record: AnyRunRecord, identity: ModelIdentity) -> None:
+        """Stamp ``record`` with the answering identity and configured model reference."""
+        record.model, record.model_provider = identity.id, identity.provider
+        if self.tracker.model_name is not None:
+            record.model_name = self.tracker.model_name
+
+
+async def _stamp_request_identity(model: ModelProvider, request: ModelRequest, turn: TurnCompleted) -> None:
+    """Attach the request identity digest to ``turn`` unless a stage rewrote the request or already stamped it."""
+    answered = turn.message.provider_data or {}
+    if answered.get(REWRITTEN_ATTEMPT_KEY) or REQUEST_IDENTITY_KEY in answered:
+        return
+    # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
+    request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
+    if request_identity is not None:
+        turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
+
+
 async def _stream_turn(
     model: ModelProvider,
     request: ModelRequest,
     messages: list[Message],
-    metrics: RunMetrics,
+    record: AnyRunRecord,
+    outcome: _StreamOutcome,
+    *,
+    on_model_changed: Callable[[str], None] | None = None,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
     The finished turn records the identity of ``request`` (``llm.request_identity``), unless a pipeline stage answered
     it with another request in its place (``REWRITTEN_ATTEMPT_KEY``) or recorded the identity as it sent the request.
 
-    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
-    already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
-    before whatever ended the stream reaches the run's terminal handling. The message has no content, so no request
-    sends it; the text the stream yielded, which a reply showed, is kept in its ``CUT_OFF_TEXT_KEY``, and a stream
-    that reported no usage leaves the message for that text alone. A turn that completed but was never taken
-    by the consumer, such as one cancelled while a pipeline stage finishes the stream, is cut off the same way with
-    the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that usage instead.
+    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, each failed
+    attempt's usage and the active attempt's reported usage are kept under their own billing identities, and the run
+    record updates its answering model whenever the active attempt emitted output or usage.
     """
-    identity = model.identity
     turn: TurnCompleted | None = None
     handed_off = False
-    reported = ReportedUsage()
     shown: list[str] = []
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                if isinstance(event, TextDelta):
-                    shown.append(event.text)
+                outcome.tracker.observe(event)
+                if isinstance(event, ModelSelected):
+                    outcome.active_answered = False
+                elif isinstance(event, TextDelta | ReasoningDelta):
+                    outcome.note_answered(on_model_changed)
+                    if isinstance(event, TextDelta):
+                        shown.append(event.text)
                     yield event
-                elif isinstance(event, ReasoningDelta):
-                    yield event
-                elif isinstance(event, UsageReported):
-                    reported.observe(event)
+                elif isinstance(event, ToolCallReady):
+                    outcome.note_answered(on_model_changed)
                 elif isinstance(event, TurnCompleted):
+                    outcome.note_answered(on_model_changed)
                     turn = event
-        turn = _validate_completed_turn(turn, provider=identity.provider)
-        answered = turn.message.provider_data or {}
-        if not answered.get(REWRITTEN_ATTEMPT_KEY) and REQUEST_IDENTITY_KEY not in answered:
-            # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
-            request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
-            if request_identity is not None:
-                turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
+        turn = _validate_completed_turn(turn, provider=outcome.tracker.identity.provider)
+        await _stamp_request_identity(model, request, turn)
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True
     finally:
         if not handed_off:
-            # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
-            # plus a partial none replaced.
-            billed = turn.message.metrics if turn is not None else reported.received
-            # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
-            sums_attempts = (
-                usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
-            )
-            _keep_cut_off(messages, metrics, identity, billed, "".join(shown), sums_attempts=sums_attempts)
+            _keep_unaccepted(messages, record, turn, outcome, "".join(shown))
+
+
+def _keep_unaccepted(
+    messages: list[Message],
+    record: AnyRunRecord,
+    turn: TurnCompleted | None,
+    outcome: _StreamOutcome,
+    shown: str,
+) -> None:
+    """Keep a cut-off request with per-model billing attribution and update the record when the active model answered."""
+    metrics = record.metrics
+    assert metrics is not None
+    tracker = outcome.tracker
+    for prior in tracker.prior_usage:
+        _keep_cut_off(messages, metrics, prior.identity, prior.metrics, "", sums_attempts=prior.sums_attempts)
+    if turn is not None:
+        sums_attempts = usage_sums_attempts(turn.message.provider_data)
+        answered = _answering_identity(turn.message, tracker.identity)
+        outcome.stamp_record(record, answered)
+        _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
+        return
+    active_billed = tracker.reported.received
+    if outcome.active_answered or (active_billed is not None and active_billed.reported):
+        outcome.stamp_record(record, tracker.identity)
+    _keep_cut_off(
+        messages,
+        metrics,
+        tracker.identity,
+        active_billed,
+        shown,
+        sums_attempts=tracker.reported.sums_attempts,
+    )
 
 
 def _validate_completed_turn(turn: TurnCompleted | None, *, provider: str) -> TurnCompleted:
@@ -628,6 +718,13 @@ def _keep_cut_off(
     if billed is not None:
         message.metrics = billed
         _count_request(metrics, billed, identity)
+
+
+def _answering_identity(message: Message, identity: ModelIdentity) -> ModelIdentity:
+    """Return the model the provider stamped on ``message`` as having answered it, else ``identity``."""
+    if (answered := read_model_provenance(message.provider_data)) is None:
+        return identity
+    return replace(identity, id=answered.model_id, provider=answered.provider)
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:

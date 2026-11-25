@@ -22,8 +22,15 @@ from mindroom.llm.errors import (
     ProviderError,
     incomplete_stream_error,
 )
-from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ModelTurn, ReportedUsage, RequestOverrides, TurnCompleted
+from mindroom.llm.messages import Message, read_model_provenance
+from mindroom.llm.provider import (
+    ModelIdentity,
+    ModelRequest,
+    ModelTurn,
+    RequestOverrides,
+    StreamTracker,
+    TurnCompleted,
+)
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -179,21 +186,63 @@ def _cancel_and_detach(response_task: asyncio.Task[ModelTurn], *, reason: str) -
     asyncio.get_running_loop().call_later(_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS, warn_if_still_running)
 
 
+def _summary_usage_entries(
+    tracker: StreamTracker,
+    *,
+    completed: TurnCompleted | None,
+    failure: Exception | None,
+) -> list[tuple[ModelIdentity, MessageMetrics]]:
+    """Return every billed ``(identity, metrics)`` entry for a summary request, including failed attempts."""
+    entries = [(prior.identity, prior.metrics) for prior in tracker.prior_usage]
+    if completed is not None:
+        provenance = read_model_provenance(completed.message.provider_data)
+        answering = (
+            ModelIdentity(id=provenance.model_id, provider=provenance.provider)
+            if provenance is not None
+            else tracker.identity
+        )
+        entries.append((answering, completed.message.metrics))
+    elif tracker.reported.received is not None and tracker.reported.received.reported:
+        entries.append((tracker.identity, tracker.reported.received))
+    elif isinstance(failure, ModelSafeguardRefusal):
+        entries.append(
+            (ModelIdentity(id=failure.model_id or tracker.identity.id, provider=failure.provider), failure.usage),
+        )
+    return [(identity, usage) for identity, usage in entries if usage.reported]
+
+
+async def _persist_summary_usage(
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+    entries: list[tuple[ModelIdentity, MessageMetrics]],
+) -> None:
+    if on_usage is None:
+        return
+    for identity, usage in entries:
+        try:
+            await on_usage(identity, usage)
+        except Exception as error:
+            logger.warning(
+                "compaction_summary_usage_save_failed",
+                error_type=type(error).__name__,
+                exc_info=True,
+            )
+
+
 async def _request_summary(
     model: ModelProvider,
     request: ModelRequest,
     provider_done: asyncio.Future[None],
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
 ) -> ModelTurn:
-    """Send the summary request, then persist the usage it reported, failed and refused responses included."""
-    reported = ReportedUsage()
+    """Send the summary request, then persist the usage it reported under each billed model."""
+    tracker = StreamTracker(model.identity)
     completed: TurnCompleted | None = None
     failure: Exception | None = None
     try:
         events = model.stream(request)
         async with closing_async_stream(events):
             async for event in events:
-                reported.observe(event)
+                tracker.observe(event)
                 if isinstance(event, TurnCompleted):
                     completed = event
     except Exception as error:
@@ -201,26 +250,9 @@ async def _request_summary(
     finally:
         provider_done.set_result(None)
     if failure is None and completed is None:
-        failure = incomplete_stream_error(provider=model.identity.provider)
-
-    usage = (
-        completed.message.metrics
-        if completed is not None
-        else reported.received
-        if reported.received is not None and reported.received.reported
-        else failure.usage
-        if isinstance(failure, ModelSafeguardRefusal)
-        else None
-    )
-    if on_usage is not None and usage is not None and usage.reported:
-        try:
-            await on_usage(usage)
-        except Exception as error:
-            logger.warning(
-                "compaction_summary_usage_save_failed",
-                error_type=type(error).__name__,
-                exc_info=True,
-            )
+        failure = incomplete_stream_error(provider=tracker.identity.provider)
+    entries = _summary_usage_entries(tracker, completed=completed, failure=failure)
+    await _persist_summary_usage(on_usage, entries)
     if failure is not None:
         raise failure
     assert completed is not None
@@ -234,17 +266,23 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
     keep_thinking_setting: bool = False,
+    allow_transient_fallback: bool = False,
 ) -> str:
     """Bound the provider request, then persist returned usage before validating the summary text it returns.
 
     ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
+    ``allow_transient_fallback`` lets a configured fallback chain take over on transient errors on the final retry.
     """
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     request = ModelRequest(
         messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        overrides=replace(_SUMMARY_OVERRIDES, omit_thinking_setting=not keep_thinking_setting),
+        overrides=replace(
+            _SUMMARY_OVERRIDES,
+            omit_thinking_setting=not keep_thinking_setting,
+            fallback_on_retryable=allow_transient_fallback,
+        ),
     )
     response_task = asyncio.create_task(
         _request_summary(model, request, provider_done, on_usage),

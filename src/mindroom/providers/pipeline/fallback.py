@@ -1,0 +1,299 @@
+"""Fall back across a configured chain of model providers when a provider cannot serve a request right now.
+
+The chain wraps the full request pipeline of each model, so every model keeps its own retries, media fallback,
+idle limit, and request log. A failure after the caller received output or a hosted tool committed is final, as is
+any failure another model would repeat (invalid request, context-window overflow, safeguard refusal, cancellation).
+A failure that names when its limit resets moves that route to the end of the chain until then.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
+
+from mindroom.llm.errors import ProviderError, fails_over
+from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.provider import (
+    DeferredTools,
+    ModelSelected,
+    ReportedUsage,
+    StructuredOutput,
+    TurnCompleted,
+    json_output_prompt,
+)
+from mindroom.logging_config import get_logger
+from mindroom.providers.pipeline.wrapped import commits_attempt
+from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.context_bound_streams import closing_async_stream
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Sequence
+
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
+
+__all__ = ["ChainModel", "fallback_stream"]
+
+logger = get_logger(__name__)
+
+# When each route/account fingerprint may be tried again, on the ``time.monotonic`` clock.
+_COOLDOWN_UNTIL: dict[str, float] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class ChainModel:
+    """One fallback model: its configured reference, context window, provider builder, and cooldown key."""
+
+    name: str
+    context_window: int | None
+    build: Callable[[], ModelProvider]
+    cooldown_key: str
+
+
+def _follows_fallback(messages: Sequence[Message]) -> bool:
+    """Return whether the latest assistant message in ``messages`` was answered by a fallback model."""
+    for message in reversed(messages):
+        if message.role == "assistant":
+            return FALLBACK_MODEL_KEY in (message.provider_data or {})
+    return False
+
+
+def _primary_request(request: ModelRequest) -> ModelRequest:
+    """Return ``request`` for the primary model, making continuation portable when following a fallback turn.
+
+    Keeps the primary's own ``native_compaction`` checkpoint intact: foreign Responses IDs and encrypted items are
+    already rejected per message via ``FALLBACK_MODEL_KEY``.
+    """
+    return replace(request, portable_replay=True) if _follows_fallback(request.messages) else request
+
+
+def _fallback_request(request: ModelRequest, *, model_name: str) -> ModelRequest:
+    """Return ``request`` without the state only the first model's route can replay."""
+    return replace(
+        request,
+        native_compaction=None,
+        portable_replay=True,
+        strip_encrypted_replay=True,
+        fallback_model=model_name,
+        retry_budget=None,
+        prompt_hold=None,
+        prompt_hold_pin=None,
+    )
+
+
+def _with_structured_output_prompt(
+    request: ModelRequest,
+    *,
+    from_mode: StructuredOutput,
+    to_mode: StructuredOutput,
+) -> ModelRequest:
+    """Adjust the JSON-mode schema instruction when switching between JSON-mode and schema-enforcing routes."""
+    if request.output_schema is None or (from_mode == "json_mode") == (to_mode == "json_mode"):
+        return request
+    prompt = json_output_prompt(request.output_schema)
+    messages = list(request.messages)
+    if to_mode == "json_mode":
+        if messages and messages[0].role == "system" and isinstance(messages[0].content, str):
+            existing = messages[0].content
+            messages[0] = replace(messages[0], content=f"{existing}\n\n{prompt}" if existing else prompt)
+        else:
+            messages.insert(0, Message(role="system", content=prompt))
+    elif messages and messages[0].role == "system" and isinstance(messages[0].content, str):
+        existing = messages[0].content
+        if existing == prompt:
+            messages.pop(0)
+        elif existing.endswith(f"\n\n{prompt}"):
+            messages[0] = replace(messages[0], content=existing.removesuffix(f"\n\n{prompt}"))
+    return replace(request, messages=tuple(messages))
+
+
+def _cooling(key: str, now: float) -> bool:
+    return _COOLDOWN_UNTIL.get(key, 0.0) > now
+
+
+def _remember_reset(key: str, error: ProviderError) -> None:
+    if (hint := error.retry_after_seconds) is not None and hint > 0:
+        until = time.monotonic() + hint
+        _COOLDOWN_UNTIL[key] = max(_COOLDOWN_UNTIL.get(key, 0.0), until)
+
+
+def _clear_cooldown(key: str, seen_until: float | None) -> None:
+    if _COOLDOWN_UNTIL.get(key) == seen_until:
+        _COOLDOWN_UNTIL.pop(key, None)
+
+
+def _log_fallback(error: ProviderError, *, from_model: str, to_model: str) -> None:
+    logger.warning(
+        "model_fallback_used",
+        from_model=from_model,
+        to_model=to_model,
+        error_type=type(error).__name__,
+        error_code=error.code,
+        status_code=error.status_code,
+        provider=error.provider,
+        error=redact_sensitive_text(str(error), max_length=500),
+    )
+
+
+def _fits(provider: ModelProvider, request: ModelRequest, context_window: int | None) -> bool:
+    return context_window is None or provider.request_tokens(request) <= context_window
+
+
+@dataclass(slots=True)
+class _Attempt:
+    """What one model's stream handed the caller so far: whether it committed, and the usage it reported."""
+
+    committed: bool = False
+    usage: ReportedUsage = field(default_factory=ReportedUsage)
+
+
+async def _attempt_stream(
+    provider: ModelProvider,
+    sent: ModelRequest,
+    *,
+    model_name: str,
+    fallback: bool,
+    attempt: _Attempt,
+) -> AsyncIterator[StreamEvent]:
+    """Stream one model's attempt, announcing the selected model and stamping fallback turns."""
+    yield ModelSelected(identity=provider.identity, model_name=model_name, capabilities=provider.capabilities)
+    events = provider.stream(sent)
+    async with closing_async_stream(events):
+        async for event in events:
+            attempt.usage.observe(event)
+            attempt.committed = attempt.committed or commits_attempt(event)
+            if fallback and isinstance(event, TurnCompleted):
+                message = event.message
+                message.provider_data = {
+                    **(message.provider_data or {}),
+                    REWRITTEN_ATTEMPT_KEY: True,
+                    FALLBACK_MODEL_KEY: model_name,
+                }
+            yield event
+
+
+async def _sendable(
+    member: ChainModel,
+    request: ModelRequest,
+    *,
+    primary_structured_output: StructuredOutput,
+) -> tuple[ModelProvider, ModelRequest] | None:
+    """Return a fallback's provider and compatible request, or None when it cannot take the request.
+
+    A fallback that cannot be built or sized, such as one whose SDK is missing, is skipped like one the request does
+    not fit, so the chain goes on and the last provider failure stays the one reported.
+    """
+    try:
+        provider = await asyncio.to_thread(member.build)
+        sent = _fallback_request(request, model_name=member.name)
+        if (
+            sent.deferred_tools.names
+            and not sent.deferred_tools.portable
+            and not provider.capabilities.native_tool_search
+        ):
+            sent = replace(sent, deferred_tools=DeferredTools())
+        sent = _with_structured_output_prompt(
+            sent,
+            from_mode=primary_structured_output,
+            to_mode=provider.capabilities.structured_output,
+        )
+        fits = await asyncio.to_thread(_fits, provider, sent, member.context_window)
+    except Exception as error:
+        logger.warning(
+            "model_fallback_skipped",
+            model=member.name,
+            reason="unavailable",
+            error_type=type(error).__name__,
+            error=redact_sensitive_text(str(error), max_length=500),
+        )
+        return None
+    if not fits:
+        logger.warning("model_fallback_skipped", model=member.name, reason="context_window")
+        return None
+    return provider, sent
+
+
+def _in_turn(members: Sequence[ChainModel], *, model_name: str) -> list[ChainModel]:
+    """Return ``members`` in order, those cooling down after the rest, as a last resort."""
+    now = time.monotonic()
+    cooling = [member for member in members if _cooling(member.cooldown_key, now)]
+    if cooling:
+        logger.debug("model_fallback_cooldown", model=model_name, cooling=[member.name for member in cooling])
+    return [member for member in members if member not in cooling] + cooling
+
+
+async def _resolve_member(
+    member: ChainModel,
+    inner: ModelProvider,
+    request: ModelRequest,
+    *,
+    model_name: str,
+) -> tuple[ModelProvider, ModelRequest, bool] | None:
+    """Return ``(provider, sent_request, is_fallback)`` for ``member``, or None when a fallback is skipped."""
+    if member.name == model_name:
+        return inner, _primary_request(request), False
+    target = await _sendable(
+        member,
+        request,
+        primary_structured_output=inner.capabilities.structured_output,
+    )
+    if target is None:
+        return None
+    provider, sent = target
+    return provider, sent, True
+
+
+async def fallback_stream(
+    inner: ModelProvider,
+    request: ModelRequest,
+    *,
+    model_name: str,
+    chain: Sequence[ChainModel],
+    cooldown_key: str,
+    allow_fallback: Callable[[str], bool] | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """Stream ``request`` on ``inner`` (``model_name``), then on eligible ``chain`` members while models fail over.
+
+    A caller-retried request (such as compaction summaries) fails over immediately on non-retryable availability errors
+    (quota, credentials) and on transient errors when ``fallback_on_retryable`` is set. Each attempt's usage stays
+    attributed to the model that billed it, and fallback turns are marked so later requests never reuse foreign
+    continuation or encrypted replay state.
+    """
+    eligible = [member for member in chain if allow_fallback is None or allow_fallback(member.name)]
+    primary = ChainModel(model_name, None, lambda: inner, cooldown_key)
+    members = _in_turn([primary, *eligible], model_name=model_name)
+    # A success clears only the cooldown this request saw, not one a concurrent request set since.
+    seen = {member.cooldown_key: _COOLDOWN_UNTIL.get(member.cooldown_key) for member in members}
+    failure: tuple[str, ProviderError] | None = None
+    for member in members:
+        resolved = await _resolve_member(member, inner, request, model_name=model_name)
+        if resolved is None:
+            continue
+        provider, sent, is_fallback = resolved
+        if failure is not None:
+            _log_fallback(failure[1], from_model=failure[0], to_model=member.name)
+        attempt = _Attempt()
+        stream = _attempt_stream(provider, sent, model_name=member.name, fallback=is_fallback, attempt=attempt)
+        try:
+            async with closing_async_stream(stream):
+                async for event in stream:
+                    yield event
+        except ProviderError as error:
+            defer_transient = (
+                request.overrides.caller_retries and not request.overrides.fallback_on_retryable and error.retryable
+            )
+            can_fail_over = fails_over(error) and not defer_transient
+            if can_fail_over:
+                _remember_reset(member.cooldown_key, error)
+            if attempt.committed or not can_fail_over:
+                raise
+            failure = (member.name, error)
+        else:
+            _clear_cooldown(member.cooldown_key, seen[member.cooldown_key])
+            return
+        if (report := attempt.usage.settle()) is not None:
+            yield report
+    # The request's own model is never skipped, so a failure ends the chain.
+    assert failure is not None
+    raise failure[1]

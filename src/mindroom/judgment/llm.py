@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentResult, TokenUsage
 from mindroom.judgment.execution import run_judgment, run_judgment_thread
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, read_model_provenance
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers import registry as provider_registry
 
@@ -69,8 +69,9 @@ async def judge_with_llm(
         if turn.tool_calls or not isinstance(turn.message.content, str):
             raise JudgmentError(failure="invalid_response")
         usage = turn.usage
+        provenance = read_model_provenance(turn.message.provider_data)
         return JudgmentResponse(
-            model=provider.identity.id,
+            model=provenance.model_id if provenance is not None else provider.identity.id,
             decision=_parse_decision(turn.message.content),
             probability=None,
             # A provider that reported no usage leaves the counts unknown rather than zero.

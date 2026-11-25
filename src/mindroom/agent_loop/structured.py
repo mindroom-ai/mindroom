@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
-from mindroom.llm.provider import STRUCTURED_OUTPUT_TOOL
+from mindroom.llm.provider import STRUCTURED_OUTPUT_TOOL, json_output_prompt
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelTurn
@@ -43,15 +43,6 @@ def structured_answer_text(turn: ModelTurn, capabilities: Capabilities) -> str:
             if function.get("name") == STRUCTURED_OUTPUT_TOOL:
                 return str(function.get("arguments") or "")
     return turn.content
-
-
-def json_output_prompt(schema: type[BaseModel]) -> str:
-    """Return the system-message prompt that asks a JSON-mode model for an object matching ``schema``."""
-    json_schema = json.dumps(schema.model_json_schema(), indent=2, ensure_ascii=False)
-    return (
-        "Answer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it."
-        f"\n<json_schema>\n{json_schema}\n</json_schema>"
-    )
 
 
 def parse_structured[T: BaseModel](content: str, schema: type[T], *, lenient: bool) -> T | None:

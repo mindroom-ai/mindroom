@@ -31,9 +31,12 @@ from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.identity import model_identity
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -51,6 +54,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import drain
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, team_spec
@@ -62,10 +66,11 @@ from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
 from tests.test_dynamic_workflows import _make_context, _make_multi_agent_context, _room_agent_model, _workflow_spec
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import StreamEvent
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.members import BuiltTeam
 
@@ -732,3 +737,156 @@ async def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(
 
     assert run["status"] == "completed", run
     assert workflow.models_loaded == ["luna"]
+
+
+@pytest.mark.asyncio
+async def test_capped_user_cannot_fail_over_from_unpriced_primary_to_priced_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A voice reusable build created under budget blocks priced fallbacks once the requester crosses their cap."""
+    from mindroom.matrix_rtc.call_tools import _CallAgentCache  # noqa: PLC0415
+
+    config = _subagent_workflow_config()
+    agent_name = next(iter(config.agents))
+    config.agents[agent_name].model = "opus"
+    config.models["opus"] = ModelConfig(provider="synthetic", id="opus-sub", fallbacks=["bedrock-opus"])
+    config.models["bedrock-opus"] = ModelConfig(
+        provider="synthetic",
+        id="bedrock-paid",
+        pricing=ModelPricing(input=5, output=25),
+    )
+    config.models["local"] = ModelConfig(provider="synthetic", id="local-free")
+    config.budgets = BudgetsConfig(fallback_model="local", monthly_limit_usd=10.0)
+    paths = _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+
+    calls: list[str] = []
+
+    class _QuotaFailModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            calls.append(self.identity.id)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+            yield  # pragma: no cover
+
+    class _CountingModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            calls.append(self.identity.id)
+            async for event in super().stream(request):
+                yield event
+
+    models_by_ref = {
+        "opus": _QuotaFailModel([], identity=model_identity(config.models["opus"])),
+        "bedrock-opus": _CountingModel([answer("paid")], identity=model_identity(config.models["bedrock-opus"])),
+    }
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, name, **_kw: models_by_ref[name],
+    )
+
+    monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_identity(), requester_id=_ALICE))
+    context = replace(
+        base_ctx,
+        requester_id=_ALICE,
+        orchestrator=SimpleNamespace(budgets=monitor),
+        active_model_name="opus",
+    )
+    # Build the reusable voice agent while Alice is still under budget (spend = 0 < 10).
+    cache = _CallAgentCache(
+        agent_name=agent_name,
+        config=config,
+        runtime_paths=paths,
+        context=context,
+        active_model_name="opus",
+    )
+    reusable_build = cache._build(knowledge=None, refresh_scheduler=None)
+
+    # Alice crosses her cap before the next call turn reuses the cached build.
+    set_month_spend(monitor, {_ALICE: 12.0})
+    with tool_runtime_context(context), pytest.raises(ProviderError):
+        await drain(reusable_build.spec.model, ModelRequest(messages=(Message(role="user", content="hello"),)))
+
+    assert calls == ["opus-sub"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_workflow_permissions_block_unpermitted_fallback_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow whose permissions.models permits only local must send zero requests to its cloud fallback."""
+    config = _subagent_workflow_config()
+    config.models["local"] = ModelConfig(provider="synthetic", id="local-model", fallbacks=["cloud", "local-backup"])
+    config.models["cloud"] = ModelConfig(provider="synthetic", id="cloud-model")
+    config.models["local-backup"] = ModelConfig(provider="synthetic", id="local-backup-model")
+    paths = _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+
+    calls: list[str] = []
+
+    class _QuotaFailModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            calls.append(self.identity.id)
+            msg = "quota"
+            raise ProviderError(msg, provider=self.identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+            yield  # pragma: no cover
+
+    class _CountingModel(ScriptedModel):
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            calls.append(self.identity.id)
+            async for event in super().stream(request):
+                yield event
+
+    providers = {
+        "local": _QuotaFailModel([], identity=model_identity(config.models["local"])),
+        "cloud": _CountingModel([answer("leaked to cloud")], identity=model_identity(config.models["cloud"])),
+        "local-backup": _CountingModel([answer("local ok")], identity=model_identity(config.models["local-backup"])),
+    }
+    monkeypatch.setattr(
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, name, **_kw: providers[name],
+    )
+
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=_identity()),
+        active_model_name="local",
+    )
+    tools = DynamicWorkflowTools()
+
+    # 1. Only local permitted -> cloud and local-backup receive zero requests.
+    spec_strict = _subagent_workflow_spec(
+        [{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "local"}],
+        models=["local"],
+    )
+    with tool_runtime_context(context):
+        created = json.loads(await tools.create_workflow(spec_strict))
+        assert created["status"] == "ok", created
+        strict_run = json.loads(await tools.run_workflow(workflow_id="review", input={}))
+
+    assert strict_run["status"] == "failed", strict_run
+    assert calls == ["local-model"]
+
+    # 2. local and local-backup permitted -> unpermitted cloud is skipped (zero requests) and local-backup answers.
+    calls.clear()
+    spec_two = {
+        **_subagent_workflow_spec(
+            [{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "local"}],
+            models=["local", "local-backup"],
+        ),
+        "id": "review-two",
+    }
+    with tool_runtime_context(context):
+        created_two = json.loads(await tools.create_workflow(spec_two))
+        assert created_two["status"] == "ok", created_two
+        run_two = json.loads(await tools.run_workflow(workflow_id="review-two", input={}))
+
+    assert run_two["status"] == "completed", run_two
+    assert calls == ["local-model", "local-backup-model"]
