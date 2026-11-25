@@ -101,7 +101,7 @@ def test_a_toolkit_s_instructions_are_a_context_document_not_part_of_the_bootstr
 
     [guidance] = [toolkit.guidance for toolkit in build.spec.toolkits if toolkit.name == "chat_ui"]
     assert guidance is not None
-    assert "chat_ui shows parts of MindRoom Chat to the user" in guidance
+    assert "chat_ui only affects MindRoom Chat" in guidance
     assert guidance in turn.context_documents.values()
     assert guidance not in system_text(turn.system_messages)
 

@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 MARKDOWN_OUTPUT_FORMAT = "Your replies are shown as Markdown, so format them with Markdown where it helps the reader."
 MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     f"{MARKDOWN_OUTPUT_FORMAT}\n"
-    "- Single newlines break lines; supports Mermaid fences (```mermaid), GitHub callouts "
-    "(`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), "
-    "`<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and "
+    "- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences "
+    "(```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / "
+    "`[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and "
     "`<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n"
     "- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n"
     "- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, "

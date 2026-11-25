@@ -1233,7 +1233,7 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     agent = _code_agent(config, tmp_path)
     prompt = _build_prompt(agent)
 
-    assert "chat_ui shows parts of MindRoom Chat to the user;" in prompt
+    assert "chat_ui only affects MindRoom Chat" in prompt
     for name in builtin_tool_registry().entries["chat_ui"].function_names:
         assert f"\n- {name}(" not in prompt
     # With show_canvas beside open_panel, the agent learns that a real website needs the Computer panel, not a canvas.
@@ -1350,7 +1350,7 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
     assert "a canvas cannot." not in instructions
-    assert "chat_ui shows parts of MindRoom Chat to the user;" in _build_prompt(agent)
+    assert "chat_ui only affects MindRoom Chat" in _build_prompt(agent)
 
 
 @pytest.mark.parametrize("narrowed_by", ["function_filter", "persona", "approval"])
@@ -1390,7 +1390,7 @@ def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offere
 
     assert [function.name for function in chat_ui.functions] == ["open_settings"]
     for text in (_build_prompt(agent), chat_ui.guidance or ""):
-        assert "chat_ui shows parts of MindRoom Chat to the user;" in text
+        assert "chat_ui only affects MindRoom Chat" in text
         assert "a canvas cannot." not in text
         assert "https://cdn.jsdelivr.net/npm/" not in text
 

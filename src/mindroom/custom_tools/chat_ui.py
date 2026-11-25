@@ -86,9 +86,8 @@ _CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
 _CANVAS_STATE_SCAN_LIMIT = 50
 # Cross-function Chat UI rules; per-function details live on the function docstrings.
 _CHAT_UI_INSTRUCTIONS = (
-    "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. "
-    "Side panels share one slot (opening one replaces the current panel). "
-    "Display calls only send a UI request (success means sent, not seen)."
+    "chat_ui only affects MindRoom Chat (never the user's own computer or browser). "
+    "Side panels share one slot (opening one replaces the current panel)."
 )
 
 
