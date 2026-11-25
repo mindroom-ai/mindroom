@@ -452,6 +452,7 @@ Matrix sync callback
 | `history/run_checkpoint.py` | A run's checkpoints, saved before each tool batch runs and before each later request, and the recovery that finishes a run cut short as a turn of its own stored messages with every call answered |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
+| `history/summary_fork.py` | Cache-warm fork compaction eligibility, prompt construction, fold-basis verification, and the bounded live-`/compact` frame memo |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | The follower background readers share: a conversation's Matrix turns in log order, read in one snapshot with what a redaction would cut, the due scan, backoff, and where a conversation never read starts |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |

@@ -16,6 +16,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.request_identity import message_digest
+from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -32,6 +33,15 @@ _STANDARD_CACHE_TTL_SECONDS = 300.0
 _EXTENDED_CACHE_TTL_SECONDS = 3300.0
 _MAX_WARM_FRAMES = 64
 _DEFAULT_ON_SEND = ModelRequest(messages=()).on_send
+_CLAUDE_CODE_PROVIDERS = frozenset({"claude_code", ROUTE_PROVIDERS["claude_code"]})
+_EXTENDED_CACHE_PROVIDERS = frozenset(
+    {
+        ROUTE_PROVIDERS["anthropic"],
+        ROUTE_PROVIDERS["bedrock_claude"],
+        ROUTE_PROVIDERS["vertexai_claude"],
+    },
+)
+_OPENROUTER_ANTHROPIC_PREFIXES = ("anthropic/", "~anthropic/")
 
 _WARM_FRAMES_LOCK = threading.Lock()
 _WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...]]] = OrderedDict()
@@ -59,9 +69,27 @@ class ScopeForkSource:
     reserve_tokens: int
 
 
-def warm_cache_ttl_seconds(model_params: Mapping[str, Any]) -> float:
+def _supports_extended_cache(identity: ModelIdentity | None) -> bool:
+    if identity is None:
+        return True
+    if identity.provider in _EXTENDED_CACHE_PROVIDERS:
+        return True
+    return identity.provider == ROUTE_PROVIDERS["openrouter"] and identity.id.startswith(
+        _OPENROUTER_ANTHROPIC_PREFIXES,
+    )
+
+
+def warm_cache_ttl_seconds(
+    model_params: Mapping[str, Any],
+    *,
+    identity: ModelIdentity | None = None,
+) -> float:
     """Return the warm prompt-cache lifetime in seconds for ``model_params``."""
-    if model_params.get("extended_cache_time") is True and model_params.get("cache_system_prompt") is True:
+    if (
+        model_params.get("extended_cache_time") is True
+        and model_params.get("cache_system_prompt") is True
+        and _supports_extended_cache(identity)
+    ):
         return _EXTENDED_CACHE_TTL_SECONDS
     return _STANDARD_CACHE_TTL_SECONDS
 
@@ -175,7 +203,10 @@ def _static_skip_reason(fork: SummaryFork, summary_model_identity: ModelIdentity
     identity = fork.sizer.model.identity
     if identity != summary_model_identity:
         return "different_model"
-    if identity.provider == "claude_code":
+    configured = fork.sizer.configured_provider
+    if identity.provider in _CLAUDE_CODE_PROVIDERS or (
+        configured is not None and provider_route(configured) == "claude_code"
+    ):
         return "unsupported_provider"
     base = fork.request
     if base.native_compaction is not None:
@@ -219,11 +250,16 @@ def prepare_fork_request(
         role="user",
         content=render_transient_context([build_fork_compaction_prompt(summary_prompt, mid_turn=fork.mid_turn)]),
     )
+    hold_pin = (
+        (list(base.prompt_hold_pin) if base.prompt_hold_pin is not None else [])
+        if base.prompt_hold is not None
+        else None
+    )
     fork_request = replace(
         base,
         messages=(*base.messages, prompt_message),
         overrides=replace(base.overrides, caller_retries=True),
-        prompt_hold_pin=[] if base.prompt_hold is not None else None,
+        prompt_hold_pin=hold_pin,
         retry_budget=None,
     )
 
@@ -232,7 +268,7 @@ def prepare_fork_request(
         return None, "prefix_not_anchored"
 
     current_time = time.time() if now is None else now
-    ttl = warm_cache_ttl_seconds(fork.sizer.model.model_params)
+    ttl = warm_cache_ttl_seconds(fork.sizer.model.model_params, identity=fork.sizer.model.identity)
     if size.answered_at is None or not (0 <= current_time - size.answered_at < ttl):
         return None, "cache_cold"
 
