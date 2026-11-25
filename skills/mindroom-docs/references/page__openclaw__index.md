@@ -60,7 +60,7 @@ Not included:
           - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
           - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
           - Ask before external/public actions and destructive operations.
-          - Before answering prior-history questions, search memory files first with `search_memories`.
+          - Before answering prior-history questions, search memory files first with `memory` (`action="search"`).
 
         context_files:
           - SOUL.md
@@ -82,7 +82,7 @@ Not included:
         enabled: true
     ```
 
-`context_files`, file memory, and `search_memories` all read this one workspace.
+`context_files`, file memory, and the `memory` tool all read this one workspace.
 `context_files` paths are relative to it; see [File-Based Context Loading](https://docs.mindroom.chat/configuration/agents/#file-based-context-loading).
 
 ## [`openclaw_compat`]

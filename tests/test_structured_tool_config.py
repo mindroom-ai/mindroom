@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
     from agno.tools.exa import ExaTools
     from agno.tools.firecrawl import FirecrawlTools
-    from agno.tools.searxng import Searxng
+
+    from mindroom.custom_tools.searxng import SearxngTools
 
 
 def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> Toolkit:
@@ -80,18 +81,18 @@ def test_searxng_authored_engines_reach_request(
     """The outgoing query names engines rather than joining characters from text."""
     requests: list[httpx.URL] = []
 
-    def get(url: str, *, timeout: int) -> httpx.Response:
+    def get(url: str, *, params: dict[str, str], timeout: int) -> httpx.Response:
         assert timeout == 30
-        request = httpx.Request("GET", url)
+        request = httpx.Request("GET", url, params=params)
         requests.append(request.url)
         return httpx.Response(200, json={"results": []}, request=request)
 
     monkeypatch.setattr(httpx, "get", get)
     tool = cast(
-        "Searxng",
+        "SearxngTools",
         _configured_tool(tmp_path, "searxng", {"host": "https://search.example.com", "engines": engines}),
     )
 
-    assert json.loads(tool.search_web("Matrix federation")) == {"results": []}
+    assert json.loads(tool.searxng_search("Matrix federation")) == {"results": []}
     assert len(requests) == 1
     assert requests[0].params.get("engines") == (",".join(engines) if engines else None)

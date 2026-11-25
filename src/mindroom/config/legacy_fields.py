@@ -328,6 +328,53 @@ RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
+# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
+# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
+#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
+#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
+#   and todo respectively.
+# Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
+#   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
+#   differs from the replacement's effective decision (regardless of other toolkits).
+# Coverage:
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name.
+RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
+    "scheduler": {
+        "schedule": "scheduler",
+        "edit_schedule": "scheduler",
+        "list_schedules": "scheduler",
+        "cancel_schedule": "scheduler",
+    },
+    "searxng": {
+        "search_web": "searxng_search",
+        "image_search": "searxng_search",
+        "it_search": "searxng_search",
+        "map_search": "searxng_search",
+        "music_search": "searxng_search",
+        "news_search": "searxng_search",
+        "science_search": "searxng_search",
+        "video_search": "searxng_search",
+    },
+    "memory": {
+        "add_memory": "memory",
+        "search_memories": "memory",
+        "list_memories": "memory",
+        "get_memory": "memory",
+        "update_memory": "memory",
+        "delete_memory": "memory",
+    },
+    "todo": {
+        "plan": "todo",
+        "add_todo": "todo",
+        "list_todos": "todo",
+        "update_todo": "todo",
+        "apply_template": "todo",
+        "list_templates": "todo",
+    },
+}
+
 
 def _effective_approval_decision(
     rule: _ApprovalRule | None,
@@ -391,6 +438,30 @@ def retired_trigger_approval_error(
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
     for old, new in RETIRED_TRIGGER_FUNCTIONS.items():
+        if (
+            error := _retired_approval_pair_error(
+                rules,
+                old=old,
+                new=new,
+                default=default,
+                default_timeout_days=default_timeout_days,
+            )
+        ) is not None:
+            return error
+    return None
+
+
+def retired_consolidated_approval_error(
+    toolkit_name: str,
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+    if renames is None:
+        return None
+    for old, new in renames.items():
         if (
             error := _retired_approval_pair_error(
                 rules,

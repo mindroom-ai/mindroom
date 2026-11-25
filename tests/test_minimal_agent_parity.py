@@ -476,7 +476,12 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
         h.runtime.execution_identity,
     )
     old_messages = [message.to_dict() for message in storage.load_session(h.runtime.session_id).runs[0].messages]
-    await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
+    await h.respond(
+        [
+            _bash_call("memory", "memory", {"action": "add", "content": "Release parity durable lesson"}),
+            "minimal saved",
+        ],
+    )
     assert h.shell.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
     found = await search_agent_memories(
         "Release parity durable",
@@ -494,7 +499,7 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     assert "standard history sentinel" in str(final.messages)
     assert "Release parity durable lesson" in str(final.messages)
     assert offered_tools(h.provider.requests[1]) == ["bash"]
-    assert "add_memory" in offered_tools(final)
+    assert "memory" in offered_tools(final)
     calls = {call["id"] for message in final.messages for call in message.tool_calls or ()}
     assert any(message.tool_call_id in calls for message in final.messages)
 

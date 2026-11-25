@@ -55,11 +55,13 @@ from mindroom.config.legacy_access import (
     validate_access_migration_source,
 )
 from mindroom.config.legacy_fields import (
+    RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_PROMPT_NAMES,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_consolidated_approval_error,
     retired_dynamic_workflow_approval_error,
     retired_trigger_approval_error,
 )
@@ -1667,6 +1669,33 @@ class Config(BaseModel):
             is not None
         ):
             raise ToolConfigOverrideError(workflow_error)
+        if self.tool_approval.rules:
+            self._validate_retired_consolidated_approval_rules({entry.name for _, entry in entries}, tools)
+
+    def _validate_retired_consolidated_approval_rules(
+        self,
+        authored_tool_names: set[str],
+        tools: ToolRegistry,
+    ) -> None:
+        """Fail closed when approval rules target retired function names of enabled consolidated toolkits."""
+        from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        enabled_toolkits = set(authored_tool_names)
+        for agent_name in self.agents:
+            enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
+        for toolkit_name in RETIRED_CONSOLIDATED_FUNCTIONS:
+            if toolkit_name not in enabled_toolkits:
+                continue
+            if (
+                consolidated_error := retired_consolidated_approval_error(
+                    toolkit_name,
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            ) is not None:
+                raise ToolConfigOverrideError(consolidated_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
