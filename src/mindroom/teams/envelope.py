@@ -265,6 +265,7 @@ def _leader_run(
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
+                history_inputs=history.resolved_inputs,
             ),
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),

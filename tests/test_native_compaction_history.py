@@ -16,6 +16,7 @@ from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.request_size import request_sizer
@@ -23,7 +24,6 @@ from mindroom.history.runtime import (
     ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import with_force_compaction
@@ -89,10 +89,9 @@ _FRAME = request_frame("Continue")
 
 def _inputs(config: Config, entity: str = "test_agent") -> HistoryPreparationInputs:
     """Resolve the configured ``entity``'s history inputs."""
-    return resolve_entity_preparation_inputs(
+    return resolve_history_preparation_inputs(
         history_settings=config.resolve_scope(entity).history_settings,
         config=config,
-        runtime_paths=runtime_paths_for(config),
         active_model_name=entity_model_name(config, entity),
         active_context_window=None,
     )

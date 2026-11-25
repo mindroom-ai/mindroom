@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.history.policy import context_budget_after_reserve
+from mindroom.history.policy import fork_input_limit_tokens
 from mindroom.history.request_messages import request_layout, scope_history_messages
 from mindroom.history.summary_message import compaction_summary_text, is_scope_summary
 from mindroom.history.types import replayed_summary_text
@@ -224,15 +224,6 @@ def _static_skip_reason(fork: SummaryFork, summary_model_identity: ModelIdentity
     return next((reason for failed, reason in checks if failed), None)
 
 
-def _fits_context_window(tokens: int, *, context_window: int, reserve_tokens: int) -> bool:
-    if context_window <= 0:
-        return False
-    effective_reserve = max(reserve_tokens, min(4_096, context_window // 2))
-    fit_limit = context_budget_after_reserve(context_window, effective_reserve)
-    safety_margin = min(4_096, context_window // 50)
-    return tokens <= fit_limit - safety_margin
-
-
 def prepare_fork_request(
     fork: SummaryFork,
     *,
@@ -279,11 +270,7 @@ def prepare_fork_request(
         (recorded_routing != expected_routing, "routing_key_mismatch"),
         (size.answered_at is None or not (0 <= current_time - size.answered_at < ttl), "cache_cold"),
         (
-            not _fits_context_window(
-                size.tokens,
-                context_window=fork.context_window,
-                reserve_tokens=fork.reserve_tokens,
-            ),
+            fork.context_window <= 0 or size.tokens > fork_input_limit_tokens(fork.context_window, fork.reserve_tokens),
             "exceeds_context_window",
         ),
     )

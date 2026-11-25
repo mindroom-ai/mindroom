@@ -26,13 +26,10 @@ from mindroom.history.compaction import (
     summarize_runs,
 )
 from mindroom.history.conversation_text import is_own_thread_message
-from mindroom.history.policy import context_budget_after_reserve
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import HistorySummaryBudgetError
 from mindroom.history.request_size import request_sizer
-from mindroom.history.runtime import (
-    resolve_entity_preparation_inputs,
-    run_scope_compaction_with_lifecycle,
-)
+from mindroom.history.runtime import run_scope_compaction_with_lifecycle
 from mindroom.history.storage import new_scope_session, read_fold_basis
 from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
@@ -98,9 +95,8 @@ class _MidTurnCompaction:
     config: Config
     runtime_paths: RuntimePaths
     scope: HistoryScope
-    model_name: str
     model: ModelProvider
-    history_settings: ResolvedHistorySettings
+    policy: _Policy | None
     storage: RunStorage | None
     replay_plan: ResolvedReplayPlan | None
     prompt_id: str | None
@@ -150,20 +146,41 @@ def mid_turn_compaction_hook(
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
+    inputs: HistoryPreparationInputs | None = None,
+    active_context_window: int | None = None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record.
+    interrupted record. Resolves compaction policy and sizer once for the run attempt.
     """
+    resolved = inputs or resolve_history_preparation_inputs(
+        config=config,
+        history_settings=history_settings,
+        active_model_name=model_name,
+        active_context_window=active_context_window,
+    )
+    plan = resolved.execution_plan
+    policy = (
+        _Policy(
+            inputs=resolved,
+            limit=plan.limit_tokens,
+            fit_limit=plan.fit_limit_tokens,
+            sizer=request_sizer(model, config, plan.active_model_name or model_name),
+        )
+        if plan.automatic_compaction
+        and plan.text_compaction_available
+        and plan.limit_tokens is not None
+        and plan.fit_limit_tokens is not None
+        else None
+    )
     compaction = _MidTurnCompaction(
         config=config,
         runtime_paths=runtime_paths,
         scope=scope,
-        model_name=model_name,
         model=model,
-        history_settings=history_settings,
+        policy=policy,
         storage=storage,
         replay_plan=replay_plan,
         prompt_id=prompt_id,
@@ -225,10 +242,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             live_request,
             messages[:leading],
         )
-    if compaction.stopped:
-        return
-    policy = _policy(compaction)
-    if policy is None:
+    if compaction.stopped or (policy := compaction.policy) is None:
         return
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
     request_size = await asyncio.to_thread(policy.sizer.size, live_request)
@@ -500,28 +514,6 @@ def _folded_calls(fold: Fold) -> set[str]:
     return summarized_tool_call_ids(
         [message.to_dict() for message in fold.messages],
         [tool.to_dict() for member in members if member.run_id in fold.member_run_ids for tool in member.tools or []],
-    )
-
-
-def _policy(compaction: _MidTurnCompaction) -> _Policy | None:
-    """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
-    inputs = resolve_entity_preparation_inputs(
-        config=compaction.config,
-        runtime_paths=compaction.runtime_paths,
-        active_model_name=compaction.model_name,
-        active_context_window=None,
-        history_settings=compaction.history_settings,
-    )
-    plan = inputs.execution_plan
-    if not (plan.automatic_compaction and plan.text_compaction_available) or plan.limit_tokens is None:
-        return None
-    assert plan.replay_window_tokens is not None
-    model_window = compaction.config.get_model_context_window(compaction.model_name)
-    return _Policy(
-        inputs=inputs,
-        limit=plan.limit_tokens,
-        fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
-        sizer=request_sizer(compaction.model, compaction.config, compaction.model_name),
     )
 
 

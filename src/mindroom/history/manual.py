@@ -5,10 +5,9 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
+from mindroom.history.policy import describe_compaction_unavailability, resolve_history_preparation_inputs
 from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import new_scope_session, set_force_compaction
-from mindroom.history.types import HistoryPreparationInputs
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -16,7 +15,7 @@ from mindroom.turn_model import ModelScope, resolve_turn_model
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import HistoryScope
+    from mindroom.history.types import HistoryPreparationInputs, HistoryScope
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_model import TurnBudget
 
@@ -118,11 +117,10 @@ def resolve_manual_compaction_plan(
         ModelScope(entity=entity_name, room_id=room_id, thread_id=thread_id, explicit=active_model_name),
         budget,
     )
-    settings = config.resolve_scope(entity_name).history_settings
-    plan = resolve_history_execution_plan(
+    inputs = resolve_history_preparation_inputs(
         config=config,
-        history_settings=settings,
+        history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
     )
-    return describe_compaction_unavailability(plan) or (model.model_name, HistoryPreparationInputs(settings, plan))
+    return describe_compaction_unavailability(inputs.execution_plan) or (model.model_name, inputs)

@@ -340,3 +340,60 @@ async def test_a_fold_without_a_bound_prompt_keeps_the_question_after_the_agents
     (summary_request,) = summarizer.requests
     summary_input = "\n".join(str(message.content) for message in summary_request.messages)
     assert '<message role="assistant">\nmockup.png\n</message>' in summary_input
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_propagates_explicit_context_window_and_resolves_policy_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly prepared active_context_window bounds mid-turn compaction, and policy is resolved once."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(model="summary", reserve_tokens=500),
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=200_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=100_000),
+        },
+    )
+    summarizer = summary_model("SUMMARY")
+    install_model_providers(monkeypatch, {"summary": summarizer})
+    resolve_calls = 0
+    real_resolve = mid_turn_compaction.resolve_history_preparation_inputs
+
+    def counted_resolve(*args: object, **kwargs: object) -> object:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return real_resolve(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mid_turn_compaction, "resolve_history_preparation_inputs", counted_resolve)
+    model = ScriptedModel([calls(tool_call("probe", "call_1")), answer("done")])
+    hook = mid_turn_compaction_hook(
+        config=config,
+        runtime_paths=runtime_paths,
+        scope=TEST_AGENT_SCOPE,
+        model_name="default",
+        model=model,
+        history_settings=config.resolve_scope("test_agent").history_settings,
+        storage=None,
+        replay_plan=None,
+        prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
+        active_context_window=4_000,
+    )
+
+    _, record = await collect(
+        run_agent(
+            spec(model, toolkit(probe)),
+            [Message(role="user", content="Do the task")],
+            ctx=context(),
+            hooks=LoopHooks(before_request=(hook,)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert record.content == "done"
+    assert resolve_calls == 1
+    assert any(is_compaction_summary(message) for message in model.requests[1].messages)

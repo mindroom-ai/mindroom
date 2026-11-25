@@ -22,6 +22,7 @@ from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
     resolve_history_execution_plan,
+    resolve_history_preparation_inputs,
 )
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
@@ -33,7 +34,6 @@ from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import (
@@ -1350,12 +1350,10 @@ async def _prepare_then_finalize_with_a_larger_prompt(
     scope_context: ScopeSessionContext,
 ) -> PreparedHistoryState:
     """Prepare under a short system prompt, then plan replay for a final request whose prompt nearly fills the limit."""
-    resolved_inputs = resolve_entity_preparation_inputs(
+    resolved_inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=_agent_settings(config),
         active_model_name="default",
-        active_context_window=None,
     )
     limit = resolved_inputs.execution_plan.limit_tokens
     assert limit == 64_000 - 16_384

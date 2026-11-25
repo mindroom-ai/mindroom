@@ -13,12 +13,12 @@ import pytest
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_stored_scope,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, with_force_compaction
@@ -34,7 +34,6 @@ from tests.conftest import (
     install_model_providers,
     loop_runs_while_blocked,
     request_frame,
-    runtime_paths_for,
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
@@ -61,12 +60,10 @@ if TYPE_CHECKING:
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs."""
-    return resolve_entity_preparation_inputs(
+    return resolve_history_preparation_inputs(
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
-        runtime_paths=runtime_paths_for(config),
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     )
 
 

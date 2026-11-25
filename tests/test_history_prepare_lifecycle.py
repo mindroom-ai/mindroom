@@ -17,6 +17,7 @@ import pytest
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_summary_text_tokens,
@@ -29,7 +30,6 @@ from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -103,14 +103,16 @@ def _turn_tokens(prompt: str = "Current prompt") -> int:
     return estimate_only_model().request_tokens(request_frame(prompt).request())
 
 
-def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budget: int) -> ResolvedHistoryExecutionPlan:
+def _plan_with_history_budget(
+    config: Config,
+    _runtime_paths: RuntimePaths,
+    budget: int,
+) -> ResolvedHistoryExecutionPlan:
     """Return the test agent's plan with room for ``budget`` tokens of history beside the ``Current prompt`` turn."""
-    plan = resolve_entity_preparation_inputs(
+    plan = resolve_history_preparation_inputs(
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
-        runtime_paths=runtime_paths,
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     ).execution_plan
     return replace(plan, trigger_tokens=budget + _turn_tokens(), limit_tokens=budget + _turn_tokens())
 
@@ -836,12 +838,10 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         trigger_threshold_tokens=trigger_budget,
     )
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
@@ -925,12 +925,10 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         trigger_threshold_tokens=trigger_budget,
     )
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
@@ -2099,12 +2097,10 @@ async def _prepare_reply(
     ``request_frame(system=_SYSTEM_PROMPT)`` when None.
     """
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=history_settings,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=plan,
     )

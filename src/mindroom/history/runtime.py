@@ -22,7 +22,6 @@ from mindroom.history.native import configure_native_history, native_history_rou
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
-    resolve_history_execution_plan,
 )
 from mindroom.history.replay import (
     configured_replay_plan,
@@ -58,14 +57,12 @@ from mindroom.history.types import (
     HistoryScopeState,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
-    ResolvedHistorySettings,
     owner_scope,
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
-from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -324,14 +321,8 @@ async def prepare_scope_history(
             request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
-        # A trigger-level pass reports its budget against the trigger, any other against the limit; notices show the
-        # history's share of the request.
-        target = (
-            execution_plan.trigger_tokens
-            if compaction_decision.reason == "over_trigger_native_disabled"
-            else execution_plan.limit_tokens
-        )
-        history_budget = _history_share(target, static_tokens)
+        # Notices show the history's share of the decision's target (trigger or limit).
+        history_budget = _history_share(compaction_decision.target_tokens, static_tokens)
         history_tokens = max(0, request_size.tokens - static_tokens)
         fork = await _build_scope_fork(
             sizer,
@@ -412,7 +403,7 @@ async def compact_scope_now(
     frame = lookup_fork_frame((context.storage.path, context.scope.key, session.session_id))
     fork = (
         await _build_scope_fork(
-            request_sizer(model, config, plan.compaction_model_name),
+            request_sizer(model, config, plan.active_model_name),
             frame[0],
             frame[1],
             plan,
@@ -469,7 +460,11 @@ async def run_scope_compaction_with_lifecycle(
     compaction_lifecycle: CompactionLifecycle | None,
     compact: _ScopeCompactor,
 ) -> ScopeCompactionLifecycleResult:
-    """Run ``compact`` while reporting start, progress, completion, and failure through ``compaction_lifecycle``."""
+    """Run ``compact`` while reporting start, progress, completion, and failure through ``compaction_lifecycle``.
+
+    Pre-reply callers pass history-only counts for ``current_history_tokens`` and ``history_budget``;
+    mid-turn callers pass whole-request counts.
+    """
     lifecycle = compaction_lifecycle if runs_before else None
     compaction_start = time.monotonic()
     notify = partial(_send_notice, session_id=session_id, scope=scope)
@@ -732,6 +727,7 @@ def finalize_history_preparation(
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
         native_history=native_history,
+        resolved_inputs=resolved_inputs,
     )
 
 
@@ -754,41 +750,6 @@ def _fitting_history_budget(
     if not reported or history_tokens <= 0:
         return budget
     return min(budget, budget * estimated_history_tokens // history_tokens)
-
-
-def resolve_entity_preparation_inputs(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    history_settings: ResolvedHistorySettings,
-    active_model_name: str,
-    active_context_window: int | None,
-) -> HistoryPreparationInputs:
-    """Resolve the runtime model and plan for one agent or team scope.
-
-    ``active_model_name`` is the model the turn resolved, which every scope prepares under, and
-    ``active_context_window`` its window when the turn set one. ``history_settings`` are the ones the entity's build
-    resolved, whose replay policy and compaction config the scope follows.
-    """
-    runtime_model = resolve_turn_model(
-        config,
-        runtime_paths,
-        ModelScope(
-            entity=None,
-            explicit=active_model_name,
-            explicit_context_window=active_context_window,
-        ),
-        None,
-    )
-    return HistoryPreparationInputs(
-        history_settings=history_settings,
-        execution_plan=resolve_history_execution_plan(
-            config=config,
-            history_settings=history_settings,
-            active_model_name=runtime_model.model_name,
-            active_context_window=runtime_model.context_window,
-        ),
-    )
 
 
 def _prepare_scope_state_for_run(

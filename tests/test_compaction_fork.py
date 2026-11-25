@@ -27,7 +27,7 @@ from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer
+from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import compact_scope_now, prepare_scope_history
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction
@@ -1109,6 +1109,42 @@ async def test_live_compact_scope_now_skips_fork_for_different_requester_routing
     assert (empty, len(xml_calls.inputs), bob_model.requests) == (False, 1, [])
     assert any(entry.get("fork_skip_reason") == "routing_key_mismatch" for entry in logs)
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-shared")[-1].summary == "xml-for-bob"
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_now_sizes_with_active_model_name_when_compaction_model_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000)
+    template, inputs = ModelRequest(messages=()), _inputs(config, compaction_model="other")
+    assert inputs.execution_plan.active_model_name == "default"
+    assert inputs.execution_plan.compaction_model_name == "other"
+    active = ScriptedModel([], identity=ModelIdentity(id="scripted-model", provider="openai"))
+    summary_provider = ScriptedModel([], identity=ModelIdentity(id="other-model", provider="openai"))
+    install_model_providers(monkeypatch, {"default": active, "other": summary_provider})
+    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", SummaryCalls(summary="xml"))
+    sizer_model_names: list[str] = []
+
+    def spy_sizer(model: Any, cfg: Any, model_name: str) -> RequestSizer:  # noqa: ANN401
+        sizer_model_names.append(model_name)
+        return request_sizer(model, cfg, model_name)
+
+    monkeypatch.setattr("mindroom.history.runtime.request_sizer", spy_sizer)
+    seed_session(storage, _session("sess-alias", runs=[_warm_run(active, template, 4_000, run_id="r-alias")]))
+    sess = storage.load_session("sess-alias")
+    assert sess is not None
+    set_force_compaction(storage, session=sess, forced=True)
+    remember_fork_frame((storage.path, TEST_AGENT_SCOPE.key, "sess-alias"), template, _SYS)
+    await compact_scope_now(
+        _scope_ctx(storage, "sess-alias", config, paths),
+        inputs,
+        lambda: active,
+        RecordingCompactionLifecycle(),
+        config,
+        paths,
+    )
+    assert sizer_model_names == ["default"]
 
 
 def _probe_tool() -> str:

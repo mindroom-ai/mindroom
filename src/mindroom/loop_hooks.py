@@ -49,7 +49,12 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import (
+        CompactionLifecycle,
+        HistoryPreparationInputs,
+        ResolvedHistorySettings,
+        ResolvedReplayPlan,
+    )
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, StopReason
     from mindroom.participation import ParticipationGate
@@ -85,6 +90,7 @@ class HookTurn:
     turn_recorder: TurnRecorder | None = None
     checkpoints: bool = True
     memory_copy: Path | None = None
+    history_inputs: HistoryPreparationInputs | None = None
 
 
 def agent_loop_hooks(
@@ -211,6 +217,7 @@ def _loop_hooks(
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,
+            inputs=turn.history_inputs,
         ),
     )
     checkpoint = checkpoint_hooks(turn.storage) if turn.checkpoints else None
