@@ -458,13 +458,11 @@ class ApprovalContinuationRunner:
         *,
         runtime_model_name: str | None,
         handle: SpanHandle,
-        answering_model_name: str | None = None,
     ) -> dict[str, Any]:
         """Build pause write metadata carrying stream status and provisional active model."""
         extra_content: dict[str, Any] = {STREAM_STATUS_KEY: stream_status}
-        shown_model_name = answering_model_name or (None if handle.reply_model is not None else runtime_model_name)
-        if shown_model_name is not None:
-            model = model_payload(self.deps.runtime.config, shown_model_name)
+        if runtime_model_name is not None:
+            model = model_payload(self.deps.runtime.config, runtime_model_name)
             handle.reply_model = model
             extra_content.update(streaming_ai_run_content(model))
         elif handle.reply_model is not None:
@@ -492,7 +490,6 @@ class ApprovalContinuationRunner:
                 stream_status,
                 runtime_model_name=paused.runtime_model_name,
                 handle=handle,
-                answering_model_name=paused.answering_model_name,
             ),
             tool_trace=list(visible_tool_trace) or None,
         )
@@ -1336,7 +1333,6 @@ class ApprovalContinuationRunner:
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
                             quiet=request.quiet,
-                            on_model_changed=partial(note_reply_model, self.deps.runtime.config),
                         )
                 else:
                     result = await self._approval_execution.continue_run(

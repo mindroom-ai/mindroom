@@ -212,7 +212,6 @@ async def _continue_persisted_agent(
         storage=storage,
         user_id=continuation.requester_id,
         steering=True,
-        on_model_changed=partial(note_reply_model, config),
     )
     native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(
@@ -247,7 +246,6 @@ async def _continue_persisted_agent(
             tool_trace=tuple(presentation.tool_trace),
             continuation_count=continuation.continuation_count,
             runtime_model_name=continuation.runtime_model_name,
-            answering_model_name=response.model_name,
         )
     if response.status is not RunStatus.completed:
         # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
@@ -491,7 +489,7 @@ class AgentApprovalExecution:
         # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
         model = continuation_model(config, self.runtime_paths, continuation)
         # A continuation stored without its model learns it here, before the resume shows any progress.
-        note_reply_model(config, persisted.model_name or model.model_name)
+        note_reply_model(config, model.model_name)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,

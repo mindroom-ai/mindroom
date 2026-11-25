@@ -5,15 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import (
-    MODEL_PROVENANCE_KEY,
-    PRIOR_ATTEMPTS_KEY,
-    ModelProvenance,
-    read_model_provenance,
-    usage_sums_attempts,
-)
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, read_model_provenance, usage_sums_attempts
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.llm.usage import TOKEN_FIELDS, MessageMetrics, RequestUsage, TokenCounts
+from mindroom.llm.usage import TOKEN_FIELDS, RequestUsage, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -87,9 +81,10 @@ def run_usage_snapshot(record: AnyRunRecord, *, kind: IndependentUsageKind | Non
     if isinstance(requester, str):
         snapshot["metadata"] = {"requester_id": requester}
     snapshot["metrics"] = {} if record.metrics is None else _project_run_metrics(record.metrics)
+    requests = (_message_request_snapshot(message) for message in record.messages)
     snapshot["requests"] = [
         *_carried_requests(record, metadata),
-        *(request for message in record.messages for request in _message_request_snapshots(message)),
+        *(request for request in requests if request is not None),
     ]
     if kind is not None:
         snapshot["kind"] = kind
@@ -135,56 +130,6 @@ def _message_request_snapshot(message: Message) -> dict[str, object] | None:
     return snapshot
 
 
-def _prior_request_usages(message: Message) -> list[RequestUsage]:
-    """Return ``RequestUsage`` entries for failed fallback attempts carried on ``message``."""
-    if message.role != "assistant" or message.from_history:
-        return []
-    raw = (_provider_data(message) or {}).get(PRIOR_ATTEMPTS_KEY)
-    if not isinstance(raw, list):
-        return []
-    usages: list[RequestUsage] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        created_at, raw_metrics = item.get("created_at"), item.get("metrics")
-        if (
-            not isinstance(created_at, (int, float))
-            or isinstance(created_at, bool)
-            or not isinstance(raw_metrics, dict)
-        ):
-            continue
-        try:
-            tokens = stored_token_counts(raw_metrics)
-        except ValueError:
-            continue
-        if tokens is None:
-            continue
-        model, provider = item.get("model"), item.get("model_provider")
-        provenance = (
-            ModelProvenance(model_id=model, provider=provider)
-            if isinstance(model, str) and isinstance(provider, str)
-            else None
-        )
-        usages.append(RequestUsage(created_at=created_at, metrics=MessageMetrics(tokens=tokens), model=provenance))
-    return usages
-
-
-def message_request_usages(message: Message) -> list[RequestUsage]:
-    """Return every ``RequestUsage`` belonging to ``message``: failed prior attempts followed by its own."""
-    usages = _prior_request_usages(message)
-    if (own := request_usage(message)) is not None:
-        usages.append(own)
-    return usages
-
-
-def _message_request_snapshots(message: Message) -> list[dict[str, object]]:
-    """Return every request snapshot belonging to ``message``: failed prior attempts followed by its own."""
-    snapshots = [snapshot for req in _prior_request_usages(message) if (snapshot := _project_request(req)) is not None]
-    if (own := _message_request_snapshot(message)) is not None:
-        snapshots.append(own)
-    return snapshots
-
-
 def _provider_data(message: Message) -> dict[str, object] | None:
     # A message read from a row worker code wrote can hold provider data of any shape.
     return message.provider_data if isinstance(message.provider_data, dict) else None
@@ -216,7 +161,9 @@ def carry_request_usage(record: AnyRunRecord, folded: Sequence[Message]) -> None
     counted twice.
     """
     requests = [
-        {**request, "message_id": message.id} for message in folded for request in _message_request_snapshots(message)
+        {**request, "message_id": message.id}
+        for message in folded
+        if (request := _message_request_snapshot(message)) is not None
     ]
     if not requests:
         return

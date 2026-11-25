@@ -13,7 +13,7 @@ from mindroom.llm.usage import HelperUsage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, message_request_usages
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, request_usage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -108,7 +108,7 @@ def _run_usage(run: RunRecord) -> HelperUsage:
         model=run.model,
         provider=run.model_provider,
         metrics=run.metrics,
-        requests=tuple(request for message in run.messages for request in message_request_usages(message)),
+        requests=tuple(request for message in run.messages if (request := request_usage(message)) is not None),
         created_at=run.created_at,
     )
 

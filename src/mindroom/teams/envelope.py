@@ -248,7 +248,6 @@ def _leader_run(
     storage: RunStorage,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
-    on_model_changed: Callable[[str], None] | None = None,
 ) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
@@ -266,7 +265,6 @@ def _leader_run(
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
-                on_model_changed=on_model_changed,
             ),
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),
@@ -509,7 +507,6 @@ class _TeamTurn:
             storage=storage,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
             turn_recorder=run.record,
-            on_model_changed=on_model_resolved,
         )
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
@@ -650,7 +647,6 @@ class _TeamTurn:
         return replace(
             continued_team_pause(attempt.presentation, paused, quiet=self.ctx.allow_no_report_response),
             runtime_model_name=attempt.runtime_model_name,
-            answering_model_name=record.model_name,
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
 

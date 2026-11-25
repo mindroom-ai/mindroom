@@ -42,7 +42,6 @@ from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
     CUT_OFF_TEXT_KEY,
-    PRIOR_ATTEMPTS_KEY,
     REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
@@ -51,11 +50,9 @@ from mindroom.llm.messages import (
 )
 from mindroom.llm.provider import (
     ModelRequest,
-    ModelSelected,
     ReasoningDelta,
     StreamTracker,
     TextDelta,
-    ToolCallReady,
     TurnCompleted,
 )
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
@@ -166,7 +163,6 @@ class LoopHooks:
     after_tool_batch: tuple[AfterToolBatchHook, ...] = ()
     on_resume_entry: tuple[AfterToolBatchHook, ...] = ()
     on_loop_end: LoopEndHook | None = None
-    on_model_changed: Callable[[str], None] | None = None
 
 
 NO_HOOKS = LoopHooks()
@@ -241,16 +237,9 @@ async def run_model_loop(
             break
         request = state.request()
         progress.last_request = request
-        outcome = _StreamOutcome(tracker=StreamTracker(identity))
+        tracker = StreamTracker(identity)
         turn: TurnCompleted | None = None
-        events = _stream_turn(
-            model,
-            request,
-            messages,
-            state.record,
-            outcome,
-            on_model_changed=hooks.on_model_changed,
-        )
+        events = _stream_turn(model, request, messages, state.record, tracker)
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -261,7 +250,7 @@ async def run_model_loop(
                     yield event
         assert turn is not None
         message = turn.message
-        _accept_turn(message, state, progress, outcome)
+        _accept_turn(message, state, progress, tracker)
         if not message.tool_calls:
             break
         batch_events = _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn)
@@ -315,32 +304,14 @@ def _accept_turn(
     message: Message,
     state: LoopState,
     progress: _Progress,
-    outcome: _StreamOutcome,
+    tracker: StreamTracker,
 ) -> None:
-    """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
-
-    Each failed fallback attempt's usage stays attributed to the model that billed it; the finished message counts
-    under the answering model, whose identity and configured reference are stamped on the run record.
-    """
+    """Record one finished request: the assistant message, its usage, and its text as the run's content so far."""
     metrics = state.record.metrics
     assert metrics is not None
-    prior_requests: list[dict[str, object]] = []
-    for prior in outcome.tracker.prior_usage:
-        _count_request(metrics, prior.metrics, prior.identity)
-        if not prior.sums_attempts and prior.metrics.reported:
-            prior_requests.append(
-                {
-                    "created_at": message.created_at,
-                    "metrics": prior.metrics.to_dict(),
-                    "model": prior.identity.id,
-                    "model_provider": prior.identity.provider,
-                },
-            )
-    if prior_requests:
-        message.provider_data = {**(message.provider_data or {}), PRIOR_ATTEMPTS_KEY: prior_requests}
     state.messages.append(message)
-    answered = _answering_identity(message, outcome.tracker.identity)
-    outcome.stamp_record(state.record, answered)
+    answered = _answering_identity(message, tracker.identity)
+    _stamp_answering_model(state.record, answered, tracker.model_name)
     _count_request(metrics, message.metrics, answered)
     state.request_index += 1
     if message.content is not None:
@@ -533,27 +504,11 @@ def _batch_stops_run(messages: Sequence[Message]) -> bool:
     return False
 
 
-@dataclass(slots=True)
-class _StreamOutcome:
-    """Pairs ``StreamTracker`` with live-model notification and cut-off output tracking."""
-
-    tracker: StreamTracker
-    active_answered: bool = False
-    notified_model_name: str | None = None
-
-    def note_answered(self, on_model_changed: Callable[[str], None] | None) -> None:
-        """Mark the active candidate as having emitted output and notify live model observers once."""
-        self.active_answered = True
-        model_name = self.tracker.model_name
-        if on_model_changed is not None and model_name is not None and model_name != self.notified_model_name:
-            self.notified_model_name = model_name
-            on_model_changed(model_name)
-
-    def stamp_record(self, record: AnyRunRecord, identity: ModelIdentity) -> None:
-        """Stamp ``record`` with the answering identity and configured model reference."""
-        record.model, record.model_provider = identity.id, identity.provider
-        if self.tracker.model_name is not None:
-            record.model_name = self.tracker.model_name
+def _stamp_answering_model(record: AnyRunRecord, identity: ModelIdentity, model_name: str | None) -> None:
+    """Stamp ``record`` with the answering identity and configured model reference."""
+    record.model, record.model_provider = identity.id, identity.provider
+    if model_name is not None:
+        record.model_name = model_name
 
 
 async def _stamp_request_identity(model: ModelProvider, request: ModelRequest, turn: TurnCompleted) -> None:
@@ -572,18 +527,16 @@ async def _stream_turn(
     request: ModelRequest,
     messages: list[Message],
     record: AnyRunRecord,
-    outcome: _StreamOutcome,
-    *,
-    on_model_changed: Callable[[str], None] | None = None,
+    tracker: StreamTracker,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
     The finished turn records the identity of ``request`` (``llm.request_identity``), unless a pipeline stage answered
     it with another request in its place (``REWRITTEN_ATTEMPT_KEY``) or recorded the identity as it sent the request.
 
-    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, each failed
-    attempt's usage and the active attempt's reported usage are kept under their own billing identities, and the run
-    record updates its answering model whenever the active attempt emitted output or usage.
+    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the active attempt's
+    reported usage is kept under its billing identity and the run record updates its answering model whenever the active
+    attempt emitted output or usage.
     """
     turn: TurnCompleted | None = None
     handed_off = False
@@ -592,51 +545,43 @@ async def _stream_turn(
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                outcome.tracker.observe(event)
-                if isinstance(event, ModelSelected):
-                    outcome.active_answered = False
-                elif isinstance(event, TextDelta | ReasoningDelta):
-                    outcome.note_answered(on_model_changed)
-                    if isinstance(event, TextDelta):
-                        shown.append(event.text)
+                tracker.observe(event)
+                if isinstance(event, TextDelta):
+                    shown.append(event.text)
                     yield event
-                elif isinstance(event, ToolCallReady):
-                    outcome.note_answered(on_model_changed)
+                elif isinstance(event, ReasoningDelta):
+                    yield event
                 elif isinstance(event, TurnCompleted):
-                    outcome.note_answered(on_model_changed)
                     turn = event
-        turn = _validate_completed_turn(turn, provider=outcome.tracker.identity.provider)
+        turn = _validate_completed_turn(turn, provider=tracker.identity.provider)
         await _stamp_request_identity(model, request, turn)
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True
     finally:
         if not handed_off:
-            _keep_unaccepted(messages, record, turn, outcome, "".join(shown))
+            _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
 
 
 def _keep_unaccepted(
     messages: list[Message],
     record: AnyRunRecord,
     turn: TurnCompleted | None,
-    outcome: _StreamOutcome,
+    tracker: StreamTracker,
     shown: str,
 ) -> None:
-    """Keep a cut-off request with per-model billing attribution and update the record when the active model answered."""
+    """Keep a cut-off request under its answering identity and update the record when the active model answered."""
     metrics = record.metrics
     assert metrics is not None
-    tracker = outcome.tracker
-    for prior in tracker.prior_usage:
-        _keep_cut_off(messages, metrics, prior.identity, prior.metrics, "", sums_attempts=prior.sums_attempts)
     if turn is not None:
         sums_attempts = usage_sums_attempts(turn.message.provider_data)
         answered = _answering_identity(turn.message, tracker.identity)
-        outcome.stamp_record(record, answered)
+        _stamp_answering_model(record, answered, tracker.model_name)
         _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
         return
     active_billed = tracker.reported.received
-    if outcome.active_answered or (active_billed is not None and active_billed.reported):
-        outcome.stamp_record(record, tracker.identity)
+    if tracker.answered or (active_billed is not None and active_billed.reported):
+        _stamp_answering_model(record, tracker.identity, tracker.model_name)
     _keep_cut_off(
         messages,
         metrics,

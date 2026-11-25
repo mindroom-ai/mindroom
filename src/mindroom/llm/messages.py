@@ -61,8 +61,6 @@ REWRITTEN_ATTEMPT_KEY = "mindroom_attempt_rewritten"
 # ``Message.provider_data`` key naming the configured fallback reference that answered an assistant turn, so later
 # requests on another route never reuse its stored continuation or encrypted replay state.
 FALLBACK_MODEL_KEY = "mindroom_fallback_model"
-# Failed primary/fallback attempt request snapshots carried on the answering assistant message for per-request usage reconciliation.
-PRIOR_ATTEMPTS_KEY = "mindroom_prior_attempts"
 # ``Message.provider_data`` key holding the text a response streamed before it was cut off, on the assistant message
 # without content that stands for it in its run; recovery of a run its user stopped keeps that text.
 CUT_OFF_TEXT_KEY = "mindroom_cut_off_text"
@@ -441,7 +439,6 @@ __all__ = [
     "MEDIA_FOLLOW_UP_TEXT",
     "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
-    "PRIOR_ATTEMPTS_KEY",
     "PROMPT_UPDATE_KEY",
     "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
     "REWRITTEN_ATTEMPT_KEY",

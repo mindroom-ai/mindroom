@@ -41,7 +41,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_
 from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
@@ -85,7 +85,6 @@ class HookTurn:
     turn_recorder: TurnRecorder | None = None
     checkpoints: bool = True
     memory_copy: Path | None = None
-    on_model_changed: Callable[[str], None] | None = None
 
 
 def agent_loop_hooks(
@@ -236,7 +235,6 @@ def _loop_hooks(
             if skill_review_capture is not None
             else None
         ),
-        on_model_changed=turn.on_model_changed,
     )
 
 

@@ -15,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -294,16 +294,20 @@ async def test_a_fallback_is_sent_the_request_without_the_first_routes_replay_st
 
 
 @pytest.mark.asyncio
-async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cost() -> None:
+async def test_answering_fallback_is_billed_under_its_own_model_and_price() -> None:
     config = Config(
         models={
             "paid": ModelConfig(
                 provider="anthropic",
                 id="claude-opus-5-5",
                 pricing=ModelPricing(input=5, output=25),
-                fallbacks=["free"],
+                fallbacks=["cheap"],
             ),
-            "free": ModelConfig(provider="codex", id="gpt-6-sol"),
+            "cheap": ModelConfig(
+                provider="openai",
+                id="gpt-6-mini",
+                pricing=ModelPricing(input=1, output=2),
+            ),
         },
     )
     saved: list[RunRecord] = []
@@ -311,18 +315,17 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
     async def persist(record: RunRecord) -> None:
         saved.append(record)
 
-    primary_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000))
-    fallback_usage = MessageMetrics(tokens=TokenCounts(input_tokens=500_000, total_tokens=500_000))
-    primary = _Model("paid", [[UsageReported(primary_usage, final=False), _quota()]])
+    fallback_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000))
+    primary = _Model("paid", [[_quota()]])
     primary.identity = ModelIdentity(id="claude-opus-5-5", provider="Anthropic")
     answer = Message(
         role="assistant",
         content="hi",
-        provider_data=model_provenance("gpt-6-sol", "Codex"),
+        provider_data=model_provenance("gpt-6-mini", "OpenAI"),
         metrics=fallback_usage,
     )
     fallback = _Model(
-        "free",
+        "cheap",
         [
             [
                 UsageReported(fallback_usage, final=True),
@@ -331,7 +334,7 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
             ],
         ],
     )
-    fallback.identity = ModelIdentity(id="gpt-6-sol", provider="Codex")
+    fallback.identity = ModelIdentity(id="gpt-6-mini", provider="OpenAI")
     spec = AgentSpec(id="code", name="Code", model=_with_fallbacks(primary, fallback), system_messages=(), toolkits=())
 
     async for _ in run_agent(
@@ -344,21 +347,17 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
         pass
 
     [record] = saved
+    assert (record.model_provider, record.model, record.model_name) == ("OpenAI", "gpt-6-mini", "cheap")
     assert record.metrics is not None
-    assert record.metrics.tokens.input_tokens == 1_500_000
     assert [
         (entry.provider, entry.id, entry.tokens.input_tokens) for entry in (record.metrics.details or {})["model"]
-    ] == [
-        ("Anthropic", "claude-opus-5-5", 1_000_000),
-        ("Codex", "gpt-6-sol", 500_000),
-    ]
-    # Paid primary tokens must NOT be folded into the unpriced fallback's identity.
+    ] == [("OpenAI", "gpt-6-mini", 1_000_000)]
     assert run_cost_usd(
         record.metrics,
         model_provider=record.model_provider,
         model_id=record.model,
         prices=model_prices(config),
-    ) == pytest.approx(5.0)
+    ) == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -976,8 +975,8 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
 
 
 @pytest.mark.asyncio
-async def test_same_id_backup_account_level_cut_off_without_usage_and_live_badge() -> None:
-    """Exact configured references survive same-ID accounts, @level, live callbacks, and usage-free cut-offs."""
+async def test_same_id_backup_account_level_and_cut_off_without_usage() -> None:
+    """Exact configured references survive same-ID accounts, @level, and usage-free cut-offs."""
     config = Config(
         models={
             "gpt": ModelConfig(provider="openai", id="gpt-6", api_key="key-a", fallbacks=["gpt-backup"]),
@@ -1002,8 +1001,7 @@ async def test_same_id_backup_account_level_cut_off_without_usage_and_live_badge
         },
     )
 
-    # 1. Same-ID backup account + live callback fired before first TextDelta.
-    events_order: list[str] = []
+    # 1. Same-ID backup account stamps exact backup reference and fallback_from.
     saved: list[RunRecord] = []
 
     async def persist(record: RunRecord) -> None:
@@ -1015,8 +1013,7 @@ async def test_same_id_backup_account_level_cut_off_without_usage_and_live_badge
         "gpt-backup",
         [
             [
-                TextDelta("from "),
-                TextDelta("backup"),
+                TextDelta("from backup"),
                 TurnCompleted(
                     message=Message(
                         role="assistant",
@@ -1031,18 +1028,14 @@ async def test_same_id_backup_account_level_cut_off_without_usage_and_live_badge
     backup.identity = ModelIdentity(id="gpt-6", provider="OpenAI")
     spec = AgentSpec(id="code", name="Code", model=_with_fallbacks(primary, backup), system_messages=(), toolkits=())
 
-    async for event in run_agent(
+    async for _ in run_agent(
         spec,
         [Message(role="user", content="hello")],
         ctx=RunContext(run_id="r1", session=UnstoredSession("s1")),
         persist=persist,
         request_template=EMPTY_REQUEST,
-        hooks=LoopHooks(on_model_changed=lambda name: events_order.append(f"model:{name}")),
     ):
-        if isinstance(event, TextDelta):
-            events_order.append(f"text:{event.text}")  # noqa: PERF401 - asserts live chronological ordering
-
-    assert events_order == ["model:gpt-backup", "text:from ", "text:backup"]
+        pass
     [record] = saved
     assert record.model_name == "gpt-backup"
     metadata = build_ai_run_metadata_content(
@@ -1277,100 +1270,6 @@ async def test_build_model_provider_enforces_exact_level_on_budget_fallback(
     events = await drain(low_provider, _request())
     assert _text(events) == "answered:paid@low"
     assert calls == ["paid@low"]
-
-
-@pytest.mark.asyncio
-async def test_failed_primary_usage_reconciles_with_per_request_usage_stats(tmp_path: Path) -> None:
-    """When a failed primary emits usage before a fallback answers, include_requests=True reconciles both models."""
-    from datetime import UTC, datetime  # noqa: PLC0415
-
-    from mindroom.history.storage import new_scope_session  # noqa: PLC0415
-    from mindroom.history.types import HistoryScope  # noqa: PLC0415
-    from mindroom.session_storage.agent_storage import create_session_storage  # noqa: PLC0415
-    from mindroom.usage.stats import collect_admin_usage  # noqa: PLC0415
-
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "data",
-        process_env={},
-    )
-    config = Config(
-        models={"default": _synthetic()},
-        agents={"code": {"display_name": "Code", "role": "Coder"}},
-    )
-    primary = _Model(
-        "primary",
-        [[UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=40))), _transient()]],
-    )
-    fallback_msg = Message(
-        role="assistant",
-        content="ok",
-        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=200, output_tokens=80)),
-        provider_data=model_provenance("fallback-id", "fallback-provider"),
-    )
-    fallback = _Model("fallback", [[TextDelta("ok"), TurnCompleted(message=fallback_msg, stop_reason="end")]])
-    spec = AgentSpec(id="code", name="Code", model=_with_fallbacks(primary, fallback), system_messages=(), toolkits=())
-    saved: list[RunRecord] = []
-
-    async def persist(record: RunRecord) -> None:
-        saved.append(record)
-
-    async for _ in run_agent(
-        spec,
-        [Message(role="user", content="hello")],
-        ctx=RunContext(
-            run_id="r-reconcile",
-            session=UnstoredSession("s1"),
-            metadata={"requester_id": "@alice:localhost"},
-        ),
-        persist=persist,
-        request_template=EMPTY_REQUEST,
-    ):
-        pass
-
-    [record] = saved
-    record.created_at = int(datetime.now(tz=UTC).timestamp())
-    storage = create_session_storage("code", config, paths, execution_identity=None)
-    storage.save_run(
-        new_scope_session(session_id="s1", scope=HistoryScope(kind="agent", scope_id="code")),
-        record,
-        record_usage=True,
-    )
-
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.request_coverage is not None
-    assert report.request_coverage.unavailable_sources == 0
-    by_provider = {
-        (row.model_provider, row.model): (row.totals.input_tokens, row.totals.output_tokens)
-        for row in report.request_breakdown
-    }
-    assert by_provider == {
-        ("primary-provider", "primary-id"): (100, 40),
-        ("fallback-provider", "fallback-id"): (200, 80),
-    }
-
-    from mindroom.helper_usage import _run_usage  # noqa: PLC0415
-    from mindroom.usage.storage import helper_usage_snapshot  # noqa: PLC0415
-
-    helper_snap = helper_usage_snapshot(
-        _run_usage(record),
-        usage_id="workflow:r-reconcile",
-        kind="workflow",
-        requester_id="@alice:localhost",
-    )
-    helper_rows = [
-        (
-            r["model_provider"],
-            r["model"],
-            cast("dict[str, object]", r["metrics"])["input_tokens"],
-            cast("dict[str, object]", r["metrics"])["output_tokens"],
-        )
-        for r in cast("list[dict[str, object]]", helper_snap["requests"])
-    ]
-    assert helper_rows == [
-        ("primary-provider", "primary-id", 100, 40),
-        ("fallback-provider", "fallback-id", 200, 80),
-    ]
 
 
 @pytest.mark.asyncio

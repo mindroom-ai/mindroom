@@ -597,7 +597,6 @@ class PausedAttempt:
     requirements: tuple[RunRequirement, ...]
     toolkit_owners: Mapping[tuple[str, str], str]
     runtime_model_name: str | None = None
-    answering_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     response_text: str = ""
     acknowledged_response_text: str | None = None

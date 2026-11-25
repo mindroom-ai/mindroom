@@ -788,7 +788,7 @@ A fallback that has `fallbacks` of its own tries them right after itself, and wh
 When a provider says when its limit resets, as Codex and Claude subscriptions do, MindRoom tries that model last until then.
 A reply at `name@level` runs each fallback at that level when the fallback lists it, and at the fallback's default level otherwise.
 A fallback whose `context_window` is too small for the conversation is skipped, so give fallbacks at least the first model's window.
-A finished reply answered by a fallback shows the answering model, names the model it stood in for as `fallback_from` in its run metadata, and records each attempt's usage and cost under the provider and model that billed it.
+A finished reply answered by a fallback shows the answering model, names the model it stood in for as `fallback_from` in its run metadata, and counts its usage and cost under the answering model.
 For a user at their [budget cap](../budgets.md#over-budget-replies), fallback chains skip priced models other than `budgets.fallback_model`, and Dynamic Workflows with `permissions.models` skip fallbacks outside that allowlist.
 
 ## Reasoning Levels

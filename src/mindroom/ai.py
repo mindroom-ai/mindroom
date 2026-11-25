@@ -34,7 +34,6 @@ from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_tool_runtime_context,
     delegation_grant,
-    note_child_active_model,
     note_child_run_id,
     observe_child_event,
     reload_stopped_child_result,
@@ -344,7 +343,6 @@ class _AgentRunContext:
     runtime_paths: RuntimePaths
     # The turn's record, where the run's mid-turn compaction notes the calls a fold summarized.
     turn_recorder: TurnRecorder
-    on_model_resolved: Callable[[str], None] | None = None
 
     @property
     def agent_name(self) -> str:
@@ -523,7 +521,6 @@ def _agent_loop_hooks(
             # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
             checkpoints=not ctx.inline_tools,
             memory_copy=prepared.memory_copy,
-            on_model_changed=run_context.on_model_resolved,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -1076,7 +1073,6 @@ async def _prepare_agent_run_context(
         config=config,
         runtime_paths=runtime_paths,
         turn_recorder=turn_recorder,
-        on_model_resolved=on_model_resolved,
     )
 
 
@@ -1154,7 +1150,6 @@ async def run_delegated_child_response(
     sinks = TurnSinks(
         # Delegation recovery records a child's interruption.
         persist_interrupted=False,
-        on_model_resolved=partial(note_child_active_model, child),
         on_attempt_start=lambda run_id, model_name: note_child_run_id(
             child,
             run_id,
@@ -1489,7 +1484,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 replace(
                     paused_attempt,
                     runtime_model_name=prepared_run.runtime_model_name,
-                    answering_model_name=record.model_name,
                     tool_trace=(
                         paused_attempt.tool_trace
                         if show_tool_calls

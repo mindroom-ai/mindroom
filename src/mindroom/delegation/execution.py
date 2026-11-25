@@ -26,7 +26,6 @@ from mindroom.delegation.lifecycle import (
     child_tool_runtime_context,
     finish_child_turn,
     live_delegation_config,
-    note_child_active_model,
     note_child_run_id,
     observe_child_event,
     original_prompt,
@@ -397,7 +396,6 @@ async def _execute_child(
         # A job asks for its child's approvals and resumes each paused row once, so nothing settles from that row and
         # the resume checkpoints as the child's fresh run does: a crash then keeps its work for its continuation.
         checkpoints=job_owns_execution(),
-        on_model_changed=partial(note_child_active_model, child),
     )
     with tool_runtime_context(child_context):
         response = await _continue_child(

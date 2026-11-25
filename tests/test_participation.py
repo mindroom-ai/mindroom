@@ -254,26 +254,26 @@ async def test_cancellation_is_not_converted_to_silence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decision_failover_records_usage_under_answering_model_and_prior_attempt() -> None:
-    """A participation decision that fails over records prior primary usage and answering fallback usage separately."""
+async def test_decision_failover_records_usage_under_answering_model() -> None:
+    """A participation decision that fails over records decision and reply usage under the answering fallback."""
     from functools import partial  # noqa: PLC0415
 
     from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError  # noqa: PLC0415
-    from mindroom.llm.provider import ModelIdentity, UsageReported  # noqa: PLC0415
+    from mindroom.llm.provider import ModelIdentity  # noqa: PLC0415
     from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream  # noqa: PLC0415
     from mindroom.providers.pipeline.wrapped import WrappedProvider  # noqa: PLC0415
 
     primary_id = ModelIdentity(id="primary-m", provider="Anthropic")
     fallback_id = ModelIdentity(id="fallback-m", provider="OpenAI")
 
-    class _QuotaThenFail(ScriptedModel):
+    class _QuotaFail(ScriptedModel):
         async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
             self.requests.append(request)
-            yield UsageReported(usage(15, 3))
             msg = "quota"
             raise ProviderError(msg, provider="Anthropic", status_code=429, code=QUOTA_EXHAUSTED)
+            yield  # pragma: no cover
 
-    primary = _QuotaThenFail([], identity=primary_id)
+    primary = _QuotaFail([], identity=primary_id)
     fallback = ScriptedModel(
         [answer(_RESPOND, usage(25, 5)), answer("Reply", usage(10, 2))],
         identity=fallback_id,
@@ -295,7 +295,7 @@ async def test_decision_failover_records_usage_under_answering_model_and_prior_a
         (entry.provider, entry.id): (entry.tokens.input_tokens, entry.tokens.output_tokens)
         for entry in record.metrics.details["model"]
     }
-    assert by_model == {("Anthropic", "primary-m"): (30, 6), ("OpenAI", "fallback-m"): (35, 7)}
+    assert by_model == {("OpenAI", "fallback-m"): (35, 7)}
 
 
 @pytest.mark.asyncio

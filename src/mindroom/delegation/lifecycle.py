@@ -199,11 +199,6 @@ async def reserve_child_turn(
         child.model_name = retained.model_name
 
 
-def note_child_active_model(child: DelegationChild, model_name: str) -> None:
-    """Publish the active model answering for ``child`` without changing its requested model for follow-ups."""
-    _publish(child.delegation_id, lambda feed: feed.model(model_name))
-
-
 def note_child_run_id(
     child: DelegationChild,
     run_id: str,

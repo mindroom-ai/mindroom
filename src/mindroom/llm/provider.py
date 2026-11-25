@@ -355,38 +355,30 @@ class ReportedUsage:
         return report
 
 
-@dataclass(frozen=True, slots=True)
-class AttemptUsage:
-    """One failed attempt's reported usage before a fallback chain switched to another model."""
-
-    identity: ModelIdentity
-    metrics: MessageMetrics
-    sums_attempts: bool = False
-
-
 @dataclass(slots=True)
 class StreamTracker:
-    """Tracks the active model identity, reference, capabilities, and per-attempt usage across fallback switches."""
+    """Tracks the active model identity, reference, capabilities, and reported usage across fallback switches."""
 
     identity: ModelIdentity
     model_name: str | None = None
     capabilities: Capabilities | None = None
     selected: bool = False
+    answered: bool = False
     reported: ReportedUsage = field(default_factory=ReportedUsage)
-    prior_usage: list[AttemptUsage] = field(default_factory=list)
 
     def observe(self, event: StreamEvent) -> None:
         """Update tracker state for one stream event."""
         if isinstance(event, ModelSelected):
-            if (received := self.reported.received) is not None and received.reported:
-                self.prior_usage.append(AttemptUsage(self.identity, received, self.reported.sums_attempts))
             self.reported = ReportedUsage()
             self.identity = event.identity
             self.model_name = event.model_name
             self.capabilities = event.capabilities
             self.selected = True
+            self.answered = False
         elif isinstance(event, UsageReported):
             self.reported.observe(event)
+        elif isinstance(event, TextDelta | ReasoningDelta | ToolCallReady | TurnCompleted):
+            self.answered = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -396,7 +388,6 @@ class ModelTurn:
     message: Message
     stop_reason: StopReason | None
     capabilities: Capabilities | None = None
-    prior_usage: tuple[AttemptUsage, ...] = ()
     identity: ModelIdentity | None = None
 
     @property
@@ -509,14 +500,12 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         message=completed.message,
         stop_reason=completed.stop_reason,
         capabilities=tracker.capabilities,
-        prior_usage=tuple(tracker.prior_usage),
         identity=tracker.identity if tracker.selected else None,
     )
 
 
 __all__ = [
     "STRUCTURED_OUTPUT_TOOL",
-    "AttemptUsage",
     "Capabilities",
     "DeferredTools",
     "MediaKind",
