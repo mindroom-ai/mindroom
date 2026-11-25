@@ -735,7 +735,7 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     path = tmp_path / "w.sqlite3"
     store = WorkflowRunStore(path)
     store.reserve_run(_run())
-    assert _schema_version(path) == store_module.SCHEMA_VERSION == 1
+    assert _schema_version(path) == store_module.SCHEMA_VERSION == 2
 
     calls: list[str] = []
 
@@ -751,14 +751,14 @@ def test_migrations_run_in_order_from_version_zero(tmp_path: Path, monkeypatch: 
     for _ in range(2):
         WorkflowRunStore(path)
     assert calls == ["second", "third"]
-    assert _schema_version(path) == 3
+    assert _schema_version(path) == 4
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT placeholder FROM workflow_runs").fetchall() == [("migrated",)]
 
     fresh = tmp_path / "fresh.sqlite3"
     WorkflowRunStore(fresh)
     assert calls == ["second", "third", "second", "third"]
-    assert _schema_version(fresh) == 3
+    assert _schema_version(fresh) == 4
 
 
 def test_failed_migration_leaves_the_version_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -996,3 +996,94 @@ def test_turn_costs_are_those_of_the_runs_own_priced_turns(tmp_path: Path) -> No
         store.add_usage(_RUN_A, "@0", 1, turn, 1, {"cost_usd": cost})
 
     assert sorted(store.usage_summary(_RUN_A).turn_costs) == [0.0, 0.3, 0.6]
+
+
+def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path: Path) -> None:
+    """Opening a v1 database adds workflow_log.attempt (default 0) and scopes logs by attempt."""
+    path = tmp_path / "v1.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE workflow_schema (version INTEGER NOT NULL)")
+        store_module._create_schema(conn)
+        conn.execute("INSERT INTO workflow_schema (version) VALUES (1)")
+        conn.commit()
+    # Populate a run + v1 log row (no attempt column yet) before opening v2 store.
+    with sqlite3.connect(path) as conn:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(workflow_log)")]
+        assert "attempt" not in cols
+        run = _run()
+        values = {
+            **store_module._row_values(store_module.asdict(run), store_module._RUN_JSON_FIELDS),
+            "reservation_digest": "d",
+        }
+        store_module._insert(conn, "INSERT INTO workflow_runs", values)
+        conn.execute(
+            "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
+            (_RUN_A, "2026-01-01T00:00:00Z", "legacy"),
+        )
+        conn.commit()
+
+    store = WorkflowRunStore(path)
+    assert _schema_version(path) == 2
+    with sqlite3.connect(path) as conn:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(workflow_log)")]
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "attempt" in cols
+    assert "workflow_log_run_attempt_idx" in indexes
+
+    set_run(store, _RUN_A, attempt=1)
+    store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 1")
+    set_run(store, _RUN_A, attempt=2)
+    store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 2")
+
+    assert store.log(_RUN_A) == ["legacy", "attempt 1", "attempt 2"]
+    assert store.log(_RUN_A, attempt=0) == ["legacy"]
+    assert store.log(_RUN_A, attempt=1) == ["attempt 1"]
+    assert store.log(_RUN_A, attempt=2) == ["attempt 2"]
+
+
+def test_usage_summary_scopes_by_node_to_current_generations_while_keeping_totals(tmp_path: Path) -> None:
+    """Per-node usage filters to current generations while run totals keep full multi-attempt spend."""
+    store, _ = _store_with_node(tmp_path)
+    store.add_usage(_RUN_A, "@0", 1, 1, 1, {"input_tokens": 100, "cost_usd": 0.50})
+    store.add_usage(_RUN_A, "@0", 2, 1, 2, {"input_tokens": 50, "cost_usd": 0.25})
+    store.add_usage(_RUN_A, "@1", 1, 1, 1, {"input_tokens": 20, "cost_usd": 0.10})
+    store.add_usage(_RUN_A, "@2", 1, 1, 1, {"input_tokens": 40, "cost_usd": 0.40})
+
+    scoped = store.usage_summary(_RUN_A, attempt=2, current_generations={"@0": 2, "@1": 1})
+    assert scoped.totals["cost_usd"] == pytest.approx(1.25)
+    assert scoped.totals["input_tokens"] == 210
+    assert scoped.attempt_cost_usd == pytest.approx(0.25)
+    assert set(scoped.by_node) == {"@0", "@1"}
+    assert scoped.by_node["@0"]["cost_usd"] == pytest.approx(0.25)
+    assert scoped.by_node["@0"]["input_tokens"] == 50
+    assert scoped.by_node["@1"]["cost_usd"] == pytest.approx(0.10)
+    # Default (current_generations=None) preserves full per-key sum.
+    assert store.usage_summary(_RUN_A).by_node["@0"]["cost_usd"] == pytest.approx(0.75)
+
+
+def test_node_previews_extracts_bounded_text_shell_and_json_and_skips_state_and_large_blobs(tmp_path: Path) -> None:
+    """node_previews returns bounded text/output/small-JSON previews and skips state, null, stale, and large blobs."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    cases: list[tuple[str, str, WorkflowNodeState, object, bool]] = [
+        ("@0", "agent", WorkflowNodeState.COMPLETED, "  hello " + "a" * 80, False),
+        ("@1", "tool", WorkflowNodeState.COMPLETED, {"output": "shell stdout\n", "exit_code": 0}, False),
+        ("@2", "turn", WorkflowNodeState.COMPLETED, {"id": 9007199254740993, "ok": True}, False),
+        ("@3", "state", WorkflowNodeState.COMPLETED, "secret shared state", False),
+        ("@4", "tool", WorkflowNodeState.COMPLETED, {"blob": "x" * 5000}, False),
+        ("@5", "agent", WorkflowNodeState.COMPLETED, None, False),
+        ("@6", "agent", WorkflowNodeState.COMPLETED, {"text": "y" * (9 * 1024 * 1024)}, False),
+        ("@7", "agent", WorkflowNodeState.COMPLETED, "stale text", True),
+        ("@8", "agent", WorkflowNodeState.RUNNING, None, False),
+    ]
+    for key, kind, state, result, stale in cases:
+        store.put_node(_node(key=key, kind=kind, state=WorkflowNodeState.RUNNING, stale=stale), 0)
+        if state is WorkflowNodeState.COMPLETED:
+            store.settle_node(_RUN_A, key, 1, 0, state=state, result=result)
+
+    previews = store.node_previews(_RUN_A, max_chars=40)
+    assert set(previews) == {"@0", "@1", "@2"}
+    assert previews["@0"] == ("hello " + "a" * 80)[:38]  # 2 leading spaces stripped after substr(..., 1, 40)
+    assert previews["@1"] == "shell stdout"
+    assert previews["@2"] == '{"id":9007199254740993,"ok":true}'
+    assert store.node_previews(_RUN_A, max_chars=0) == {}

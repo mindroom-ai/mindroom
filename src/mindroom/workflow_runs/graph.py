@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -27,11 +27,13 @@ _NAME_CHARS = 80
 _TEXT_CHARS = 200
 # How many of its newest log lines a snapshot shows: a client that adds a delta's lines keeps as many.
 LOG_LINES = 20
+MESSAGE_LINES = 50
 _COUNTED = ("queued", "running", "waiting", "completed", "failed")
 _USAGE = ("input_tokens", "output_tokens", "tool_calls", "cost_usd")
 # A call that was cancelled or may have run is counted with the failed ones wherever calls are counted by status.
 _AS_FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED, WorkflowNodeState.INDETERMINATE})
 AGENT_KINDS = frozenset({"agent", "turn"})
+_PREVIEW_KINDS = frozenset({"agent", "turn", "tool"})
 
 type _Row = dict[str, Any]
 
@@ -45,6 +47,7 @@ class Graph:
     nodes: list[_Row]
     edges: list[_Row]
     log: list[str]
+    messages: list[_Row] = field(default_factory=list)
 
 
 def node_label(kind: str, args: Mapping[str, object], name: object = None) -> str:
@@ -123,6 +126,8 @@ def graph_rows(
     log: Sequence[str],
     *,
     inside: Mapping[str, Mapping[str, int]] | None = None,
+    messages: Sequence[_Row] = (),
+    previews: Mapping[str, str] | None = None,
 ) -> Graph:
     """Return the rows of the current view of a run: its phases, groups, calls, message edges and newest log lines.
 
@@ -165,34 +170,41 @@ def graph_rows(
         count(parent_group(node.lane), _bucket(node.state))
         used, links = usage_by_node.get(node.key, {}), node.links
         message = None if node.error is None else str(node.error.get("message") or node.error.get("kind") or "")
-        rows.append(
-            {
-                "id": ids[node.key],
-                "kind": node.kind,
-                "label": node.label,
-                "name": redact_sensitive_text(node.name, max_length=_NAME_CHARS) if node.name else None,
-                "phase": phases.index(node.phase) if node.phase else None,
-                "group": ids.get(parent_group(node.lane) or "") if parent_group(node.lane) in groups else None,
-                "status": node.state.value,
-                "waiting_on": node.waiting_on,
-                "agent": links.get("agent"),
-                "model": links.get("model"),
-                "run": links.get("delegation_id"),
-                "subagent": links.get("subagent_id"),
-                "job": links.get("job_id"),
-                "session": ids.get(node.session_key) if node.session_key else None,
-                "turns": (
-                    session_turns[node.key]
-                    if node.kind == "session"
-                    else (int(links.get("turn", 1)) if node.kind in AGENT_KINDS else 0)
-                ),
-                "started_at": _epoch(node.started_at),
-                "ended_at": _epoch(node.ended_at),
-                "cached": node.cached,
-                "error": None if message is None else redact_sensitive_text(message, max_length=_TEXT_CHARS),
-                "usage": {name: used.get(name) or 0 for name in _USAGE},
-            },
-        )
+        row: _Row = {
+            "id": ids[node.key],
+            "kind": node.kind,
+            "label": node.label,
+            "name": redact_sensitive_text(node.name, max_length=_NAME_CHARS) if node.name else None,
+            "phase": phases.index(node.phase) if node.phase else None,
+            "group": ids.get(parent_group(node.lane) or "") if parent_group(node.lane) in groups else None,
+            "status": node.state.value,
+            "waiting_on": node.waiting_on,
+            "agent": links.get("agent"),
+            "model": links.get("model"),
+            "run": links.get("delegation_id"),
+            "subagent": links.get("subagent_id"),
+            "job": links.get("job_id"),
+            "session": ids.get(node.session_key) if node.session_key else None,
+            "turns": (
+                session_turns[node.key]
+                if node.kind == "session"
+                else (int(links.get("turn", 1)) if node.kind in AGENT_KINDS else 0)
+            ),
+            "started_at": _epoch(node.started_at),
+            "ended_at": _epoch(node.ended_at),
+            "cached": node.cached,
+            "error": None if message is None else redact_sensitive_text(message, max_length=_TEXT_CHARS),
+            "usage": {name: used.get(name) or 0 for name in _USAGE},
+        }
+        if (
+            previews
+            and node.state is WorkflowNodeState.COMPLETED
+            and node.kind in _PREVIEW_KINDS
+            and (raw := previews.get(node.key))
+            and (trimmed := raw.strip())
+        ):
+            row["preview"] = redact_sensitive_text(trimmed, max_length=_TEXT_CHARS)
+        rows.append(row)
     return Graph(
         phases=[phase[:_NAME_CHARS] for phase in phases],
         groups=list(groups.values()),
@@ -201,6 +213,7 @@ def graph_rows(
             {"from": sender, "to": receiver, "kind": "message", "count": number} for sender, receiver, number in edges
         ],
         log=[line[:_TEXT_CHARS] for line in log[-LOG_LINES:]],
+        messages=list(messages[-MESSAGE_LINES:]),
     )
 
 
@@ -219,12 +232,14 @@ def _order(row: _Row) -> tuple[int, int]:
 def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
     """Return the largest snapshot of *graph* that *fits*, with a count of everything it leaves out.
 
-    Calls are added in the order a person can act on them, then edges, the busiest first. When the groups alone do
-    not fit, the innermost ones are left out and no call is shown; the group around them still counts their calls.
-    When that does not fit either, the log, then the groups, then the phase names are left out. What remains then,
-    the counts, has a fixed size, so a frame can always be sent.
+    Calls are added in the order a person can act on them, then edges (busiest first), then messages (newest kept).
+    When the groups alone do not fit, the innermost ones are left out and no call is shown; the group around them
+    still counts their calls. When that does not fit either, the log, then the groups, then the phase names are left
+    out. What remains then, the counts, has a fixed size, so a frame can always be sent.
     """
-    calls, edges = sorted(graph.nodes, key=_order), sorted(graph.edges, key=lambda edge: -edge["count"])
+    calls = sorted(graph.nodes, key=_order)
+    edges = sorted(graph.edges, key=lambda edge: -edge["count"])
+    messages = list(graph.messages[-MESSAGE_LINES:])
     depths: dict[str, int] = {}
     for group in graph.groups:
         # A group comes after the group around it, and the call a nested run is under is in no group that counts here.
@@ -233,11 +248,14 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
 
     def built(shown: int, depth: int, *, log: bool = True, phases: bool = True) -> dict[str, Any]:
         groups = [group for group in graph.groups if depths[group["id"]] <= depth]
+        shown_edges = min(len(edges), max(0, shown - len(calls)))
+        shown_messages = min(len(messages), max(0, shown - len(calls) - len(edges)))
         omitted = dict.fromkeys(_COUNTED, 0) | Counter(
             _bucket(WorkflowNodeState(row["status"])) for row in calls[shown:]
         )
         omitted |= {
-            "edges": len(edges) - max(0, shown - len(calls)),
+            "edges": len(edges) - shown_edges,
+            "messages": len(messages) - shown_messages,
             "groups": len(graph.groups) - len(groups),
             "phases": 0 if phases else len(graph.phases),
             "log": 0 if log else len(graph.log),
@@ -247,7 +265,8 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
             "groups": groups,
             # Calls are shown only with every group: each names its own.
             "nodes": calls[:shown],
-            "edges": edges[: max(0, shown - len(calls))],
+            "edges": edges[:shown_edges],
+            "messages": messages[-shown_messages:] if shown_messages else [],
             "omitted": omitted,
             "log": graph.log if log else [],
         }
@@ -258,15 +277,25 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
             return built(0, depth)
         reduced = (built(0, 0, log=False), built(0, -1, log=False))
         return next((form for form in reduced if fits(form)), built(0, -1, log=False, phases=False))
-    shown = bisect_left(range(1, len(calls) + len(edges) + 1), True, key=lambda n: not fits(built(n, deepest)))
+    total = len(calls) + len(edges) + len(messages)
+    shown = bisect_left(range(1, total + 1), True, key=lambda n: not fits(built(n, deepest)))
     return built(shown, deepest)
 
 
+def _append_suffix[T](was: Sequence[T], now: Sequence[T], window: int) -> list[T] | str | None:
+    """Return items appended since *was*, None if unchanged, or `REPLACE` when an existing item went or changed."""
+    kept = next(size for size in range(min(len(was), len(now)), -1, -1) if was[len(was) - size :] == now[:size])
+    if kept < len(was) and not (len(now) == window and kept > 0):
+        return REPLACE
+    return list(now[kept:]) or None
+
+
 def graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | str | None:
-    """Return what changed from one snapshot to the next: the rows that changed or came, and the new log lines.
+    """Return what changed from one snapshot to the next: changed rows, new log lines, and new messages.
 
     None when nothing did. `REPLACE` when a row went, or the phases or the counts of what was left out changed: the
-    frame that follows is a snapshot then. A client adds `log_append` and keeps the newest `LOG_LINES` lines.
+    frame that follows is a snapshot then. A client adds `log_append` / `messages_append` and keeps the newest
+    `LOG_LINES` / `MESSAGE_LINES` entries.
     """
     if before["phases"] != after["phases"] or before["omitted"] != after["omitted"]:
         return REPLACE
@@ -278,9 +307,13 @@ def graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
             return REPLACE
         if changed := [row for key, row in new.items() if old.get(key) != row]:
             delta[rows] = changed
-    was, now = before["log"], after["log"]
-    # The lines the newer log starts with are the older one's last: the rest came since.
-    kept = next(size for size in range(len(was), -1, -1) if was[len(was) - size :] == now[:size])
-    if now[kept:]:
-        delta["log_append"] = now[kept:]
+    for key, append_key, window in (
+        ("log", "log_append", LOG_LINES),
+        ("messages", "messages_append", MESSAGE_LINES),
+    ):
+        appended = _append_suffix(before[key], after[key], window)
+        if appended is REPLACE:
+            return REPLACE
+        if appended is not None:
+            delta[append_key] = appended
     return delta or None

@@ -427,11 +427,17 @@ class WorkflowRunStore:
             )
         return inserted.rowcount == 1
 
-    def usage_summary(self, run_id: str, *, attempt: int | None = None) -> UsageSummary:
+    def usage_summary(
+        self,
+        run_id: str,
+        *,
+        attempt: int | None = None,
+        current_generations: Mapping[str, int] | None = None,
+    ) -> UsageSummary:
         """Read *run_id*'s usage ledger once: totals, optional *attempt* cost, per-node sums, and priced own turns."""
         with self.read_connection() as connection:
             rows = connection.execute(
-                "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
+                "SELECT key, generation, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
                 (run_id,),
             ).fetchall()
         all_entries: list[dict[str, Any]] = []
@@ -443,7 +449,8 @@ class WorkflowRunStore:
             all_entries.append(used)
             if attempt is None or row["attempt"] == attempt:
                 attempt_entries.append(used)
-            by_key.setdefault(row["key"], []).append(used)
+            if current_generations is None or current_generations.get(row["key"]) == row["generation"]:
+                by_key.setdefault(row["key"], []).append(used)
             if "sub:" not in str(row["turn"]) and (cost := used.get("cost_usd")) is not None:
                 turn_costs.append(cost)
         totals = _totals(all_entries)
@@ -455,22 +462,47 @@ class WorkflowRunStore:
             turn_costs=turn_costs,
         )
 
+    def node_previews(self, run_id: str, *, max_chars: int = 300) -> dict[str, str]:
+        """Return bounded result previews for completed non-stale agent, turn and tool nodes."""
+        if max_chars <= 0:
+            return {}
+        sql = (
+            "SELECT key, CASE "
+            "WHEN json_type(result_json) = 'text' THEN substr(json_extract(result_json, '$'), 1, ?) "
+            "WHEN json_type(result_json) = 'object' AND json_type(result_json, '$.output') = 'text' "
+            "THEN substr(json_extract(result_json, '$.output'), 1, ?) "
+            "WHEN length(result_json) <= 4096 AND result_json != 'null' THEN substr(result_json, 1, ?) "
+            "END AS preview "
+            "FROM workflow_nodes "
+            "WHERE run_id = ? AND stale = 0 AND state = 'completed' "
+            "AND kind IN ('agent', 'turn', 'tool') AND result_file IS NULL "
+            "ORDER BY seq"
+        )
+        with self.read_connection() as connection:
+            rows = connection.execute(sql, (max_chars, max_chars, max_chars, run_id)).fetchall()
+        return {
+            row["key"]: text for row in rows if row["preview"] is not None and (text := str(row["preview"]).strip())
+        }
+
     def append_log(self, run_id: str, epoch: int, text: str) -> None:
         """Append one line to a run's log, for the holder of *epoch*."""
         with self.write_transaction(run_id) as connection:
-            _fenced(connection, run_id, epoch)
+            run = _fenced(connection, run_id, epoch)
             connection.execute(
-                "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
-                (run_id, utc_timestamp(), text),
+                "INSERT INTO workflow_log (run_id, attempt, created_at, text) VALUES (?, ?, ?, ?)",
+                (run_id, run.attempt, utc_timestamp(), text),
             )
 
-    def log(self, run_id: str, limit: int = 50) -> list[str]:
-        """Return the newest *limit* lines of a run's log, oldest first."""
+    def log(self, run_id: str, limit: int = 50, *, attempt: int | None = None) -> list[str]:
+        """Return the newest *limit* lines of a run's log, oldest first; optional *attempt* narrows to one attempt."""
+        query = (
+            "SELECT text FROM workflow_log WHERE run_id = ? AND attempt = ? ORDER BY id DESC LIMIT ?"
+            if attempt is not None
+            else "SELECT text FROM workflow_log WHERE run_id = ? ORDER BY id DESC LIMIT ?"
+        )
+        params: tuple[object, ...] = (run_id, attempt, limit) if attempt is not None else (run_id, limit)
         with self.read_connection() as connection:
-            rows = connection.execute(
-                "SELECT text FROM workflow_log WHERE run_id = ? ORDER BY id DESC LIMIT ?",
-                (run_id, limit),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [row["text"] for row in reversed(rows)]
 
     def get_source(self, run_id: str, attempt: int, name: str) -> tuple[bytes, str] | None:
@@ -893,6 +925,14 @@ _LIGHT_COLUMNS = ", ".join(
     for column in (_column(field.name, _NODE_JSON_FIELDS) for field in fields(WorkflowNode))
 )
 
+
+def _add_log_attempt(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_log)")}
+    if "attempt" not in columns:
+        connection.execute("ALTER TABLE workflow_log ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+    connection.execute("CREATE INDEX IF NOT EXISTS workflow_log_run_attempt_idx ON workflow_log(run_id, attempt, id)")
+
+
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
-_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema,)
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_create_schema, _add_log_attempt)
 SCHEMA_VERSION = len(_MIGRATIONS)

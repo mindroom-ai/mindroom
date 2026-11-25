@@ -650,9 +650,9 @@ async def test_workflow_children_get_the_peer_tools_and_other_children_do_not(st
 
 @pytest.mark.asyncio
 async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(stack: WorkflowStack) -> None:
-    """Frames and cards carry only edge counts (no message text); get_workflow(messages=True) is owner-checked."""
+    """Frames and cards carry redacted bounded message previews and never shared_state; get_workflow(messages=True) is owner-checked."""
     views = stack.show()
-    payload_text = "TOP-SECRET-CONTRACT-PAYLOAD"
+    payload_text = "contract api_key=sk-inventedinventedinvented1234 " + "p" * 240
     secret_state = {"token": "SUPER-SECRET-STATE-VALUE"}
     hold = asyncio.Event()
 
@@ -683,14 +683,27 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
     await views.show(stack.run_id)
 
     assert stack.room is not None
-    # Graph frames and run card must have edges with counts only and ZERO message/state payload text.
+    # Room events/cards must redact credentials, bound preview length, and NEVER leak shared_state.
     raw_room = json.dumps(stack.room.events) + json.dumps(stack.room.sent)
-    assert payload_text not in raw_room
+    assert "sk-invented" not in raw_room
     assert "SUPER-SECRET-STATE-VALUE" not in raw_room
     built = views._build(stack.run_id)
     assert built is not None
     _run, _nodes, _usage, graph = built
     assert graph.edges == [{"from": "n1", "to": "n2", "kind": "message", "count": 2}]
+    assert len(graph.messages) == 2
+    for preview in graph.messages:
+        assert (preview["from"], preview["from_name"], preview["to"], preview["to_name"]) == (
+            "n1",
+            "backend",
+            "n2",
+            "frontend",
+        )
+        assert isinstance(preview["sent_at"], int)
+        assert "sk-invented" not in preview["text"]
+        assert len(preview["text"]) <= 200
+    assert "second message" in {preview["text"] for preview in graph.messages}
+    assert any(preview["text"].startswith("contract ") for preview in graph.messages)
 
     # get_workflow(messages=True) returns full uncapped text and state to owner.
     tools = WorkflowTools()
@@ -1631,3 +1644,100 @@ async def test_raw_gateway_inbox_rejects_invalid_wait_seconds_and_records_nothin
         assert conn.execute("SELECT COUNT(*) FROM workflow_cursors WHERE run_id = ?", (stack.run_id,)).fetchone() == (
             0,
         )
+
+
+@pytest.mark.asyncio
+async def test_visible_messages_resolves_targets_redacts_and_caps_limit(stack: WorkflowStack) -> None:
+    """visible_messages resolves single targets, sets broadcast/script to None, redacts, truncates, and respects limit."""
+    gate = asyncio.Event()
+    _route_agents(stack, lambda _req: [Await(gate.wait), *answer("ok")])
+    await stack.submit("/0:p0@0", "agent", {"prompt": "a", "name": "alpha"}, meta={"name": "alpha"})
+    await stack.submit("/0:p1@0", "agent", {"prompt": "b", "name": "beta"}, meta={"name": "beta"})
+    await stack.submit("/0:p2@0", "agent", {"prompt": "c", "name": "gamma"}, meta={"name": "gamma"})
+    await stack.until(lambda: all(stack.store.get_node(stack.run_id, f"/0:p{i}@0") for i in range(3)))
+
+    alpha_ref = _ref(stack, "/0:p0@0")
+    peers.send(
+        stack.store,
+        stack.run_id,
+        op_id="m1",
+        sender=NodeRef(alpha_ref.key, alpha_ref.generation, "alpha api_key=sk-inventedinventedinvented1234"),
+        to="beta",
+        text="secret api_key=sk-inventedinventedinvented1234 " + "z" * 250,
+    )
+    peers.send(stack.store, stack.run_id, op_id="m2", sender=alpha_ref, to="*", text="broadcast to both")
+    peers.send(stack.store, stack.run_id, op_id="m3", sender=alpha_ref, to="script", text="report to script")
+
+    nodes = stack.store.nodes(stack.run_id)
+    msgs = peers.visible_messages(stack.store, stack.run_id, nodes, limit=50)
+    beta_node = stack.store.get_node(stack.run_id, "/0:p1@0")
+    assert beta_node is not None
+    assert len(msgs) == 3
+    assert msgs[0]["to"] == f"n{beta_node.seq}"
+    assert "sk-invented" not in msgs[0]["from_name"]
+    assert "sk-invented" not in msgs[0]["text"]
+    assert len(msgs[0]["text"]) <= 200
+    assert (msgs[1]["to"], msgs[1]["to_name"]) == (None, "*")
+    assert (msgs[2]["to"], msgs[2]["to_name"]) == (None, "script")
+    assert [m["text"] for m in peers.visible_messages(stack.store, stack.run_id, nodes, limit=2)] == [
+        "broadcast to both",
+        "report to script",
+    ]
+    assert peers.visible_messages(stack.store, stack.run_id, nodes, limit=0) == []
+
+    gate.set()
+    for index, name in enumerate(("alpha", "beta", "gamma")):
+        await stack.result(f"/0:p{index}@0", "agent", {"prompt": "abc"[index], "name": name}, meta={"name": name})
+
+
+@pytest.mark.asyncio
+async def test_rerun_generation_excludes_superseded_read_messages_from_edges_and_previews(stack: WorkflowStack) -> None:
+    """Read messages from a superseded sender generation do not double edge counts or leak into visible_messages."""
+    attempt_num = 1
+    sent_gate = asyncio.Event()
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompt = _user_texts(req)[0]
+        if prompt == "be":
+            if not _tool_outputs(req):
+                return calls(tool_call("send_peer_message", "s1", to="frontend", text=f"v{attempt_num} contract"))
+            sent_gate.set()
+            return answer(f"be-{attempt_num}")
+        if not _tool_outputs(req):
+            return [Await(sent_gate.wait), *calls(tool_call("read_peer_messages", "r1"))]
+        return answer(f"fe-{attempt_num}")
+
+    _route_agents(stack, _handle)
+    await stack.submit("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"})
+    await stack.submit("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
+    assert (
+        await stack.result("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"}) == "be-1"
+    )
+    assert (
+        await stack.result("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
+        == "fe-1"
+    )
+    be_node = stack.store.get_node(stack.run_id, "/0:p0@0")
+    fe_node = stack.store.get_node(stack.run_id, "/0:p1@0")
+    assert be_node is not None
+    assert fe_node is not None
+    await stack.finish_attempt(result="done-1")
+
+    # Rerun both peers so backend advances to generation 2; gen-1 message was read (withdrawn = 0).
+    attempt_num = 2
+    sent_gate = asyncio.Event()
+    await stack.resume(stack.run_id, rerun=[f"n{be_node.seq}", f"n{fe_node.seq}"])
+    await stack.submit("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"})
+    await stack.submit("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
+    assert (
+        await stack.result("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"}) == "be-2"
+    )
+    assert (
+        await stack.result("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
+        == "fe-2"
+    )
+
+    nodes = stack.store.nodes(stack.run_id)
+    assert peers.message_edges(stack.store, stack.run_id, nodes) == [(f"n{be_node.seq}", f"n{fe_node.seq}", 1)]
+    assert [m["text"] for m in peers.visible_messages(stack.store, stack.run_id, nodes)] == ["v2 contract"]
+    assert [m["text"] for m in peers.all_messages(stack.store, stack.run_id)] == ["v1 contract", "v2 contract"]

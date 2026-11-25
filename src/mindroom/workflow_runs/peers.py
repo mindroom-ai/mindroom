@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode
 from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError
 
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
 
 MAX_PEER_BYTES = 1024 * 1024
+_NAME_CHARS = 80
+_TEXT_CHARS = 200
 
 _LIVE = frozenset(state.value for state in LIVE_NODE_STATES)
 _UNREACHABLE = "'{name}' has finished and will not read this. Use spawn() to keep an agent you want to talk to."
@@ -319,33 +322,91 @@ def list_peers(store: WorkflowRunStore, run_id: str) -> list[dict[str, object]]:
     return out
 
 
-def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[WorkflowNode]) -> list[tuple[str, str, int]]:
-    """Aggregate non-withdrawn messages into `(from_id, to_id, count)` graph edges (counts only, never text)."""
+def _message_index(
+    nodes: Iterable[WorkflowNode],
+) -> tuple[dict[str, str], dict[str, int], dict[str, str], dict[str, list[str]]]:
     current = [n for n in nodes if not n.stale]
     ids = {n.key: f"n{n.seq}" for n in current}
+    gens = {n.key: n.generation for n in current}
     sess_of = {n.key: n.session_key for n in current if n.session_key}
     by_name: dict[str, list[str]] = {}
     for n in current:
         if n.kind in ("agent", "session") and n.name:
             by_name.setdefault(n.name, []).append(ids[n.key])
-    q = "SELECT sender_key, recipient_name, recipient_keys_json FROM workflow_messages WHERE run_id = ? AND withdrawn = 0"
+    return ids, gens, sess_of, by_name
+
+
+def _resolved_recipients(
+    row: sqlite3.Row,
+    from_id: str,
+    ids: dict[str, str],
+    sess_of: dict[str, str],
+    by_name: dict[str, list[str]],
+) -> list[str]:
+    self_ids = {from_id} | ({ids[s]} if (s := sess_of.get(row["sender_key"])) and s in ids else set())
+    frozen = row["recipient_keys_json"]
+    pool = (
+        [ids[k] for k in json.loads(frozen) if k in ids]
+        if frozen is not None
+        else by_name.get(row["recipient_name"], ())
+    )
+    return [to_id for to_id in pool if to_id not in self_ids]
+
+
+def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[WorkflowNode]) -> list[tuple[str, str, int]]:
+    """Aggregate non-withdrawn current-generation messages into `(from_id, to_id, count)` graph edges."""
+    ids, gens, sess_of, by_name = _message_index(nodes)
+    q = (
+        "SELECT sender_key, sender_generation, recipient_name, recipient_keys_json "
+        "FROM workflow_messages WHERE run_id = ? AND withdrawn = 0"
+    )
     with store.read_connection() as conn:
         rows = conn.execute(q, (run_id,)).fetchall()
     counts: Counter[tuple[str, str]] = Counter()
     for r in rows:
-        if (from_id := ids.get(r["sender_key"])) is None:
+        sender_key = r["sender_key"]
+        if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
             continue
-        self_ids = {from_id} | ({ids[s]} if (s := sess_of.get(r["sender_key"])) and s in ids else set())
-        frozen = r["recipient_keys_json"]
-        pool = (
-            [ids[k] for k in json.loads(frozen) if k in ids]
-            if frozen is not None
-            else by_name.get(r["recipient_name"], ())
-        )
-        for to_id in pool:
-            if to_id not in self_ids:
-                counts[(from_id, to_id)] += 1
+        for to_id in _resolved_recipients(r, from_id, ids, sess_of, by_name):
+            counts[(from_id, to_id)] += 1
     return [(s, r, c) for (s, r), c in sorted(counts.items())]
+
+
+def visible_messages(
+    store: WorkflowRunStore,
+    run_id: str,
+    nodes: Iterable[WorkflowNode],
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return the newest *limit* redacted peer message previews for current-generation senders, oldest first."""
+    if limit <= 0:
+        return []
+    ids, gens, sess_of, by_name = _message_index(nodes)
+    q = (
+        "SELECT sender_key, sender_generation, sender_name, recipient_name, recipient_keys_json, text, created_at "
+        "FROM workflow_messages WHERE run_id = ? AND withdrawn = 0 ORDER BY seq ASC"
+    )
+    with store.read_connection() as conn:
+        rows = conn.execute(q, (run_id,)).fetchall()
+    matched = [
+        r for r in rows if (sender_key := r["sender_key"]) in ids and int(r["sender_generation"]) == gens[sender_key]
+    ][-limit:]
+    out: list[dict[str, Any]] = []
+    for r in matched:
+        from_id = ids[r["sender_key"]]
+        targets = _resolved_recipients(r, from_id, ids, sess_of, by_name)
+        out.append(
+            {
+                "from": from_id,
+                "from_name": redact_sensitive_text(r["sender_name"], max_length=_NAME_CHARS),
+                "to": targets[0] if len(targets) == 1 else None,
+                "to_name": redact_sensitive_text(r["recipient_name"], max_length=_NAME_CHARS),
+                "text": redact_sensitive_text(r["text"], max_length=_TEXT_CHARS),
+                "sent_at": int(datetime.fromisoformat(r["created_at"]).timestamp()),
+            },
+        )
+    return out
 
 
 def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
