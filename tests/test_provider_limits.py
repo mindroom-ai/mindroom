@@ -131,7 +131,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=14200000,
                 cost_usd_7d=None,
                 cost_estimated=False,
-                token_mix_7d=TokenMix(1200000, 600000, 11200000, 1200000),
+                token_mix_7d=TokenMix(12400000, 1800000, 18500000, 2100000),
             ),
             ProviderLimitAccount(
                 id="codex:default",
@@ -204,7 +204,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=1200000,
                 cost_usd_7d=3.25,
                 cost_estimated=True,
-                token_mix_7d=TokenMix(300000, 150000, 650000, 100000),
+                token_mix_7d=TokenMix(900000, 300000, 2400000, 350000),
             ),
         ),
         daily_7d=(
@@ -220,10 +220,43 @@ def test_wire_contract_fixture_round_trip() -> None:
                 unattributed_tokens=0,
                 cost_by_account={"openrouter:1": 2.45},
             ),
+            DailyAccountUsage(
+                day="2026-11-20",
+                by_account={
+                    "anthropic:default": 400000,
+                    "claude_code:default": 3400000,
+                    "codex:default": 2300000,
+                    "openrouter:1": 1550000,
+                },
+                unattributed_tokens=0,
+                cost_by_account={"anthropic:default": 1.08, "openrouter:1": 4.45},
+            ),
+            DailyAccountUsage(
+                day="2026-11-22",
+                by_account={
+                    "anthropic:default": 450000,
+                    "claude_code:default": 3600000,
+                    "codex:default": 2500000,
+                    "openrouter:1": 1600000,
+                },
+                unattributed_tokens=0,
+                cost_by_account={"anthropic:default": 1.22, "openrouter:1": 4.6},
+            ),
+            DailyAccountUsage(
+                day="2026-11-23",
+                by_account={
+                    "anthropic:default": 350000,
+                    "claude_code:default": 3200000,
+                    "codex:default": 2300000,
+                    "openrouter:1": 1500000,
+                },
+                unattributed_tokens=0,
+                cost_by_account={"anthropic:default": 0.95, "openrouter:1": 4.3},
+            ),
         ),
         unattributed_tokens_7d=0,
         unattributed_cost_usd_7d=None,
-        token_mix_7d=TokenMix(5400000, 2350000, 22550000, 1300000),
+        token_mix_7d=TokenMix(17200000, 3700000, 31600000, 2450000),
         cache_savings_usd_7d=6.85,
         top_models_7d=(
             ModelUsage7d(
@@ -234,7 +267,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 cost_usd_7d=18.4,
                 run_count=142,
                 token_mix_7d=TokenMix(2100000, 900000, 3400000, 0),
-                daily_tokens_7d=(900000, 850000),
+                daily_tokens_7d=(900000, 850000, 1550000, 1600000, 1500000),
             ),
             ModelUsage7d(
                 provider="Anthropic",
@@ -243,8 +276,8 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=1200000,
                 cost_usd_7d=3.25,
                 run_count=68,
-                token_mix_7d=TokenMix(300000, 150000, 650000, 100000),
-                daily_tokens_7d=(0, 0),
+                token_mix_7d=TokenMix(900000, 300000, 2400000, 350000),
+                daily_tokens_7d=(0, 0, 400000, 450000, 350000),
             ),
             ModelUsage7d(
                 provider="Anthropic (Claude Code)",
@@ -253,8 +286,8 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=14200000,
                 cost_usd_7d=None,
                 run_count=210,
-                token_mix_7d=TokenMix(1200000, 600000, 11200000, 1200000),
-                daily_tokens_7d=(1900000, 2100000),
+                token_mix_7d=TokenMix(12400000, 1800000, 18500000, 2100000),
+                daily_tokens_7d=(1900000, 2100000, 3400000, 3600000, 3200000),
             ),
             ModelUsage7d(
                 provider="OpenAI Codex",
@@ -264,7 +297,7 @@ def test_wire_contract_fixture_round_trip() -> None:
                 cost_usd_7d=None,
                 run_count=154,
                 token_mix_7d=TokenMix(1800000, 700000, 7300000, 0),
-                daily_tokens_7d=(1200000, 1500000),
+                daily_tokens_7d=(1200000, 1500000, 2300000, 2500000, 2300000),
             ),
         ),
         top_agents_7d=(
@@ -273,24 +306,24 @@ def test_wire_contract_fixture_round_trip() -> None:
                 tokens_7d=18400000,
                 cost_usd_7d=14.2,
                 run_count=310,
-                token_mix_7d=TokenMix(3100000, 1350000, 13150000, 800000),
-                daily_tokens_7d=(2300000, 2600000),
+                token_mix_7d=TokenMix(10000000, 2150000, 18400000, 1450000),
+                daily_tokens_7d=(2300000, 2600000, 4450000, 4750000, 4300000),
             ),
             AgentUsage7d(
                 entity="research",
                 tokens_7d=8900000,
                 cost_usd_7d=7.45,
                 run_count=164,
-                token_mix_7d=TokenMix(1650000, 700000, 6250000, 300000),
-                daily_tokens_7d=(1150000, 1250000),
+                token_mix_7d=TokenMix(4850000, 1050000, 8900000, 650000),
+                daily_tokens_7d=(1150000, 1250000, 2150000, 2300000, 2050000),
             ),
             AgentUsage7d(
                 entity="general",
                 tokens_7d=4300000,
                 cost_usd_7d=None,
                 run_count=100,
-                token_mix_7d=TokenMix(650000, 300000, 3150000, 200000),
-                daily_tokens_7d=(550000, 600000),
+                token_mix_7d=TokenMix(2350000, 500000, 4300000, 350000),
+                daily_tokens_7d=(550000, 600000, 1050000, 1100000, 1000000),
             ),
         ),
     )
@@ -1764,7 +1797,7 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end 7d analytics reconcile accounts, daily costs, models, agents, uncached input, and cache savings."""
+    """End-to-end 7d analytics reconcile accounts, daily costs, models, agents, uncached input, and net cache savings."""
     monkeypatch.setattr(
         provider_limits,
         "probe_codex",
@@ -1802,6 +1835,7 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
     persist_runs(
         create_agent_state_storage("code", paths.storage_root / "agents" / "code"),
         ConversationSession(kind="agent", session_id="long-lived", owner_id="code"),
+        # Anthropic parser records total_tokens = input + output (cache read/write sit outside input/total).
         _usage_run(
             "run-old",
             "Anthropic",
@@ -1810,9 +1844,9 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
             input_tokens=90_000,
             output_tokens=10_000,
             cache_read=500_000,
-            total_tokens=600_000,
+            total_tokens=100_000,
         ),
-        # Anthropic reports cache outside input -> uncached stays 100k.
+        # Day 1 Anthropic net cache savings: 400k*(2.0-0.2) - 200k*(2.5-2.0) = $0.72 - $0.10 = $0.62.
         _usage_run(
             "run-ant-1",
             "Anthropic",
@@ -1822,9 +1856,9 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
             output_tokens=50_000,
             cache_read=400_000,
             cache_write=200_000,
-            total_tokens=750_000,
+            total_tokens=150_000,
         ),
-        # OpenAI includes cache inside input -> uncached = 500k - 300k = 200k.
+        # OpenAI includes cache inside input -> uncached = 500k - 300k = 200k, total = input + output = 600k.
         _usage_run(
             "run-oai-1",
             "OpenAI",
@@ -1858,7 +1892,7 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
             input_tokens=50_000,
             output_tokens=25_000,
             cache_read=100_000,
-            total_tokens=175_000,
+            total_tokens=75_000,
         ),
         _usage_run(
             "run-goog-1",
@@ -1875,8 +1909,9 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
     snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
     assert snapshot.partial is False
     by_id = {acct.id: acct for acct in snapshot.accounts}
+    # Anthropic tokens_7d == input + output (225k), while token_mix_7d captures all 4 processed buckets (925k total).
     assert (by_id["anthropic:default"].tokens_7d, by_id["anthropic:default"].cost_usd_7d) == (
-        925_000,
+        225_000,
         pytest.approx(1.35),
     )
     assert by_id["anthropic:default"].token_mix_7d == TokenMix(150_000, 75_000, 500_000, 200_000)
@@ -1899,22 +1934,22 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
 
     expected_mix = TokenMix(470_000, 245_000, 1_060_000, 200_000)
     assert snapshot.token_mix_7d == expected_mix
-    # Savings: Anthropic 500k*1.8 + OpenAI 300k*4.0 + Codex 200k*3.5 = 2.80 (Google unpriced contributes 0).
-    assert snapshot.cache_savings_usd_7d == pytest.approx(2.8)
+    # Net savings: Anthropic ($0.62 + $0.18 = $0.80, after -$0.10 write premium) + OpenAI $1.20 + Codex $0.70 = $2.70.
+    assert snapshot.cache_savings_usd_7d == pytest.approx(2.7)
 
     assert [
-        (m.provider, m.model, m.account_id, m.cost_usd_7d, m.run_count, m.daily_tokens_7d)
+        (m.provider, m.model, m.account_id, m.tokens_7d, m.cost_usd_7d, m.run_count, m.daily_tokens_7d)
         for m in snapshot.top_models_7d
     ] == [
-        ("OpenAI", "gpt-5.4", "openai:default", 2.8, 1, (0, 600_000)),
-        ("Anthropic", "claude-haiku-4-5", "anthropic:default", 1.35, 2, (750_000, 175_000)),
-        ("OpenAI Codex", "gpt-5.4", None, 1.1, 1, (350_000, 0)),
-        ("Google", "gemini-2.5-flash", "google:default", None, 1, (0, 100_000)),
+        ("OpenAI", "gpt-5.4", "openai:default", 600_000, 2.8, 1, (0, 600_000)),
+        ("Anthropic", "claude-haiku-4-5", "anthropic:default", 225_000, 1.35, 2, (150_000, 75_000)),
+        ("OpenAI Codex", "gpt-5.4", None, 350_000, 1.1, 1, (350_000, 0)),
+        ("Google", "gemini-2.5-flash", "google:default", 100_000, None, 1, (0, 100_000)),
     ]
     assert "account_id" not in snapshot.top_models_7d[2].to_dict()
     assert [(a.entity, a.tokens_7d, a.cost_usd_7d, a.run_count, a.daily_tokens_7d) for a in snapshot.top_agents_7d] == [
-        ("code", 1_350_000, 3.88, 2, (750_000, 600_000)),
-        ("research", 625_000, 1.37, 3, (350_000, 275_000)),
+        ("code", 750_000, 3.88, 2, (150_000, 600_000)),
+        ("research", 525_000, 1.37, 3, (350_000, 175_000)),
     ]
 
     total_tokens = sum(a.tokens_7d for a in snapshot.accounts) + snapshot.unattributed_tokens_7d
@@ -1922,10 +1957,102 @@ async def test_rich_7d_analytics_token_mix_normalization_cache_savings_and_recon
         total_tokens
         == sum(m.tokens_7d for m in snapshot.top_models_7d)
         == sum(a.tokens_7d for a in snapshot.top_agents_7d)
-        == 1_975_000
+        == 1_275_000
     )
     assert _sum_mixes(m.token_mix_7d for m in snapshot.top_models_7d) == expected_mix
     assert _sum_mixes(a.token_mix_7d for a in snapshot.top_agents_7d) == expected_mix
+
+
+@pytest.mark.asyncio
+async def test_net_cache_savings_subtracts_cache_write_premium_and_omits_non_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Net cache savings deducts cache-write surcharges ($0.62 vs $0.72 gross) and omits <= 0 net savings."""
+    haiku_cfg = Config(
+        models={
+            "haiku": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                pricing=ModelPricing(input=2.0, output=6.0, cache_read=0.2, cache_write=2.5),
+            ),
+        },
+    )
+    paths = test_runtime_paths(tmp_path)
+
+    # Gross read discount = 400k*(2.0-0.2) = $0.72; write premium = 200k*(2.5-2.0) = $0.10 -> net = $0.62.
+    net_positive = (
+        UsageDailyBreakdownRow(
+            "2026-11-23",
+            TokenCounts(
+                input_tokens=100_000,
+                output_tokens=50_000,
+                cache_read_tokens=400_000,
+                cache_write_tokens=200_000,
+                total_tokens=150_000,
+            ),
+            1,
+            (
+                UsageModelBreakdownRow(
+                    "Anthropic",
+                    "claude-haiku-4-5",
+                    TokenCounts(
+                        input_tokens=100_000,
+                        output_tokens=50_000,
+                        cache_read_tokens=400_000,
+                        cache_write_tokens=200_000,
+                        total_tokens=150_000,
+                    ),
+                    1,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage(net_positive),
+    )
+    pos_snap = await get_provider_usage_snapshot(config=haiku_cfg, runtime_paths=paths, now=FIXED_NOW)
+    assert pos_snap.cache_savings_usd_7d == pytest.approx(0.62)
+
+    # Write-heavy workload: read discount 50k*1.8=$0.09 < write premium 400k*0.5=$0.20 -> net -$0.11 -> omitted.
+    provider_limits.clear_cache()
+    net_negative = (
+        UsageDailyBreakdownRow(
+            "2026-11-23",
+            TokenCounts(
+                input_tokens=100_000,
+                output_tokens=20_000,
+                cache_read_tokens=50_000,
+                cache_write_tokens=400_000,
+                total_tokens=120_000,
+            ),
+            1,
+            (
+                UsageModelBreakdownRow(
+                    "Anthropic",
+                    "claude-haiku-4-5",
+                    TokenCounts(
+                        input_tokens=100_000,
+                        output_tokens=20_000,
+                        cache_read_tokens=50_000,
+                        cache_write_tokens=400_000,
+                        total_tokens=120_000,
+                    ),
+                    1,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage(net_negative),
+    )
+    neg_snap = await get_provider_usage_snapshot(config=haiku_cfg, runtime_paths=paths, now=FIXED_NOW)
+    assert neg_snap.cache_savings_usd_7d is None
+    assert "cache_savings_usd_7d" not in neg_snap.to_dict()
 
 
 @pytest.mark.asyncio
@@ -1938,7 +2065,7 @@ async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12
         UsageModelBreakdownRow(
             "VertexAI",
             "custom-endpoint",
-            TokenCounts(input_tokens=400, output_tokens=100, cache_read_tokens=1000, total_tokens=1500),
+            TokenCounts(input_tokens=400, output_tokens=100, cache_read_tokens=1000, total_tokens=500),
             1,
         ),
         UsageModelBreakdownRow(
@@ -2007,18 +2134,14 @@ async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12
     )
     assert snapshot.cache_savings_usd_7d is None
     assert "cache_savings_usd_7d" not in snapshot.to_dict()
+    assert _acct(snapshot, "vertexai_claude:default").tokens_7d == 500
     assert _acct(snapshot, "vertexai_claude:default").token_mix_7d == TokenMix(400, 100, 1000, 0)
     assert (
         snapshot.top_models_7d[0].provider,
         snapshot.top_models_7d[0].model,
         snapshot.top_models_7d[0].run_count,
         snapshot.top_models_7d[0].tokens_7d,
-    ) == (
-        "OpenAI",
-        "gpt-5.4",
-        5,
-        1000,
-    )
+    ) == ("OpenAI", "gpt-5.4", 5, 1000)
     assert snapshot.top_models_7d[0].token_mix_7d == TokenMix(400, 200, 400, 0)
     assert (len(snapshot.top_models_7d), len(snapshot.top_agents_7d)) == (12, 12)
     assert [a.entity for a in snapshot.top_agents_7d[:3]] == ["agent-14", "agent-13", "agent-12"]
@@ -2056,7 +2179,7 @@ async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12
 
 
 def test_fit_to_device_budget_progressive_shedding_order() -> None:
-    """fit_to_device_budget sheds optional rich analytics first, keeping daily_7d & accounts, before dropping daily_7d."""
+    """fit_to_device_budget sheds optional rich analytics without setting partial=True, then drops daily_7d & trims keys."""
     mix = {"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 3000, "cache_write_tokens": 500}
     rich_payload: dict[str, object] = {
         "version": 1,
@@ -2119,9 +2242,9 @@ def test_fit_to_device_budget_progressive_shedding_order() -> None:
     unmodified = fit_to_device_budget(rich_payload, max_bytes=full_size)
     assert (unmodified == rich_payload, unmodified["partial"]) == (True, False)
 
-    # Stage 1: strips all rich analytics while preserving daily_7d tokens and all model_keys.
+    # Stage 1: strips optional rich analytics while preserving daily_7d, model_keys, and partial=False.
     stage1 = fit_to_device_budget(rich_payload, max_bytes=full_size - 100)
-    assert stage1["partial"] is True
+    assert stage1["partial"] is False
     assert len(json.dumps(stage1).encode("utf-8")) <= full_size - 100
     assert not ({"top_agents_7d", "top_models_7d", "token_mix_7d", "cache_savings_usd_7d"} & stage1.keys())
     assert "token_mix_7d" not in stage1["accounts"][0]
@@ -2132,12 +2255,12 @@ def test_fit_to_device_budget_progressive_shedding_order() -> None:
         40,
     )
 
-    # Stage 2: drops daily_7d while preserving all model_keys.
+    # Stage 2: drops daily_7d and flips partial=True while preserving all model_keys.
     stage1_size = len(json.dumps(stage1).encode("utf-8"))
     stage2 = fit_to_device_budget(rich_payload, max_bytes=stage1_size - 50)
     assert (stage2["partial"], stage2["daily_7d"], len(stage2["accounts"][0]["model_keys"])) == (True, [], 40)
 
-    # Stage 3: trims model_keys.
+    # Stage 3: trims model_keys with partial=True.
     stage2_size = len(json.dumps(stage2).encode("utf-8"))
     stage3 = fit_to_device_budget(rich_payload, max_bytes=stage2_size - 100)
     assert stage3["partial"] is True

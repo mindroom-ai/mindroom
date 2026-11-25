@@ -1,9 +1,12 @@
 import { isPlainObject } from "@/lib/configSchema";
 import type {
+  AgentUsage7d,
+  ModelUsage7d,
   ProviderLimitAccount,
   ProviderLimitWindow,
   ProviderUsageDailyRow,
   ProviderUsageSnapshot,
+  TokenMix,
   TokenTotals,
   UsagePollResult,
   UsageReport,
@@ -208,8 +211,56 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+const TOKEN_MIX_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+] as const satisfies readonly (keyof TokenMix)[];
+
 function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
+}
+
+function isTokenMix(value: unknown): value is TokenMix {
+  return (
+    isPlainObject(value) &&
+    TOKEN_MIX_FIELDS.every((field) => isCount(value[field]))
+  );
+}
+
+function isOptionalTokenMix(value: unknown): boolean {
+  return value === undefined || isTokenMix(value);
+}
+
+function isOptionalDailyTokens(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every(isCount));
+}
+
+function isModelUsage7d(value: unknown): value is ModelUsage7d {
+  return (
+    isPlainObject(value) &&
+    typeof value.provider === "string" &&
+    typeof value.model === "string" &&
+    isOptionalString(value.account_id) &&
+    isCount(value.tokens_7d) &&
+    (value.cost_usd_7d === null || isFiniteNumber(value.cost_usd_7d)) &&
+    isCount(value.run_count) &&
+    isOptionalTokenMix(value.token_mix_7d) &&
+    isOptionalDailyTokens(value.daily_tokens_7d)
+  );
+}
+
+function isAgentUsage7d(value: unknown): value is AgentUsage7d {
+  return (
+    isPlainObject(value) &&
+    typeof value.entity === "string" &&
+    isCount(value.tokens_7d) &&
+    (value.cost_usd_7d === null || isFiniteNumber(value.cost_usd_7d)) &&
+    isCount(value.run_count) &&
+    isOptionalTokenMix(value.token_mix_7d) &&
+    isOptionalDailyTokens(value.daily_tokens_7d)
+  );
 }
 
 function isProviderLimitWindow(value: unknown): value is ProviderLimitWindow {
@@ -247,7 +298,8 @@ function isProviderLimitAccount(value: unknown): value is ProviderLimitAccount {
     typeof value.stale === "boolean" &&
     isCount(value.tokens_7d) &&
     (value.cost_usd_7d === null || isFiniteNumber(value.cost_usd_7d)) &&
-    typeof value.cost_estimated === "boolean"
+    typeof value.cost_estimated === "boolean" &&
+    isOptionalTokenMix(value.token_mix_7d)
   );
 }
 
@@ -259,7 +311,12 @@ function isProviderUsageDailyRow(
     typeof value.day === "string" &&
     isPlainObject(value.by_account) &&
     Object.values(value.by_account).every(isCount) &&
-    isCount(value.unattributed_tokens)
+    isCount(value.unattributed_tokens) &&
+    (value.cost_by_account === undefined ||
+      (isPlainObject(value.cost_by_account) &&
+        Object.values(value.cost_by_account).every(isFiniteNumber))) &&
+    (value.unattributed_cost_usd === undefined ||
+      isFiniteNumber(value.unattributed_cost_usd))
   );
 }
 
@@ -278,7 +335,16 @@ export function isProviderUsageSnapshot(
     value.daily_7d.every(isProviderUsageDailyRow) &&
     isCount(value.unattributed_tokens_7d) &&
     (value.unattributed_cost_usd_7d === null ||
-      isFiniteNumber(value.unattributed_cost_usd_7d))
+      isFiniteNumber(value.unattributed_cost_usd_7d)) &&
+    isOptionalTokenMix(value.token_mix_7d) &&
+    (value.cache_savings_usd_7d === undefined ||
+      isFiniteNumber(value.cache_savings_usd_7d)) &&
+    (value.top_models_7d === undefined ||
+      (Array.isArray(value.top_models_7d) &&
+        value.top_models_7d.every(isModelUsage7d))) &&
+    (value.top_agents_7d === undefined ||
+      (Array.isArray(value.top_agents_7d) &&
+        value.top_agents_7d.every(isAgentUsage7d)))
   );
 }
 
