@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import MediaKind
 
 __all__ = [
+    "GEMINI_FILTERED_FINISH_REASONS",
+    "MALFORMED_FUNCTION_CALL_FINISH_REASON",
     "CliLoginError",
     "classify_provider_error",
     "media_ids",
@@ -46,6 +48,21 @@ __all__ = [
     "provider_failure",
     "retry_after_seconds",
 ]
+
+# Gemini candidate finish reasons shared by the native Gemini adapter and OpenRouter's ``native_finish_reason``.
+MALFORMED_FUNCTION_CALL_FINISH_REASON = "MALFORMED_FUNCTION_CALL"
+GEMINI_FILTERED_FINISH_REASONS = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    },
+)
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
@@ -75,8 +92,6 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
 # package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
 # limit, extra usage included, name the time the limit resets, so they stay rate limits.
-# The Codex backend's error types, sent with a 429, for a ChatGPT plan whose Codex usage limit is reached until the
-# ``resets_at`` the body names, often hours away, and for a plan that does not include Codex.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -90,8 +105,6 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "1113",
         "1309",
         "1314",
-        "usage_limit_reached",
-        "usage_not_included",
     },
 )
 # How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
@@ -103,14 +116,12 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
 # Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
 # spending cap.", or "Your billing account has ..." for the billing account's cap. OpenRouter's 403 for a key that
 # reached the credit limit set on it: "Key limit exceeded (monthly limit). Manage it using ...".
-# The Codex backend's "The usage limit has been reached", for a reply that lost its error type.
 _QUOTA_EXHAUSTED_WORDING = (
     "credit balance is too low",
     "you have reached your specified",
     "prepayment credits are depleted",
     "exceeded its monthly spending cap",
     "key limit exceeded",
-    "the usage limit has been reached",
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
@@ -134,11 +145,20 @@ _TRANSIENT_NAMES = frozenset(
 
 
 # Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
-# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
-# auth family in either spelling. Each is a whole word of the lowercased text, one not inside a longer run of letters or
-# digits, so ``invalid_auth`` holds ``auth`` while an ``author`` property, an ``authority``, or ``oauth`` holds none.
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, ``auth``,
+# ``unauth*``, ``authenticat*``, ``authori[sz]e``/``authori[sz]ing``/``authori[sz]ation``, or negated ``authori[sz]ed``.
+# Positive ``authorized``/``authorised`` alone is excluded so policy refusals such as "authorized security work" stay
+# non-auth errors. Whole-word boundaries keep ``invalid_auth`` matching while excluding ``author``, ``authority``, and
+# ``oauth``.
 _CREDENTIAL_WORDING = re.compile(
-    r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
+    r"(?<![a-z0-9])(?:"
+    r"api[ _-]?keys?"
+    r"|unauth(?:enticat[a-z]*|ori[sz][a-z]*)?"
+    r"|auth(?:enticat[a-z]*|ori[sz](?:ations?|es?|ing))?"
+    r"|(?:not|cannot|no[\s_-]+longer|"
+    "(?:is|are|was|were|ca|could|wo|would|should|has|have|had)n['\u2019]t)"
+    r"[\s_-]+(?:(?:be|been)[\s_-]+)?authori[sz]ed"
+    r")(?![a-z0-9])",
 )
 
 # How OpenAI words the 429 of a request larger than the account's tokens-per-minute limit, which it sends with the

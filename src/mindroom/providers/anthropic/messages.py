@@ -91,7 +91,7 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn, turn_end
+from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, TurnTimer, stamp_finished_turn, turn_end
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import (
@@ -360,7 +360,11 @@ class ClaudeProvider:
                 blocks=len(dropped),
                 reasons=sorted({entry.reason for entry in dropped}),
             )
-        return turn_end(message, stop_reason)
+        return turn_end(
+            message,
+            stop_reason,
+            raw_stop_reason=raw_stop_reason if stop_reason in ABNORMAL_STOP_REASONS else None,
+        )
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None on every route but ``native``.

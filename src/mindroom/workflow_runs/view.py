@@ -21,6 +21,7 @@ from mindroom.live_frames.workflow import publish_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
+from mindroom.workflow_runs.answers import notice, notice_fits, send_notice
 from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import (
     AGENT_KINDS,
@@ -31,13 +32,13 @@ from mindroom.workflow_runs.graph import (
     graph_rows,
     projected_cost_usd,
 )
+from mindroom.workflow_runs.interactions import retry_question_cards
 from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     UNSETTLED_NODE_STATES,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
 from mindroom.workflow_runs.peers import message_edges
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
@@ -210,7 +211,7 @@ class RunViews:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
-            await self.engine.ask.retry_question_cards(run_id)
+            await retry_question_cards(self.engine, run_id)
         else:
             self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:

@@ -11,7 +11,7 @@ from mindroom.memory._file_backend import (
     write_scope_markdown_file,
 )
 from mindroom.memory._prompting import redact_memory_text, strip_user_turn_time_prefix
-from mindroom.memory._shared import MemoryResult
+from mindroom.memory._shared import MemoryNotFoundError, MemoryResult
 from mindroom.memory.auto_flush import MemoryAutoFlushService
 from mindroom.memory.functions import (
     MemoryPromptParts,
@@ -31,6 +31,7 @@ from mindroom.memory.functions import (
 __all__ = [
     "ConversationRef",
     "MemoryAutoFlushService",
+    "MemoryNotFoundError",
     "MemoryPromptParts",
     "MemoryResult",
     "MemorySearchOutcome",

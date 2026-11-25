@@ -1373,6 +1373,15 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
     return row is not None
 
 
+def is_settled(transaction: Transaction, principal_id: str, event_id: str) -> bool:
+    """Return whether one event has already settled."""
+    row = transaction.fetchone(
+        "SELECT 1 AS present FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
+        (principal_id, event_id),
+    )
+    return row is not None
+
+
 def pending_among(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
     """Return which of these events still owe semantic work."""
     rows = turn_rows.fetch_in(

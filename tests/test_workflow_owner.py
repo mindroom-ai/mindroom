@@ -355,7 +355,7 @@ async def test_pass_whose_launch_waited_while_another_owner_took_the_run_starts_
     """The pass names the owner and the epoch it judged, so its launch is no launch for whoever has the run by then."""
     await stack.start(SCRIPT)
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=RUNTIME_RESTARTED)
-    lock = stack.engine.live.condition(stack.run_id)
+    lock = stack.engine.condition(stack.run_id)
     settle, settled = stack.engine.settle, asyncio.Event()
 
     async def seen(*run: Any, **options: Any) -> WorkflowRun:  # noqa: ANN401

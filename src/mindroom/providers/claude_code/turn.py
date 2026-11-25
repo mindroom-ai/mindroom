@@ -277,18 +277,9 @@ def _turn_failure(
     if error == "rate_limit" or (rejected is not None and status == 429):
         window = (rejected.rate_limit_type or "").replace("_", " ") if rejected is not None else ""
         message = f"Claude subscription limit reached ({window})." if window else "Claude subscription limit reached."
-        reset_in: float | None = None
         if rejected is not None and rejected.resets_at:
-            resets_at = datetime.fromtimestamp(rejected.resets_at, UTC)
-            message += f" Resets at {resets_at.isoformat()}."
-            reset_in = max((resets_at - datetime.now(UTC)).total_seconds(), 0.0) or None
-        return ProviderError(
-            message,
-            provider=provider,
-            status_code=429,
-            code=QUOTA_EXHAUSTED,
-            retry_after_seconds=reset_in,
-        )
+            message += f" Resets at {datetime.fromtimestamp(rejected.resets_at, UTC).isoformat()}."
+        return ProviderError(message, provider=provider, status_code=429, code=QUOTA_EXHAUSTED)
     classified = classify_provider_error(text, provider=provider, status_code=status)
     if not classified.retryable:
         return classified

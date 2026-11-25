@@ -6,6 +6,7 @@ from typing import Any
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
+    SUPPRESS_PUSH_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
 )
 
@@ -21,6 +22,8 @@ def encryption_visible_metadata(content: Mapping[Any, Any]) -> dict[str, str | b
     stream_status = content.get(STREAM_STATUS_KEY)
     if isinstance(stream_status, str):
         visible_metadata[STREAM_STATUS_KEY] = stream_status
+    if content.get(SUPPRESS_PUSH_KEY) is True:
+        visible_metadata[SUPPRESS_PUSH_KEY] = True
     if content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True:
         visible_metadata[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
     config_reaction_id = content.get(CONFIG_CONFIRMATION_REACTION_KEY)

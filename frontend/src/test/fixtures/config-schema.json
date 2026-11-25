@@ -4508,15 +4508,6 @@
           ],
           "default": null,
           "description": "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
-        },
-        "fallbacks": {
-          "default": [],
-          "description": "Names of other configured models to answer with, in order, when this model's provider cannot serve a request: a quota or usage limit, an outage after automatic retries, or missing or rejected credentials",
-          "items": {
-            "type": "string"
-          },
-          "title": "Fallbacks",
-          "type": "array"
         }
       },
       "required": [

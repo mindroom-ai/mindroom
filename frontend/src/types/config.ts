@@ -40,7 +40,6 @@ export interface ModelConfig {
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
   pricing?: ModelPricing | null; // Used to measure spend against budgets
   reasoning?: { levels: ReasoningLevel[]; default: ReasoningLevel } | null; // `name@level` picks a level
-  fallbacks?: string[]; // Other model names to answer with when this model's provider cannot serve
 }
 
 export interface MemoryConfig {
