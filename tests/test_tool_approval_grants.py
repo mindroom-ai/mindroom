@@ -1069,20 +1069,22 @@ def test_retired_consolidated_approval_rules_fail_closed(
     assert loaded.tool_approval.rules[0].match == new_name
 
 
-def test_retired_consolidated_approval_rules_skip_names_offered_by_other_enabled_toolkits(tmp_path: Path) -> None:
-    """Shared names like `add_memory` (mem0) and `search_web` (serper) still load when those toolkits are enabled."""
+def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
+    """Shared names like `add_memory` (mem0) or `search_web` (serper) still fail closed until the new tool has a rule."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
     runtime_paths = test_runtime_paths(tmp_path)
-    data = {
+    base_data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {
             "a": {
                 "display_name": "A",
-                "tools": [
-                    "memory",
-                    "mem0",
-                    {"searxng": {"host": "https://search.example.test"}},
-                    "serper",
-                ],
+                "tools": ["memory", {"searxng": {"host": "https://search.example.test"}}],
+                "include_default_tools": False,
+            },
+            "b": {
+                "display_name": "B",
+                "tools": ["mem0", "serper"],
                 "include_default_tools": False,
             },
         },
@@ -1093,8 +1095,27 @@ def test_retired_consolidated_approval_rules_skip_names_offered_by_other_enabled
             ],
         },
     }
-    loaded = Config.validate_with_runtime(data, runtime_paths)
-    assert [rule.match for rule in loaded.tool_approval.rules] == ["add_memory", "search_web"]
+    with pytest.raises(ConfigRuntimeValidationError, match=r"searxng_search|memory"):
+        Config.validate_with_runtime(base_data, runtime_paths)
+
+    explicit_data = {
+        **base_data,
+        "tool_approval": {
+            "rules": [
+                {"match": "add_memory", "action": "require_approval"},
+                {"match": "memory", "action": "require_approval"},
+                {"match": "search_web", "action": "require_approval"},
+                {"match": "searxng_search", "action": "auto_approve"},
+            ],
+        },
+    }
+    loaded = Config.validate_with_runtime(explicit_data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == [
+        "add_memory",
+        "memory",
+        "search_web",
+        "searxng_search",
+    ]
 
 
 @pytest.mark.parametrize("seconds", [300, 600, 1800])

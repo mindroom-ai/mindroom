@@ -1705,19 +1705,12 @@ class Config(BaseModel):
         for toolkit_name in RETIRED_CONSOLIDATED_FUNCTIONS:
             if toolkit_name not in enabled_toolkits:
                 continue
-            offered_elsewhere = {
-                function
-                for other_name in enabled_toolkits
-                if other_name != toolkit_name and (metadata := tools.get(other_name)) is not None
-                for function in metadata.function_names or ()
-            }
             if (
                 consolidated_error := retired_consolidated_approval_error(
                     toolkit_name,
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
-                    offered_elsewhere=offered_elsewhere,
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)
