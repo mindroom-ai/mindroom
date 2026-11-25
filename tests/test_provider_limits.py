@@ -2099,22 +2099,25 @@ async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12
         ),
     )
     by_entity = {
-        f"agent-{i:02d}": (
+        "agent-infra": (
             UsageDailyBreakdownRow(
                 "2026-11-23",
-                TokenCounts(input_tokens=100 + i, output_tokens=20, total_tokens=120 + i),
-                1,
-                (
-                    UsageModelBreakdownRow(
-                        "Google",
-                        f"gemini-m-{i:02d}",
-                        TokenCounts(input_tokens=100 + i, output_tokens=20, total_tokens=120 + i),
-                        1,
-                    ),
-                ),
+                TokenCounts(total_tokens=sum(r.totals.total_tokens for r in model_rows[:3])),
+                sum(r.run_count for r in model_rows[:3]),
+                tuple(model_rows[:3]),
             ),
-        )
-        for i in range(15)
+        ),
+        **{
+            f"agent-{i:02d}": (
+                UsageDailyBreakdownRow(
+                    "2026-11-23",
+                    TokenCounts(input_tokens=100 + i, output_tokens=50, total_tokens=150 + i),
+                    1,
+                    (model_rows[3 + i],),
+                ),
+            )
+            for i in range(15)
+        },
     }
     monkeypatch.setattr(
         provider_limits,
@@ -2144,7 +2147,7 @@ async def test_rich_analytics_omission_rules_vertexai_legacy_provider_and_top_12
     ) == ("OpenAI", "gpt-5.4", 5, 1000)
     assert snapshot.top_models_7d[0].token_mix_7d == TokenMix(400, 200, 400, 0)
     assert (len(snapshot.top_models_7d), len(snapshot.top_agents_7d)) == (12, 12)
-    assert [a.entity for a in snapshot.top_agents_7d[:3]] == ["agent-14", "agent-13", "agent-12"]
+    assert [a.entity for a in snapshot.top_agents_7d[:4]] == ["agent-infra", "agent-14", "agent-13", "agent-12"]
 
     empty_wire = ProviderUsageSnapshot(
         checked_at="2026-11-23T20:00:00Z",
@@ -2266,3 +2269,136 @@ def test_fit_to_device_budget_progressive_shedding_order() -> None:
     assert stage3["partial"] is True
     assert stage3["daily_7d"] == []
     assert len(stage3["accounts"][0]["model_keys"]) < 40
+
+
+@pytest.mark.asyncio
+async def test_single_pass_clamped_cache_read_reconciles_accounts_models_and_agents(
+    tmp_path: Path,
+) -> None:
+    """Clamping cache_read > input_tokens happens once per entity row so accounts, models, daily, and agents agree."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={"agent_a": AgentConfig(display_name="Agent A"), "agent_b": AgentConfig(display_name="Agent B")},
+        models={
+            "gpt": ModelConfig(
+                provider="openai",
+                id="gpt-5.4",
+                pricing=ModelPricing(input=5.0, output=15.0, cache_read=1.0),
+            ),
+        },
+    )
+    day_ts = datetime(2026, 11, 23, 12, 0, tzinfo=UTC).timestamp()
+
+    # agent_a reports cache_read > input_tokens (clamped uncached=0; cost = 0*5 + 150k*1 + 10k*15 = $0.30).
+    persist_runs(
+        create_agent_state_storage("agent_a", paths.storage_root / "agents" / "agent_a"),
+        ConversationSession(kind="agent", session_id="s-a", owner_id="agent_a"),
+        _usage_run(
+            "run-a",
+            "OpenAI",
+            "gpt-5.4",
+            day_ts,
+            input_tokens=100_000,
+            output_tokens=10_000,
+            cache_read=150_000,
+            total_tokens=110_000,
+        ),
+    )
+    # agent_b reports cache_read=0 (uncached=100k; cost = 100k*5 + 0 + 10k*15 = $0.65).
+    persist_runs(
+        create_agent_state_storage("agent_b", paths.storage_root / "agents" / "agent_b"),
+        ConversationSession(kind="agent", session_id="s-b", owner_id="agent_b"),
+        _usage_run(
+            "run-b",
+            "OpenAI",
+            "gpt-5.4",
+            day_ts,
+            input_tokens=100_000,
+            output_tokens=10_000,
+            cache_read=0,
+            total_tokens=110_000,
+        ),
+    )
+
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    agents = {agent.entity: agent for agent in snapshot.top_agents_7d}
+    assert agents["agent_a"].token_mix_7d == TokenMix(0, 10_000, 150_000, 0)
+    assert agents["agent_a"].cost_usd_7d == pytest.approx(0.3)
+    assert agents["agent_b"].token_mix_7d == TokenMix(100_000, 10_000, 0, 0)
+    assert agents["agent_b"].cost_usd_7d == pytest.approx(0.65)
+
+    # Account, daily row, model rollup, and top-level token_mix_7d all match agent_a + agent_b exactly ($0.95, 100k uncached).
+    expected_mix = TokenMix(100_000, 20_000, 150_000, 0)
+    openai_acct = _acct(snapshot, "openai:default")
+    assert openai_acct.token_mix_7d == expected_mix
+    assert openai_acct.cost_usd_7d == pytest.approx(0.95)
+    assert snapshot.daily_7d[0].cost_by_account == {"openai:default": pytest.approx(0.95)}
+    assert snapshot.top_models_7d[0].token_mix_7d == expected_mix
+    assert snapshot.top_models_7d[0].cost_usd_7d == pytest.approx(0.95)
+    assert snapshot.token_mix_7d == expected_mix
+
+
+@pytest.mark.asyncio
+async def test_vertexai_claude_hyphenated_provider_matches_priced_and_unpriced_token_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hyphenated vertexai-claude produces identical uncached input counts with and without pricing configured."""
+    row = UsageDailyBreakdownRow(
+        "2026-11-23",
+        TokenCounts(input_tokens=400_000, output_tokens=100_000, cache_read_tokens=900_000, total_tokens=500_000),
+        1,
+        (
+            UsageModelBreakdownRow(
+                "VertexAI",
+                "custom-endpoint",
+                TokenCounts(
+                    input_tokens=400_000,
+                    output_tokens=100_000,
+                    cache_read_tokens=900_000,
+                    total_tokens=500_000,
+                ),
+                1,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        provider_limits,
+        "collect_admin_daily_usage_with_entities",
+        lambda **_kw: _empty_daily_usage((row,), {"code": (row,)}),
+    )
+    paths = test_runtime_paths(tmp_path)
+    expected_mix = TokenMix(400_000, 100_000, 900_000, 0)
+
+    unpriced_cfg = Config(models={"vc": ModelConfig(provider="vertexai-claude", id="custom-endpoint")})
+    priced_cfg = Config(
+        models={
+            "vc": ModelConfig(
+                provider="vertexai-claude",
+                id="custom-endpoint",
+                pricing=ModelPricing(input=3.0, output=15.0, cache_read=0.3),
+            ),
+        },
+    )
+    underscored_cfg = Config(
+        models={
+            "vc": ModelConfig(
+                provider="vertexai_claude",
+                id="custom-endpoint",
+                pricing=ModelPricing(input=3.0, output=15.0, cache_read=0.3),
+            ),
+        },
+    )
+
+    unpriced_snap = await get_provider_usage_snapshot(config=unpriced_cfg, runtime_paths=paths, now=FIXED_NOW)
+    priced_snap = await get_provider_usage_snapshot(config=priced_cfg, runtime_paths=paths, now=FIXED_NOW)
+    underscored_snap = await get_provider_usage_snapshot(config=underscored_cfg, runtime_paths=paths, now=FIXED_NOW)
+
+    for snap in (unpriced_snap, priced_snap, underscored_snap):
+        assert snap.token_mix_7d == expected_mix
+        assert _acct(snap, "vertexai_claude:default").token_mix_7d == expected_mix
+        assert snap.top_models_7d[0].token_mix_7d == expected_mix
+        assert snap.top_agents_7d[0].token_mix_7d == expected_mix
+    # Priced cost uses full 400k uncached input (400k*3 + 900k*0.3 + 100k*15 = 1.2 + 0.27 + 1.5 = $2.97).
+    assert _acct(priced_snap, "vertexai_claude:default").cost_usd_7d == pytest.approx(2.97)
+    assert _acct(underscored_snap, "vertexai_claude:default").cost_usd_7d == pytest.approx(2.97)

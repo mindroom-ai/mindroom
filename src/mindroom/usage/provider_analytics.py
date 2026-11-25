@@ -176,6 +176,24 @@ class _RollupBucket:
         self.daily_tokens[day] += tokens
 
 
+@dataclass(slots=True)
+class _DayAccumulator:
+    by_account: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    cost_by_account: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    unattributed_tokens: int = 0
+    unattributed_cost: float | None = None
+    accounted_tokens: int = 0
+
+    def to_daily_usage(self, day: str) -> DailyAccountUsage:
+        return DailyAccountUsage(
+            day=day,
+            by_account=dict(sorted(self.by_account.items())),
+            unattributed_tokens=self.unattributed_tokens,
+            cost_by_account={k: round(v, 4) for k, v in sorted(self.cost_by_account.items())},
+            unattributed_cost_usd=_round_opt(self.unattributed_cost),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class UsageAttribution:
     """Attributed 7-day totals, daily rows, processed token mix, net cache savings, and top rollups."""
@@ -267,6 +285,32 @@ def _single_owner(owners_by_key: Mapping[tuple[str, str], set[str]], ukey: tuple
     return next(iter(owners)) if owners and len(owners) == 1 else None
 
 
+def _account_lookups(accounts: list[AccountSpec]) -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], str]]:
+    owners_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
+    configured_providers: dict[tuple[str, str], str] = {}
+    for account in accounts:
+        for usage_key in account.usage_keys:
+            owners_by_key[usage_key].add(account.id)
+            configured_providers.setdefault(usage_key, account.provider)
+    return owners_by_key, configured_providers
+
+
+def _apply_daily_remainders(
+    daily_breakdown: DailyBreakdown,
+    valid_days: set[str],
+    days_by_date: dict[str, _DayAccumulator],
+) -> int:
+    extra_unattributed = 0
+    for row in daily_breakdown:
+        if row.date not in valid_days:
+            continue
+        day_acc = days_by_date.setdefault(row.date, _DayAccumulator())
+        if remainder := max(0, row.totals.total_tokens - day_acc.accounted_tokens):
+            day_acc.unattributed_tokens += remainder
+            extra_unattributed += remainder
+    return extra_unattributed
+
+
 def _build_top_models(
     model_buckets: Mapping[tuple[str, str], _RollupBucket],
     owners_by_key: Mapping[tuple[str, str], set[str]],
@@ -290,36 +334,20 @@ def _build_top_models(
 
 
 def _build_top_agents(
-    daily_by_entity: DailyByEntity,
-    valid_days: set[str],
+    agent_buckets: Mapping[str, _RollupBucket],
     day_order: tuple[str, ...],
-    prices: Mapping[tuple[str, str], PricedModel],
-    configured_providers: Mapping[tuple[str, str], str],
 ) -> tuple[AgentUsage7d, ...]:
-    agents: list[AgentUsage7d] = []
-    for entity, rows in daily_by_entity.items():
-        b, in_window = _RollupBucket(), False
-        for row in rows:
-            if row.date not in valid_days:
-                continue
-            in_window = True
-            row_cost, row_mix = None, TokenMix()
-            for mrow in row.model_breakdown:
-                _, mcost, mmix, _ = _evaluate_model_row(mrow, prices, configured_providers)
-                row_cost = _add_opt(row_cost, mcost)
-                row_mix = row_mix.add(mmix)
-            b.record(row.date, row.totals.total_tokens, row_cost, row.run_count, row_mix)
-        if in_window:
-            agents.append(
-                AgentUsage7d(
-                    entity,
-                    b.tokens,
-                    _round_opt(b.cost),
-                    b.run_count,
-                    _non_zero_mix(b.mix),
-                    tuple(b.daily_tokens.get(day, 0) for day in day_order),
-                ),
-            )
+    agents = [
+        AgentUsage7d(
+            entity,
+            b.tokens,
+            _round_opt(b.cost),
+            b.run_count,
+            _non_zero_mix(b.mix),
+            tuple(b.daily_tokens.get(day, 0) for day in day_order),
+        )
+        for entity, b in agent_buckets.items()
+    ]
     agents.sort(key=lambda a: (a.cost_usd_7d is None, -(a.cost_usd_7d or 0.0), -a.tokens_7d, a.entity))
     return tuple(agents[:_MAX_TOP_ITEMS])
 
@@ -333,70 +361,74 @@ def attribute_7d_usage(
     """Attribute 7-day UTC daily usage across accounts, daily costs, token mix, net cache savings, and top rollups."""
     daily_breakdown, daily_by_entity = usage_scan
     valid_days = {(now.astimezone(UTC).date() - timedelta(days=offset)).isoformat() for offset in range(7)}
-    owners_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
-    configured_providers: dict[tuple[str, str], str] = {}
-    for account in accounts:
-        for usage_key in account.usage_keys:
-            owners_by_key[usage_key].add(account.id)
-            configured_providers.setdefault(usage_key, account.provider)
+    owners_by_key, configured_providers = _account_lookups(accounts)
     prices = model_prices(config)
     tokens_by_account: dict[str, int] = defaultdict(int)
     cost_by_account: dict[str, float | None] = dict.fromkeys((a.id for a in accounts), None)
     mix_by_account: dict[str, TokenMix] = defaultdict(TokenMix)
     model_buckets: dict[tuple[str, str], _RollupBucket] = defaultdict(_RollupBucket)
+    agent_buckets: dict[str, _RollupBucket] = defaultdict(_RollupBucket)
+    days_by_date: dict[str, _DayAccumulator] = {}
     total_mix, cache_savings, unattributed_tokens, unattributed_cost = TokenMix(), 0.0, 0, None
-    daily_rows: list[DailyAccountUsage] = []
-    for row in sorted(daily_breakdown, key=lambda item: item.date):
+
+    # Evaluate each (entity, date, provider, model) row once when entity rows are present so non-additive
+    # clamps (such as max(0, input - cache_read - cache_write)) agree identically across accounts, models, and agents.
+    row_stream = (
+        ((entity, row) for entity, rows in daily_by_entity.items() for row in rows)
+        if daily_by_entity
+        else ((None, row) for row in daily_breakdown)
+    )
+    for entity, row in row_stream:
         if row.date not in valid_days:
             continue
-        day_by_account: dict[str, int] = defaultdict(int)
-        day_cost_by_account: dict[str, float] = defaultdict(float)
-        day_unattributed, day_unattributed_cost, accounted = 0, None, 0
+        day_acc = days_by_date.setdefault(row.date, _DayAccumulator())
+        row_entity_cost, row_entity_mix = None, TokenMix()
         for mrow in row.model_breakdown:
             tokens = mrow.totals.total_tokens
-            accounted += tokens
+            day_acc.accounted_tokens += tokens
             ukey, row_cost, row_mix, row_savings = _evaluate_model_row(mrow, prices, configured_providers)
             total_mix = total_mix.add(row_mix)
             cache_savings += row_savings
+            row_entity_cost = _add_opt(row_entity_cost, row_cost)
+            row_entity_mix = row_entity_mix.add(row_mix)
             model_buckets[ukey].record(row.date, tokens, row_cost, mrow.run_count, row_mix)
             if (owner := _single_owner(owners_by_key, ukey)) is not None:
                 tokens_by_account[owner] += tokens
                 if tokens > 0:
-                    day_by_account[owner] += tokens
+                    day_acc.by_account[owner] += tokens
                 cost_by_account[owner] = _add_opt(cost_by_account[owner], row_cost)
                 if row_cost is not None:
-                    day_cost_by_account[owner] += row_cost
+                    day_acc.cost_by_account[owner] += row_cost
                 mix_by_account[owner] = mix_by_account[owner].add(row_mix)
             else:
-                day_unattributed += tokens
+                day_acc.unattributed_tokens += tokens
                 unattributed_tokens += tokens
                 unattributed_cost = _add_opt(unattributed_cost, row_cost)
-                day_unattributed_cost = _add_opt(day_unattributed_cost, row_cost)
-        if remainder := max(0, row.totals.total_tokens - accounted):
-            day_unattributed += remainder
-            unattributed_tokens += remainder
-        daily_rows.append(
-            DailyAccountUsage(
-                day=row.date,
-                by_account=dict(sorted(day_by_account.items())),
-                unattributed_tokens=day_unattributed,
-                cost_by_account={k: round(v, 4) for k, v in sorted(day_cost_by_account.items())},
-                unattributed_cost_usd=_round_opt(day_unattributed_cost),
-            ),
-        )
+                day_acc.unattributed_cost = _add_opt(day_acc.unattributed_cost, row_cost)
+        if entity is not None:
+            agent_buckets[entity].record(
+                row.date,
+                row.totals.total_tokens,
+                row_entity_cost,
+                row.run_count,
+                row_entity_mix,
+            )
+
+    unattributed_tokens += _apply_daily_remainders(daily_breakdown, valid_days, days_by_date)
+    daily_rows = tuple(days_by_date[day].to_daily_usage(day) for day in sorted(days_by_date))
     day_order = tuple(row.day for row in daily_rows)
     rounded_savings = round(cache_savings, 4)
     return UsageAttribution(
         tokens_by_account=dict(tokens_by_account),
         cost_by_account={k: _round_opt(v) for k, v in cost_by_account.items()},
         mix_by_account={k: mix for k, v in mix_by_account.items() if (mix := _non_zero_mix(v)) is not None},
-        daily_7d=tuple(daily_rows),
+        daily_7d=daily_rows,
         unattributed_tokens_7d=unattributed_tokens,
         unattributed_cost_usd_7d=_round_opt(unattributed_cost),
         token_mix_7d=_non_zero_mix(total_mix),
         cache_savings_usd_7d=rounded_savings if rounded_savings > 0.0 else None,
         top_models_7d=_build_top_models(model_buckets, owners_by_key, day_order),
-        top_agents_7d=_build_top_agents(daily_by_entity, valid_days, day_order, prices, configured_providers),
+        top_agents_7d=_build_top_agents(agent_buckets, day_order),
     )
 
 

@@ -45,8 +45,8 @@ def provider_reports_cache_tokens_outside_input(
     model_id: str | None,
 ) -> bool:
     """Return whether cache tokens must be added to input tokens for context occupancy."""
-    provider_key = (provider or configured_provider or "").lower()
-    configured_provider_key = (configured_provider or "").lower()
+    provider_key = (provider or configured_provider or "").strip().lower().replace("-", "_")
+    configured_provider_key = (configured_provider or "").strip().lower().replace("-", "_")
     model_key = (model_id or "").lower()
     if "anthropic" in provider_key or "bedrock" in provider_key or provider_key == "claude_code":
         return True
