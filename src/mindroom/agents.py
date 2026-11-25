@@ -22,7 +22,7 @@ from mindroom.agent_loop.prompt import (
 )
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
-from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
+from mindroom.approval.tool_approval import approval_policy_names, tool_may_require_approval
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -897,12 +897,9 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
 
 def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, registered_tool_name: str) -> bool:
     """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
-    # A scheduled call runs only with the approval its requester gave when it was scheduled.
-    is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
-    return not is_scheduled_call_runner and tool_may_require_approval(
-        config,
-        function_name,
-        toolkit_approval_alias(config, tools, registered_tool_name, function_name),
+    return any(
+        tool_may_require_approval(config, name)
+        for name in approval_policy_names(config, tools, registered_tool_name, function_name)
     )
 
 

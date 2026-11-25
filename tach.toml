@@ -8540,6 +8540,7 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
+    "approval_policy_names",
     "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",

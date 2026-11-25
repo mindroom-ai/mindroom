@@ -1149,7 +1149,7 @@ async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Alias targets, key-less checks, and a personal agent's own template still fail closed; scheduler runner skips."""
+    """Alias targets and a personal agent's own template still fail closed; scheduler runner skips its own name."""
 
     def action() -> str:
         return "ok"
@@ -1198,13 +1198,6 @@ async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
             action_binding,
             expected_worker_target=runtime.resolve_worker_target(),
         )
-
-    # Without a key, even an unrelated rule fails closed.
-    runtime = bind_reload(
-        lambda cfg: setattr(cfg.tool_approval, "rules", [ApprovalRuleConfig(match="unrelated_*", script="gate.py")]),
-    )
-    with pytest.raises(PermissionError):
-        approval_tools.check_prepared_catalog_authority(runtime)
 
     # scheduler.run_scheduled_call ignores rules matching its own name, consistent with _approval_may_gate.
     runtime = bind_reload(

@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.approval.tool_approval import effective_tool_approval_policy, toolkit_approval_alias
+from mindroom.approval.tool_approval import approval_policy_names, effective_tool_approval_policy
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.credentials import has_ready_self_service_desktop
@@ -17,7 +17,6 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_roo
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
-    from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
@@ -215,7 +214,14 @@ async def _warm_owned_mcp_servers(
 
 
 def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None:
-    """Return the config inputs this agent's catalog depends on (excluding per-call approval), or None if gone."""
+    """Return the config inputs this agent's catalog depends on, or None once the agent is gone.
+
+    Other agents' and teams' entries are excluded; calls re-authorize the requester live.
+    ``models``, ``room_models``, ``room_thread_summary_models``, ``defaults.thread_summary_model``, and
+    ``router.model`` pick models only. The agent's own ``rooms`` are checked as a subset on reload.
+    ``calls`` is read only by the voice call manager; ``personal_agents`` keeps only this agent's own template;
+    ``tool_approval`` is checked per called key.
+    """
     agent = config.agents.get(agent_name)
     if agent is None:
         return None
@@ -248,48 +254,28 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     }
 
 
-def _call_approval_authority(
-    config: Config,
-    tools: ToolRegistry,
-    key: ToolKey,
-) -> tuple[
-    dict[str, Any],
-    ApprovalRuleConfig | str,
-    ApprovalRuleConfig | str | None,
-    ApprovalRuleConfig | str | None,
-]:
-    non_rules = config.tool_approval.model_dump(exclude={"rules"})
-    shell_policy = effective_tool_approval_policy(config, SHELL_FUNCTION)
-    if key.toolkit == "scheduler" and key.function == "run_scheduled_call":
-        return non_rules, shell_policy, None, None
+def _call_approval_authority(config: Config, tools: ToolRegistry, key: ToolKey) -> tuple[Any, ...]:
     registered_toolkit = None if key.toolkit == "agent" else key.toolkit
-    alias = toolkit_approval_alias(config, tools, registered_toolkit, key.function)
+    names = (SHELL_FUNCTION, *approval_policy_names(config, tools, registered_toolkit, key.function))
     return (
-        non_rules,
-        shell_policy,
-        effective_tool_approval_policy(config, key.function),
-        effective_tool_approval_policy(config, alias.judged_as) if alias is not None else None,
+        config.tool_approval.model_dump(exclude={"rules"}),
+        *(effective_tool_approval_policy(config, name) for name in names),
     )
 
 
-def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKey | None = None) -> None:
+def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKey) -> None:
     """Refuse a prepared CLI catalog if a reload changed its authority, removed a room, or changed the key's approval."""
     current = context.current_config
     if current is context.config:
         return
     old_agent = context.config.agents.get(context.agent_name)
     current_agent = current.agents.get(context.agent_name)
-    approval_changed = (
-        current.tool_approval != context.config.tool_approval
-        if key is None
-        else _call_approval_authority(current, context.plugins.tools, key)
-        != _call_approval_authority(context.config, context.plugins.tools, key)
-    )
     if (
         old_agent is None
         or current_agent is None
         or not set(old_agent.rooms) <= set(current_agent.rooms)
-        or approval_changed
+        or _call_approval_authority(current, context.plugins.tools, key)
+        != _call_approval_authority(context.config, context.plugins.tools, key)
         or _catalog_authority(current, context.agent_name) != _catalog_authority(context.config, context.agent_name)
     ):
         msg = "Current configuration no longer permits this prepared CLI call"

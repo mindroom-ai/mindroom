@@ -43,6 +43,7 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "approval_policy_names",
     "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
@@ -201,6 +202,20 @@ def toolkit_approval_alias(
         if metadata is not None and function_name in metadata.approval_aliases:
             return metadata.approval_aliases[function_name]
     return None
+
+
+def approval_policy_names(
+    config: Config,
+    tools: ToolRegistry,
+    registered_toolkit: str | None,
+    function_name: str,
+) -> tuple[str, ...]:
+    """Return the tool names whose approval rules judge ``(registered_toolkit, function_name)``."""
+    # A scheduled call runs only with the approval its requester gave when it was scheduled.
+    if registered_toolkit == "scheduler" and function_name == "run_scheduled_call":
+        return ()
+    alias = toolkit_approval_alias(config, tools, registered_toolkit, function_name)
+    return (function_name, alias.judged_as) if alias is not None else (function_name,)
 
 
 def resolve_tool_approval_approver(
