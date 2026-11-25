@@ -162,6 +162,7 @@ _INTERACTIVE_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
+_LEADING_BLANK_LINES_PATTERN = re.compile(r"^(?:[ \t]*\r?\n)+")
 _MAX_OPTIONS = 5
 _KEYCAP_EMOJIS = tuple(f"{digit}\ufe0f\u20e3" for digit in "12345")
 _SPARE_EMOJIS = ("🔹", "🔸", "🟢", "🟣", "🟠", "🟤", "⚪", "⚫", "🔺")
@@ -340,6 +341,49 @@ def _render_question_text(question: str, options: list[dict[str, str]], *, inclu
     return "\n".join(parts)
 
 
+def _strip_trailing_whitespace(parts: list[str]) -> None:
+    """Drop trailing spaces, tabs, and line breaks from accumulated output parts."""
+    while parts:
+        stripped = parts[-1].rstrip(" \t\r\n")
+        if stripped:
+            parts[-1] = stripped
+            return
+        parts.pop()
+
+
+def _splice_rendered_blocks(
+    response_text: str,
+    rendered: Sequence[tuple[re.Match[str], str]],
+) -> str:
+    """Splice rendered interactive blocks into response text separated by blank lines."""
+    parts: list[str] = []
+    last_end = 0
+    after_block = False
+
+    def append_prose(segment: str) -> None:
+        nonlocal after_block
+        if after_block:
+            if segment.strip():
+                parts.extend(("\n\n", _LEADING_BLANK_LINES_PATTERN.sub("", segment, count=1)))
+                after_block = False
+        elif segment:
+            parts.append(segment)
+
+    for match, replacement in rendered:
+        append_prose(response_text[last_end : match.start()])
+        if replacement:
+            if not after_block:
+                _strip_trailing_whitespace(parts)
+            if parts:
+                parts.append("\n\n")
+            parts.append(replacement)
+            after_block = True
+        last_end = match.end()
+
+    append_prose(response_text[last_end:])
+    return "".join(parts).strip()
+
+
 def _remove_inline_unparsed_interactive_fences(text: str, *, warn_unparsed: bool) -> str:
     """Remove inline interactive JSON fences that the block parser cannot render."""
     cleaned_text, count = re.subn(
@@ -498,14 +542,8 @@ def parse_and_format_interactive(
             block_count=len(matches),
         )
 
-    parts: list[str] = []
-    last_end = 0
-    for match, replacement in rendered:
-        parts.append(response_text[last_end : match.start()])
-        parts.append(replacement)
-        last_end = match.end()
-    parts.append(response_text[last_end:])
-    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip(), warn_unparsed=warn_unparsed)
+    spliced_text = _splice_rendered_blocks(response_text, rendered)
+    final_text = _remove_inline_unparsed_interactive_fences(spliced_text, warn_unparsed=warn_unparsed)
 
     return _InteractiveResponse(final_text, interactive_metadata)
 
