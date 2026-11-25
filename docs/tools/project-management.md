@@ -101,7 +101,7 @@ The GitHub App connection reaches only repositories where the GitHub App is inst
 ## [`todo`]
 
 `todo` keeps a work plan for the current Matrix room and thread, so separate threads carry independent plans.
-It exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`, and has no configuration fields.
+It exposes one unified `todo(action=...)` function supporting `plan`, `add`, `list`, `update`, `apply_template`, and `list_templates`, and has no configuration fields.
 Plans are stored under `mindroom_data/todo/` and survive restarts.
 
 ```yaml
@@ -112,23 +112,23 @@ agents:
 ```
 
 ```python
-plan("[high] Inspect issue\nWrite failing test\nImplement fix")
-add_todo("Run focused regression test", depends_on="a1b2c3d4", priority="high")
-update_todo("a1b2c3d4", status="done")
-apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
+todo(action="plan", tasks="[high] Inspect issue\nWrite failing test\nImplement fix")
+todo(action="add", title="Run focused regression test", depends_on="a1b2c3d4", priority="high")
+todo(action="update", todo_id="a1b2c3d4", status="done")
+todo(action="apply_template", template_name="mindroom-dev", params={"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 ```
 
-- `plan()` creates one item per non-empty line, with optional `[low]`, `[medium]`, `[high]`, or `[critical]` prefixes.
+- `action="plan"` creates one item per non-empty line, with optional `[low]`, `[medium]`, `[high]`, or `[critical]` prefixes.
 - Each item has a priority, a dependency list, a status of `open`, `done`, or `cancelled`, and an optional assigned agent.
 - An open item stays blocked until each of its dependencies is `done` or `cancelled`, so cancelling a prerequisite also unblocks the items that depend on it.
-- `plan()`, `add_todo()` without an assignee, and template items without an assignee assign the work to the calling agent, so that agent is [auto-poked](#auto-poke) about it.
-- `update_todo()` changes the title, priority, status, dependencies, or assignee, and `list_todos(show_all=True)` includes finished items.
+- `action="plan"`, `action="add"` without an assignee, and template items without an assignee assign the work to the calling agent, so that agent is [auto-poked](#auto-poke) about it.
+- `action="update"` changes the title, priority, status, dependencies, or assignee, and `todo(action="list", show_all=True)` includes finished items.
 - Assigning work to an agent, or changing work already assigned to one, is refused unless the requester may address that agent in this room under its [`access`](../authorization.md#responder-access) policy.
 - The assigned agent works on an item as the requester, human or agent, who last added or changed it.
 
 ### Templates
 
-`list_templates()` shows the available templates and `apply_template(name, params, dry_run=True)` previews an expansion without writing it.
+`todo(action="list_templates")` shows the available templates and `todo(action="apply_template", template_name=..., params=..., dry_run=True)` previews an expansion without writing it.
 MindRoom ships a `mindroom-dev` template, which includes a nested `parallel-review-loop` template.
 Agents can add their own templates under `todo/templates` in their workspace, and a workspace template hides a built-in template of the same name.
 A template file is named `<name>.yaml.j2` and needs a matching `name`, a string `version`, a `description`, and a nonempty `todos` list.
