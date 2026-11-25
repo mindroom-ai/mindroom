@@ -32,7 +32,7 @@ from mindroom.thread_tags import (
 )
 from mindroom.tool_system.authoring import Toolkit
 
-# ruff: noqa: D406, D407, D413
+# ruff: noqa: D413
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -322,7 +322,7 @@ class ThreadTagsTools(Toolkit):
             tags=_serialized_tags(state.tags),
         )
 
-    async def list_thread_tags(  # noqa: C901, D417, PLR0911, PLR0912
+    async def list_thread_tags(  # noqa: C901, PLR0911, PLR0912
         self,
         thread_id: str | None = None,
         room_id: str | None = None,
@@ -331,44 +331,17 @@ class ThreadTagsTools(Toolkit):
         exclude_tag: str | None = None,
         include_untagged: bool = False,
     ) -> str:
-        """List Matrix thread tags in a room.
+        """List Matrix thread tags for one thread or across a room (filters normalize like `tag_thread`).
 
-        Inspect which threads in a room have which tags. Default mode returns only
-        threads that have at least one tag stored as room state. Pass
-        `include_untagged=True` to also surface every other thread root in the room
-        (threads with no tags appear with an empty `tags` dict). This enables the
-        headline query for "what threads are still unresolved?":
+        For unresolved threads, call `list_thread_tags(exclude_tag="resolved", include_untagged=True)`.
 
-        All tag filter inputs use the same free-form normalization as `tag_thread`.
-
-            list_thread_tags(exclude_tag="resolved", include_untagged=True)
-
-        Parameters:
-          room_id: Room to query. Defaults to the current Matrix tool runtime
-            room when invoked from a runtime context.
-          thread_id: When set, restrict the query to a single thread root. Incompatible
-            with `include_untagged=True` (raises a validation error).
-          tag: Return only matching threads that carry this exact tag. In room-wide
-            mode, untagged threads are filtered out.
-          include_tag: Filter to threads that have this tag. Untagged threads are
-            filtered out.
-          exclude_tag: Filter to threads that do NOT have this tag. Untagged threads
-            pass (they have no tags, so no excluded tag is present).
-          include_untagged: When True, also enumerate every thread root in the room
-            via Matrix `/threads` and synthesize empty-tag entries for ones with no
-            tag state. The payload then also includes `include_untagged: true` and
-            `truncated: bool`. Untagged threads are filtered out by `tag=` or
-            `include_tag=`; use `exclude_tag=` alone for the unresolved-threads query.
-            Defaults to False.
-
-        Returns:
-          Thread-specific queries return a JSON object with `room_id`,
-          `thread_id`, and `tags`.
-
-          Room-wide queries return a JSON object with `room_id`, `room_wide`,
-          and `threads` (mapping of thread_id -> tag dict). On success with
-          `include_untagged=True`, the payload also includes
-          `include_untagged: bool` and `truncated: bool`.
+        Args:
+          thread_id: Restrict to one thread root (incompatible with `include_untagged=True`).
+          room_id: Target room (defaults to current room).
+          tag: Keep only threads carrying this exact tag (excludes untagged).
+          include_tag: Keep only threads with this tag (excludes untagged).
+          exclude_tag: Keep threads lacking this tag (untagged threads pass).
+          include_untagged: When True, also enumerate every thread root via `/threads` with empty `tags` (adds `include_untagged` and `truncated`). Defaults to False.
         """
         if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
             return context

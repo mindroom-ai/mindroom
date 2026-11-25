@@ -6,7 +6,7 @@ resume continues a paused one, so both run the leader the same way.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.spec import RunContext
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.agent_loop.model_loop import LoopHooks
-    from mindroom.history.types import ResolvedReplayPlan
+    from mindroom.history.types import HistoryScope, ResolvedReplayPlan
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import TeamRunRecord
@@ -32,7 +32,8 @@ class LeaderRun:
     """How the leader of ``built`` runs: where its run stores, its hooks, its request settings, and its model.
 
     ``model_name`` is the configured model the team run uses, which its tool calls carry. Every run shares the
-    stored session's ``session_state`` with its tools, which the store writes back.
+    stored session's ``session_state`` with its tools, which the store writes back, and ``compaction_requests``
+    across ``start`` and ``resume`` so a member's mid-turn compaction request survives a delegation pause.
     """
 
     built: BuiltTeam
@@ -40,6 +41,7 @@ class LeaderRun:
     hooks: LoopHooks
     request_template: ModelRequest
     model_name: str
+    compaction_requests: set[HistoryScope] = field(default_factory=set)
 
     def start(
         self,
@@ -61,6 +63,7 @@ class LeaderRun:
                 metadata=metadata,
                 history_scope=self.storage.scope,
                 model_name=self.model_name,
+                compaction_requests=self.compaction_requests,
             ),
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
@@ -85,6 +88,7 @@ class LeaderRun:
             user_id=user_id,
             model_name=self.model_name,
             history_scope=self.storage.scope,
+            compaction_requests=self.compaction_requests,
         )
         return continue_team(
             self.built.spec,

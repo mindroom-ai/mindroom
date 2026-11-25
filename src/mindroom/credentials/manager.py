@@ -84,7 +84,6 @@ __all__ = [
     "SERVICE_NAME_PATTERN",
     "CredentialLayers",
     "CredentialsManager",
-    "CredentialsUnreadableError",
     "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
     "credential_layers",

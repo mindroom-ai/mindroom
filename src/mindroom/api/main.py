@@ -22,7 +22,7 @@ from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.api.agent_profiles import router as agent_profiles_router
 from mindroom.api.agent_terminals import router as agent_terminals_router
 from mindroom.api.app_state import EmbeddedRuntime, ExternalTriggerRuntime, ensure_app_state
-from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_user
+from mindroom.api.auth import dashboard_cors_origins, verify_user
 from mindroom.api.auth import router as auth_router
 from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
@@ -41,7 +41,6 @@ from mindroom.api.connections_session import router as connections_session_route
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dictation import close_dictation_http_client
 from mindroom.api.dictation import router as dictation_router
-from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.egress_broker import router as egress_broker_router
 from mindroom.api.egress_credentials import router as egress_credentials_router
 from mindroom.api.external_triggers import event_sources_router
@@ -59,6 +58,7 @@ from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
 from mindroom.api.response_activity import router as response_activity_router
+from mindroom.api.room_triggers import router as room_triggers_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
@@ -543,13 +543,12 @@ app.include_router(call_transcripts_router)  # Authenticates client sessions; 40
 app.include_router(dictation_router)  # Authenticates client sessions; 404 while dictation is off.
 app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(agent_profiles_router)  # Authenticates client sessions.
+app.include_router(room_triggers_router)  # Authenticates client sessions.
 app.include_router(secret_requests_router)  # Authenticates client sessions.
 app.include_router(github_requests_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
 app.include_router(workflow_gateway_router)
 app.include_router(agent_cli_router)
-# Each report admits the user who requested its run, administrator or not.
-app.include_router(dynamic_workflows_router, dependencies=[Depends(authenticate_user)])
 
 
 @app.get("/api/health")

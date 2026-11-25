@@ -2759,8 +2759,7 @@ async def test_pair_targets_selected_controller_while_running_preserving_handles
                 ),
             )
             for callback in list(offline_runtime_session.owner.client.to_device_callbacks):
-                if (result := callback.func(ack)) is not None:
-                    await result
+                await callback.func(ack)
 
         monkeypatch.setattr("mindroom.desktop.pairing_client.client_ed25519_fingerprint", lambda _c: live_fingerprint)
         monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _c: live_fingerprint)

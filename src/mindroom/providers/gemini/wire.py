@@ -32,7 +32,11 @@ from mindroom.llm.messages import stored_tool_call, system_text, tool_result_vie
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.providers.errors import media_ids
+from mindroom.providers.errors import (
+    GEMINI_FILTERED_FINISH_REASONS,
+    MALFORMED_FUNCTION_CALL_FINISH_REASON,
+    media_ids,
+)
 from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
@@ -79,20 +83,6 @@ _FORMAT_TO_MIME = {
 # (https://github.com/google/adk-python/issues/5693). Its other rejection of media, "Request contains an invalid
 # argument.", which the Gemini API sent in October 2026 for an inline DOCX, names no attachment.
 _UNSUPPORTED_MIME_TYPE = re.compile(r"unsupported mime type: ([a-z0-9.+-]+/[a-z0-9.+-]+)", re.IGNORECASE)
-# The finish reason of a candidate whose tool call the model malformed.
-_MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
-_FILTERED_FINISH_REASONS = frozenset(
-    {
-        "SAFETY",
-        "RECITATION",
-        "BLOCKLIST",
-        "PROHIBITED_CONTENT",
-        "SPII",
-        "IMAGE_SAFETY",
-        "IMAGE_PROHIBITED_CONTENT",
-        "IMAGE_RECITATION",
-    },
-)
 
 
 def _without_none(**values: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -566,7 +556,7 @@ def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse) -> list[Strea
         if finish_reason is not None:
             reply.usage = so_far
         events.append(UsageReported(so_far, final=False))
-    if finish_reason != _MALFORMED_FUNCTION_CALL:
+    if finish_reason != MALFORMED_FUNCTION_CALL_FINISH_REASON:
         parts = candidate.content.parts if candidate.content is not None else None
         if candidate.grounding_metadata is not None:
             events.append(hosted_tool_started("google_search"))
@@ -578,9 +568,9 @@ def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse) -> list[Strea
 
 def malformed_tool_call_error(reply: GeminiReply, *, provider: str) -> ProviderError | None:
     """Return the error of a reply that ended in a tool call the model malformed, or None for any other reply."""
-    if reply.finish_reason != _MALFORMED_FUNCTION_CALL:
+    if reply.finish_reason != MALFORMED_FUNCTION_CALL_FINISH_REASON:
         return None
-    msg = f"Generation ended with finish reason: {_MALFORMED_FUNCTION_CALL}"
+    msg = f"Generation ended with finish reason: {MALFORMED_FUNCTION_CALL_FINISH_REASON}"
     return ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
 
 
@@ -651,7 +641,7 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
         return None
     if reply.finish_reason == "MAX_TOKENS":
         return "output_limit"
-    if reply.finish_reason in _FILTERED_FINISH_REASONS:
+    if reply.finish_reason in GEMINI_FILTERED_FINISH_REASONS:
         return "content_filter"
     if reply.finish_reason != "STOP":
         return "incomplete"

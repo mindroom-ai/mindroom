@@ -44,8 +44,8 @@ _CLIP_SEPARATOR = " … "
 _unknown_room_models_logged: set[tuple[Path, str, str]] = set()
 # A new generated title over these after normalization goes back to the model; a person's pin may use
 # ``THREAD_SUMMARY_MAX_LENGTH``.
-_GENERATED_TITLE_MAX_LENGTH = 80
-_GENERATED_TITLE_MAX_WORDS = 6
+GENERATED_TITLE_MAX_LENGTH = 80
+GENERATED_TITLE_MAX_WORDS = 6
 # One answer plus two retries that each see the rejected title and why.
 _TITLE_ATTEMPTS = 3
 
@@ -87,10 +87,10 @@ def title_error(title: str) -> str | None:
     words = sum(any(char.isalnum() for char in token) for token in title.split())
     if not title:
         return "The title is empty."
-    if words > _GENERATED_TITLE_MAX_WORDS or len(title) > _GENERATED_TITLE_MAX_LENGTH:
+    if words > GENERATED_TITLE_MAX_WORDS or len(title) > GENERATED_TITLE_MAX_LENGTH:
         return (
             f"The title has {words} words and {len(title)} characters; the limit is "
-            f"{_GENERATED_TITLE_MAX_WORDS} words and {_GENERATED_TITLE_MAX_LENGTH} characters."
+            f"{GENERATED_TITLE_MAX_WORDS} words and {GENERATED_TITLE_MAX_LENGTH} characters."
         )
     return None
 

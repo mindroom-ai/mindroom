@@ -11,8 +11,8 @@ import pytest
 
 from mindroom.constants import COMPACTIONS_CONTENT_KEY
 from mindroom.history.reply_compactions import (
-    _MAX_REPLY_COMPACTIONS,
-    _MAX_REPLY_COMPACTIONS_BYTES,
+    MAX_REPLY_COMPACTIONS,
+    MAX_REPLY_COMPACTIONS_BYTES,
     ReplyCompactionLifecycle,
     ReplyCompactions,
 )
@@ -210,7 +210,7 @@ async def test_a_verbose_failure_reason_is_capped_so_a_short_answer_edit_still_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("reason_char", "kept"), [("x", _MAX_REPLY_COMPACTIONS), ("\U0001f600", 2)])
+@pytest.mark.parametrize(("reason_char", "kept"), [("x", MAX_REPLY_COMPACTIONS), ("\U0001f600", 2)])
 async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit_fits_encrypted(
     reason_char: str,
     kept: int,
@@ -232,9 +232,9 @@ async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit
 
     content = recorder.content()
     assert content is not None
-    assert _MAX_REPLY_COMPACTIONS == 8
+    assert MAX_REPLY_COMPACTIONS == 8
     assert [entry["id"] for entry in content] == entry_ids[-kept:]
-    assert len(json.dumps(content)) <= _MAX_REPLY_COMPACTIONS_BYTES
+    assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
     prepared = await _prepare_short_answer_edit(content, room_encrypted=True)
     assert prepared["m.new_content"]["body"] == "Short answer."
     assert len(prepared[COMPACTIONS_CONTENT_KEY]) == kept
@@ -258,7 +258,7 @@ async def test_one_worst_case_entry_fits_the_byte_budget() -> None:
     [entry] = content
     assert entry["summary_model"] == "\U0001f600" * 120 + "…"
     assert entry["failure_reason"] == "\U0001f600" * 300 + "…"
-    assert len(json.dumps(content)) <= _MAX_REPLY_COMPACTIONS_BYTES
+    assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
 
 
 @pytest.mark.asyncio

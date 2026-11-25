@@ -33,7 +33,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.backends import (
+from mindroom.workers.backends._dedicated_worker_common import (
     normalize_sandbox_mount_dir,
     resolve_sandbox_mount_target,
 )

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 #: Wait this long after distributing a rotated key before encrypting with it,
 #: so slower participants receive it before frames arrive.
-USE_KEY_DELAY_MS = 1000
+_USE_KEY_DELAY_MS = 1000
 
 #: Skip rotation for joiners when the current key is younger than this.
 _KEY_ROTATION_GRACE_PERIOD_MS = 10_000

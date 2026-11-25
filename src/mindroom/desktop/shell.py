@@ -475,7 +475,7 @@ class DesktopShell:
         if used_key in self._used_ids:
             message = "Shell request ID has already been used."
             raise DesktopShellError(message)
-        self._reserve_handle_capacity()
+        self._check_handle_capacity()
         self._used_ids.add(used_key)
         self._active_controller_key = request.controller_key
         self._busy = True
@@ -483,15 +483,23 @@ class DesktopShell:
         self._cancel_event.clear()
         return deadline
 
-    def _reserve_handle_capacity(self) -> None:
+    def _oldest_finished_handle(self) -> str | None:
         self._prune()
         if len(self._handles) < _MAX_HANDLES:
-            return
+            return None
         finished = [(record.finished_at or 0.0, handle) for handle, record in self._records.items() if record.finished]
         if not finished:
             message = "Too many local shell commands are running; kill one before starting another."
             raise DesktopShellError(message)
-        self._discard(min(finished)[1])
+        return min(finished)[1]
+
+    def _check_handle_capacity(self) -> None:
+        self._oldest_finished_handle()
+
+    def _reserve_handle_capacity(self) -> None:
+        oldest = self._oldest_finished_handle()
+        if oldest is not None:
+            self._discard(oldest)
 
     async def execute(self, request: DesktopShellRequest) -> DesktopShellResult:
         """Admit one request, await local approval if needed, then run it until it completes or becomes a handle."""
@@ -515,6 +523,7 @@ class DesktopShell:
             if not Path(request.cwd).is_dir():
                 message = "Shell working directory must be an existing directory; the command did not run."
                 raise DesktopShellError(message)
+            self._reserve_handle_capacity()
             self._active_request_id = request.request_id
             self._active_owner = (request.controller_key, request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.

@@ -76,9 +76,6 @@ def _replies(diag: socket.socket) -> Iterator[bytes]:
 
 def _diagnosed_listeners() -> list[_Listener]:
     """Ask the kernel's socket diagnostics for the TCP sockets listening on any port."""
-    if sys.platform != "linux":
-        msg = "Netlink socket diagnostics are available only on Linux."
-        raise OSError(msg)
     found: list[_Listener] = []
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_SOCK_DIAG) as diag:
         for family, address_bytes in ((socket.AF_INET, 4), (socket.AF_INET6, 16)):

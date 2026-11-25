@@ -1030,3 +1030,46 @@ async def test_per_controller_grant_and_revoke_isolate_leases_pending_and_handle
     assert shell.controller_status("ctrl-b")["auto_approve_remaining_seconds"] == 0
     assert shell.status()["auto_approve_remaining_seconds"] == 0
     await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_unapproved_or_invalid_shell_request_does_not_evict_finished_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Denied, expired, or invalid-cwd requests never evict an unread finished handle."""
+    monkeypatch.setattr("mindroom.desktop.shell._MAX_HANDLES", 2)
+    shell = local_shell()
+    shell.grant(60)
+    finished = await shell.execute(request("echo keep-me", tmp_path, request_id="r1", timeout=1))
+    running = await shell.execute(request("sleep 30", tmp_path, request_id="r2", timeout=1))
+    assert finished.handle is not None
+    assert running.handle is not None
+    assert finished.state == "completed"
+
+    # End auto-approval so the next requests require explicit approval.
+    shell._leases.clear()
+
+    # Denied request must not evict the finished handle.
+    denied_task = asyncio.create_task(shell.execute(request("echo denied", tmp_path, request_id="r3")))
+    await wait_pending(shell)
+    shell.decide("r3", approved=False)
+    with pytest.raises(DesktopShellError, match="denied"):
+        await denied_task
+    assert {entry["handle"] for entry in shell.handles()} == {finished.handle, running.handle}
+
+    # Approved request with a nonexistent cwd must not evict the finished handle either.
+    bad_cwd_task = asyncio.create_task(
+        shell.execute(request("echo bad-cwd", tmp_path / "missing-dir", request_id="r4")),
+    )
+    await wait_pending(shell)
+    shell.decide("r4", approved=True)
+    with pytest.raises(DesktopShellError, match="existing directory"):
+        await bad_cwd_task
+    assert {entry["handle"] for entry in shell.handles()} == {finished.handle, running.handle}
+
+    # The finished handle's unread output is still intact.
+    checked = shell.check(REQUESTER, AGENT, finished.handle)
+    assert checked.output.read() == b"keep-me\n"
+    shell.hand_over(checked)
+    await shell.close()

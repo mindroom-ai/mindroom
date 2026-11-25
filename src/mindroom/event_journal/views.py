@@ -102,6 +102,10 @@ class ReplayView(PrincipalRows):
         """Return whether one event still owes semantic work."""
         return await self._read(journal.is_pending, event_id)
 
+    async def is_settled(self, event_id: str) -> bool:
+        """Return whether one event has already settled."""
+        return await self._read(journal.is_settled, event_id)
+
     async def revise_pending(self, event_id: str, content: Mapping[str, object]) -> None:
         """Store the content its sender edited a pending message to, which a replay of the message then reads."""
         await self._write(journal.revise_pending, event_id, content)

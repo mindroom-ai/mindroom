@@ -5208,7 +5208,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
     bot = _make_bot(tmp_path, debounce_ms=60_000)
     room = _make_room()
     first_cmd = _text_event(event_id="$c1", body="!help", server_timestamp=1000)
-    second_cmd = _text_event(event_id="$c2", body="!schedule list", server_timestamp=1001)
+    second_cmd = _text_event(event_id="$c2", body="!list_schedules", server_timestamp=1001)
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -5233,7 +5233,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
 
     assert calls == [
         ("!help", ["$c1"]),
-        ("!schedule list", ["$c2"]),
+        ("!list_schedules", ["$c2"]),
     ]
 
 
@@ -6720,16 +6720,16 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$c1",
-        body="!schedule tomorrow at 9am turn off the lights",
+        body="!list_schedules",
         source={
             "content": {
                 "msgtype": "m.text",
-                "body": "!schedule tomorrow at 9am turn off the lights",
+                "body": "!list_schedules",
             },
         },
         server_timestamp=1000,
     )
-    dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
+    dispatch = _prepared_dispatch(event_id="$c1", body="!list_schedules")
 
     handle_cmd_mock = AsyncMock(return_value=True)
     prepare_dispatch_mock = AsyncMock(return_value=dispatch)
@@ -6752,11 +6752,11 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     voice_command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice_command",
-        body="!schedule tomorrow at 9am turn off the lights",
+        body="!list_schedules",
         source={
             "content": {
                 "msgtype": "m.text",
-                "body": "!schedule tomorrow at 9am turn off the lights",
+                "body": "!list_schedules",
                 SOURCE_KIND_KEY: "voice",
             },
         },
@@ -6765,7 +6765,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     )
     dispatch = _prepared_dispatch(
         event_id="$voice_command",
-        body="!schedule tomorrow at 9am turn off the lights",
+        body="!list_schedules",
         thread_id="$thread",
         source_kind="voice",
         dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,

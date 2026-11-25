@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict
-from datetime import datetime  # noqa: TC003 - Pydantic resolves postponed annotations at runtime.
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import aiohttp
@@ -23,14 +22,11 @@ from mindroom.scheduling.errors import (
     SchedulingError,
 )
 from mindroom.scheduling.tasks import (
-    ScheduledTaskReadModel,
     build_edited_scheduled_workflow,
-    build_scheduled_task_read_model,
     cancel_scheduled_task,
     get_scheduled_tasks_for_room,
     require_scheduled_task,
     save_edited_scheduled_task,
-    scheduled_task_read_sort_key,
     scheduled_task_timezone,
 )
 
@@ -38,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from mindroom.constants import RuntimePaths
+    from mindroom.scheduling.tasks import ScheduledTaskRecord
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -54,6 +51,8 @@ class ScheduledTaskResponse(BaseModel):
     next_run_at: datetime | None = None
     cron_expression: str | None = None
     cron_description: str | None = None
+    timezone: str
+    cron_timezone: str | None = None
     description: str
     message: str
     history_limit: int | None = None
@@ -168,11 +167,41 @@ def _http_error(error: SchedulingError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(error))
 
 
-def _to_response_task(task: ScheduledTaskReadModel, runtime_paths: RuntimePaths) -> ScheduledTaskResponse:
+def _task_response(
+    task: ScheduledTaskRecord,
+    *,
+    timezone: str,
+    runtime_paths: RuntimePaths,
+    current_time: datetime | None = None,
+) -> ScheduledTaskResponse:
+    """Build the API response payload for a stored scheduled task."""
+    workflow = task.workflow
     return ScheduledTaskResponse(
+        task_id=task.task_id,
+        room_id=task.room_id,
         room_alias=get_room_alias_from_id(task.room_id, runtime_paths=runtime_paths),
-        **asdict(task),
+        status=task.status,
+        schedule_type=workflow.schedule_type,
+        execute_at=workflow.execute_at,
+        next_run_at=workflow.next_run_at(current_time),
+        cron_expression=workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None,
+        cron_description=workflow.cron_description(timezone, current_time),
+        timezone=timezone,
+        cron_timezone=workflow.cron_timezone,
+        description=workflow.description,
+        message=workflow.message,
+        history_limit=workflow.history_limit,
+        thread_id=workflow.thread_id,
+        new_thread=workflow.new_thread,
+        silent=workflow.silent,
+        created_by=workflow.created_by,
+        created_at=task.created_at,
     )
+
+
+def _task_response_sort_key(task: ScheduledTaskResponse) -> tuple[int, datetime]:
+    """Sort pending tasks first, then by next execution time."""
+    return (0 if task.status == "pending" else 1, task.next_run_at or datetime.max.replace(tzinfo=UTC))
 
 
 @router.get("", response_model=ListSchedulesResponse)
@@ -188,7 +217,7 @@ async def list_schedules(
     if not room_refs:
         return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[], unreadable_rooms=[])
 
-    tasks: list[ScheduledTaskReadModel] = []
+    tasks: list[ScheduledTaskResponse] = []
     # A room that stays unreadable must neither look empty nor hide every other room's tasks.
     room_ids, unreadable_rooms = await _room_ids(request, room_refs, runtime_paths)
     for resolved_room_id in room_ids:
@@ -210,17 +239,18 @@ async def list_schedules(
             )
         else:
             tasks.extend(
-                build_scheduled_task_read_model(
+                _task_response(
                     task,
                     timezone=scheduled_task_timezone(task.workflow, runtime_config),
+                    runtime_paths=runtime_paths,
                 )
                 for task in room_tasks
             )
 
-    tasks.sort(key=scheduled_task_read_sort_key)
+    tasks.sort(key=_task_response_sort_key)
     return ListSchedulesResponse(
         timezone=runtime_config.timezone,
-        tasks=[_to_response_task(task, runtime_paths) for task in tasks],
+        tasks=tasks,
         unreadable_rooms=unreadable_rooms,
     )
 
@@ -259,12 +289,10 @@ async def update_schedule(
     except SchedulingError as e:
         raise _http_error(e) from e
 
-    return _to_response_task(
-        build_scheduled_task_read_model(
-            updated_task,
-            timezone=scheduled_task_timezone(updated_task.workflow, runtime_config),
-        ),
-        runtime_paths,
+    return _task_response(
+        updated_task,
+        timezone=scheduled_task_timezone(updated_task.workflow, runtime_config),
+        runtime_paths=runtime_paths,
     )
 
 

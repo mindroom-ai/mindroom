@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
 import mindroom.tools  # noqa: F401
@@ -353,7 +354,7 @@ async def test_screenshot_response_becomes_model_visible_image(monkeypatch: pyte
     command = request.await_args.args[1]
     assert command.requester_id == "@alice:example.org"
     assert command.agent_name == "computer"
-    assert command.parameters == {"app": "com.example.Editor"}
+    assert command.parameters == {"app": "com.example.Editor", "observation": "screenshot"}
 
 
 @pytest.mark.asyncio
@@ -1511,3 +1512,140 @@ async def test_tool_owners_and_locally_allowed_enforce_self_service_ready_creden
         authority=authority,
         runtime_paths=runtime_paths,
     )
+
+
+@pytest.mark.asyncio
+async def test_request_status_decrypts_recorded_screenshot_and_strips_media_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovering an app receipt decrypts its screenshot and never leaks media encryption fields."""
+    secret_media = EncryptedDesktopMedia(
+        url="mxc://example.org/secret-shot",
+        key="secret-aes-key-material",
+        iv="secret-iv-value",
+        sha256="secret-sha256-hash",
+        mime_type="image/jpeg",
+        size=10,
+    )
+    recorded = DesktopResponse(
+        "original",
+        "s",
+        True,
+        result={"action": "get_app_state", "state": {"state_id": "state-1"}},
+        screenshot=secret_media,
+    )
+    _route_desktop_requests(
+        monkeypatch,
+        DesktopResponse(
+            "query",
+            "s",
+            True,
+            result={"request_id": "original", "state": "completed", "response": recorded.to_content()},
+        ),
+    )
+    download = AsyncMock(return_value=b"\xff\xd8\xffrecovered")
+    monkeypatch.setattr("mindroom.custom_tools.desktop.download_encrypted_screenshot", download)
+
+    result = await _configured_tool(monkeypatch).desktop("request_status", request_id="original")
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "ok"
+    assert "screenshot" not in payload["result"]["response"]
+    for leaked in (secret_media.key, secret_media.url, secret_media.iv, secret_media.sha256):
+        assert leaked not in result.content
+    assert len(result.images) == 1
+    assert result.images[0].content == b"\xff\xd8\xffrecovered"
+    assert result.images[0].mime_type == "image/jpeg"
+    download.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_status_screenshot_failure_is_partial_and_redacts_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport or media error during request_status screenshot download returns sanitized partial output."""
+    secret_media = EncryptedDesktopMedia(
+        url="mxc://example.org/secret-shot",
+        key="secret-aes-key-material",
+        iv="secret-iv-value",
+        sha256="secret-sha256-hash",
+        mime_type="image/jpeg",
+        size=10,
+    )
+    recorded = DesktopResponse(
+        "original",
+        "s",
+        True,
+        result={"action": "click_element", "action_completed": True},
+        screenshot=secret_media,
+    )
+    fake_client = SimpleNamespace(
+        download=AsyncMock(
+            side_effect=aiohttp.ClientPayloadError(
+                "stream broke for mxc://example.org/secret-shot",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.get_tool_runtime_context",
+        lambda: SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=fake_client),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(
+            request=AsyncMock(
+                return_value=DesktopResponse(
+                    "query",
+                    "s",
+                    True,
+                    result={"request_id": "original", "state": "completed", "response": recorded.to_content()},
+                ),
+            ),
+        ),
+    )
+
+    result = await _configured_tool(monkeypatch).desktop("request_status", request_id="original")
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "partial"
+    assert payload["result"]["response"]["result"] == {"action": "click_element", "action_completed": True}
+    assert "request_status" in payload["message"]
+    assert "do not repeat" in payload["message"]
+    assert "screenshot" not in payload["result"]["response"]
+    for leaked in (secret_media.key, secret_media.url, secret_media.iv, secret_media.sha256, "stream broke"):
+        assert leaked not in result.content
+    assert not result.images
+
+
+@pytest.mark.asyncio
+async def test_screenshot_observation_defaults_to_screenshot_and_allows_explicit_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The screenshot action defaults to observation=screenshot while explicit both and other app actions default to both."""
+    schema_prop = toolkit_offers(DesktopTools(), "desktop").parameters["properties"]["observation"]
+    assert "default" not in schema_prop
+    assert "action=screenshot" in schema_prop["description"]
+
+    request = _route_desktop_requests(
+        monkeypatch,
+        DesktopResponse("r1", "s", True, result={"action": "screenshot"}, screenshot=MEDIA),
+        DesktopResponse("r2", "s", True, result={"action": "screenshot"}, screenshot=MEDIA),
+        DesktopResponse("r3", "s", True, result={"action": "get_app_state"}, screenshot=MEDIA),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.download_encrypted_screenshot",
+        AsyncMock(return_value=b"\xff\xd8\xffjpeg"),
+    )
+    tool = _configured_tool(monkeypatch)
+
+    await tool.desktop("screenshot", app="com.example.Editor")
+    assert request.await_args_list[0].args[1].parameters == {
+        "app": "com.example.Editor",
+        "observation": "screenshot",
+    }
+
+    await tool.desktop("screenshot", app="com.example.Editor", observation="both")
+    assert request.await_args_list[1].args[1].parameters == {"app": "com.example.Editor"}
+
+    await tool.desktop("get_app_state", app="com.example.Editor")
+    assert request.await_args_list[2].args[1].parameters == {"app": "com.example.Editor"}

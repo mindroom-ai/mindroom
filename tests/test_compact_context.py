@@ -10,26 +10,33 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom import ai
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.compact_context import CompactContextTools
-from mindroom.history.manual import request_compaction_before_next_reply
+from mindroom.history.manual import schedule_compaction_before_next_reply
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.tool_jobs.execution import _detached, approval_can_run_as_job, wait_mode
+from mindroom.tool_jobs.execution_authority import JobCall, JobTool
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -38,9 +45,11 @@ from tests.conftest import (
     install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
+    make_turn_context,
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -132,7 +141,7 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
     [None, CompactionConfig(enabled=False), CompactionConfig()],
     ids=["built-in", "disabled", "enabled"],
 )
-async def test_request_compaction_before_next_reply_is_public_manual_seam(
+async def test_schedule_compaction_before_next_reply_is_public_manual_seam(
     tmp_path: Path,
     compaction: CompactionConfig | None,
 ) -> None:
@@ -142,7 +151,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
-    result = await request_compaction_before_next_reply(
+    unavailable = await schedule_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
@@ -154,7 +163,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
     )
 
     assert has_queued_force_compaction(storage, "session-1")
-    assert result == COMPACT_CONTEXT_SUCCESS
+    assert unavailable is None
 
 
 @pytest.mark.asyncio
@@ -751,3 +760,170 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
 
     assert has_queued_force_compaction(scope_context.storage, "session-1")
     assert result == COMPACT_CONTEXT_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_compact_context_with_delegation_compacts_on_parent_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A [compact_context, run_subagent] batch preserves the request across delegation continuation."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    tools=["compact_context"],
+                    delegate_to=["helper"],
+                    model="default",
+                ),
+                "helper": AgentConfig(display_name="Helper", tools=[], model="helper"),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(model="summary", reserve_tokens=500),
+            ),
+            memory=MemoryConfig(backend="none"),
+            models={
+                "default": ModelConfig(provider="openai", id="coder-model", context_window=48_000),
+                "helper": ModelConfig(provider="openai", id="helper-model", context_window=48_000),
+                "summary": ModelConfig(provider="openai", id="summary-model", context_window=48_000),
+            },
+        ),
+        runtime_paths,
+    )
+    config.background_tool_jobs.enabled = False
+    with_responder_access(config, "helper", users=["@alice:localhost"])
+    coder_model = ScriptedModel(
+        [
+            calls(
+                tool_call("compact_context", "call-compact"),
+                tool_call("run_subagent", "call-sub", agent_name="helper", task="Check status"),
+            ),
+            answer("All done."),
+        ],
+    )
+    helper_model = ScriptedModel([answer("Status is green.")])
+    install_model_providers(
+        monkeypatch,
+        {"default": coder_model, "helper": helper_model, "summary": summary_model()},
+    )
+    summary_mock = AsyncMock(return_value="delegated mid-turn summary")
+    runtime_context = _member_runtime_context(config, runtime_paths, agent_name="coder")
+    turn_ctx = replace(
+        make_turn_context(
+            "coder",
+            session_id="session-1",
+            room_id="!room:localhost",
+            thread_id="thread-1",
+            requester_id="@alice:localhost",
+        ),
+        prompt="Delegate and compact",
+        execution_identity=runtime_context.execution_identity,
+        supports_native_tool_approval=True,
+    )
+    original_continue = ai._TurnRunContinuation.events
+    continued_runs: list[str] = []
+
+    def spy_continue(
+        self: ai._TurnRunContinuation,
+        paused: RunRecord,
+        decisions: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        assert paused.status is RunStatus.paused
+        assert summary_mock.await_count == 0
+        assert self.compaction_requests == {HistoryScope(kind="agent", scope_id="coder")}
+        continued_runs.append(paused.run_id)
+        return original_continue(self, paused, decisions)
+
+    monkeypatch.setattr(ai._TurnRunContinuation, "events", spy_continue)
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+    ):
+        result = await ai.ai_response(turn_ctx, runtime_paths, config)
+
+    assert result.text.endswith("All done.")
+    assert len(continued_runs) == 1
+    assert summary_mock.await_count == 1
+    assert len(coder_model.requests) == 2
+    assert any(
+        is_scope_summary(message) and "delegated mid-turn summary" in str(message.content)
+        for message in coder_model.requests[1].messages
+    )
+    storage = create_session_storage(
+        "coder",
+        config,
+        runtime_paths,
+        execution_identity=runtime_context.execution_identity,
+    )
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.text == "delegated mid-turn summary"
+    assert not has_queued_force_compaction(storage, "session-1")
+
+
+def test_compact_context_stays_in_loop_and_detached_job_clears_compaction_requests(tmp_path: Path) -> None:
+    """compact_context never becomes a background job, and detached job copies clear compaction_requests."""
+    config, runtime_paths = _make_config(tmp_path)
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_execution_identity(),
+    )
+    [function] = adapt_toolkit(tool, key="compact_context").functions
+    job_tool = JobTool(function=function, toolkit=tool, authority={})
+    runtime_context = _member_runtime_context(config, runtime_paths)
+
+    assert approval_can_run_as_job(function, tool) is False
+    assert wait_mode(job_tool, depth=0, context=runtime_context) == "native"
+
+    live_requests = {_AGENT_SCOPE}
+    job_call = JobCall(
+        tool=job_tool,
+        arguments={},
+        context=ToolCallContext(
+            run_id="run-1",
+            session_id="session-1",
+            user_id="@user:localhost",
+            compaction_requests=live_requests,
+        ),
+        team=False,
+    )
+    detached = _detached(job_call)
+    assert detached.context.compaction_requests is None
+    assert live_requests == {_AGENT_SCOPE}
+
+
+@pytest.mark.asyncio
+async def test_compact_context_under_run_context_without_compaction_requests_falls_back_to_next_reply(
+    tmp_path: Path,
+) -> None:
+    """A RunContext with compaction_requests=None (such as CLI approval recovery) uses the durable fallback."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+    [function] = adapt_toolkit(tool, key="compact_context").functions
+    run = RunContext(
+        run_id="recovery-run",
+        session=UnstoredSession("session-1"),
+        model_name="default",
+        compaction_requests=None,
+    )
+
+    with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
+        result = await run_tool_call(function, {}, run.call_context("call-1"), middleware=())
+
+    assert result.value == COMPACT_CONTEXT_SUCCESS
+    assert has_queued_force_compaction(storage, "session-1")

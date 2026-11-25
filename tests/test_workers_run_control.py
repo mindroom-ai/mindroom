@@ -21,7 +21,7 @@ import urllib.request
 from contextlib import ExitStack, contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, TextIOWrapper
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
@@ -1881,7 +1881,7 @@ def _real_workers_run(respond, **popen: object) -> Iterator[subprocess.Popen[byt
         "MINDROOM_AGENT_CLI_TOKEN": "private-capability",
     }
     command = "from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))"
-    proc = cast("subprocess.Popen[bytes]", subprocess.Popen([sys.executable, "-c", command], env=env, **popen))
+    proc = subprocess.Popen([sys.executable, "-c", command], env=env, **popen)
     try:
         yield proc
     finally:

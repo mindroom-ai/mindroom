@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 _AD_HOC_MODEL_NAME = "default"
 
 # What chose a requested model; the first three are overrides.
-type _ModelSource = Literal["explicit", "thread", "room", "room_config", "agent"]
+type ModelSource = Literal["explicit", "thread", "room", "room_config", "agent"]
 # What chose a model an entity inherits in a room without a thread choice.
-type _InheritedModelSource = Literal["room", "room_config", "agent"]
+type InheritedModelSource = Literal["room", "room_config", "agent"]
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ def _thread_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope
     return resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(scope.entity)
 
 
-def _requested_choice(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, _ModelSource]:
+def _requested_choice(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, ModelSource]:
     if scope.explicit is not None:
         return scope.explicit, "explicit"
     if scope.entity is None:
@@ -106,7 +106,7 @@ def resolve_inherited_model(
     runtime_paths: RuntimePaths,
     entity: str,
     room_id: str,
-) -> tuple[str, _InheritedModelSource]:
+) -> tuple[str, InheritedModelSource]:
     """Return the model ``entity`` runs in a room without a thread choice, and what chose it, from one read.
 
     The source is the room's `model` setting, its authored `room_models` entry, or the entity's own model.

@@ -33,7 +33,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import make_conversation_reader_mock, unwrap_extracted_collaborator
+from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_agent_cli_authority import _runtime_context as _authority_runtime_context
@@ -211,7 +211,6 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(
             runtime.room_id,
             runtime.thread_id if plain_reply else None,

@@ -250,6 +250,20 @@ def test_a_rule_hiding_one_skill_function_names_it_in_the_prompt(tmp_path: Path)
     assert "These skill functions are not available to you: get_skill_script." in build.prompt.instructions
 
 
+def test_a_rule_hiding_get_skill_instructions_keeps_prompt_non_contradictory(tmp_path: Path) -> None:
+    """Gating get_skill_instructions alone leaves the remaining skill tools and qualifies the prompt hint."""
+    config, runtime_paths = _config(tmp_path)
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="get_skill_instructions", action="require_approval")],
+    )
+
+    build = _build(config, runtime_paths, supports_native_tool_approval=True)
+
+    assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"get_skill_reference", "get_skill_script"}
+    assert "These skill functions are not available to you: get_skill_instructions." in build.prompt.instructions
+    assert any("if available" in line for line in build.prompt.instructions)
+
+
 def _write_plugin_skill(plugin_root: Path, name: str) -> None:
     (plugin_root / "skills" / name).mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(

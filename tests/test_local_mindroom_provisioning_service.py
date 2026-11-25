@@ -47,12 +47,16 @@ def test_service_script_pins_its_whole_dependency_set() -> None:
 def _service_config(
     state_path: Path,
     *,
+    matrix_homeserver: str = "https://mindroom.chat",
+    matrix_server_name: str = "mindroom.chat",
     google_oauth_client_id: str | None = None,
     google_oauth_client_secret: str | None = None,
+    required_room: str | None = None,
+    matrix_homeserver_api_url: str | None = None,
 ) -> provisioning.ServiceConfig:
     return provisioning.ServiceConfig(
-        matrix_homeserver="https://mindroom.chat",
-        matrix_server_name="mindroom.chat",
+        matrix_homeserver=matrix_homeserver,
+        matrix_server_name=matrix_server_name,
         matrix_ssl_verify=True,
         matrix_registration_token="server-secret-token",  # noqa: S106
         state_path=state_path,
@@ -63,6 +67,8 @@ def _service_config(
         listen_port=8776,
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
+        required_room=required_room,
+        matrix_homeserver_api_url=matrix_homeserver_api_url,
     )
 
 
@@ -1265,6 +1271,79 @@ def test_service_config_reads_approve_url(monkeypatch: pytest.MonkeyPatch) -> No
     assert provisioning._load_service_config_from_env().approve_url == "https://chat.example.org/connect"
 
 
+def test_service_config_reads_and_validates_forwarded_allow_ips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trusted proxy IPs/CIDRs default to loopback, fall back to FORWARDED_ALLOW_IPS, allow empty opt-out, and reject invalid entries."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    for name in (
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS",
+        "FORWARDED_ALLOW_IPS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("127.0.0.1", "::1")
+
+    # Uvicorn's standard FORWARDED_ALLOW_IPS remains honored when the provisioning-specific var is unset.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.20.0.5")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("10.20.0.5",)
+
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ()
+
+    # MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS takes precedence over FORWARDED_ALLOW_IPS.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.20.0.5")
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8, 127.0.0.1, ::1")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ("10.0.0.0/8", "127.0.0.1", "::1")
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "   ")
+    assert provisioning._load_service_config_from_env().forwarded_allow_ips == ()
+
+    for invalid in ("*", "127.0.0.1,*", "not-an-ip", "10.0.0.1/8"):
+        monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", invalid)
+        with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"):
+            provisioning._load_service_config_from_env()
+
+    monkeypatch.delenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    with pytest.raises(ValueError, match="FORWARDED_ALLOW_IPS"):
+        provisioning._load_service_config_from_env()
+
+
+def test_main_passes_forwarded_allow_ips_to_uvicorn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() enables uvicorn proxy headers only for configured trusted proxy IPs/CIDRs."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.setenv("MINDROOM_PROVISIONING_STATE_PATH", str(tmp_path / "state.sqlite3"))
+    for name in (
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS",
+        "FORWARDED_ALLOW_IPS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_run(app: object, **kwargs: object) -> None:
+        calls.append({"app": app, **kwargs})
+
+    monkeypatch.setattr(provisioning.uvicorn, "run", _fake_run)
+
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is True
+    assert calls[-1]["forwarded_allow_ips"] == ["127.0.0.1", "::1"]
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "10.0.0.0/8,127.0.0.1")
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is True
+    assert calls[-1]["forwarded_allow_ips"] == ["10.0.0.0/8", "127.0.0.1"]
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS", "")
+    provisioning.main()
+    assert calls[-1]["proxy_headers"] is False
+    assert calls[-1]["forwarded_allow_ips"] == []
+
+
 def _throttled_polls(monkeypatch: pytest.MonkeyPatch, interval_seconds: int) -> int:
     """Count polls the per-device limit rejects for one client polling at a fixed interval for two minutes."""
     now = [1000.0]
@@ -1829,14 +1908,17 @@ def test_legacy_json_state_path_opens_the_database_beside_it(tmp_path: Path, mon
 def _install_homeserver(
     monkeypatch: pytest.MonkeyPatch,
     handler: Callable[[httpx.Request], httpx.Response],
-) -> None:
+) -> list[float]:
     real_async_client = httpx.AsyncClient
+    client_timeouts: list[float] = []
 
     def _client(*, timeout: float, verify: bool) -> httpx.AsyncClient:
         assert verify is True
+        client_timeouts.append(timeout)
         return real_async_client(timeout=timeout, transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", _client)
+    return client_timeouts
 
 
 @pytest.mark.asyncio
@@ -1858,6 +1940,74 @@ async def test_openid_userinfo_returns_local_user(tmp_path: Path, monkeypatch: p
     assert request.url.copy_with(query=None) == "https://mindroom.chat/_matrix/federation/v1/openid/userinfo"
     assert request.url.params["access_token"] == "openid-secret"  # noqa: S105
     assert "authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sub",
+    [
+        "@mindroom_dev:mindroom.chat",
+        "@mindroom_code_abcd2345:mindroom.chat",
+        "@MindRoom_router:mindroom.chat",
+        "@mindroom_:mindroom.chat",
+    ],
+)
+async def test_openid_userinfo_rejects_managed_agent_accounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sub: str,
+) -> None:
+    """Managed mindroom_* agent accounts cannot approve pairings or manage connections via OpenID."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(200, json={"sub": sub}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_service_config(tmp_path / "state.sqlite3"), "openid-agent")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Managed agent accounts cannot authenticate to the provisioning service"
+
+
+def test_agent_account_cannot_approve_device_pairing_or_list_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent account with a valid OpenID token gets 403 on approve and connections, while @mindroom stays allowed."""
+    token_to_user = {
+        "openid-agent": "@mindroom_code_abcd2345:mindroom.chat",
+        "openid-human": "@mindroom:mindroom.chat",
+    }
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        sub = token_to_user.get(request.url.params.get("access_token", ""))
+        if sub is None:
+            return httpx.Response(401, json={"errcode": "M_UNKNOWN_TOKEN"})
+        return httpx.Response(200, json={"sub": sub})
+
+    _install_homeserver(monkeypatch, _handler)
+    app = provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/v1/local-mindroom/pair/device/start",
+            json={"client_name": "Work Laptop", "client_pubkey_or_fingerprint": "fp-1"},
+        ).json()
+        approved = client.post(
+            "/v1/local-mindroom/pair/device/approve",
+            json={"pair_code": started["pair_code"]},
+            headers={OPENID_TOKEN_HEADER: "openid-agent"},
+        )
+        assert approved.status_code == 403
+        listed = client.get(
+            "/v1/local-mindroom/connections",
+            headers={OPENID_TOKEN_HEADER: "openid-agent"},
+        )
+        assert listed.status_code == 403
+        # A plain human username without the `mindroom_` prefix is still accepted.
+        human_ok = client.get(
+            "/v1/local-mindroom/connections",
+            headers={OPENID_TOKEN_HEADER: "openid-human"},
+        )
+        assert human_ok.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -2063,3 +2213,274 @@ def test_app_silences_httpx_request_url_logging(tmp_path: Path, caplog: pytest.L
         assert not httpx_logger.isEnabledFor(logging.INFO)
     finally:
         httpx_logger.setLevel(original_level)
+
+
+def _set_base_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
+    for name in (
+        "MATRIX_SERVER_NAME",
+        "MATRIX_REGISTRATION_TOKEN_FILE",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_ID",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        "MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE",
+        "MINDROOM_PROVISIONING_REQUIRED_ROOM",
+        "MINDROOM_PROVISIONING_HOMESERVER_API_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _example_config(
+    tmp_path: Path,
+    *,
+    required_room: str | None = None,
+    matrix_homeserver_api_url: str | None = None,
+) -> provisioning.ServiceConfig:
+    return _service_config(
+        tmp_path / "state.sqlite3",
+        matrix_homeserver="https://matrix.example.org",
+        matrix_server_name="example.org",
+        required_room=required_room,
+        matrix_homeserver_api_url=matrix_homeserver_api_url,
+    )
+
+
+def test_service_config_reads_and_validates_required_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MINDROOM_PROVISIONING_REQUIRED_ROOM accepts v1/v12 room IDs and local aliases and rejects invalid values."""
+    _set_base_service_env(monkeypatch)
+    monkeypatch.setenv("MATRIX_SERVER_NAME", "example.org")
+
+    assert provisioning._load_service_config_from_env().required_room is None
+    for blank in ("", "   "):
+        monkeypatch.setenv("MINDROOM_PROVISIONING_REQUIRED_ROOM", blank)
+        assert provisioning._load_service_config_from_env().required_room is None
+
+    for raw, expected in (
+        ("  !v12serverlesshash  ", "!v12serverlesshash"),
+        ("!room1:example.org", "!room1:example.org"),
+        ("#lobby:example.org", "#lobby:example.org"),
+    ):
+        monkeypatch.setenv("MINDROOM_PROVISIONING_REQUIRED_ROOM", raw)
+        assert provisioning._load_service_config_from_env().required_room == expected
+
+    invalid_env_values = (
+        "#lobby:other.org",
+        "#:example.org",
+        "#lobby",
+        "lobby:example.org",
+        "!",
+        "!room id",
+        "#lo bby:example.org",
+        "!room\x1fid",
+        "!room\nid",
+        "!room\x7fid",
+    )
+    for invalid in invalid_env_values:
+        monkeypatch.setenv("MINDROOM_PROVISIONING_REQUIRED_ROOM", invalid)
+        with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_REQUIRED_ROOM"):
+            provisioning._load_service_config_from_env()
+    with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_REQUIRED_ROOM"):
+        provisioning._parse_required_room("!room\x00id", matrix_server_name="example.org")
+
+
+def test_service_config_reads_and_validates_homeserver_api_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MINDROOM_PROVISIONING_HOMESERVER_API_URL defaults to MATRIX_HOMESERVER and keeps MATRIX_SERVER_NAME inferred from it."""
+    _set_base_service_env(monkeypatch)
+    monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org/")
+
+    default_cfg = provisioning._load_service_config_from_env()
+    assert default_cfg.matrix_homeserver_api_url is None
+    assert default_cfg.homeserver_api_url == "https://matrix.example.org"
+    assert default_cfg.matrix_server_name == "matrix.example.org"
+
+    monkeypatch.setenv("MINDROOM_PROVISIONING_HOMESERVER_API_URL", "http://matrix.internal:8008/")
+    internal_cfg = provisioning._load_service_config_from_env()
+    assert internal_cfg.matrix_homeserver_api_url == "http://matrix.internal:8008"
+    assert internal_cfg.homeserver_api_url == "http://matrix.internal:8008"
+    assert internal_cfg.matrix_server_name == "matrix.example.org"
+
+    for invalid in ("ftp://matrix.internal:8008", "matrix.internal:8008", "http://", "http://matrix.internal:badport"):
+        monkeypatch.setenv("MINDROOM_PROVISIONING_HOMESERVER_API_URL", invalid)
+        with pytest.raises(ValueError, match="MINDROOM_PROVISIONING_HOMESERVER_API_URL"):
+            provisioning._load_service_config_from_env()
+
+    monkeypatch.delenv("MINDROOM_PROVISIONING_HOMESERVER_API_URL")
+    for invalid in ("ftp://matrix.example.org", "matrix.example.org", "http://"):
+        monkeypatch.setenv("MATRIX_HOMESERVER", invalid)
+        with pytest.raises(ValueError, match="MATRIX_HOMESERVER"):
+            provisioning._load_service_config_from_env()
+
+
+@pytest.mark.asyncio
+async def test_openid_userinfo_with_required_room_id_and_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenID verification sends io.mindroom.room_id directly or after resolving a local #alias in one client."""
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.startswith("/_matrix/client/v3/directory/room/"):
+            return httpx.Response(200, json={"room_id": "!resolved123"})
+        return httpx.Response(200, json={"sub": "@alice:example.org", "io.mindroom.room_joined": True})
+
+    clients = _install_homeserver(monkeypatch, _handler)
+    assert (
+        await provisioning._matrix_openid_userinfo(_example_config(tmp_path, required_room="!direct123"), "tok")
+        == "@alice:example.org"
+    )
+    assert len(clients) == 1
+    assert [(r.url.path, dict(r.url.params)) for r in requests] == [
+        ("/_matrix/federation/v1/openid/userinfo", {"access_token": "tok", "io.mindroom.room_id": "!direct123"}),
+    ]
+
+    requests.clear()
+    clients.clear()
+    assert (
+        await provisioning._matrix_openid_userinfo(_example_config(tmp_path, required_room="#lobby:example.org"), "tok")
+        == "@alice:example.org"
+    )
+    assert len(clients) == 1
+    assert [r.url.raw_path for r in requests] == [
+        b"/_matrix/client/v3/directory/room/%23lobby%3Aexample.org",
+        b"/_matrix/federation/v1/openid/userinfo?access_token=tok&io.mindroom.room_id=%21resolved123",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("required_room", "status_code", "body", "expected_status", "expected_detail"),
+    [
+        (
+            "!secret:example.org",
+            403,
+            {"errcode": "M_FORBIDDEN", "error": "Not in !secret:example.org"},
+            403,
+            "Matrix account is not authorized for local provisioning",
+        ),
+        ("!secret:example.org", 401, {"errcode": "M_UNKNOWN_TOKEN"}, 401, "Invalid Matrix OpenID token"),
+        ("!secret:example.org", 403, {"errcode": "M_UNKNOWN_TOKEN"}, 401, "Invalid Matrix OpenID token"),
+        (None, 403, {"errcode": "M_FORBIDDEN"}, 401, "Invalid Matrix OpenID token"),
+    ],
+)
+async def test_openid_userinfo_required_room_error_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    required_room: str | None,
+    status_code: int,
+    body: dict[str, str],
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    """403 maps to generic 403 only when required_room is set; 401/M_UNKNOWN_TOKEN always map to 401."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(status_code, json=body))
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_example_config(tmp_path, required_room=required_room), "tok")
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.detail == expected_detail
+    if required_room is not None:
+        assert required_room not in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sub": "@alice:example.org"},
+        {"sub": "@alice:example.org", "io.mindroom.room_joined": False},
+        {"sub": "@alice:example.org", "io.mindroom.room_joined": 1},
+        {"sub": "@alice:example.org", "io.mindroom.room_joined": "true"},
+    ],
+)
+async def test_openid_userinfo_required_room_fails_closed_without_membership_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+) -> None:
+    """Missing, false, or non-bool io.mindroom.room_joined fails closed with 502."""
+    _install_homeserver(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_example_config(tmp_path, required_room="!room123"), "tok")
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "Matrix homeserver did not verify required room membership"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "alias_response",
+    [
+        httpx.Response(404, json={"errcode": "M_NOT_FOUND"}),
+        httpx.Response(500, json={"errcode": "M_UNKNOWN"}),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=["!room123"]),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"room_id": "!"}),
+        httpx.Response(200, json={"room_id": "room123"}),
+        httpx.Response(200, json={"room_id": 123}),
+        None,
+    ],
+)
+async def test_openid_userinfo_required_room_alias_lookup_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_response: httpx.Response | None,
+) -> None:
+    """Alias lookup errors or malformed room_id fail closed with 502 before calling openid/userinfo."""
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if alias_response is None:
+            msg = f"connection refused for {request.url}"
+            raise httpx.ConnectError(msg, request=request)
+        return alias_response
+
+    _install_homeserver(monkeypatch, _handler)
+    with pytest.raises(HTTPException) as exc_info:
+        await provisioning._matrix_openid_userinfo(_example_config(tmp_path, required_room="#lobby:example.org"), "tok")
+    assert exc_info.value.status_code == 502
+    assert "#lobby:example.org" not in str(exc_info.value.detail)
+    assert len(requests) == 1
+
+
+def test_homeserver_api_url_routes_all_server_calls_while_keeping_public_homeserver_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All 4 server-to-homeserver calls hit homeserver_api_url, while register-agent validates public MATRIX_HOMESERVER."""
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.raw_path == b"/_matrix/client/v3/directory/room/%23lobby%3Aexample.org":
+            return httpx.Response(200, json={"room_id": "!lobby123"})
+        if request.url.path == "/_matrix/federation/v1/openid/userinfo":
+            return httpx.Response(200, json={"sub": "@alice:example.org", "io.mindroom.room_joined": True})
+        if request.url.path == "/_matrix/client/v3/register":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(200, json={"user_id": f"@{username}:example.org", "access_token": "agent-tok"})
+        if request.url.path.endswith("/displayname"):
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    _install_homeserver(monkeypatch, _handler)
+    config = _example_config(
+        tmp_path,
+        required_room="#lobby:example.org",
+        matrix_homeserver_api_url="http://matrix.internal:8008",
+    )
+    with TestClient(provisioning.create_app(config)) as client:
+        paired = _pair_local_client(client)
+        username = _managed_agent_username("code", paired["namespace"])
+        assert (
+            _post_register_agent(client, paired, username, homeserver="http://matrix.internal:8008").status_code == 400
+        )
+        registered = _post_register_agent(client, paired, username, homeserver="https://matrix.example.org")
+        assert registered.status_code == 200
+        assert registered.json()["status"] == "created"
+
+    assert all(f"{r.url.scheme}://{r.url.netloc.decode()}" == "http://matrix.internal:8008" for r in requests)
+    assert [(r.method, r.url.raw_path.split(b"?")[0]) for r in requests] == [
+        ("GET", b"/_matrix/client/v3/directory/room/%23lobby%3Aexample.org"),
+        ("GET", b"/_matrix/federation/v1/openid/userinfo"),
+        ("POST", b"/_matrix/client/v3/register"),
+        ("PUT", f"/_matrix/client/v3/profile/%40{username}%3Aexample.org/displayname".encode()),
+    ]

@@ -53,6 +53,7 @@ from mindroom.hooks import (
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.event_types import ACTIVE_RUNS_EVENT_TYPE
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -472,7 +473,6 @@ async def test_handler_runs_compact_only_for_the_human_in_person(tmp_path: Path,
         config=config,
         runtime_paths=paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM, THREAD, "$command"),
         record_handled_turn=AsyncMock(),
         record_command_result=record_command_result,
@@ -1188,10 +1188,7 @@ async def test_command_owner_hook_veto_creates_no_row(
     assert await target.journal_principal().load_event(_ROW_ID) is None
 
 
-@pytest.mark.asyncio
-async def test_contact_room_sets_flag_without_admitting_work(
-    tmp_path: Path,
-) -> None:
+def _personal_contact_config(tmp_path: Path) -> tuple[Config, RuntimePaths, ContactRecord]:
     _, paths = _config(tmp_path)
     roster = personal_agent_roster_path(paths)
     roster.parent.mkdir(parents=True, exist_ok=True)
@@ -1220,11 +1217,10 @@ async def test_contact_room_sets_flag_without_admitting_work(
         paths,
     )
     persist_entity_accounts(config, paths)
-    bob = "@bob:example.test"
     record = ContactRecord(
         id="contact",
         status="active",
-        requester=ContactParty(kind="person", id=bob, owner=bob),
+        requester=ContactParty(kind="person", id=BOB, owner=BOB),
         target=ContactParty(kind="agent", id="code", owner=ALICE),
         reason="Chat",
         requester_side=ContactSide(),
@@ -1233,9 +1229,17 @@ async def test_contact_room_sets_flag_without_admitting_work(
         origin_thread_id=None,
         room_id=ROOM,
     )
+    return config, paths, record
+
+
+@pytest.mark.asyncio
+async def test_contact_room_sets_flag_without_admitting_work(
+    tmp_path: Path,
+) -> None:
+    config, paths, record = _personal_contact_config(tmp_path)
     update_contacts(paths, lambda book: book.contacts.append(record))
     _, target, room, event = _compact_pair(config, paths)
-    room.add_member(bob, "Bob", None)
+    room.add_member(BOB, "Bob", None)
     await _dispatch_message(target, room, event)
     assert _queued(config, paths, "code")
     assert await target.journal_principal().load_event(_ROW_ID) is None
@@ -1637,3 +1641,118 @@ async def test_unavailable_target_only_gets_the_flag(
     assert await target.journal_principal().load_event(_ROW_ID) is None
     assert _queued(config, paths, "code")
     assert "before its next reply" in str(owner.client.room_send.await_args_list)
+
+
+def _record_active_runs(bot: AgentBot) -> tuple[list[list[dict[str, str | None]]], asyncio.Event]:
+    assert bot.client is not None
+    puts: list[list[dict[str, str | None]]] = []
+    updated = asyncio.Event()
+
+    async def put_state(
+        room_id: str,
+        event_type: str,
+        content: dict[str, Any],
+        state_key: str = "",
+    ) -> nio.RoomPutStateResponse:
+        if event_type == ACTIVE_RUNS_EVENT_TYPE:
+            assert (room_id, state_key) == (ROOM, bot.matrix_id.full_id)
+            puts.append(content["threads"])
+            updated.set()
+        return nio.RoomPutStateResponse(event_id=f"$state-{len(puts)}", room_id=room_id)
+
+    bot.client.room_put_state = AsyncMock(side_effect=put_state)
+    return puts, updated
+
+
+async def _wait_active_runs_workers(bot: AgentBot) -> None:
+    async with asyncio.timeout(5.0):
+        while bot._active_runs._workers:
+            await asyncio.gather(*list(bot._active_runs._workers.values()), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "room_mode", "expected_thread", "outcome"),
+    [
+        ("code", False, THREAD, "ok"),
+        ("lobby", True, None, "ok"),
+        ("code", False, THREAD, "failed"),
+        ("code", False, THREAD, "cancelled"),
+    ],
+)
+async def test_active_runs_standalone_compact_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    room_mode: bool,
+    expected_thread: str | None,
+    outcome: str,
+) -> None:
+    config, paths = _config(tmp_path)
+    target = _live_bot(ready_runtime(config, paths), name)
+    room = _room_with_members(ALICE, target.matrix_id.full_id, room_id=ROOM)
+    room.members_synced = True
+    _seed_history(config, paths, name, room_mode=room_mode)
+    if not room_mode:
+        await _hydrate(target)
+    puts, updated = _record_active_runs(target)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def block() -> None:
+        started.set()
+        await release.wait()
+        if outcome == "failed":
+            raise RuntimeError
+
+    model = summary_model([Await(block), *summary_steps("folded history")], model_id="test-model", provider="openai")
+    install_model_providers(monkeypatch, {"default": model})
+    command = _addressed(target, f"/compact {name}", "$command")
+    if room_mode:
+        del command.source["content"]["m.relates_to"]
+    await _dispatch_message(target, room, command)
+    fold = await _start_fold(target)
+    try:
+        await asyncio.wait_for(started.wait(), 30)
+        async with asyncio.timeout(5.0):
+            while not puts:
+                updated.clear()
+                await updated.wait()
+        assert puts == [[{"thread_id": expected_thread}]]
+        if outcome == "cancelled":
+            fold.cancel()
+        else:
+            release.set()
+    finally:
+        release.set()
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(fold, 30)
+    else:
+        await asyncio.wait_for(fold, 30)
+    await _wait_active_runs_workers(target)
+    assert puts == [[{"thread_id": expected_thread}], []]
+    assert _summaries(config, paths, name, room_mode=room_mode) == (["folded history"] if outcome == "ok" else [])
+
+
+@pytest.mark.asyncio
+async def test_active_runs_contact_room_fold_skips_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths, record = _personal_contact_config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    room.add_member(BOB, "Bob", None)
+    await _hydrate(target)
+    puts, _ = _record_active_runs(target)
+    install_model_providers(
+        monkeypatch,
+        {"default": summary_model("contact summary", model_id="test-model", provider="openai")},
+    )
+    await _dispatch_message(target, room, command)
+    update_contacts(paths, lambda book: book.contacts.append(record))
+    await asyncio.wait_for(await _start_fold(target), 30)
+    await _wait_active_runs_workers(target)
+    assert _summaries(config, paths, "code") == ["contact summary"]
+    assert puts == []
+    assert target.client is not None
+    target.client.room_put_state.assert_not_awaited()

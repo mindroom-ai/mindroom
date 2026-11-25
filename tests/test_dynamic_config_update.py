@@ -11,16 +11,13 @@ import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_session import PermanentMatrixStartupError
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_shutdown import CONFIG_RELOAD_SHUTDOWN
-from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.access_schema_support import refresh_memberships
-from tests.conftest import install_bots, install_model_providers, orchestrator_runtime_paths, published_config_load
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.conftest import install_bots, orchestrator_runtime_paths, published_config_load
 from tests.identity_helpers import persist_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -209,67 +206,6 @@ class TestDynamicConfigUpdate:
         router_bot.apply_published_config.assert_not_called()
         general_bot.refresh_presence.assert_not_awaited()
         router_bot.refresh_presence.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_scheduling_with_dynamically_added_agent(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Test that scheduling commands work correctly with dynamically added agents."""
-        # Update config to add callagent
-        updated_config = Config(
-            agents={
-                "email_assistant": {
-                    "display_name": "EmailAssistant",
-                    "role": "Email assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-                "callagent": {
-                    "display_name": "CallAgent",
-                    "role": "Call assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-            },
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        )
-
-        # Test that parse_workflow_schedule correctly recognizes the new agent
-        request = "whenever i get an email with title urgent, notify @callagent to send me a text"
-        runtime_paths = resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        )
-        persist_entity_accounts(updated_config, runtime_paths)
-
-        # The parser model answers with a workflow that references both agents.
-        workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*"),
-            message="@email_assistant Check for emails with 'urgent' in the title. If found, @callagent notify the user by sending a text.",
-            description="Monitor for urgent emails and send text notification",
-        )
-        model = ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
-        install_model_providers(monkeypatch, {"default": model})
-        result = await _parse_workflow_schedule(
-            request,
-            updated_config,
-            runtime_paths,
-            available_responders=[
-                MatrixID(username="email_assistant", domain="localhost"),
-                MatrixID(username="callagent", domain="localhost"),
-            ],
-            timezone="UTC",
-        )
-
-        # Verify the workflow was parsed correctly and includes both agents
-        assert isinstance(result, ScheduledWorkflow)
-        assert "@email_assistant" in result.message
-        assert "@callagent" in result.message
-        assert result.description == "Monitor for urgent emails and send text notification"
 
     @pytest.mark.asyncio
     async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(

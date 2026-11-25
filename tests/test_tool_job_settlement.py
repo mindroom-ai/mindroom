@@ -124,7 +124,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
             assert await saved_payload(tmp_path, "write-failure") is None
             assert (tmp_path / "effect.txt").read_text() == "once"
-        await runtime._acknowledge_wait("write-failure", waited.claim)
+        await runtime.acknowledge_wait("write-failure", waited.claim)
         await runtime.shutdown()
         restored = await tool_job_runtime(tmp_path)
         try:

@@ -1178,7 +1178,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template (at most one agent per room)",
+          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template; direct room calls auto-join only when one calls-enabled agent owns the room",
           "title": "Agents",
           "type": "object",
           "x-mindroom": {
@@ -4508,6 +4508,15 @@
           ],
           "default": null,
           "description": "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
+        },
+        "fallbacks": {
+          "default": [],
+          "description": "Names of other configured models to answer with, in order, when this model's provider cannot serve a request: a quota or usage limit, an outage after automatic retries, or missing or rejected credentials",
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallbacks",
+          "type": "array"
         }
       },
       "required": [

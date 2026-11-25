@@ -157,7 +157,7 @@
                         "type": "null"
                       }
                     ],
-                    "description": "Seconds to wait for this call before it continues in the background, without cancelling it. Omit or pass null to wait until completion or a newer message you answer; zero continues in the background at once and returns a job handle."
+                    "description": "Seconds before continuing in background (0 = immediately; omit/null = wait)."
                   }
                 },
                 "required": [

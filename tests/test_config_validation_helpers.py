@@ -283,36 +283,46 @@ def test_a_team_entry_with_an_unknown_mode_or_key_fails_naming_it(authored: dict
 
 
 @pytest.mark.parametrize(
-    "second_room",
-    ["voice", "#voice:localhost"],
-    ids=["same-spelling-model-validator", "alias-spelling-runtime-validation"],
-)
-def test_one_rule_reports_one_location_and_message_from_either_validator(tmp_path: Path, second_room: str) -> None:
-    """A call room shared by spelling or by alias fails with the same issue, named at `config`, without Pydantic's prefix."""
-    data = {
-        "agents": {
-            "one": {"display_name": "One", "rooms": ["voice"]},
-            "two": {"display_name": "Two", "rooms": [second_room]},
-        },
-        "calls": {
-            "enabled": True,
-            "profiles": {
-                "voice": {
-                    "backend": "realtime",
-                    "model": "gpt-realtime",
-                    "credentials_service": "openai",
-                    "voice": "marin",
+    ("data", "expected_message"),
+    [
+        (
+            {
+                "agents": {"one": {"display_name": "One", "rooms": ["voice"]}},
+                "calls": {
+                    "enabled": True,
+                    "profiles": {
+                        "voice": {
+                            "backend": "realtime",
+                            "model": "gpt-realtime",
+                            "credentials_service": "openai",
+                            "voice": "marin",
+                        },
+                    },
+                    "agents": {"ghost": "voice"},
                 },
             },
-            "agents": {"one": "voice", "two": "voice"},
-        },
-    }
-    with pytest.raises(ValueError, match="configures multiple agents") as raised:
+            "calls.agents references unknown agent(s): ghost",
+        ),
+        (
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {"one": {"display_name": "One", "model": "ghost"}},
+            },
+            "Unknown model for agents.one.model: 'ghost'. Configured models: default",
+        ),
+    ],
+    ids=["model-validator", "runtime-validation"],
+)
+def test_whole_config_issues_report_config_location_without_pydantic_prefix(
+    tmp_path: Path,
+    data: dict[str, object],
+    expected_message: str,
+) -> None:
+    """Whole-config ValidationError and ConfigRuntimeValidationError both report at `config` without Pydantic's prefix."""
+    with pytest.raises(ValueError, match="ghost") as raised:
         Config.validate_with_runtime(data, test_runtime_paths(tmp_path))
 
-    assert config_validation_issues(raised.value) == [
-        (("config",), "calls.agents configures multiple agents for room(s): voice (one, two)"),
-    ]
+    assert config_validation_issues(raised.value) == [(("config",), expected_message)]
 
 
 _OUTSIDE_ALIAS = "#ideas:example.org"

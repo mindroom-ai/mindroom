@@ -65,10 +65,10 @@ def is_persisted_managed_entity_id(
     Unlike ``is_managed_entity_id``, never matches unconfigured synthetic generated usernames; use this
     for positive privilege grants such as ``include_bots`` exemptions.
     """
-    return user_id in _persisted_managed_entity_ids(config, runtime_paths)
+    return user_id in persisted_managed_entity_ids(config, runtime_paths)
 
 
-def _persisted_managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+def persisted_managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return ONLY persisted/prepared Matrix IDs of configured router, agent, and team accounts."""
 
     def derive(domain: str, state: MatrixState) -> frozenset[str]:

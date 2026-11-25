@@ -19,6 +19,8 @@ from mindroom.scheduling.scheduled_run_records import (
     record_silent_schedule_result_if_needed,
     record_silent_schedule_started_if_needed,
 )
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from tests.conftest import plant_workspace_entry, request_envelope, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -374,3 +376,35 @@ async def test_silent_run_receipts_never_follow_planted_workspace_entries(tmp_pa
 
     assert victim_file.read_text(encoding="utf-8") == '{"victim": "victim-only note"}'
     assert sorted(path.name for path in victim.iterdir()) == ["notes.json"]
+
+
+async def test_silent_job_follow_up_writes_no_scheduled_run_receipts(tmp_path: Path) -> None:
+    """Silent job follow-ups reuse silent delivery without writing fictitious schedule-run receipts."""
+    config = _config(agents={"watcher": AgentConfig(display_name="Watcher")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    key = ConversationKey("watcher", "!room:localhost", "$thread", "@alice:localhost", silent=True)
+    envelope = follow_up_envelope(
+        key,
+        follow_up_id="job-follow-up:silent:1",
+        sender_id="@mindroom_watcher:localhost",
+        prompt="Follow up silently.",
+    )
+    assert envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    await record_silent_schedule_started_if_needed(
+        entity_name="watcher",
+        agent_names=("watcher",),
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await record_silent_schedule_result_if_needed(
+        entity_name="watcher",
+        agent_names=("watcher",),
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+        suppression_reason="silent_no_report",
+        response_text="NO_REPLY",
+    )
+    runs_dir = runtime_paths.storage_root / "agents" / "watcher" / "workspace" / ".mindroom" / "scheduled_runs"
+    assert not runs_dir.exists()

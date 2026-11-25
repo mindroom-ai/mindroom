@@ -12,7 +12,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import appended_context, prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, matrix_markdown_output_format
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
@@ -377,7 +377,7 @@ def build_team_spec(
             outside_matrix=outside_matrix,
         ),
         markdown=config.defaults.markdown,
-        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else MATRIX_MARKDOWN_OUTPUT_FORMAT,
+        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else matrix_markdown_output_format(has_tools=True),
         tool_instructions=toolkit_instructions(leader.toolkits),
         turn_context=turn_context,
     )

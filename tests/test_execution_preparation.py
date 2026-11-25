@@ -45,13 +45,14 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
-from mindroom.history.conversation_text import _own_thread_message_text
+from mindroom.history.conversation_text import own_thread_message_text
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.request_size import RequestFrame, request_sizer
-from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
+from mindroom.history.runtime import PreparedScopeHistory
 from mindroom.history.types import (
     CompactionDecision,
     HistoryPolicy,
+    HistoryPreparationInputs,
     PreparedHistoryState,
     ResolvedReplayPlan,
 )
@@ -988,7 +989,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     # The team's earlier answer reaches the leader as its own thread message, which is no assistant turn.
-    assert [(message.role, _own_thread_message_text(message)) for message in prepared.turn.context] == [
+    assert [(message.role, own_thread_message_text(message)) for message in prepared.turn.context] == [
         ("user", None),
         ("user", "Earlier team answer"),
     ]
@@ -1629,7 +1630,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
     ).in_request_order()
 
     assert [message.role for message in messages] == ["user", "user", "user"]
-    assert [_own_thread_message_text(message) for message in messages[:2]] == [
+    assert [own_thread_message_text(message) for message in messages[:2]] == [
         "The lab closes at 7:41 PM",
         '[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]',
     ]
@@ -1663,7 +1664,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
     ).in_request_order()
 
     assert [message.role for message in messages] == ["user", "user", "user"]
-    assert [_own_thread_message_text(message) for message in messages[:2]] == [
+    assert [own_thread_message_text(message) for message in messages[:2]] == [
         "The lab closes at 7:41 PM",
         "[audio message: Lab turnaround]",
     ]
@@ -1705,7 +1706,7 @@ def test_fallback_thread_history_names_agent_media_by_attachment_id(tmp_path: Pa
         event_id="$agent-file",
         sent_by_you=True,
     )
-    assert _own_thread_message_text(messages[0]) == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert own_thread_message_text(messages[0]) == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
 
 
@@ -1907,7 +1908,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_the_agents_own
     ).in_request_order()
 
     assert messages[0].role == "user"
-    assert _own_thread_message_text(messages[0]) == "Checking status.\n\nStill checking.\n\nDone."
+    assert own_thread_message_text(messages[0]) == "Checking status.\n\nStill checking.\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -2135,7 +2136,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         event_id="$spawn-root",
         sent_by_you=True,
     )
-    assert _own_thread_message_text(messages[0]) == "@mindroom_missing_agent Please investigate this"
+    assert own_thread_message_text(messages[0]) == "@mindroom_missing_agent Please investigate this"
 
 
 def test_unseen_context_keeps_other_agent_message_tagged() -> None:
@@ -2293,7 +2294,7 @@ def test_fallback_thread_history_keeps_hook_output_out_of_the_agents_own_message
         ),
         ("user", _hook_context("deep_research done · confident · 2 rounds", "$done")),
     ]
-    assert [_own_thread_message_text(message) for message in messages[:2]] == ["Started a deep_research job.", None]
+    assert [own_thread_message_text(message) for message in messages[:2]] == ["Started a deep_research job.", None]
 
 
 def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None:

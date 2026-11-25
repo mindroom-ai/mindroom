@@ -10,7 +10,7 @@ CLI_ENV = "MINDROOM_CLAUDE_CODE_CLI"
 KEEP_ENV = "MINDROOM_CLAUDE_CODE_KEEP"
 
 
-def _main() -> None:
+def main() -> None:
     """Remove untrusted settings and replace this process with Claude Code."""
     real = os.environ.pop(CLI_ENV)
     keep = set(os.environ.pop(KEEP_ENV).split())
@@ -23,4 +23,4 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    _main()
+    main()

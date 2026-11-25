@@ -48,11 +48,11 @@ from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _CLIP_SEPARATOR,
     _CLIP_TAIL_CHARS,
-    _GENERATED_TITLE_MAX_LENGTH,
     _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_EDGE_COUNT,
     _TRUNCATION_MIDDLE_COUNT,
+    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _conversation_text,
     _ThreadEnrichment,
@@ -482,7 +482,7 @@ def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) 
 
 def test_thread_summary_model_accepts_a_long_answer_to_reject() -> None:
     """An overlong answer parses, so the title check can send it back instead of a parse error losing it."""
-    assert _GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
+    assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
     assert _ThreadSummary(title="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
 
 
@@ -514,7 +514,7 @@ def test_title_error_checks_six_words_and_80_characters(title: str, error: str |
         ("🧪 ISSUE-148 cache refetch live test now", True),
         ("🧪 ISSUE-148 cache refetch live test (forked)", True),
         ("🧵 Review of PR #548 session persistence hooks", False),
-        ("x" * (_GENERATED_TITLE_MAX_LENGTH + 1), False),
+        ("x" * (GENERATED_TITLE_MAX_LENGTH + 1), False),
     ],
 )
 def test_only_a_title_within_the_short_rule_may_be_kept(title: str, keepable: bool) -> None:
@@ -1001,7 +1001,7 @@ class TestMaybeGenerateThreadSummary:
         assert sent["summary"] == fork_title
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
-        assert len(model.requests) == (parent_title is None or len(parent_title) > _GENERATED_TITLE_MAX_LENGTH)
+        assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
         # Only a title a model writes reads the room's title settings, both at once.
         state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
         assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)

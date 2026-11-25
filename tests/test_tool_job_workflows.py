@@ -1,179 +1,75 @@
-"""Managed workflows retain independent completion ownership for each participant call."""
+"""Managed composite jobs drain every nested sync child before releasing resources."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
-from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agents import build_agent_toolkit
-from mindroom.config.models import ToolConfigEntry
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
-from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.authorization import authority_snapshot
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
-from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
-from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
-from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import tool_placement
-from tests.delegation_helpers import ScriptedAgents
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
-from tests.test_dynamic_workflows import _make_context, _workflow_spec
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     always_owned,
-    call_job_tool,
     cancel_settled,
     job_actor,
     job_tool,
     run_job_turn,
-    tool_job_journal,
     tool_job_runtime,
     toolkit_job_tools,
     wait_for_status,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
-    from mindroom.config.main import Config
-    from mindroom.tool_jobs.execution import JobActor
-    from mindroom.tool_jobs.execution_authority import JobTool
 
-
-def _workflow_caller(toolkit: DynamicWorkflowTools, config: Config) -> JobActor:
-    """The general agent offering its workflow toolkit, granted as the agent is now."""
-    tools = toolkit_job_tools(toolkit, authored_name="dynamic_workflow", snapshot=authority_snapshot(config, "general"))
-    return job_actor(*tools.values(), name="general")
-
-
-def _child_outputs(child_model: ScriptedModel) -> list[object]:
-    """Return what each participant call returned, as the participant's last request carried them."""
-    messages = child_model.requests[-1].messages
-    return [json.loads(str(message.content))["result"] for message in messages if message.role == "tool"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("managed", [False, True])
-@pytest.mark.parametrize("parallel", [False, True])
-async def test_workflow_participant_runs_multiple_sync_tools(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    managed: bool,
-    parallel: bool,
-) -> None:
-    """Real subagent participants retain all calculator results in one managed workflow."""
-    context = _make_context(tmp_path)
-    context.config.background_tool_jobs.enabled = managed
-    # A participant can use only tools its caller has.
-    context.config.agents["general"].tools = [
-        ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
-        ToolConfigEntry(name="calculator"),
-    ]
-    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
-    if managed:
-        pin_background_tool_jobs(context.config, context.runtime_paths)
-        register_background_runtime(context.runtime_paths, runtime)
-    requested = [tool_call("add", "a", a=1, b=2), tool_call("multiply", "b", a=3, b=4)]
-    child_model = ScriptedModel(
-        [
-            *([calls(*requested)] if parallel else [calls(call) for call in requested]),
-            answer("workflow done"),
-        ],
+def _make_context(tmp_path: Path) -> ToolRuntimeContext:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["workflow"])},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+        runtime_paths,
     )
-    ScriptedAgents({"general": child_model}).install(monkeypatch)
-    toolkit = DynamicWorkflowTools()
-    caller = _workflow_caller(toolkit, context.config)
-    spec = _workflow_spec(
-        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
-        permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
+    return make_test_tool_runtime_context(
+        agent_name="general",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
+        requester_id="@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        storage_path=None,
     )
-    try:
-        async with execution_resources():
-            with tool_runtime_context(context):
-                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
-                outcome = await call_job_tool(
-                    caller,
-                    "run_workflow",
-                    {"workflow_id": "competitor-research-report", "input": {"topic": "test"}},
-                    call_id="outer",
-                    run_id="root",
-                    session_id=context.session_id,
-                )
-        assert not outcome.is_error, outcome.content
-        assert _child_outputs(child_model) == [3, 12]
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_workflow_participant_tools_run_under_their_own_grants(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A participant is a subagent built with its own grants, so each of its calls is checked as itself."""
-    context = _make_context(tmp_path)
-    context.config.background_tool_jobs.enabled = True
-    # A participant can use only tools its caller has.
-    context.config.agents["general"].tools = [
-        ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
-        ToolConfigEntry(name="calculator"),
-    ]
-    checked: list[tuple[str, dict[str, object]]] = []
-
-    def authorize_execution(_owner: object, tool: JobTool, arguments: Mapping[str, object]) -> None:
-        checked.append((tool.function.name, dict(arguments)))
-        if "scope" not in tool.authority:
-            msg = "Tool execution is no longer authorized for this caller."
-            raise JobAccessError(msg)
-
-    runtime = await tool_job_runtime(context.runtime_paths.storage_root, authorize_execution=authorize_execution)
-    pin_background_tool_jobs(context.config, context.runtime_paths)
-    register_background_runtime(context.runtime_paths, runtime)
-    child_model = ScriptedModel(
-        [
-            calls(tool_call("add", "a", a=1, b=2)),
-            calls(tool_call("multiply", "b", a=3, b=4)),
-            answer("workflow done"),
-        ],
-    )
-    ScriptedAgents({"general": child_model}).install(monkeypatch)
-    toolkit = DynamicWorkflowTools()
-    caller = _workflow_caller(toolkit, context.config)
-    arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
-    spec = _workflow_spec(
-        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
-        permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
-    )
-    try:
-        async with execution_resources():
-            with tool_runtime_context(context):
-                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
-                await call_job_tool(
-                    caller,
-                    "run_workflow",
-                    arguments,
-                    call_id="outer",
-                    run_id="root",
-                    session_id=context.session_id,
-                )
-        assert _child_outputs(child_model) == [3, 12]
-        assert {check[0] for check in checked} == {"run_workflow", "add", "multiply"}
-        assert ("run_workflow", arguments) in checked
-        assert ("add", {"a": 1, "b": 2}) in checked
-        assert ("multiply", {"a": 3, "b": 4}) in checked
-    finally:
-        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -248,60 +144,3 @@ async def test_cancel_composite_job_drains_all_sync_children(
     finally:
         release.set()
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A participant is granted by its caller's workflow tool, not by a delegate list, which stays empty here."""
-    context = _make_context(tmp_path)
-    context.config.background_tool_jobs.enabled = True
-    context.config.agents["general"].tools = [
-        ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
-        ToolConfigEntry(name="calculator"),
-    ]
-    assert context.config.agents["general"].delegate_to == []
-    coordinator = ToolJobRuntimeCoordinator(
-        runtime_paths=context.runtime_paths,
-        config_provider=lambda: context.config,
-        bot_provider=lambda _name: None,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        journal_provider=partial(tool_job_journal, context.runtime_paths.storage_root),
-    )
-    child_model = ScriptedModel([calls(tool_call("add", "a", a=1, b=2)), answer("workflow done")])
-    ScriptedAgents({"general": child_model}).install(monkeypatch)
-    entry = context.config.agents["general"].tools[0]
-    assert isinstance(entry, ToolConfigEntry)
-    toolkit = build_agent_toolkit(
-        "dynamic_workflow",
-        agent_tools=resolve_agent_tools(context.config, "general", builtin_tool_registry()),
-        placement=tool_placement(context.runtime_paths, builtin_tool_registry()),
-        runtime_paths=context.runtime_paths,
-        tool_config_overrides=context.config.resolve_agent("general").tools.authored[0].tool_config_overrides,
-        execution_identity=context.execution_identity,
-    )
-    assert isinstance(toolkit, DynamicWorkflowTools)
-    caller = _workflow_caller(toolkit, context.config)
-    spec = _workflow_spec(
-        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
-        permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
-    )
-    try:
-        await coordinator.sync()
-        async with execution_resources():
-            with tool_runtime_context(context):
-                assert json.loads(await toolkit.create_workflow(spec))["status"] == "ok"
-                arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
-                await call_job_tool(
-                    caller,
-                    "run_workflow",
-                    arguments,
-                    call_id="outer",
-                    run_id="root",
-                    session_id=context.session_id,
-                )
-        assert _child_outputs(child_model) == [3]
-    finally:
-        await coordinator.stop()

@@ -126,7 +126,7 @@ async def test_run_turn_runs_tools_and_returns_text(
     assert len(provider.requests) == 2
     # No Matrix room: the prompt neither describes one nor attributes the prompt to the requester's Matrix ID.
     sent = _sent(provider.requests[0])
-    assert "Matrix Reply Targeting" not in sent
+    assert "MindRoom selects which messages reach you" not in sent
     assert "@alice:localhost" not in sent
 
 
@@ -408,7 +408,8 @@ async def test_default_base_dir_is_the_workspace(tmp_path: Path, monkeypatch: py
 
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(storage / "agents" / "coder" / "workspace")
     system = _sent(provider.requests[0], "system")
-    assert "MINDROOM_AGENT_WORKSPACE" in system
+    assert "agent workspace and attachments only" in system
+    assert "Workdir:" not in system
     assert "skills/<skill-name>/" in system
 
 
@@ -817,7 +818,7 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
     (write_file,) = (tool for tool in provider.requests[0].tools if tool.name == "write_file")
     description = write_file.parameters["properties"]["mindroom_output_path"]["description"]
-    assert description.startswith("Optional path under your saved tool outputs directory:")
+    assert description.startswith("Optional path under saved tool outputs dir:")
 
 
 @pytest.mark.asyncio
@@ -1060,7 +1061,7 @@ async def test_requests_carry_the_authored_headers_without_request_headers(
 
 @pytest.mark.asyncio
 async def test_compaction_request_carries_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A follow-up to a subagent that asked to compact sends its summary request with that subagent's headers."""
+    """A subagent that calls compact_context sends its mid-turn summary request with that subagent's headers."""
     wire = _model_server(
         monkeypatch,
         "chat",
@@ -1081,9 +1082,9 @@ async def test_compaction_request_carries_headers(tmp_path: Path, monkeypatch: p
     ]
     child_id = runs[1][1]
     assert child_id != "lead"
-    # The follow-up compacts its history before its first request, right after the lead's request that continued it.
-    assert summaries == [4]
-    assert runs[4] == ("helper", child_id, "-", "1")
+    # Compaction runs immediately mid-turn inside the subagent's turn and does not re-run on the follow-up.
+    assert summaries == [2]
+    assert runs[2] == ("helper", child_id, "-", "1")
 
 
 @pytest.mark.asyncio

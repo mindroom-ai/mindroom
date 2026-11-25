@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     name="desktop",
     file_access=ToolFileAccess.NONE,
     display_name="Matrix Desktop",
-    description="Let the agent use allowed apps, read selected folders, and run shell commands you approve on your computer",
+    description="Operate the user's paired local computer: control allowlisted apps, read selected folders, and run locally approved shell commands",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,

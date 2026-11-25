@@ -126,9 +126,7 @@ async def test_an_invalid_interval_fails_before_any_heap_task_exists(env: dict[s
 
 
 @pytest.mark.asyncio
-async def test_refreeze_collects_released_objects_before_freezing_the_survivors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replaced bots must be collectable again, and garbage must be gone before the survivors are frozen."""
     gc_calls: list[str] = []
     frozen = [12_000]

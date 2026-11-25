@@ -21,6 +21,7 @@ from mindroom.live_frames.workflow import publish_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
+from mindroom.workflow_runs.answers import notice, notice_fits, send_notice
 from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import (
     AGENT_KINDS,
@@ -31,13 +32,13 @@ from mindroom.workflow_runs.graph import (
     graph_rows,
     projected_cost_usd,
 )
+from mindroom.workflow_runs.interactions import retry_question_cards
 from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     UNSETTLED_NODE_STATES,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
 from mindroom.workflow_runs.peers import message_edges
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
@@ -64,7 +65,7 @@ _ERROR_CHARS = 200
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
 
 
-def _card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
+def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
     """Return what a run's card says: who and what the run is, where it stands, its counts and what it used.
 
     A run that ended without completing says why in one line, the last of its error: a traceback names its error
@@ -85,7 +86,7 @@ def _card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> 
     }
 
 
-def _card_text(content: dict[str, Any]) -> str:
+def card_text(content: dict[str, Any]) -> str:
     """Return the card as plain text, for a client that does not draw it."""
     counts = content["counts"]
     title = f'Workflow "{content["title"]}"' if content["title"] else "Workflow"
@@ -105,7 +106,7 @@ def _fitted_card(
     final: bool,
 ) -> dict[str, Any]:
     """Return the card's content within what one edit event holds; the card of an ended run carries its graph."""
-    content = _card_content(run, meta, graph.phases)
+    content = card_content(run, meta, graph.phases)
     if not final:
         return content if fits(content) else {**content, "phases": []}
 
@@ -210,7 +211,7 @@ class RunViews:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
-            await self.engine.ask.retry_question_cards(run_id)
+            await retry_question_cards(self.engine, run_id)
         else:
             self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:
@@ -309,7 +310,7 @@ class RunViews:
             return True
 
         def message(content: dict[str, Any]) -> dict[str, Any]:
-            return notice(run, _card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
+            return notice(run, card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
 
         def fits(content: dict[str, Any]) -> bool:
             return notice_fits(client, run, message(content), run.card_event_id)

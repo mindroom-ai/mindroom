@@ -686,11 +686,6 @@ class TodoTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="todo",
-            instructions=(
-                "Use these tools to manage a per-thread work plan with dependencies. "
-                "Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. "
-                "Items are scoped to the current conversation thread."
-            ),
             tools=[
                 self.plan,
                 self.add_todo,
@@ -702,7 +697,12 @@ class TodoTools(Toolkit):
         )
 
     def plan(self, tasks: str) -> str:  # noqa: C901
-        """Create a multi-step work plan for the current thread."""
+        """Append a visible multi-step work plan to this thread.
+
+        Args:
+            tasks: One task per line (numbering/bullets stripped; optional leading `[low|medium|high|critical] ` priority prefix).
+
+        """
         path, room_id, thread_id, agent_name = _current_scope()
         assigned_agent = _default_assignee(agent_name)
 
@@ -764,7 +764,15 @@ class TodoTools(Toolkit):
         priority: str = "medium",
         assigned_agent: str = "",
     ) -> str:
-        """Add a single todo item to the current thread's work plan."""
+        """Add one task to this thread's visible work plan, with optional priority, dependencies, and assignee.
+
+        Args:
+            title: Non-empty task title.
+            depends_on: Comma-separated prerequisite todo IDs (blocks until those are done/cancelled).
+            priority: `low`, `medium` (default), `high`, or `critical`.
+            assigned_agent: Configured agent name (defaults to caller).
+
+        """
         path, room_id, thread_id, agent_name = _current_scope()
         clean_title = title.strip()
         if not clean_title:
@@ -818,7 +826,12 @@ class TodoTools(Toolkit):
         return message
 
     def list_todos(self, show_all: bool = False) -> str:
-        """List todo items in the current thread's work plan."""
+        """List this thread's work plan grouped by actionable (priority-ordered) and blocked items.
+
+        Args:
+            show_all: Also include done and cancelled items.
+
+        """
         path, _room_id, _thread_id, _agent_name = _current_scope()
         state = read_json(path)
         items = state.get("items", [])
@@ -865,7 +878,17 @@ class TodoTools(Toolkit):
         depends_on: str | None = None,
         assigned_agent: str = "",
     ) -> str:
-        """Update fields on an existing todo item."""
+        """Update an existing todo item (marking done/cancelled reports newly unblocked tasks).
+
+        Args:
+            todo_id: Target todo ID.
+            title: New title (empty keeps current).
+            priority: `low`, `medium`, `high`, or `critical` (empty keeps current).
+            status: `open`, `done`, or `cancelled` (empty keeps current).
+            depends_on: Comma-separated prerequisite IDs replacing current (`""` clears; null keeps current; cycle-checked).
+            assigned_agent: Configured agent name (empty keeps current; whitespace clears).
+
+        """
         path, room_id, thread_id, _agent_name = _current_scope()
 
         if priority and priority.lower() not in PRIORITY_ORDER:
@@ -951,7 +974,14 @@ class TodoTools(Toolkit):
         params: dict[str, str | int | bool],
         dry_run: bool = False,
     ) -> str:
-        """Apply a named todo template to the current thread's work plan."""
+        """Expand a reusable built-in or workspace template (with dependencies) into this thread's work plan.
+
+        Args:
+            name: Template name from `list_templates`.
+            params: Template parameter key-value map.
+            dry_run: Preview expanded tasks without modifying the plan.
+
+        """
         template_roots = _visible_template_roots()
         rendered_template = _render_template_definition(
             name,
@@ -1009,7 +1039,7 @@ class TodoTools(Toolkit):
         )
 
     def list_templates(self) -> str:
-        """List available todo templates."""
+        """List available built-in and workspace todo templates with descriptions and parameter schemas when available."""
         templates: list[dict[str, Any]] = []
         remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
         template_roots = _visible_template_roots()

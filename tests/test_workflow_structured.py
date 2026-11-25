@@ -14,10 +14,9 @@ import pytest_asyncio
 from mindroom.config.models import ModelPricing
 from mindroom.delegation.background import delegation_child
 from mindroom.script_runs.models import ScriptRunState
-from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.agent_nodes import _turn_job_id
+from mindroom.workflow_runs.agent_nodes import turn_job_id
 from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState
 from mindroom.workflow_runs.replay import node_digest
@@ -193,7 +192,7 @@ async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job
 
     run = stack.store.get_run(stack.run_id)
     jobs = {job.job_id: delegation_child(job) for job in stack.jobs.retained_jobs()}
-    first, second = (jobs[_turn_job_id(run, "@0", 1, turn)] for turn in (1, 2))
+    first, second = (jobs[turn_job_id(run, "@0", 1, turn)] for turn in (1, 2))
     node = stack.store.get_node(stack.run_id, "@0")
     assert result == {"ok": True}
     assert (first.session_id, first.subagent_id) == (second.session_id, second.subagent_id)
@@ -202,7 +201,7 @@ async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job
     assert (
         "Your answer did not match the schema: no JSON value found. Reply with only the corrected fenced json block."
     ) in _last_said(model)
-    assert (node.links["turn"], node.links["job_id"]) == (2, _turn_job_id(run, "@0", 1, 2))
+    assert (node.links["turn"], node.links["job_id"]) == (2, turn_job_id(run, "@0", 1, 2))
     assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(0.2)
 
 
@@ -269,7 +268,7 @@ async def test_null_answer_is_the_calls_result(stack: WorkflowStack) -> None:
 async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack: WorkflowStack) -> None:
     """A Stop of the run reads the turn that ended and starts no further one."""
     model = stack.child_script(answer("no json here"), answer(_GOOD))
-    original = agent_dispatch_module.launch_child
+    original = agent_nodes.launch_child
     started: list[int] = []
 
     async def counted(*args: object, **options: object) -> object:
@@ -279,12 +278,12 @@ async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack
             await stack.engine.cancel(stack.run_id, reason="Stopped.")
         return await original(*args, **options)  # type: ignore[arg-type]
 
-    agent_dispatch_module.launch_child = counted  # type: ignore[assignment]
+    agent_nodes.launch_child = counted  # type: ignore[assignment]
     try:
         await stack.submit("@0", "agent", _ASK)
         await stack.until(lambda: stack.store.get_node(stack.run_id, "@0").state is not WorkflowNodeState.RUNNING)
     finally:
-        agent_dispatch_module.launch_child = original
+        agent_nodes.launch_child = original
 
     assert len(model.requests) == 1
 
@@ -332,13 +331,15 @@ async def test_further_turn_whose_first_child_is_gone_is_told_the_task_again(
 ) -> None:
     """A further turn continues the first turn's child. Without it the agent starts anew, and needs the task too."""
     model = stack.child_script(answer("no json here"), answer(_GOOD))
-    launch = agent_dispatch_module.launch_child
+    launch = agent_nodes.launch_child
 
-    async def forgetful(*args: object, **options: object) -> object:
-        jobs = _Forgetful(options.pop("jobs")) if options.get("turn", 1) > 1 else options.pop("jobs")  # type: ignore[operator]
-        return await launch(*args, jobs=jobs, **options)  # type: ignore[arg-type]
+    async def forgetful(engine: object, *args: object, **options: object) -> object:
+        if options.get("turn", 1) > 1:  # type: ignore[operator]
+            runtime = engine.agents()  # type: ignore[attr-defined]
+            options["jobs"] = _Forgetful(runtime.jobs)
+        return await launch(engine, *args, **options)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(agent_dispatch_module, "launch_child", forgetful)
+    monkeypatch.setattr(agent_nodes, "launch_child", forgetful)
 
     assert await stack.result("@0", "agent", _ASK) == {"ok": True}
 
@@ -364,7 +365,7 @@ async def test_correction_that_ends_without_an_answer_keeps_what_the_first_turn_
     wrote, again = calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b"))
     further = [Await(_provider_fails)] if ends == "fails" else [Await(gate.wait), *answer(_GOOD)]
     model = stack.child_script(wrote, answer("no json here"), further, again, answer(_GOOD))
-    second = _turn_job_id(stack.store.get_run(stack.run_id), "@0", 1, 2)
+    second = turn_job_id(stack.store.get_run(stack.run_id), "@0", 1, 2)
     start = stack.jobs.start
 
     async def stopped(job_id: str, **options: object) -> object:
@@ -381,7 +382,7 @@ async def test_correction_that_ends_without_an_answer_keeps_what_the_first_turn_
         await stack.until(lambda: len(model.requests) == 3)
         await stack.jobs.request_cancel(second)
     # The wait for the node's agent has ended: with the node's end, or with the primary's.
-    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
+    await stack.until(lambda: not (stack.engine._runs.get(stack.run_id) and stack.engine._runs[stack.run_id].tasks))
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
 

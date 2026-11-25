@@ -28,7 +28,16 @@ from mindroom.history.storage import (
     record_summary_usage,
     set_force_compaction,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    CompactionForkToolCallError,
+    CompactionSummaryIncompleteError,
+    CompactionSummaryOutputLimitError,
+    generate_compaction_summary,
+    is_summary_timeout,
+    request_compaction_summary,
+)
+from mindroom.history.summary_fork import prepare_fork_request
 from mindroom.history.summary_input import (
     build_summary_input,
     minimum_summary_input_tokens,
@@ -45,7 +54,7 @@ from mindroom.history.types import (
     owner_scope,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, TranscriptLine, emit
-from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.llm.errors import AuthenticationFailed, ContextWindowExceeded, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_summary, checkpoint_tail, replay_basis
@@ -67,6 +76,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
+    from mindroom.history.summary_fork import SummaryFork
     from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
@@ -107,6 +117,9 @@ class Summarizer:
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None
     # The input budget a failed chunk shrank to; later chunks start there unless their first run needs more.
     shrunk_budget_tokens: int | None = None
+    fork: SummaryFork | None = None
+    # XML fallback retry cap after a fork timeout or safeguard refusal.
+    xml_max_attempts: int | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
@@ -175,6 +188,7 @@ def load_summarizer(
     session_id: str,
     scope: HistoryScope,
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+    fork: SummaryFork | None = None,
 ) -> Summarizer:
     """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     assert execution_plan.summary_input_budget_tokens is not None
@@ -219,11 +233,12 @@ def load_summarizer(
         session_id=session_id,
         scope=scope,
         on_usage=on_usage,
+        fork=fork,
     )
 
 
 def scope_usage_recorder(
-    storage: ConversationStore,
+    storage: ConversationStore | Callable[[], ConversationStore],
     session_id: str,
     *,
     initial_session: ConversationSession | None = None,
@@ -521,7 +536,13 @@ async def _rewrite_working_session_for_compaction(
         if basis is None:
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
-        chunk = await _summarize_chunk(summarizer, previous_summary, remaining)
+        chunk = await _summarize_chunk(
+            summarizer,
+            previous_summary,
+            remaining,
+            max_summary_tokens=max_summary_tokens,
+            model=model,
+        )
         if chunk is None:
             logger.warning(
                 "Compaction skipped because no run fit the single-pass summary budget",
@@ -586,6 +607,9 @@ async def summarize_runs(
     summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
+    *,
+    max_summary_tokens: int | None = None,
+    model: ModelProvider | None = None,
 ) -> tuple[str, Summarizer]:
     """Summarize runs into one cumulative summary without writing anything.
 
@@ -595,7 +619,13 @@ async def summarize_runs(
     summary = previous_summary
     remaining = list(runs)
     while remaining:
-        chunk = await _summarize_chunk(summarizer, summary, remaining)
+        chunk = await _summarize_chunk(
+            summarizer,
+            summary,
+            remaining,
+            max_summary_tokens=max_summary_tokens,
+            model=model,
+        )
         if chunk is None:
             msg = "No compactable content fit the summary input budget."
             raise RuntimeError(msg)
@@ -618,7 +648,7 @@ async def compact_running_turn(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     available_history_budget: int | None,
-    max_summary_tokens: int,
+    max_summary_tokens: int | None,
     model: ModelProvider,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
@@ -636,7 +666,13 @@ async def compact_running_turn(
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
-    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
+    summary, summarizer = await summarize_runs(
+        summarizer,
+        basis.summary,
+        runs,
+        max_summary_tokens=max_summary_tokens,
+        model=model,
+    )
     # Sized as the rewritten request is, so a stored summary keeps it within the limit; sizing stays off the loop.
     summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, model, upper_bound=True)
     if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
@@ -754,11 +790,15 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
+    *,
+    max_summary_tokens: int | None = None,
+    model: ModelProvider | None = None,
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
-    The runs and messages before the latest readable native checkpoint fold without being read, since its text
-    summarizes them.
+    When ``summarizer.fork`` is set, attempts one cache-warm fork summary covering all of ``runs`` first, clearing
+    ``fork`` for any fallback or subsequent chunks. The runs and messages before the latest readable native checkpoint
+    fold without being read, since its text summarizes them.
 
     A failed attempt retries the same or a smaller input when safe, and a shrunk size carries to later chunks. A
     safeguard refusal from the primary model switches once to the fallback model, rebuilding the input only when it
@@ -766,6 +806,15 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     retry policy's attempt bound, so a refusal after an earlier shrink or transient retry propagates without a
     fallback call.
     """
+    if summarizer.fork is not None:
+        fork_summary, summarizer = await _try_fork_summary(
+            summarizer,
+            summarizer.fork,
+            max_summary_tokens=max_summary_tokens,
+            model=model,
+        )
+        if fork_summary is not None:
+            return _SummaryChunk(summary=fork_summary, included_runs=list(runs), summarizer=summarizer)
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
     shrunk_budget = summarizer.shrunk_budget_tokens
@@ -805,7 +854,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     summary_input, included_runs, source = await build(budget, token_estimator)
     if not included_runs:
         return None
-    retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
+    retry_policy = (
+        DEFAULT_SUMMARY_RETRY_POLICY
+        if summarizer.xml_max_attempts is None
+        else replace(DEFAULT_SUMMARY_RETRY_POLICY, max_attempts=summarizer.xml_max_attempts)
+    )
     minimum_progress_input_tokens = await asyncio.to_thread(
         minimum_summary_input_tokens,
         previous_summary=source.previous_summary,
@@ -837,11 +890,8 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
                 keep_thinking_setting=summary_model.keeps_thinking_setting,
-                on_usage=(
-                    partial(summarizer.on_usage, summary_model.model.identity)
-                    if summarizer.on_usage is not None
-                    else None
-                ),
+                on_usage=summarizer.on_usage,
+                allow_transient_fallback=attempt >= retry_policy.max_attempts,
             )
         except Exception as exc:
             logger.warning(
@@ -854,6 +904,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 fallback_model is not None
                 and attempt < retry_policy.max_attempts
                 and isinstance(exc, ModelSafeguardRefusal)
+                and not (
+                    exc.model_id is not None
+                    and (provider_route(exc.provider), exc.model_id)
+                    == (provider_route(fallback_model.model.identity.provider), fallback_model.model.identity.id)
+                )
             ):
                 fallback_token_estimator = _summary_input_tokens(fallback_model.model)
                 fits_fallback = (
@@ -912,12 +967,135 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
         logger.info(
             "Compaction summary chunk completed",
             **attempt_fields,
+            compaction_strategy="xml",
             duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
         )
-        later = replace(summarizer, model=summary_model, fallback=fallback_model, shrunk_budget_tokens=shrunk_budget)
+        later = replace(
+            summarizer,
+            model=summary_model,
+            fallback=fallback_model,
+            shrunk_budget_tokens=shrunk_budget,
+            xml_max_attempts=None,
+        )
         # The input may hold a checkpoint's run from the checkpoint on; the fold and its hooks take the stored runs.
         folded = list(runs[: len(source.unread_runs) + len(included_runs)])
         return _SummaryChunk(summary=summary, included_runs=folded, summarizer=later)
+
+
+_FORK_FALLBACK_REASONS: tuple[tuple[type[Exception], str], ...] = (
+    (CompactionForkToolCallError, "tool_call"),
+    (CompactionSummaryOutputLimitError, "output_limit"),
+    (CompactionSummaryIncompleteError, "incomplete"),
+    (ContextWindowExceeded, "context_window_exceeded"),
+    (ProviderError, "provider_error"),
+)
+
+
+def _fork_fallback_reason(exc: Exception, *, timed_out: bool) -> str:
+    if timed_out:
+        return "timeout"
+    return next((reason for err, reason in _FORK_FALLBACK_REASONS if isinstance(exc, err)), "empty_or_invalid")
+
+
+def _log_fork_outcome(
+    event: str,
+    *,
+    log_fields: dict[str, object],
+    reported_usage: Sequence[MessageMetrics],
+    started: float,
+    info: bool = False,
+    **extra: object,
+) -> None:
+    tokens = reported_usage[-1].tokens if reported_usage else None
+    (logger.info if info else logger.warning)(
+        event,
+        **log_fields,
+        input_tokens=tokens.input_tokens if tokens is not None else None,
+        cache_read_tokens=tokens.cache_read_tokens if tokens is not None else None,
+        cache_write_tokens=tokens.cache_write_tokens if tokens is not None else None,
+        duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
+        **extra,
+    )
+
+
+async def _try_fork_summary(
+    summarizer: Summarizer,
+    fork: SummaryFork,
+    *,
+    max_summary_tokens: int | None,
+    model: ModelProvider | None,
+) -> tuple[str | None, Summarizer]:
+    """Attempt one cache-warm fork summary, returning ``(summary, updated_summarizer)`` or ``(None, fallback)``."""
+    base_fallback = replace(summarizer, fork=None)
+    fork_request, skip_reason = await asyncio.to_thread(
+        prepare_fork_request,
+        fork,
+        summary_prompt=summarizer.prompt,
+        summary_model_identity=summarizer.model.model.identity,
+    )
+    log_fields: dict[str, object] = {
+        "session_id": summarizer.session_id,
+        "scope": summarizer.scope.key,
+        "model_name": summarizer.model.name,
+        "mid_turn": fork.mid_turn,
+    }
+    if fork_request is None:
+        logger.info("Compaction fork skipped", **log_fields, compaction_strategy="xml", fork_skip_reason=skip_reason)
+        return None, base_fallback
+
+    reported_usage: list[MessageMetrics] = []
+
+    async def on_usage(identity: ModelIdentity, usage: MessageMetrics) -> None:
+        reported_usage.append(usage)
+        if summarizer.on_usage is not None:
+            await summarizer.on_usage(identity, usage)
+
+    started = asyncio.get_running_loop().time()
+    log_outcome = partial(_log_fork_outcome, log_fields=log_fields, reported_usage=reported_usage, started=started)
+    try:
+        summary = await request_compaction_summary(
+            model=fork.sizer.model,
+            request=fork_request,
+            timeout_seconds=summarizer.timeout_seconds,
+            on_usage=on_usage,
+            reject_tool_calls=True,
+        )
+    except (AuthenticationFailed, asyncio.CancelledError):
+        raise
+    except ModelSafeguardRefusal as exc:
+        log_outcome(
+            "Compaction fork refused; falling back to XML summary",
+            compaction_strategy="xml",
+            fork_fallback_reason="safeguard_refusal",
+            error=failure_text(exc),
+        )
+        if summarizer.fallback is not None:
+            return None, replace(base_fallback, model=summarizer.fallback, fallback=None, xml_max_attempts=1)
+        return None, replace(base_fallback, xml_max_attempts=1)
+    except Exception as exc:
+        timed_out = is_summary_timeout(exc)
+        log_outcome(
+            "Compaction fork failed; falling back to XML summary",
+            compaction_strategy="xml",
+            fork_fallback_reason=_fork_fallback_reason(exc, timed_out=timed_out),
+            error=failure_text(exc),
+        )
+        return None, replace(base_fallback, xml_max_attempts=1) if timed_out else base_fallback
+
+    if max_summary_tokens is not None and model is not None:
+        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, model, upper_bound=True)
+        if _summary_budget_error(summary_tokens, max_summary_tokens) is not None:
+            log_outcome(
+                "Compaction fork summary exceeded history budget; falling back to XML summary",
+                compaction_strategy="xml",
+                fork_fallback_reason="exceeds_max_summary_tokens",
+                summary_tokens=summary_tokens,
+                max_summary_tokens=max_summary_tokens,
+            )
+            return None, base_fallback
+
+    log_outcome("Compaction fork completed", info=True, compaction_strategy="fork")
+    return summary, base_fallback
 
 
 def _iso_utc_now() -> str:

@@ -43,22 +43,29 @@ def leftmost_fitting(
     low: int,
     high: int,
     build: Callable[[int], dict[str, object]],
+    *,
+    screenshot: EncryptedDesktopMedia | None = None,
 ) -> int:
     """Binary-search the smallest ``x`` in ``[low, high]`` whose enveloped ``build(x)`` reply still fits.
 
-    Shared by every trimmed reply (shell output, listings, status), all measured by ``fits_inline``.
+    Shared by every trimmed reply (shell output, listings, status, app state), all measured by ``fits_inline``.
     Assumes ``build`` only shrinks the reply as ``x`` grows, and that ``build(high)`` fits.
     """
     while low < high:
         middle = (low + high) // 2
-        if fits_inline(command, build(middle)):
+        if fits_inline(command, build(middle), screenshot=screenshot):
             high = middle
         else:
             low = middle + 1
     return low
 
 
-def fits_inline(command: DesktopCommand, result: dict[str, object]) -> bool:
+def fits_inline(
+    command: DesktopCommand,
+    result: dict[str, object],
+    *,
+    screenshot: EncryptedDesktopMedia | None = None,
+) -> bool:
     """Report whether ``result`` fits one to-device reply once execution adds its metrics."""
-    reply = success_response(command, result={**result, "metrics": _WIDEST_METRICS})
+    reply = success_response(command, result={**result, "metrics": _WIDEST_METRICS}, screenshot=screenshot)
     return reply.content_bytes() <= MAX_INLINE_RESPONSE_BYTES

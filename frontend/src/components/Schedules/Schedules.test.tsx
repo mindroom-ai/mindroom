@@ -16,7 +16,9 @@ const silentTask = {
   execute_at: null,
   next_run_at: "2026-08-24T16:00:00Z",
   cron_expression: "0 9 * * *",
-  cron_description: "Every day at 9:00 AM",
+  cron_description: "At 09:00 (America/Los_Angeles)",
+  timezone: "America/Los_Angeles",
+  cron_timezone: "America/Los_Angeles",
   description: "Quiet inbox check",
   message: "Check the inbox for urgent mail",
   history_limit: 0,
@@ -32,6 +34,9 @@ const visibleTask = {
   task_id: "visible-1",
   description: "Visible status check",
   message: "Post the current deployment status",
+  cron_description: "At 09:00 (UTC)",
+  timezone: "UTC",
+  cron_timezone: null,
   silent: false,
 } satisfies ScheduleTask;
 
@@ -95,7 +100,7 @@ describe("Schedules", () => {
     ).toBeChecked();
   });
 
-  it("sends a changed delivery mode to the schedules API", async () => {
+  it("sends only changed fields when toggling delivery mode", async () => {
     render(<Schedules />);
 
     fireEvent.click(await screen.findByText("Quiet inbox check"));
@@ -106,15 +111,11 @@ describe("Schedules", () => {
     const [, updateRequest] = vi.mocked(global.fetch).mock.calls[1];
     expect(JSON.parse(String(updateRequest?.body))).toEqual({
       room_id: "!ops:example.org",
-      message: "Check the inbox for urgent mail",
-      description: "Quiet inbox check",
-      schedule_type: "cron",
-      cron_expression: "0 9 * * *",
       silent: false,
     });
   });
 
-  it("preserves silent delivery when editing another field", async () => {
+  it("sends only changed fields when editing description without re-sending cron_expression", async () => {
     render(<Schedules />);
 
     fireEvent.click(await screen.findByText("Quiet inbox check"));
@@ -125,9 +126,85 @@ describe("Schedules", () => {
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(3));
     const [, updateRequest] = vi.mocked(global.fetch).mock.calls[1];
-    expect(JSON.parse(String(updateRequest?.body))).toMatchObject({
+    expect(JSON.parse(String(updateRequest?.body))).toEqual({
+      room_id: "!ops:example.org",
       description: "Updated quiet inbox check",
-      silent: true,
+    });
+  });
+
+  it("shows local cron timezone vs legacy UTC label and cron description", async () => {
+    render(<Schedules />);
+
+    fireEvent.click(await screen.findByText("Quiet inbox check"));
+    expect(
+      screen.getByLabelText("Cron Expression (America/Los_Angeles)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/At 09:00 \(America\/Los_Angeles\)/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(
+      screen.getByLabelText("Cron Expression (America/Los_Angeles)"),
+      { target: { value: "30 10 * * *" } },
+    );
+    expect(
+      screen.queryByText(/At 09:00 \(America\/Los_Angeles\)/),
+    ).not.toBeInTheDocument();
+    fireEvent.change(
+      screen.getByLabelText("Cron Expression (America/Los_Angeles)"),
+      { target: { value: "0 9 * * *" } },
+    );
+    expect(
+      screen.getByText(/At 09:00 \(America\/Los_Angeles\)/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Visible status check"));
+    expect(
+      screen.getByLabelText("Cron Expression (UTC (legacy))"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/At 09:00 \(UTC\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/!schedule/)).not.toBeInTheDocument();
+  });
+
+  it("does not re-send execute_at when editing a one-time task message", async () => {
+    const onceTask = {
+      ...visibleTask,
+      task_id: "once-1",
+      schedule_type: "once",
+      execute_at: "2026-11-25T17:00:00Z",
+      next_run_at: "2026-11-25T17:00:00Z",
+      cron_expression: null,
+      cron_description: null,
+      timezone: "America/Los_Angeles",
+      description: "One-time reminder",
+      message: "Check deployment",
+    } satisfies ScheduleTask;
+    vi.mocked(global.fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        timezone: "UTC",
+        tasks: [onceTask],
+        unreadable_rooms: [],
+      }),
+    } as Response);
+
+    render(<Schedules />);
+
+    fireEvent.click(await screen.findByText("One-time reminder"));
+    expect(screen.getByLabelText("Run At")).toHaveValue("2026-11-25T09:00");
+    expect(
+      screen.getByText("One-time execution timestamp (America/Los_Angeles)"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Prompt Message"), {
+      target: { value: "Check production deployment" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(3));
+    const [, updateRequest] = vi.mocked(global.fetch).mock.calls[1];
+    expect(JSON.parse(String(updateRequest?.body))).toEqual({
+      room_id: "!ops:example.org",
+      message: "Check production deployment",
     });
   });
 

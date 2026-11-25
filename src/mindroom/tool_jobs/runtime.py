@@ -222,6 +222,15 @@ def _stopped_while_working(job: BackgroundJob) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationWorkingState:
+    """One conversation's live approval, active-job, and unconsumed ended-job state."""
+
+    awaiting_approval: bool = False
+    has_active: bool = False
+    ended_jobs: tuple[BackgroundJob, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AcknowledgeWait:
     """One claimed outcome to mark consumed in a batched acknowledgement."""
 
@@ -437,7 +446,7 @@ async def saved_jobs(journal: EventJournalStore) -> list[BackgroundJob]:
 def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
     """Return what the job runtime knows of *job_id*, or `unknown` while no runtime exists."""
     runtime = get_background_runtime(runtime_paths)
-    return "unknown" if runtime is None else runtime._job_standing(job_id)
+    return "unknown" if runtime is None else runtime.job_standing(job_id)
 
 
 def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.Lock:
@@ -450,7 +459,7 @@ def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.
 def undelivered_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str] | None:
     """Return job IDs whose terminal outcome is unsaved, or None while no runtime exists."""
     runtime = get_background_runtime(runtime_paths)
-    return None if runtime is None else runtime._undelivered_jobs()
+    return None if runtime is None else runtime.undelivered_jobs()
 
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
@@ -587,7 +596,7 @@ class ToolJobRuntime:
         entry = self._entries.get(job_id)
         return None if entry is None else entry.job
 
-    def _outcome_saved(self, job_id: str) -> bool:
+    def outcome_saved(self, job_id: str) -> bool:
         """Return whether the journal holds the job as it is here; false while an outcome that failed to save waits."""
         return self._entries[job_id].saved
 
@@ -848,9 +857,9 @@ class ToolJobRuntime:
             entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
 
     def _job_delivered(self, job: BackgroundJob) -> bool:
-        return job.status in TERMINAL_STATUSES and self._outcome_saved(job.job_id)
+        return job.status in TERMINAL_STATUSES and self.outcome_saved(job.job_id)
 
-    def _job_standing(self, job_id: str) -> str:
+    def job_standing(self, job_id: str) -> str:
         """Return what this runtime knows of *job_id*: `absent`, `stopped`, `ended`, or `held`."""
         job = self.retained_job(job_id)
         if job is None:
@@ -859,7 +868,7 @@ class ToolJobRuntime:
             return "stopped" if job.status in ("cancelled", "denied") else "ended"
         return "held"
 
-    def _undelivered_jobs(self) -> frozenset[str]:
+    def undelivered_jobs(self) -> frozenset[str]:
         """Return the job IDs whose terminal outcome has not been saved yet."""
         return frozenset(job.job_id for job in self.retained_jobs() if not self._job_delivered(job))
 
@@ -870,6 +879,7 @@ class ToolJobRuntime:
         *,
         owner: ToolExecutionIdentity,
         depth: int,
+        source_kind: str | None = None,
     ) -> tuple[BackgroundJob, JobClaim | None]:
         """Start a prepared *spec* as *job_id* for *owner* at *depth*, passing the live adapter reference."""
         return await self.start(
@@ -878,6 +888,7 @@ class ToolJobRuntime:
             depth=depth,
             kind=spec.kind,
             toolkit_name=spec.toolkit_name,
+            source_kind=source_kind,
             adapter=spec.adapter,
             owner=owner,
             operation=spec.operation,
@@ -1212,22 +1223,6 @@ class ToolJobRuntime:
         returned_inline: bool = False,
         adapter: Mapping[str, Any] | None = None,
     ) -> None:
-        """Mark one claimed outcome consumed after its parent tool result has been durably saved."""
-        await self._acknowledge_wait(
-            job_id,
-            claim,
-            returned_inline=returned_inline,
-            adapter=adapter,
-        )
-
-    async def _acknowledge_wait(
-        self,
-        job_id: str,
-        claim: JobClaim | None,
-        *,
-        returned_inline: bool = False,
-        adapter: Mapping[str, Any] | None = None,
-    ) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
 
         ``returned_inline`` says that tool result belongs to the call that started the job, and ``adapter`` holds
@@ -1419,6 +1414,35 @@ class ToolJobRuntime:
                 and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
+
+    async def conversation_working_state(self, key: ConversationKey) -> ConversationWorkingState:
+        """Inspect one conversation's approval, active-job, and unconsumed ended-job state.
+
+        Any matching job waiting on approval (including a workflow-node child) marks
+        ``awaiting_approval=True`` immediately so the conversation surfaces in Needs You.
+        Only non-workflow-node depth-0 jobs count toward active work or follow-ups.
+        """
+        async with self._lock:
+            if self._closed:
+                return ConversationWorkingState()
+            has_active = False
+            ended: list[BackgroundJob] = []
+            for entry in self._by_conversation.get(
+                (key.recipient, key.room_id, key.thread_id, key.requester_id),
+                {},
+            ).values():
+                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) != key.silent:
+                    continue
+                status = entry.job.status
+                if status == "awaiting_approval":
+                    return ConversationWorkingState(awaiting_approval=True)
+                if entry.job.depth != 0 or is_workflow_node_job(entry.job):
+                    continue
+                if status not in TERMINAL_STATUSES:
+                    has_active = True
+                elif not entry.job.consumed and entry.claim is None and self._grant(entry.job) == "allowed":
+                    ended.append(entry.job)
+            return ConversationWorkingState(has_active=has_active, ended_jobs=tuple(ended))
 
     async def expire_ended(
         self,

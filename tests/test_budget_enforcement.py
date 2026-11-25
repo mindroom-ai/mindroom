@@ -21,19 +21,19 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig, RouterConfig
+from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
-from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
-from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.identity import model_identity
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -51,15 +51,12 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import drain
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
+from tests.scripted_agent_helpers import raising
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
-from tests.test_delegation_direct_audit import _identity
-from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
-from tests.test_dynamic_workflow_subagents import _spec as _subagent_workflow_spec
-from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
-from tests.test_dynamic_workflows import _make_context, _make_multi_agent_context, _room_agent_model, _workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -503,52 +500,6 @@ def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, str
     assert prepare.await_args.kwargs["team_model_name"] == "luna"
 
 
-def _budget_context_config(config: Config) -> None:
-    config.models["default"].pricing = ModelPricing(input=3, output=15)
-    config.models["luna"] = ModelConfig(
-        provider="openai",
-        id="gpt-6-luna",
-        pricing=ModelPricing(input=0.2, output=1.25),
-    )
-    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=0)
-
-
-@pytest.mark.asyncio
-async def test_dynamic_workflow_room_agent_participant_uses_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
-    _budget_context_config(context.config)
-    _model, loaded = _room_agent_model(monkeypatch, answer("done"))
-
-    await dynamic_workflow_module._execute_room_agent_participant(
-        context,
-        RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
-        "Write a report.",
-        run_key="report:run_1",
-    )
-
-    assert loaded == ["luna"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_workflow_subagent_participant_uses_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-
-    run = await workflow.run(
-        _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "default"}]),
-    )
-
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]
-
-
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("model", ["general", "team/super_team"])
 def test_openai_compat_completion_adds_its_cost_for_its_requester(
@@ -584,151 +535,121 @@ def test_openai_compat_completion_adds_its_cost_for_its_requester(
     assert response_finished.call_args.args[2] <= datetime.now(UTC)
 
 
-async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:
-    """Create and run the workflow from a reply that runs on ``active_model_name``."""
-    spec = _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": []}], models=["default-model"])
-    context = replace(
-        _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity()),
-        active_model_name=active_model_name,
-    )
-    with tool_runtime_context(context):
-        created = json.loads(await workflow.tools.create_workflow(spec))
-        assert created["status"] == "ok", created
-        return json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
-
-
 @pytest.mark.asyncio
-async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
+async def test_capped_user_cannot_fail_over_from_unpriced_primary_to_priced_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A workflow that names the caller's priced model keeps working once the caller is over budget."""
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+    """A voice reusable build created under budget blocks priced fallbacks once the requester crosses their cap."""
+    from types import SimpleNamespace  # noqa: PLC0415
 
-    # The response runner hands tools the budgeted model of the reply.
-    run = await _run_workflow_as(workflow, "luna")
+    from mindroom.matrix_rtc.call_tools import _CallAgentCache  # noqa: PLC0415
 
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]
-
-
-@pytest.mark.asyncio
-async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
-    context = _make_context(tmp_path)
-    _budget_context_config(context.config)
-    context.config.models["opus"] = ModelConfig(
-        provider="anthropic",
-        id="claude-opus-5",
+    config = _make_config({"leader": AgentConfig(display_name="Leader", model="opus")})
+    config.models["opus"] = ModelConfig(provider="synthetic", id="opus-sub", fallbacks=["bedrock-opus"])
+    config.models["bedrock-opus"] = ModelConfig(
+        provider="synthetic",
+        id="bedrock-paid",
         pricing=ModelPricing(input=5, output=25),
     )
-    context = replace(context, active_model_name="luna")
-    spec = _workflow_spec()
-    spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
+    config.models["local"] = ModelConfig(provider="synthetic", id="local-free")
+    config.budgets = BudgetsConfig(fallback_model="local", monthly_limit_usd=10.0)
+    paths = _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
 
-    with tool_runtime_context(context):
-        payload = json.loads(await DynamicWorkflowTools().create_workflow(spec))
-
-    assert payload["status"] == "error"
-    assert "not allowed by permissions.models" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("participant_model", "allowed"),
-    [("cheap@low", True), ("cheap@high", False), ("lookalike", False), ("twin@low", False)],
-)
-async def test_a_level_permission_admits_only_its_fallbacks_level(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    participant_model: str,
-    allowed: bool,
-) -> None:
-    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low`` only.
-
-    Not ``cheap`` at another level, nor a model whose provider ID reads ``cheap@low`` or equals the fallback's.
-    """
-    config = _subagent_workflow_config()
-    reasoning = ReasoningConfig(levels=["low", "high"], default="high")
-    pricing = ModelPricing(input=5, output=30)
-    config.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning, pricing=pricing)
-    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
-    config.models["twin"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
-    config.models["lookalike"] = ModelConfig(provider="openai", id="cheap@low")
-    config.budgets = BudgetsConfig(fallback_model="cheap@low", monthly_limit_usd=0)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": participant_model}
-    spec = _subagent_workflow_spec([participant], models=["sol@low"])
-
-    with workflow.context():
-        payload = json.loads(await workflow.tools.validate_workflow(spec))
-
-    assert (payload["status"] == "ok") is allowed, payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("fallback", "requested", "permitted", "runs"),
-    [("cheap", "cheap@low", "cheap@low", "cheap@low"), ("cheap@low", "cheap@high", "cheap", "cheap@low")],
-    ids=["fallback-without-a-level", "fallback-at-a-level"],
-)
-async def test_a_level_of_the_fallback_model_runs_at_a_fixed_level_over_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fallback: str,
-    requested: str,
-    permitted: str,
-    runs: str,
-) -> None:
-    """Over budget, a level of the fallback model keeps its level unless the fallback names one, which then wins.
-
-    Either way a reload of the model's default cannot move a later step.
-    """
-
-    def config(default: str) -> Config:
-        loaded = _subagent_workflow_config()
-        reasoning = ReasoningConfig(levels=["low", "high"], default=default)
-        pricing = ModelPricing(input=1, output=2)
-        loaded.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning, pricing=pricing)
-        loaded.budgets = BudgetsConfig(fallback_model=fallback, monthly_limit_usd=0)
-        return loaded
-
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config("low"))
-    live = [workflow.config]
-    loaded: list[str] = []
-
-    def load_model(*args: object, **_kwargs: object) -> object:
-        loaded.append(str(args[2]))
-        live[0] = config("high")
-        return workflow.model
-
-    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
-    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
+    opus_identity = model_identity(config.models["opus"])
+    quota_error = ProviderError("quota", provider=opus_identity.provider, status_code=429, code=QUOTA_EXHAUSTED)
+    models_by_ref = {
+        "opus": ScriptedModel([[raising(quota_error)]], identity=opus_identity),
+        "bedrock-opus": ScriptedModel([answer("paid")], identity=model_identity(config.models["bedrock-opus"])),
+    }
     monkeypatch.setattr(
-        workflow,
-        "context",
-        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
+        provider_registry,
+        "_build_single_provider",
+        lambda _cfg, _paths, name, **_kw: models_by_ref[name],
     )
-    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": requested}
 
-    run = await workflow.run(_subagent_workflow_spec([participant], steps=2, models=[permitted]))
+    monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_owner(), requester_id=_ALICE))
+    context = replace(
+        base_ctx,
+        requester_id=_ALICE,
+        orchestrator=SimpleNamespace(budgets=monitor),
+        active_model_name="opus",
+    )
+    # Build the reusable voice agent while Alice is still under budget (spend = 0 < 10).
+    cache = _CallAgentCache(
+        agent_name="leader",
+        config=config,
+        runtime_paths=paths,
+        context=context,
+        active_model_name="opus",
+    )
+    reusable_build = cache._build(knowledge=None, refresh_scheduler=None)
 
-    assert run["status"] == "completed", run
-    assert loaded == [runs, runs]
+    # Alice crosses her cap before the next call turn reuses the cached build.
+    set_month_spend(monitor, {_ALICE: 12.0})
+    with tool_runtime_context(context), pytest.raises(ProviderError):
+        await drain(reusable_build.spec.model, ModelRequest(messages=(Message(role="user", content="hello"),)))
+
+    assert len(models_by_ref["opus"].requests) == 1
+    assert models_by_ref["bedrock-opus"].requests == []
 
 
-@pytest.mark.asyncio
-async def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The caller's reply started on the priced model; its workflow then runs on the fallback."""
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+def test_context_scope_precedence_and_restoration(tmp_path: Path) -> None:
+    """Nested conversation/detached scopes preserve precedence, never borrow detached monitors, and restore cleanly."""
+    from types import SimpleNamespace  # noqa: PLC0415
 
-    run = await _run_workflow_as(workflow, "default")
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.tool_system.context_scope import (  # noqa: PLC0415
+        current_budget_monitor,
+        current_requester_id,
+        detached_requester_context,
+        get_detached_requester_context,
+        get_tool_runtime_context,
+        tool_runtime_context,
+    )
+    from mindroom.tool_system.runtime_context import DetachedRequesterContext  # noqa: PLC0415
 
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]
+    bob = "@bob:localhost"
+    config = _make_config({"leader": AgentConfig(display_name="Leader")})
+    paths = _runtime_paths(tmp_path)
+    detached_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    conv_monitor = BudgetMonitor(runtime_paths=paths, config_provider=lambda: config)
+    detached = DetachedRequesterContext(
+        requester_id=_ALICE,
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+        budget_monitor=detached_monitor,
+    )
+    base_ctx = _delegate_runtime_context(config, paths, execution_identity=replace(_owner(), requester_id=bob))
+    conv_with_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=conv_monitor))
+    conv_without_monitor = replace(base_ctx, requester_id=bob, orchestrator=SimpleNamespace(budgets=None))
+
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)
+    with detached_requester_context(detached):
+        assert get_detached_requester_context() is detached
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+        with tool_runtime_context(conv_with_monitor):
+            assert get_tool_runtime_context() is conv_with_monitor
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+            # Clearing conversation exposes enclosing detached authority.
+            with tool_runtime_context(None):
+                assert get_tool_runtime_context() is None
+                assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+            assert (current_budget_monitor(), current_requester_id()) == (conv_monitor, bob)
+
+        # A conversation context with budget_monitor=None must NOT borrow detached's monitor.
+        with tool_runtime_context(conv_without_monitor):
+            assert current_requester_id() == bob
+            assert current_budget_monitor() is None
+
+        assert (current_budget_monitor(), current_requester_id()) == (detached_monitor, _ALICE)
+
+    assert (get_tool_runtime_context(), get_detached_requester_context()) == (None, None)
+    assert (current_budget_monitor(), current_requester_id()) == (None, None)

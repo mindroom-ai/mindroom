@@ -168,7 +168,6 @@ def save_compaction_usage(
 
 
 __all__ = [
-    "agent_session_database_path",
     "create_agent_state_storage",
     "create_session_storage",
     "create_state_storage",

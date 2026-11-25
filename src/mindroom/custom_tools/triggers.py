@@ -44,6 +44,14 @@ from mindroom.reactive_triggers.external_sources import (
     is_source_subscriber_allowed,
     validate_subscription_against_source,
 )
+from mindroom.reactive_triggers.management import (
+    delete_trigger_sync,
+    get_trigger_record,
+    is_trigger_owner,
+    read_thread_tag_present,
+    refresh_reactive_state_on_reenable,
+    set_trigger_enabled_sync,
+)
 from mindroom.reactive_triggers.matching import matches_external_event, matches_room_message
 from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
@@ -71,7 +79,7 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     managed_entity_user_ids,
 )
-from mindroom.thread_tags import ThreadTagsError, get_thread_tags, normalize_tag_name
+from mindroom.thread_tags import ThreadTagsError, normalize_tag_name
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -514,6 +522,7 @@ class TriggersTools(Toolkit):
             "auth_epoch": record.auth_epoch,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
+            "last_fired_at": record.last_fired_at,
         }
 
     @staticmethod
@@ -533,8 +542,10 @@ class TriggersTools(Toolkit):
         *,
         verb: str = "changed",
     ) -> None:
-        actor_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-        if record.owner_user_id not in actor_ids and not cls._is_admin(context):
+        if not (
+            is_trigger_owner(context.requester_id, record.owner_user_id, context.config, context.runtime_paths)
+            or cls._is_admin(context)
+        ):
             msg = f"trigger can only be {verb} by its owner or an external trigger admin"
             raise ReactiveTriggerStoreError(msg)
 
@@ -587,45 +598,6 @@ class TriggersTools(Toolkit):
         created = await run_blocking_until_complete(_create)
         self._notify_reactive_service(context)
         return created
-
-    def _apply_set_enabled_sync(
-        self,
-        context: ToolRuntimeContext,
-        external_store: ExternalTriggerStore,
-        reactive_store: ReactiveTriggerStore,
-        trigger_id: str,
-        *,
-        enabled: bool,
-        refreshed_tag_present: bool | None = None,
-    ) -> str:
-        if _has_external_trigger(external_store, trigger_id):
-            record = external_store.set_enabled(
-                trigger_id,
-                enabled=enabled,
-                actor_user_id=context.requester_id,
-                config=context.config,
-            )
-            return self._payload("ok", action="set_enabled", trigger=self._record_payload(record))
-
-        reactive_record = reactive_store.get_trigger(trigger_id)
-        if reactive_record is None:
-            msg = f"external trigger not found: {trigger_id}"
-            raise ExternalTriggerStoreError(msg)
-        self._require_reactive_owner_or_admin(context, reactive_record)
-        if enabled and not reactive_record.enabled:
-            _refresh_state_on_reenable(
-                reactive_store,
-                reactive_record,
-                now=time.time(),
-                refreshed_tag_present=refreshed_tag_present,
-            )
-        updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=reactive_record.rule_uid)
-        if updated is None:
-            msg = f"external trigger not found: {trigger_id}"
-            raise ExternalTriggerStoreError(msg)
-        if enabled:
-            self._notify_reactive_service(context)
-        return self._payload("ok", action="set_enabled", trigger=self._reactive_record_payload(updated))
 
     async def triggers(
         self,
@@ -680,61 +652,21 @@ class TriggersTools(Toolkit):
         actor: str | None = None,
         sample_data: dict[str, Any] | None = None,
     ) -> str:
-        """Manage reactive triggers and direct signed webhooks.
+        """Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
 
-        Actions:
-        - watch_room: Watch room messages (needs prompt; once=False, include_bots=False).
-        - watch_thread: Watch a thread tag change (needs prompt; tag='resolved', transition='added', once=True).
-        - subscribe_event: Subscribe to an event source (needs source_id, kind, prompt; once=True).
-        - create: Create direct Ed25519 webhook /api/triggers/{trigger_id} (needs trigger_id, public_key).
-        - list: List triggers and authorized event_sources.
-        - update: Update a reactive rule in place (needs trigger_id; '' clears pattern/triage_instructions, [] clears senders).
-        - set_enabled: Toggle enabled state (needs trigger_id; enabled defaults False).
-        - delete: Delete a trigger (needs trigger_id).
-        - rotate_key: Rotate a direct trigger key (needs trigger_id, public_key).
-        - history: Recent reactive firings (optional trigger_id, limit 1..100).
-        - test: Dry-run matching and triage without side effects (needs trigger_id).
+        Actions (key params):
+        - watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
+        - watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
+        - subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
+        - create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
+        - list (optional `include_disabled`=True): list triggers and authorized `event_sources`.
+        - update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).
+        - set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).
+        - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
+        - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 
-        Args:
-            action: Operation to run.
-            trigger_id: Route-safe trigger ID (auto-generated if omitted on reactive create).
-            prompt: Wake-agent instruction.
-            description: Rule description.
-            room_id: Watched room (defaults to current).
-            thread_id: Watched thread root ID.
-            senders: Sender Matrix IDs for watch_room ([] clears on update).
-            pattern: Case-insensitive regex for watch_room ('' clears on update).
-            include_bots: Allow other bots/agents on watch_room (never target self).
-            tag: Thread tag name (default 'resolved').
-            transition: Tag transition ('added' or 'removed').
-            source_id: Event source ID from list's event_sources.
-            kind: Event kind (subscribe_event) or sample kind (test).
-            match: Exact-match event.data filter (dot-paths supported).
-            triage_instructions: Tool-less triage criteria ('' clears on update).
-            triage_model: Model alias (required when triage_provider='llm').
-            triage_provider: Triage backend ('llm', 'typesafe', 'openai_decisions').
-            triage_threshold: Classifier triage threshold (0..1).
-            target_agent: Agent/team to wake (defaults to current).
-            target_room_id: Target room (defaults to current).
-            target_thread_id: Target thread or 'origin' (same-room watch_room).
-            new_thread: Open fresh thread per firing.
-            thread_key: Grouping key for new_thread=True.
-            once: Auto-disable after one firing.
-            max_fires_per_hour: Hourly cap (default 10).
-            cooldown_seconds: Cooldown seconds (default 0).
-            expires_in_hours: Lifetime in hours (<=8760).
-            enabled: Enabled state for set_enabled (default False) or update.
-            include_disabled: Include disabled triggers in list.
-            public_key: Ed25519 public key (raw base64, OpenSSH, or PEM).
-            key_id: Signing key ID (default 'default').
-            allowed_kinds: Allowed payload kinds (direct create).
-            replay_window_seconds: Replay window (direct create).
-            max_body_bytes: Max body bytes (direct create).
-            limit: Max history rows (1..100, default 20).
-            text: Sample text (test).
-            actor: Sample actor (test).
-            sample_data: Sample event.data dict (test).
-
+        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`). Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
+        Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
         try:
@@ -1017,8 +949,7 @@ class TriggersTools(Toolkit):
                 direct_error="In-place update is only supported for reactive triggers.",
             ),
         )
-        actor_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-        if existing.owner_user_id not in actor_ids:
+        if not is_trigger_owner(context.requester_id, existing.owner_user_id, context.config, context.runtime_paths):
             msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
             raise ReactiveTriggerStoreError(msg)
 
@@ -1029,7 +960,7 @@ class TriggersTools(Toolkit):
 
         def _persist() -> ReactiveTriggerRecord:
             if reenabling:
-                _refresh_state_on_reenable(
+                refresh_reactive_state_on_reenable(
                     reactive_store,
                     existing,
                     now=now,
@@ -1052,58 +983,45 @@ class TriggersTools(Toolkit):
     async def _set_enabled(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "set_enabled")
         target_enabled = False if args["enabled"] is None else args["enabled"]
-        external_store = ExternalTriggerStore(context.runtime_paths)
-        reactive_store = ReactiveTriggerStore(context.runtime_paths)
-
         refreshed_tag_present: bool | None = None
         if target_enabled:
-            reactive_record = await run_blocking_until_complete(
-                lambda: (
-                    None
-                    if _has_external_trigger(external_store, resolved_trigger_id)
-                    else reactive_store.get_trigger(resolved_trigger_id)
-                ),
+            record = await run_blocking_until_complete(
+                partial(get_trigger_record, context.runtime_paths, resolved_trigger_id),
             )
-            if reactive_record is not None and not reactive_record.enabled:
-                self._require_reactive_owner_or_admin(context, reactive_record)
-                refreshed_tag_present = await _read_reenable_tag_state(context, reactive_record, enabling=True)
-        return await run_blocking_until_complete(
+            if isinstance(record, ReactiveTriggerRecord) and not record.enabled:
+                self._require_reactive_owner_or_admin(context, record)
+                refreshed_tag_present = await _read_reenable_tag_state(context, record, enabling=True)
+        updated = await run_blocking_until_complete(
             partial(
-                self._apply_set_enabled_sync,
-                context,
-                external_store,
-                reactive_store,
+                set_trigger_enabled_sync,
+                context.runtime_paths,
+                context.config,
                 resolved_trigger_id,
                 enabled=target_enabled,
+                actor_user_id=context.requester_id,
                 refreshed_tag_present=refreshed_tag_present,
+                authorize_reactive=partial(self._require_reactive_owner_or_admin, context),
             ),
         )
+        if isinstance(updated, ExternalTriggerRecord):
+            return self._payload("ok", action="set_enabled", trigger=self._record_payload(updated))
+        if target_enabled:
+            self._notify_reactive_service(context)
+        return self._payload("ok", action="set_enabled", trigger=self._reactive_record_payload(updated))
 
     async def _delete_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "delete")
-
-        def _delete() -> str:
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
-            if _has_external_trigger(external_store, resolved_trigger_id):
-                external_store.delete_record(
-                    resolved_trigger_id,
-                    actor_user_id=context.requester_id,
-                    config=context.config,
-                )
-                return self._payload("ok", action="delete", trigger_id=resolved_trigger_id)
-
-            reactive_record = reactive_store.get_trigger(resolved_trigger_id)
-            if reactive_record is None:
-                msg = f"external trigger not found: {resolved_trigger_id}"
-                raise ExternalTriggerStoreError(msg)
-            self._require_reactive_owner_or_admin(context, reactive_record)
-            if not reactive_store.delete_trigger(resolved_trigger_id, expected_rule_uid=reactive_record.rule_uid):
-                msg = f"external trigger not found: {resolved_trigger_id}"
-                raise ExternalTriggerStoreError(msg)
-            return self._payload("ok", action="delete", trigger_id=resolved_trigger_id)
-
-        return await run_blocking_until_complete(_delete)
+        await run_blocking_until_complete(
+            partial(
+                delete_trigger_sync,
+                context.runtime_paths,
+                context.config,
+                resolved_trigger_id,
+                actor_user_id=context.requester_id,
+                authorize_reactive=partial(self._require_reactive_owner_or_admin, context),
+            ),
+        )
+        return self._payload("ok", action="delete", trigger_id=resolved_trigger_id)
 
     async def _rotate_key(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "rotate_key")
@@ -1111,15 +1029,10 @@ class TriggersTools(Toolkit):
         resolved_key_id = "default" if args["key_id"] is None else args["key_id"]
 
         def _rotate() -> str:
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
-            if (
-                not _has_external_trigger(external_store, resolved_trigger_id)
-                and reactive_store.get_trigger(resolved_trigger_id) is not None
-            ):
+            if isinstance(get_trigger_record(context.runtime_paths, resolved_trigger_id), ReactiveTriggerRecord):
                 msg = "Key rotation applies only to direct signed external triggers."
                 raise ExternalTriggerStoreError(msg)
-            record = external_store.rotate_key(
+            record = ExternalTriggerStore(context.runtime_paths).rotate_key(
                 resolved_trigger_id,
                 public_key=resolved_public_key,
                 key_id=resolved_key_id,
@@ -1376,28 +1289,6 @@ class TriggersTools(Toolkit):
         )
 
 
-def _refresh_state_on_reenable(
-    reactive_store: ReactiveTriggerStore,
-    record: ReactiveTriggerRecord,
-    *,
-    now: float,
-    refreshed_tag_present: bool | None,
-) -> None:
-    if isinstance(record.source, RoomMessageSourceSpec):
-        reactive_store.advance_room_cursor(
-            record.trigger_id,
-            RoomCursor(created_ts=int(now * 1000), logical_event_id=""),
-            expected_rule_uid=record.rule_uid,
-        )
-    elif isinstance(record.source, ThreadTagSourceSpec) and refreshed_tag_present is not None:
-        reactive_store.update_thread_checkpoint_and_enqueue(
-            record.trigger_id,
-            tag_present=refreshed_tag_present,
-            state_event_id=None,
-            expected_rule_uid=record.rule_uid,
-        )
-
-
 def _load_reactive_or_error(
     external_store: ExternalTriggerStore,
     reactive_store: ReactiveTriggerStore,
@@ -1408,7 +1299,7 @@ def _load_reactive_or_error(
     record = reactive_store.get_trigger(trigger_id)
     if record is not None:
         return record
-    if _has_external_trigger(external_store, trigger_id):
+    if external_store.get_record(trigger_id) is not None:
         raise ReactiveTriggerStoreError(direct_error)
     msg = f"Reactive trigger not found: {trigger_id}"
     raise ReactiveTriggerStoreError(msg)
@@ -1798,9 +1689,7 @@ async def _read_thread_tag_present(
     preferred_agent: str,
 ) -> bool:
     watch_client = _client_for_room(context, source.room_id, preferred_agent=preferred_agent) or context.client
-    tag_state = await get_thread_tags(watch_client, source.room_id, source.thread_id)
-    current_tags = tag_state.tags if tag_state is not None else {}
-    return source.tag.lower() in {existing.lower() for existing in current_tags}
+    return await read_thread_tag_present(watch_client, source)
 
 
 async def _read_reenable_tag_state(
@@ -1812,10 +1701,6 @@ async def _read_reenable_tag_state(
     if not enabling or record.enabled or not isinstance(record.source, ThreadTagSourceSpec):
         return None
     return await _read_thread_tag_present(context, record.source, preferred_agent=record.target.agent)
-
-
-def _has_external_trigger(external_store: ExternalTriggerStore, trigger_id: str) -> bool:
-    return any(record.trigger_id == trigger_id for record in external_store.list_records())
 
 
 def _validate_optional_trigger_id(trigger_id: str | None) -> str | None:
@@ -1847,14 +1732,14 @@ def _resolve_unique_reactive_trigger_id(
         if not stripped or TRIGGER_ID_PATTERN.fullmatch(stripped) is None:
             msg = "trigger_id must match ^[A-Za-z0-9_-]{1,64}$"
             raise ValueError(msg)
-        if _has_external_trigger(external_store, stripped) or reactive_store.get_trigger(stripped) is not None:
+        if external_store.get_record(stripped) is not None or reactive_store.get_trigger(stripped) is not None:
             msg = f"Trigger already exists: {stripped}"
             raise ReactiveTriggerDuplicateError(msg)
         return stripped
 
     for _ in range(10):
         candidate = generate_trigger_id()
-        if not _has_external_trigger(external_store, candidate) and reactive_store.get_trigger(candidate) is None:
+        if external_store.get_record(candidate) is None and reactive_store.get_trigger(candidate) is None:
             return candidate
     msg = "Failed to generate a unique trigger_id."
     raise ReactiveTriggerStoreError(msg)

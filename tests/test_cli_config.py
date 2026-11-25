@@ -289,6 +289,7 @@ def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
 
     config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
     with (
+        patch.object(config_cli, "select", return_value="mindroom.chat"),
         patch.object(config_cli, "secret", return_value="sk-typed"),
         patch("mindroom.cli.setup_detection.detect_single_provider", return_value=None),
         patch(
@@ -3079,6 +3080,8 @@ class TestRunFirstRunSetup:
             "MINDROOM_API_KEY",
             "MATRIX_HOMESERVER",
             "MATRIX_REGISTRATION_TOKEN",
+            "MATRIX_REGISTRATION_SHARED_SECRET",
+            "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
             "MINDROOM_PROVISIONING_URL",
             "MINDROOM_LOCAL_CLIENT_ID",
             "MINDROOM_LOCAL_CLIENT_SECRET",
@@ -3116,10 +3119,12 @@ class TestRunFirstRunSetup:
         env_path = config_path.parent / ".env"
         typed_key = "sk-first-run-dummy-123"
 
-        result, paired, started = self._invoke_run(config_path, f"openai\n{typed_key}\n")
+        result, paired, started = self._invoke_run(config_path, f"\nopenai\n{typed_key}\n")
 
         assert result.exit_code == 0, result.output
         assert "Welcome to MindRoom" in result.output
+        assert "Which Matrix server should your agents connect to?" in result.output
+        assert "Own Matrix server? Press Ctrl+C" not in result.output
         assert "Which model provider should your agents use?" in result.output
         assert "API key" in result.output
         assert typed_key not in result.output
@@ -3168,7 +3173,7 @@ class TestRunFirstRunSetup:
         config_path = narrow_markup_dir / "config.yaml"
         manager = self._service_manager(monkeypatch)
 
-        result, paired, started = self._invoke_run(config_path, "codex\n\n", args=())
+        result, paired, started = self._invoke_run(config_path, "\ncodex\n\n", args=())
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
@@ -3194,7 +3199,7 @@ class TestRunFirstRunSetup:
 
         result, _paired, started = self._invoke_run(
             config_path,
-            "openai\nsk-typed\n\n",
+            "\nopenai\nsk-typed\n\n",
             env={"OPENAI_API_KEY": exported, "ANTHROPIC_API_KEY": exported and "your-anthropic-key-here"},
             args=(),
         )
@@ -3216,7 +3221,7 @@ class TestRunFirstRunSetup:
 
         result, _paired, started = self._invoke_run(
             config_path,
-            "openai\n\n",
+            "\nopenai\n\n",
             env={"OPENAI_API_KEY": "sk-exported"},
             args=(),
         )
@@ -3250,7 +3255,7 @@ class TestRunFirstRunSetup:
         manager = self._service_manager(monkeypatch)
         args = tuple(str(tmp_path / arg) if arg in {"chosen-storage", "config.yaml"} else arg for arg in args)
 
-        result, _paired, started = self._invoke_run(config_path, "codex\n", args=args)
+        result, _paired, started = self._invoke_run(config_path, "\ncodex\n", args=args)
 
         assert result.exit_code == 0, result.output
         assert "start it at login" not in result.output
@@ -3327,7 +3332,7 @@ class TestRunFirstRunSetup:
         config_path = tmp_path / "config.yaml"
         manager = self._service_manager(monkeypatch)
 
-        result, _paired, started = self._invoke_run(config_path, "codex\n", args=("--no-service",))
+        result, _paired, started = self._invoke_run(config_path, "\ncodex\n", args=("--no-service",))
 
         assert result.exit_code == 0, result.output
         assert "start it at login" not in result.output
@@ -3424,7 +3429,7 @@ class TestRunFirstRunSetup:
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
 
-        result, paired, started = self._invoke_run(config_path, "anthropic\n\n")
+        result, paired, started = self._invoke_run(config_path, "\nanthropic\n\n")
 
         assert result.exit_code == 0, result.output
         assert "ANTHROPIC_API_KEY=your-anthropic-key-here\n" in env_path.read_text(encoding="utf-8")
@@ -3461,7 +3466,7 @@ class TestRunFirstRunSetup:
         """Providers without one API key skip the prompt, and the hint holds while startup continues."""
         config_path = tmp_path / "config.yaml"
 
-        result, paired, started = self._invoke_run(config_path, f"{preset}\n")
+        result, paired, started = self._invoke_run(config_path, f"\n{preset}\n")
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
@@ -3476,7 +3481,7 @@ class TestRunFirstRunSetup:
         """An exported provider key is used as is; the new `.env` placeholder cannot shadow it."""
         config_path = tmp_path / "config.yaml"
 
-        result, _paired, started = self._invoke_run(config_path, "openai\n", env={"OPENAI_API_KEY": "sk-exported"})
+        result, _paired, started = self._invoke_run(config_path, "\nopenai\n", env={"OPENAI_API_KEY": "sk-exported"})
 
         assert result.exit_code == 0, result.output
         assert "API key (" not in result.output
@@ -3489,7 +3494,7 @@ class TestRunFirstRunSetup:
         env_path = tmp_path / ".env"
         env_path.write_text("MINDROOM_LOCAL_CLIENT_ID=client\nMINDROOM_LOCAL_CLIENT_SECRET=secret\n", encoding="utf-8")
 
-        result, paired, started = self._invoke_run(config_path, "openrouter\nsk-or-key\n")
+        result, paired, started = self._invoke_run(config_path, "\nopenrouter\nsk-or-key\n")
 
         assert result.exit_code == 0, result.output
         env_content = env_path.read_text(encoding="utf-8")
@@ -3525,7 +3530,7 @@ class TestRunFirstRunSetup:
 
         result, _paired, started = self._invoke_run(
             config_path,
-            "codex\n",
+            "\ncodex\n",
             args=("--no-api", "--storage-path", str(storage)),
         )
 
@@ -3543,7 +3548,7 @@ class TestRunFirstRunSetup:
         real_env.write_text("", encoding="utf-8")
         (tmp_path / ".env").symlink_to(real_env)
 
-        result, paired, started = self._invoke_run(config_path, "openai\nsk-typed\n")
+        result, paired, started = self._invoke_run(config_path, "\nopenai\nsk-typed\n")
 
         assert result.exit_code == 1
         assert result.exception is None or isinstance(result.exception, SystemExit)
@@ -3560,7 +3565,7 @@ class TestRunFirstRunSetup:
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
 
-        result, _paired, started = self._invoke_run(config_path, "openai\nsk-real\n")
+        result, _paired, started = self._invoke_run(config_path, "\nopenai\nsk-real\n")
 
         assert result.exit_code == 0, result.output
         assert "OpenAI API key" in result.output
@@ -3576,7 +3581,7 @@ class TestRunFirstRunSetup:
 
         result, _paired, started = self._invoke_run(
             config_path,
-            "openai\nsk-typed\n",
+            "\nopenai\nsk-typed\n",
             env={"OPENAI_API_KEY": exported},
         )
 
@@ -3591,7 +3596,7 @@ class TestRunFirstRunSetup:
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=your-openai-key-here # replace this\n", encoding="utf-8")
 
-        result, _paired, started = self._invoke_run(config_path, "openai\n\n")
+        result, _paired, started = self._invoke_run(config_path, "\nopenai\n\n")
 
         assert result.exit_code == 0, result.output
         assert "OpenAI API key" in result.output
@@ -3607,7 +3612,7 @@ class TestRunFirstRunSetup:
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=\nOPENAI_API_KEY=your-openai-key-here\n", encoding="utf-8")
 
-        result, _paired, started = self._invoke_run(config_path, "openai\nsk-typed\n")
+        result, _paired, started = self._invoke_run(config_path, "\nopenai\nsk-typed\n")
 
         assert result.exit_code == 0, result.output
         assert re.findall(r"^OPENAI_API_KEY=.*$", env_path.read_text(encoding="utf-8"), re.MULTILINE) == [
@@ -3621,7 +3626,7 @@ class TestRunFirstRunSetup:
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-real\n", encoding="utf-8")
 
-        result, _paired, started = self._invoke_run(config_path, "openai\n")
+        result, _paired, started = self._invoke_run(config_path, "\nopenai\n")
 
         assert result.exit_code == 0, result.output
         assert "Using OPENAI_API_KEY from your environment." in result.output

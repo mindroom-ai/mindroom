@@ -107,7 +107,7 @@ def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, output_files: 
 
 
 def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:
-    """The skills section of the system prompt is the one Agno rendered, describing get_skill_script as read-only."""
+    """The skills catalog section matches the prompt golden without duplicating skill tool instructions."""
     golden = _golden("agent_anthropic")
     _write_golden_workspace(tmp_path, golden)
     system_message = golden["requests"][0]["messages"][0]["content"]
@@ -117,7 +117,8 @@ def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:
     block = _build(tmp_path).prompt_block()
 
     assert block == system_message[start:end]
-    assert "`get_skill_script(skill_name, script_path)` - Read scripts" in block
+    assert "Available skills (load via skill tools, not callable directly):" in block
+    assert "get_skill_instructions" not in block
     assert "execute" not in block
 
 
@@ -134,7 +135,7 @@ def test_the_prompt_block_names_no_scripts_or_references(tmp_path: Path) -> None
 
     assert (
         "<skill>\n  <name>plain</name>\n  <description>Has nothing else.</description>\n</skill>\n"
-        "<skill>\n  <name>tooling</name>\n  <description>Uses scripts.</description>\n</skill>\n\n</skills_system>"
+        "<skill>\n  <name>tooling</name>\n  <description>Uses scripts.</description>\n</skill>\n</skills_system>"
     ) in block
 
 

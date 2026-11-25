@@ -19,7 +19,8 @@ from mindroom.delegation.sessions import subagent_sessions_dir
 from mindroom.delegation.state import SubagentPersona
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.agent_nodes import _turn_job_id
+from mindroom.workflow_runs import nodes as nodes_module
+from mindroom.workflow_runs.agent_nodes import turn_job_id
 from mindroom.workflow_runs.graph import graph_rows
 from mindroom.workflow_runs.models import WorkflowNodeState
 from tests.fakes.scripted_model import Await, answer, usage
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.model import ModelRequest
 
 
 @pytest.fixture
@@ -135,8 +136,8 @@ async def test_second_turn_continues_the_same_child_as_its_own_job(stack: Workfl
     job1, job2 = stack.node_job("@1"), stack.node_job("@2")
     child1, child2 = delegation_child(job1), delegation_child(job2)
 
-    assert job1.job_id == _turn_job_id(run, "@1", 1, 1)
-    assert job2.job_id == _turn_job_id(run, "@2", 1, 1)
+    assert job1.job_id == turn_job_id(run, "@1", 1, 1)
+    assert job2.job_id == turn_job_id(run, "@2", 1, 1)
     assert job1.job_id != job2.job_id
     assert child1.subagent_id == child2.subagent_id
     assert child1.session_id == child2.session_id
@@ -295,8 +296,8 @@ async def test_two_asks_at_once_on_one_session_are_refused_and_two_sessions_run_
 
     gate_a.set()
     gate_b.set()
-    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
-    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
+    assert (await nodes_module.node_receipt(stack.engine, stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
+    assert (await nodes_module.node_receipt(stack.engine, stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentResult, TokenUsage
 from mindroom.judgment.execution import run_judgment, run_judgment_thread
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.provider import ModelRequest, answering_identity, complete
 from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
@@ -70,7 +70,7 @@ async def judge_with_llm(
             raise JudgmentError(failure="invalid_response")
         usage = turn.usage
         return JudgmentResponse(
-            model=provider.identity.id,
+            model=answering_identity(turn.message, turn.identity or provider.identity).id,
             decision=_parse_decision(turn.message.content),
             probability=None,
             # A provider that reported no usage leaves the counts unknown rather than zero.

@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     )
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts"]
+__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts", "commits_attempt"]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 
@@ -179,7 +179,7 @@ async def attempts(
                     except StopAsyncIteration:
                         break
                     usage.observe(event)
-                    committed = committed or _commits_attempt(event)
+                    committed = committed or commits_attempt(event)
                     finished = finished or isinstance(event, TurnCompleted)
                     if isinstance(event, TurnCompleted) and request is not sent:
                         # The attempt was another request than the caller's, so its usage sizes none of the caller's.
@@ -208,7 +208,7 @@ async def attempts(
         )
 
 
-def _commits_attempt(event: StreamEvent) -> bool:
+def commits_attempt(event: StreamEvent) -> bool:
     """Return whether a retry after this event could repeat work: output the caller received, or a hosted tool's run.
 
     It decides for a failure the adapter raised and for a stage's own stall alike.

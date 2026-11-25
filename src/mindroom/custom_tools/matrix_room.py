@@ -578,32 +578,14 @@ class MatrixRoomTools(Toolkit):
         include_summaries: bool = False,
         workflow: Literal["needs_you", "working", "later", "all"] | None = None,
     ) -> str:
-        """Inspect Matrix room metadata, available agents, members, threads, and state.
+        """Inspect Matrix room metadata, available agents, members, threads, and state (`room_id` defaults to current room).
 
         Actions:
-        - room-info: Room metadata and current thread_id, reply_to_event_id, requester_id, and agent_name.
-        - members: List joined members with display names and power levels.
-        - agents: List agents and teams available to answer this requester in the room, including yourself.
-          Each row has name, matrix_user_id, description, and thread_mode (thread or room).
-          To start a conversation, use matrix_message(recipient=name, message="...").
-          This lists conversation targets; run_subagent separately lists your allowed subagents.
-        - threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.
-          With include_summaries=True, each row also has summary (the current thread title, or null) and
-          summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted
-          when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
-          Use page_token from a previous response's next_token to paginate.
-          workflow labels rows (workflow: needs_you, working, later, done) and keeps one group, or every row with all.
-          needs_you rows have why: approval or question (waits on the requester; lead with these) or your_turn
-          (idle: the requester's move, not yours).
-          later rows have back_at (ms) when known. A filtered page can hold fewer rows than limit.
-          Approximate: questions show only in unencrypted rooms; other runtimes' approvals and replies are unseen.
-          room_id="all" (threads only) covers every room the requester shares with you; rows carry room_id.
-          Use it with workflow="needs_you" for "what needs me?".
-          It reads one page per room, so name a room and use page_token to go further.
-        - state: Read room state. If event_type is given, return that specific state event.
-          If omitted, return a summary of all state events (m.room.member events are elided).
-
-        room_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.
+        - room-info: Room metadata + current thread_id, reply_to_event_id, requester_id, agent_name.
+        - members: Joined members with display names and power levels.
+        - agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message="...")` (separate from `run_subagent` allowlist).
+        - threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow="all"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: questions only in unencrypted rooms; single runtime; filtered pages may be shorter than `limit`. `room_id="all"` spans all shared rooms (one page/room; pair with `workflow="needs_you"` for "what needs me?").
+        - state: Specific state event (`event_type` + optional `state_key`), or summary of all state events (`m.room.member` elided).
         """
         if isinstance(context := tool_context_or_error(self._payload, "Matrix room"), str):
             return context

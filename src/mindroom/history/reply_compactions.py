@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 # out its answer: the strings an entry takes from outside are cut to these lengths.
 _MAX_CHARS = {"failure_reason": 300, "summary_model": 120}
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
-_MAX_REPLY_COMPACTIONS = 8
+MAX_REPLY_COMPACTIONS = 8
 # ...and within this many bytes as Matrix sends them (ASCII escapes), since an edit carries the list twice.
 # The newest entry is always kept; with its strings cut, it fits on its own.
-_MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
+MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
 
 
 def _capped(key: str, value: object) -> object:
@@ -108,8 +108,8 @@ class ReplyCompactions:
         """Return a copy of the newest entries for the reply's content and frames, or ``None`` when there are none."""
         if not self._entries:
             return None
-        entries = self._entries[-_MAX_REPLY_COMPACTIONS:]
-        while len(entries) > 1 and len(json.dumps(entries)) > _MAX_REPLY_COMPACTIONS_BYTES:
+        entries = self._entries[-MAX_REPLY_COMPACTIONS:]
+        while len(entries) > 1 and len(json.dumps(entries)) > MAX_REPLY_COMPACTIONS_BYTES:
             entries = entries[1:]
         return copy.deepcopy(entries)
 

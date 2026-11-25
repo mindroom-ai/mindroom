@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import (
+    EMPTY_REQUEST,
     EndRun,
     LoopEnded,
     LoopHooks,
@@ -21,10 +22,18 @@ from mindroom.agent_loop.model_loop import (
     SendRequest,
 )
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
-from mindroom.agent_loop.run import resumed_record
+from mindroom.agent_loop.run import resumed_record, run_agent
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES
 from mindroom.constants import TOOL_TRACE_CONTENT_KEY
-from mindroom.llm.errors import ProviderError, RateLimited
+from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.llm.errors import (
+    ContextWindowExceeded,
+    ModelOutputLimitError,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
@@ -35,12 +44,28 @@ from mindroom.llm.messages import (
 )
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
-from tests.agent_loop.helpers import add, boom, echo, external, gated, run_loop, run_record, spec, toolkit
+from tests.agent_loop.helpers import (
+    add,
+    boom,
+    context,
+    echo,
+    external,
+    gated,
+    run_loop,
+    run_record,
+    spec,
+    toolkit,
+)
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, answer, calls, raw_tool_call, tool_call, usage
 
 if TYPE_CHECKING:
@@ -124,6 +149,60 @@ async def test_an_answer_to_another_request_than_the_loop_sent_records_no_reques
     await run_loop(spec(model), messages)
 
     assert messages[-1].provider_data == {
+        REWRITTEN_ATTEMPT_KEY: True,
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
+
+
+async def test_cache_routing_digest_stamping_in_model_loop() -> None:
+    """Answers on routed models record the cache-routing digest unless the attempt was rewritten."""
+    params = {"prompt_cache_key": "cache-alice", "session_id": "sess-alice"}
+    expected_digest = cache_routing_digest(params)
+    assert expected_digest is not None
+
+    normal_model = ScriptedModel([answer("ok", metrics=usage(10, 2))], model_params=params)
+    normal_messages = _prompt()
+    await run_loop(spec(normal_model), normal_messages)
+    [normal_request] = normal_model.requests
+    assert normal_messages[-1].provider_data == {
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        REQUEST_IDENTITY_KEY: request_prefixes(normal_model, normal_request)[-1],
+        CACHE_ROUTING_KEY: expected_digest,
+    }
+
+    # A pipeline stage (e.g. prompt hold) may pre-stamp REQUEST_IDENTITY_KEY; routing digest is still stamped.
+    prestamped_turn = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="held",
+            metrics=usage(10, 2),
+            provider_data={REQUEST_IDENTITY_KEY: "held-identity"},
+        ),
+        stop_reason="end",
+    )
+    held_model = ScriptedModel([[TextDelta("held"), prestamped_turn]], model_params=params)
+    held_messages = _prompt()
+    await run_loop(spec(held_model), held_messages)
+    assert held_messages[-1].provider_data == {
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        REQUEST_IDENTITY_KEY: "held-identity",
+        CACHE_ROUTING_KEY: expected_digest,
+    }
+
+    # A rewritten attempt records neither request identity nor cache routing digest.
+    rewritten_turn = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="rewritten",
+            metrics=usage(10, 2),
+            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+        ),
+        stop_reason="end",
+    )
+    rewritten_model = ScriptedModel([[TextDelta("rewritten"), rewritten_turn]], model_params=params)
+    rewritten_messages = _prompt()
+    await run_loop(spec(rewritten_model), rewritten_messages)
+    assert rewritten_messages[-1].provider_data == {
         REWRITTEN_ATTEMPT_KEY: True,
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
     }
@@ -1358,3 +1437,160 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI")],
     }
     assert messages[-1].provider_data["mindroom_model"] == {"id": "m", "provider": "OpenAI"}
+
+
+async def test_reasoning_only_content_filter_after_tool_call_fails_and_keeps_history_clean() -> None:
+    """A reasoning-only content_filter turn after a tool call fails loudly without saving the aborted thought."""
+
+    def _make_steps() -> list[Any]:
+        first_usage = usage(10, 4)
+        second_usage = usage(20, 6)
+        aborted = Message(role="assistant", reasoning_content="Thinking...", metrics=second_usage)
+        return [
+            calls(tool_call("echo", "c1", text="ok"), metrics=first_usage),
+            [
+                ReasoningEvent("Thinking..."),
+                UsageReported(second_usage),
+                TurnCompleted(message=aborted, stop_reason="content_filter", raw_stop_reason="RECITATION"),
+            ],
+        ]
+
+    # Direct model loop raises typed ModelSafeguardRefusal naming RECITATION and keeps billed usage once.
+    loop_messages = _prompt()
+    loop_record = run_record()
+    with pytest.raises(ModelSafeguardRefusal) as raised:
+        await run_loop(spec(ScriptedModel(_make_steps()), toolkit(echo)), loop_messages, record=loop_record)
+
+    assert raised.value.provider_code == "RECITATION"
+    assert "RECITATION" in str(raised.value)
+    assert "(RECITATION)" in get_user_friendly_error_message(raised.value, "code")
+    assert all(message.reasoning_content is None for message in loop_messages)
+    assert loop_record.metrics is not None
+    assert (loop_record.metrics.tokens.input_tokens, loop_record.metrics.tokens.output_tokens) == (30, 10)
+
+    # Full run_agent stores RunStatus.error (never completed), re-raises, and preserves earlier tool execution.
+    persisted: list[RunRecord] = []
+
+    async def save(record: RunRecord) -> None:
+        persisted.append(record)
+
+    with pytest.raises(ModelSafeguardRefusal) as run_raised:
+        async for _event in run_agent(
+            spec(ScriptedModel(_make_steps()), toolkit(echo)),
+            [Message(role="user", content="hi")],
+            ctx=context(),
+            persist=save,
+            request_template=EMPTY_REQUEST,
+        ):
+            pass
+    assert run_raised.value.provider_code == "RECITATION"
+    [record] = persisted
+    assert record.status is RunStatus.error
+    assert record.error is not None
+    assert "RECITATION" in record.error
+    assert all(message.reasoning_content is None for message in record.messages)
+    assert [tool.tool_name for tool in record.tools or ()] == ["echo"]
+    assert record.metrics is not None
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 10)
+
+    # Without reported usage, no placeholder assistant message is appended at all.
+    no_usage_steps = [
+        calls(tool_call("echo", "c1", text="ok")),
+        [
+            ReasoningEvent("Thinking..."),
+            TurnCompleted(
+                message=Message(role="assistant", reasoning_content="Thinking..."),
+                stop_reason="content_filter",
+                raw_stop_reason="RECITATION",
+            ),
+        ],
+    ]
+    no_usage_messages = _prompt()
+    with pytest.raises(ModelSafeguardRefusal):
+        await run_loop(spec(ScriptedModel(no_usage_steps), toolkit(echo)), no_usage_messages)
+    assert [message.role for message in no_usage_messages] == ["system", "user", "assistant", "tool"]
+
+
+async def test_empty_or_reasoning_only_output_limit_raises_while_partial_text_completes() -> None:
+    """Output-limit turns with no text or tool calls raise ModelOutputLimitError; partial text still completes."""
+    reasoning_only = [
+        ReasoningEvent("Long thought..."),
+        TurnCompleted(
+            message=Message(role="assistant", reasoning_content="Long thought..."),
+            stop_reason="output_limit",
+        ),
+    ]
+    with pytest.raises(ModelOutputLimitError, match="while reasoning"):
+        await run_loop(spec(ScriptedModel([reasoning_only])), _prompt())
+
+    empty_limit = [
+        TurnCompleted(message=Message(role="assistant"), stop_reason="output_limit", raw_stop_reason="max_tokens"),
+    ]
+    with pytest.raises(ModelOutputLimitError, match="before producing any text or tool calls"):
+        await run_loop(spec(ScriptedModel([empty_limit])), _prompt())
+
+    context_window_limit = [
+        TurnCompleted(
+            message=Message(role="assistant"),
+            stop_reason="output_limit",
+            raw_stop_reason="model_context_window_exceeded",
+        ),
+    ]
+    with pytest.raises(ContextWindowExceeded, match="model_context_window_exceeded") as context_exc:
+        await run_loop(spec(ScriptedModel([context_window_limit])), _prompt())
+    assert context_exc.value.provider_code == "model_context_window_exceeded"
+
+    partial_text = [
+        TextDelta("Partial answer"),
+        TurnCompleted(message=Message(role="assistant", content="Partial answer"), stop_reason="output_limit"),
+    ]
+    _, record = await run_loop(spec(ScriptedModel([partial_text])), _prompt())
+    assert record.content == "Partial answer"
+
+
+async def test_abnormal_stop_reasons_and_partial_tool_calls_fail_without_running_tools() -> None:
+    """Incomplete/empty stops and tool_use without calls fail, and filtered/incomplete tool calls never run."""
+    ran: list[str] = []
+
+    def probe(text: str) -> str:
+        """Record a probe call."""
+        ran.append(text)
+        return text
+
+    incomplete = [
+        TurnCompleted(message=Message(role="assistant"), stop_reason="incomplete", raw_stop_reason="OTHER"),
+    ]
+    with pytest.raises(ProviderUnavailable) as unavailable:
+        await run_loop(spec(ScriptedModel([incomplete]), toolkit(probe)), _prompt())
+    assert unavailable.value.provider_code == "OTHER"
+
+    empty_tool_use = [TurnCompleted(message=Message(role="assistant"), stop_reason="tool_use")]
+    with pytest.raises(ProviderError, match="tool_use"):
+        await run_loop(spec(ScriptedModel([empty_tool_use]), toolkit(probe)), _prompt())
+
+    reasoning_only_tool_use = [
+        ReasoningEvent("Deciding..."),
+        TurnCompleted(message=Message(role="assistant", reasoning_content="Deciding..."), stop_reason="tool_use"),
+    ]
+    with pytest.raises(ProviderError, match="tool_use"):
+        await run_loop(spec(ScriptedModel([reasoning_only_tool_use]), toolkit(probe)), _prompt())
+
+    text_with_tool_use = [
+        TextDelta("Answer anyway."),
+        TurnCompleted(message=Message(role="assistant", content="Answer anyway."), stop_reason="tool_use"),
+    ]
+    _, text_record = await run_loop(spec(ScriptedModel([text_with_tool_use]), toolkit(probe)), _prompt())
+    assert text_record.content == "Answer anyway."
+
+    filtered_call = calls(tool_call("probe", "c1", text="never"))
+    filtered_call[-1] = replace(filtered_call[-1], stop_reason="content_filter", raw_stop_reason="SAFETY")
+    with pytest.raises(ModelSafeguardRefusal) as refused:
+        await run_loop(spec(ScriptedModel([filtered_call]), toolkit(probe)), _prompt())
+    assert refused.value.provider_code == "SAFETY"
+
+    incomplete_call = calls(tool_call("probe", "c2", text="never"))
+    incomplete_call[-1] = replace(incomplete_call[-1], stop_reason="incomplete", raw_stop_reason="OTHER")
+    with pytest.raises(ProviderUnavailable) as incomplete_exc:
+        await run_loop(spec(ScriptedModel([incomplete_call]), toolkit(probe)), _prompt())
+    assert incomplete_exc.value.provider_code == "OTHER"
+    assert ran == []

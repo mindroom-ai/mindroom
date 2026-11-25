@@ -42,6 +42,7 @@ from mindroom.approval.tool_approval import (
     tool_may_require_approval,
 )
 from mindroom.cli.config import _full_template
+from mindroom.cli.setup_matrix import unconfigured_self_hosted_matrix_selection
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -1950,7 +1951,9 @@ async def test_starter_config_asks_before_config_manager_changes_configuration(
     expected: bool,
 ) -> None:
     """The config init starter, which seeds hosted instances too, gates config_manager writes but not its reads."""
-    config = Config.model_validate(yaml.safe_load(_full_template("openrouter", matrix_server="self-hosted")))
+    config = Config.model_validate(
+        yaml.safe_load(_full_template("openrouter", matrix_selection=unconfigured_self_hosted_matrix_selection())),
+    )
 
     requires_approval, _ = await evaluate_tool_approval(
         config,

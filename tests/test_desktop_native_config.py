@@ -216,6 +216,7 @@ def test_simultaneous_app_and_terminal_saves_have_one_winner(tmp_path: Path, mon
         {"allowed_app_ids": ["com.example.Editor", "chat.mindroom.menubar"]},
         {"allowed_app_ids": ["chat.mindroom.desktophelper"]},
         {"capture": {"max_screenshot_width": 319, "jpeg_quality": 80}},
+        {"capture": {"max_screenshot_width": 1568, "jpeg_quality": 19}},
         {"capture": {"max_screenshot_width": 1568, "jpeg_quality": 96}},
         {
             "browser": {
@@ -497,3 +498,12 @@ def test_upsert_rejects_mismatched_ed25519_for_same_device() -> None:
     with pytest.raises(NativeConfigError) as caught:
         cfg.with_upserted_controller(conflicting)
     assert caught.value.code == "invalid_request"
+
+
+def test_native_config_accepts_full_jpeg_quality_range() -> None:
+    """Saved configs accept jpeg_quality from 20 through 95."""
+    for quality in (20, 35, 95):
+        cfg = NativeDesktopConfig.from_payload(
+            _payload(capture={"max_screenshot_width": 1568, "jpeg_quality": quality}),
+        )
+        assert cfg.capture.jpeg_quality == quality

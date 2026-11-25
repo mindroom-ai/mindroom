@@ -63,8 +63,9 @@ def test_the_session_context_names_the_date_and_timezone() -> None:
         context = render_session_context(Config(), "America/New_York")
 
     assert context == (
-        "<mindroom_session_context>\n## Current Date and Time\nToday is Friday, March 20, 2026.\n"
-        "Timezone: America/New_York (EDT)\n</mindroom_session_context>"
+        "<mindroom_session_context>\n"
+        "Current date: Friday, March 20, 2026 (America/New_York, EDT).\n"
+        "</mindroom_session_context>"
     )
 
 
@@ -75,7 +76,7 @@ def test_the_session_context_in_utc() -> None:
         mock_datetime.now.return_value = frozen_now
         context = render_session_context(Config(), Config().timezone)
 
-    assert "Today is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n" in context
+    assert "Current date: Friday, March 20, 2026 (UTC, UTC)." in context
 
 
 def test_the_session_context_rejects_an_unknown_timezone() -> None:
@@ -115,15 +116,13 @@ def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None
     assert "@mindroom_general" in role
 
     assert "General assistant" in role
-    assert "## Current Date and Time" not in role
+    assert "Current date:" not in role
     stable, turn = prompt_for_turn(build)
     assert isinstance(turn.content, str)
-    assert "## Current Date and Time" in turn.content
-    assert "Today is Friday, March 20, 2026." in turn.content
-    assert "Timezone: America/Los_Angeles (PDT)" in turn.content
+    assert "Current date: Friday, March 20, 2026 (America/Los_Angeles, PDT)." in turn.content
     assert "The current time is" not in turn.content
     assert "General assistant" in str(stable.content)
-    assert "## Current Date and Time" not in str(stable.content)
+    assert "Current date:" not in str(stable.content)
 
 
 def test_agent_timezone_overrides_the_global_timezone_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,8 +137,7 @@ def test_agent_timezone_overrides_the_global_timezone_in_the_prompt(monkeypatch:
         build = _build(config, monkeypatch)
 
     assert build.prompt.turn_context is not None
-    assert "Today is Saturday, March 21, 2026." in build.prompt.turn_context
-    assert "Timezone: Europe/Amsterdam (CET)" in build.prompt.turn_context
+    assert "Current date: Saturday, March 21, 2026 (Europe/Amsterdam, CET)." in build.prompt.turn_context
 
 
 def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,8 +154,8 @@ def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyP
 
     assert agent_ny.prompt.turn_context is not None
     assert agent_tokyo.prompt.turn_context is not None
-    assert "Timezone: America/New_York (EDT)" in agent_ny.prompt.turn_context
-    assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.prompt.turn_context
+    assert "(America/New_York, EDT)." in agent_ny.prompt.turn_context
+    assert "(Asia/Tokyo, JST)." in agent_tokyo.prompt.turn_context
     assert agent_ny.prompt.role == agent_tokyo.prompt.role
 
 
@@ -177,7 +175,7 @@ def test_agent_prompt_datetime_stable_within_same_day(monkeypatch: pytest.Monkey
     assert first_agent.prompt.role == second_agent.prompt.role
     assert first_agent.prompt.turn_context == second_agent.prompt.turn_context
     assert first_agent.prompt.turn_context is not None
-    assert "Today is Friday, March 20, 2026." in first_agent.prompt.turn_context
+    assert "Current date: Friday, March 20, 2026 (UTC, UTC)." in first_agent.prompt.turn_context
 
 
 def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,7 +208,6 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
         member = members.build("general", members.model_names["general"])
 
     assert member.prompt.role is not None
-    assert "## Current Date and Time" not in member.prompt.role
+    assert "Current date:" not in member.prompt.role
     leader_prompt = system_text(team.spec.leader.system_messages)
-    assert "Today is Friday, March 20, 2026." in leader_prompt
-    assert "Timezone: UTC (UTC)" in leader_prompt
+    assert "Current date: Friday, March 20, 2026 (UTC, UTC)." in leader_prompt

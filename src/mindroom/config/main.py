@@ -58,7 +58,9 @@ from mindroom.config.legacy_fields import (
     RETIRED_PROMPT_NAMES,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
+    dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_dynamic_workflow_approval_error,
     retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
@@ -130,7 +132,6 @@ from mindroom.constants import (
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
 from mindroom.entity_resolution import (
-    canonical_room_reference,
     names_room,
     resolve_agent_thread_mode,
     resolve_room_scoped_value,
@@ -160,7 +161,7 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Collection
 
     from pydantic_core import ErrorDetails
 
@@ -533,6 +534,46 @@ class Config(BaseModel):
         return fallback if fallback is not None else f"Unknown {label}: {model!r}"
 
     @model_validator(mode="after")
+    def validate_model_fallbacks(self) -> Config:
+        """Require each model's ``fallbacks`` to name other configured models, once each, without a cycle."""
+        for name, model in self.models.items():
+            for fallback in model.fallbacks:
+                if fallback == name:
+                    msg = f"models.{name}.fallbacks must not name the model itself"
+                    raise ValueError(msg)
+                # A ``name@level`` reference is not a configured name, though the table finds it.
+                if fallback not in self.models.keys():  # noqa: SIM118 - ModelTable.__contains__ accepts name@level
+                    available = ", ".join(sorted(self.models))
+                    msg = f"models.{name}.fallbacks: unknown model {fallback!r}. Configured models: {available}"
+                    raise ValueError(msg)
+            if len(set(model.fallbacks)) != len(model.fallbacks):
+                msg = f"models.{name}.fallbacks must not repeat a model"
+                raise ValueError(msg)
+        self._validate_fallback_cycles()
+        return self
+
+    def _validate_fallback_cycles(self) -> None:
+        """Raise ``ValueError`` when following ``fallbacks`` reaches a cycle; each model is explored once."""
+        done: set[str] = set()
+        path: list[str] = []
+
+        def visit(name: str) -> None:
+            path.append(name)
+            for fallback in self.models[name].fallbacks:
+                if fallback in path:
+                    cycle = [*path[path.index(fallback) :], fallback]
+                    msg = f"models fallbacks form a cycle: {' -> '.join(cycle)}"
+                    raise ValueError(msg)
+                if fallback not in done:
+                    visit(fallback)
+            path.pop()
+            done.add(name)
+
+        for name in self.models:
+            if name not in done:
+                visit(name)
+
+    @model_validator(mode="after")
     def validate_budgets(self) -> Config:
         """Require a configured fallback model for budgets."""
         if self.budgets is not None and self.budgets.fallback_model not in self.models:
@@ -679,6 +720,25 @@ class Config(BaseModel):
                     reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
         return self
 
+    def _dynamic_workflow_alias_usage(self) -> tuple[bool, bool]:
+        """Return ``(used_alias, ignored_allowed_tools)`` across default and agent tool lists."""
+        entries = (
+            *self.defaults.tools,
+            *(entry for agent in self.agents.values() for entry in agent.tools),
+        )
+        aliased = [entry for entry in entries if entry.aliased_from_dynamic_workflow]
+        return bool(aliased), any(entry.ignored_legacy_allowed_tools for entry in aliased)
+
+    @model_validator(mode="after")
+    def warn_deprecated_dynamic_workflow_alias(self, info: ValidationInfo) -> Config:
+        """Log one concise warning when a config still names the retired `dynamic_workflow` tool."""
+        if isinstance(info.context, dict) and info.context.get("suppress_deprecation_warnings"):
+            return self
+        used_alias, ignored_allowed_tools = self._dynamic_workflow_alias_usage()
+        if used_alias:
+            logger.warning(dynamic_workflow_deprecation_warning(ignored_allowed_tools=ignored_allowed_tools))
+        return self
+
     @model_validator(mode="after")
     def validate_egress_service_agents(self) -> Config:
         """Ensure each egress service's `agents` list names configured agents."""
@@ -740,23 +800,7 @@ class Config(BaseModel):
             )
             raise ValueError(msg)
 
-        self._reject_call_agents_sharing_a_room(lambda room: room)
         return self
-
-    def _reject_call_agents_sharing_a_room(self, room_key: Callable[[str], str]) -> None:
-        """Reject a room, compared by ``room_key``, that more than one call agent joins."""
-        agents_by_room: dict[str, list[str]] = {}
-        for agent_name in self.calls.agents:
-            for room in self.agents[agent_name].rooms:
-                agents_by_room.setdefault(room_key(room), []).append(agent_name)
-        conflicts = [
-            f"{room} ({', '.join(sorted(agent_names))})"
-            for room, agent_names in sorted(agents_by_room.items())
-            if len(agent_names) > 1
-        ]
-        if conflicts:
-            msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
-            raise ConfigRuntimeValidationError(msg)
 
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
@@ -1178,14 +1222,17 @@ class Config(BaseModel):
             expansion.data,
             runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            suppress_deprecation_warnings=True,
         )
+        probe_config: Config | None = None
         if expansion.probe_data is not None:
             # A template or override nobody uses yet must fail now, not at a later reload that onboards someone.
             try:
-                cls._validate_runtime_data(
+                probe_config = cls._validate_runtime_data(
                     expansion.probe_data,
                     runtime_paths,
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                    suppress_deprecation_warnings=True,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
                 msg = (
@@ -1204,6 +1251,9 @@ class Config(BaseModel):
         config._personal_agent_instances = expansion.instances
         config._personal_agent_call_templates = expansion.call_templates
         config._personal_agent_call_agents = expansion.call_agents
+        alias_usage = [config._dynamic_workflow_alias_usage()]
+        if probe_config is not None:
+            alias_usage.append(probe_config._dynamic_workflow_alias_usage())
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
         generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
@@ -1212,6 +1262,7 @@ class Config(BaseModel):
                     generated_data,
                     runtime_paths,
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                    suppress_deprecation_warnings=True,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
                 if candidate:
@@ -1221,6 +1272,7 @@ class Config(BaseModel):
             config._personal_agent_instances = expansion.instances
             config._personal_agent_call_templates = expansion.call_templates
             config._personal_agent_call_agents = expansion.call_agents
+            alias_usage.append(config._dynamic_workflow_alias_usage())
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
         # authored_model_dump drops generated agents while they match these dumps.
         config._generated_agent_dumps = {
@@ -1230,6 +1282,12 @@ class Config(BaseModel):
         config._personal_agents_added_agents_section = (
             bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
         )
+        if any(used for used, _ignored in alias_usage):
+            logger.warning(
+                dynamic_workflow_deprecation_warning(
+                    ignored_allowed_tools=any(ignored for _used, ignored in alias_usage),
+                ),
+            )
         return config
 
     @classmethod
@@ -1239,9 +1297,15 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool,
+        suppress_deprecation_warnings: bool = False,
     ) -> Config:
-        config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
-        config._reject_call_agents_sharing_a_room(lambda room: canonical_room_reference(room, runtime_paths))
+        config = cls.model_validate(
+            data,
+            context={
+                "runtime_paths": runtime_paths,
+                "suppress_deprecation_warnings": suppress_deprecation_warnings,
+            },
+        )
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
@@ -1591,6 +1655,18 @@ class Config(BaseModel):
             is not None
         ):
             raise ToolConfigOverrideError(trigger_error)
+        if (
+            any(entry.aliased_from_dynamic_workflow for _, entry in entries)
+            and (
+                workflow_error := retired_dynamic_workflow_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
+            is not None
+        ):
+            raise ToolConfigOverrideError(workflow_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

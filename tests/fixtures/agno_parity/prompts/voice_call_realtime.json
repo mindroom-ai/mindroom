@@ -1,7 +1,7 @@
 {
   "description": "Realtime voice call: the chat system prompt and the tool schemas handed to the realtime model.",
   "exported": {
-    "instructions": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\n## Personality Context\nEach section below is headed by the path of the file it was read from, inlined here automatically every turn. Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first; its result lists the skill's references (`available_references`) and scripts (`available_scripts`)\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). When you do not know a skill's filenames, call `get_skill_reference` or `get_skill_script` with only the skill name to list them.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n\n</skills_system>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+    "instructions": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
     "tools": [
       {
         "name": "add",
@@ -27,7 +27,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -60,7 +60,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -93,7 +93,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -126,7 +126,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -159,7 +159,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -188,7 +188,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -216,7 +216,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -244,7 +244,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -254,17 +254,72 @@
       },
       {
         "name": "schedule",
-        "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
+        "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "request": {
+            "message": {
               "type": "string",
-              "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+              "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
             },
             "new_thread": {
               "type": "boolean",
-              "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+              "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
+            },
+            "execute_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
+            },
+            "delay_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
+            },
+            "cron": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Short listing label (defaults to trimmed `message`)."
+            },
+            "timezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
             },
             "history_limit": {
               "anyOf": [
@@ -275,18 +330,11 @@
                   "type": "null"
                 }
               ],
-              "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
+              "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
             },
             "silent": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+              "type": "boolean",
+              "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
             },
             "model": {
               "anyOf": [
@@ -297,7 +345,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+              "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -309,36 +357,36 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
-            "request",
+            "message",
             "new_thread"
           ]
         }
       },
       {
         "name": "schedule_tool_call",
-        "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+        "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
         "parameters": {
           "type": "object",
           "properties": {
             "tool_name": {
               "type": "string",
-              "description": "One of your tool functions, e.g. \"post_slack_message\"."
+              "description": "Your tool function name (e.g. \"post_slack_message\")."
             },
             "arguments_json": {
               "type": "string",
-              "description": "The call's arguments as a JSON object string."
+              "description": "Arguments as a JSON object string."
             },
             "execute_at": {
               "type": "string",
-              "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+              "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
             },
             "description": {
               "type": "string",
-              "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+              "description": "Short action summary (guides execution if any arguments are approved)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -350,7 +398,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -363,13 +411,13 @@
       },
       {
         "name": "run_scheduled_call",
-        "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+        "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
         "parameters": {
           "type": "object",
           "properties": {
             "task_id": {
               "type": "string",
-              "description": "The scheduled task's ID from its message."
+              "description": "Task ID from the scheduled prompt."
             },
             "arguments_json": {
               "anyOf": [
@@ -380,7 +428,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+              "description": "Replacement JSON object string (only when any arguments were approved)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -392,7 +440,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -402,17 +450,79 @@
       },
       {
         "name": "edit_schedule",
-        "description": "Edit an existing scheduled task by replacing its timing and content.",
+        "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
         "parameters": {
           "type": "object",
           "properties": {
             "task_id": {
               "type": "string",
-              "description": "The ID of the task to edit (from list_schedules)."
+              "description": "Task ID from `list_schedules`."
             },
-            "request": {
-              "type": "string",
-              "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New trigger message."
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New listing label."
+            },
+            "execute_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New one-time ISO 8601 datetime with time."
+            },
+            "delay_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New one-time delay in seconds (>= 1)."
+            },
+            "cron": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New 5-field cron in `timezone`."
+            },
+            "timezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
             },
             "history_limit": {
               "anyOf": [
@@ -423,7 +533,11 @@
                   "type": "null"
                 }
               ],
-              "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
+              "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
+            },
+            "clear_history_limit": {
+              "type": "boolean",
+              "description": "Set `True` to remove the history limit (unlimited)."
             },
             "silent": {
               "anyOf": [
@@ -434,7 +548,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
+              "description": "Update quiet delivery mode."
             },
             "model": {
               "anyOf": [
@@ -445,7 +559,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
+              "description": "Per-run model alias or `name@level`; `\"\"` restores default."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -457,12 +571,11 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
-            "task_id",
-            "request"
+            "task_id"
           ]
         }
       },
@@ -482,7 +595,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": []
@@ -496,7 +609,7 @@
           "properties": {
             "task_id": {
               "type": "string",
-              "description": "The ID of the task to cancel (from list_schedules)."
+              "description": "Task ID from `list_schedules`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -508,7 +621,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -536,7 +649,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -546,7 +659,7 @@
       },
       {
         "name": "get_skill_reference",
-        "description": "Load a reference document from a skill's references. Use this to access detailed documentation.",
+        "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -575,7 +688,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [
@@ -585,7 +698,7 @@
       },
       {
         "name": "get_skill_script",
-        "description": "Read a script from a skill. This never runs the script; run it with your shell tool if you have one.",
+        "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -614,7 +727,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
           "required": [

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     name="scheduler",
     file_access=ToolFileAccess.NONE,
     display_name="Scheduler",
-    description="Schedule tasks and reminders, and manage upcoming runs",
+    description="Schedule one-time or recurring cron tasks, reminders, silent monitors, or pre-approved tool calls, and manage upcoming runs",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

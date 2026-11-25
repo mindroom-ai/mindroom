@@ -94,16 +94,9 @@ def matrix_message_target_item(
     room_label = f"{room_display_name!r} (room ID {target.room_id})" if room_display_name else target.room_id
     thread_id = target.resolved_thread_id
     if thread_id is None:
-        text = (
-            f"You are responding in Matrix room {room_label}, outside any thread. "
-            "When calling matrix_message here, use this room_id and do not pass thread_id."
-        )
+        text = f"Current Matrix context: room {room_label} (room timeline, no thread)."
     else:
-        text = (
-            f"You are responding in Matrix room {room_label}, in thread {thread_id}. "
-            "When calling matrix_message here, use this room_id and thread_id."
-        )
-    text += " Use a current or selected <msg event_id> as target for reactions and edits."
+        text = f"Current Matrix context: room {room_label}, thread {thread_id}."
     return EnrichmentItem(
         key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
         minimal_required=True,

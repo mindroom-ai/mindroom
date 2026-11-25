@@ -23,6 +23,11 @@ logger = get_logger(__name__)
 _GOOGLE_DOCS_URL_ID_PATTERN = re.compile(
     r"^https?://docs\.google\.com/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)(?:[/?#]|$)",
 )
+_REVISION_CONFLICT_GUIDANCE = (
+    "An HTTP 400 with required_revision_id may mean the document changed since it was read "
+    "(or another request error). Re-read the document/tab, verify the target text and recompute "
+    "UTF-16 start-inclusive/end-exclusive ranges, and retry with the current revisionId."
+)
 
 
 def _document_url(document_id: str) -> str:
@@ -78,11 +83,19 @@ class GoogleDocsTools(GoogleApiToolkit):
             **kwargs,
         )
 
-    def _batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> dict[str, object]:
+    def _batch_update(
+        self,
+        document_id: str,
+        requests: list[dict[str, Any]],
+        required_revision_id: str | None = None,
+    ) -> dict[str, object]:
         service = self._google_api_service()
+        body: dict[str, Any] = {"requests": requests}
+        if required_revision_id is not None:
+            body["writeControl"] = {"requiredRevisionId": required_revision_id}
         return cast(
             "dict[str, object]",
-            service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute(),
+            service.documents().batchUpdate(documentId=document_id, body=body).execute(),
         )
 
     def google_docs_create_document(self, title: str, initial_text: str = "") -> str:
@@ -270,7 +283,12 @@ class GoogleDocsTools(GoogleApiToolkit):
         except HttpError as exc:
             return google_http_error_result("Google Docs", "replace_text", exc)
 
-    def google_docs_batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> str:
+    def google_docs_batch_update(
+        self,
+        document_id: str,
+        requests: list[dict[str, Any]],
+        required_revision_id: str | None = None,
+    ) -> str:
         """Apply Google Docs API batchUpdate requests to a document, in order and all or none.
 
         Use this for what the text functions cannot do, such as tables, headings, text and paragraph styles,
@@ -283,10 +301,15 @@ class GoogleDocsTools(GoogleApiToolkit):
         without a tabId is in the first tab.
         Each request sees the document as the requests before it left it, so make several edits from the end of
         the document toward its start.
+        Pass required_revision_id (the revisionId from google_docs_get_document) for atomic optimistic
+        concurrency via writeControl.requiredRevisionId; if a stale revision rejects the batch, re-read the
+        document/tab, verify the target text, and recompute UTF-16 start-inclusive/end-exclusive ranges
+        before retrying.
 
         Args:
             document_id: Google Docs document ID.
             requests: Docs API batchUpdate Request objects.
+            required_revision_id: Optional Docs revisionId to require via writeControl.requiredRevisionId.
 
         Returns:
             JSON containing one reply per request in the Google Docs batch-update response.
@@ -297,8 +320,17 @@ class GoogleDocsTools(GoogleApiToolkit):
             return json.dumps({"error": "Google Docs document_id must not be empty"})
         if not requests:
             return json.dumps({"error": "Google Docs requests must not be empty"})
+        normalized_revision_id: str | None = None
+        if required_revision_id is not None:
+            normalized_revision_id = required_revision_id.strip()
+            if not normalized_revision_id:
+                return json.dumps({"error": "Google Docs required_revision_id must not be empty when provided"})
         try:
-            response = self._batch_update(document_id, requests)
+            response = self._batch_update(
+                document_id,
+                requests,
+                required_revision_id=normalized_revision_id,
+            )
             return json.dumps(
                 {
                     "update": response,
@@ -306,4 +338,7 @@ class GoogleDocsTools(GoogleApiToolkit):
                 },
             )
         except HttpError as exc:
-            return google_http_error_result("Google Docs", "batch_update", exc)
+            guidance = (
+                _REVISION_CONFLICT_GUIDANCE if normalized_revision_id is not None and exc.resp.status == 400 else None
+            )
+            return google_http_error_result("Google Docs", "batch_update", exc, guidance=guidance)

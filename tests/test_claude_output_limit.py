@@ -171,11 +171,18 @@ def _http_response(body: dict[str, Any], message: dict[str, Any]) -> httpx.Respo
     return httpx.Response(200, json=message)
 
 
+def _is_compaction_request(body: dict[str, Any]) -> bool:
+    """Return whether ``body`` is a compaction summary request (tool-less XML or cache-warm fork)."""
+    if "tools" not in body:
+        return True
+    return "SYSTEM DIRECTIVE — CONTEXT COMPACTION" in json.dumps(body["messages"][-1]["content"], ensure_ascii=False)
+
+
 def _fake_claude(monkeypatch: pytest.MonkeyPatch, responses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Serve scripted Messages API responses to every Claude model MindRoom builds; return the request bodies.
 
     The last response repeats for every further request, as a model that keeps doing the same thing would.
-    Only compaction asks for a summary without tools, so such a request gets a summary instead.
+    Compaction requests (either tool-less XML or cache-warm forks) get a summary instead.
     """
     bodies: list[dict[str, Any]] = []
     pending = chain(responses, repeat(responses[-1]))
@@ -183,7 +190,9 @@ def _fake_claude(monkeypatch: pytest.MonkeyPatch, responses: list[dict[str, Any]
     def handle(request: httpx2.Request) -> httpx.Response:
         body = json.loads(request.content)
         bodies.append(body)
-        message = next(pending) if "tools" in body else _answer("The agent started writing big.py in one call.")
+        message = (
+            _answer("The agent started writing big.py in one call.") if _is_compaction_request(body) else next(pending)
+        )
         return _http_response(body, message)
 
     monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx2.AsyncClient(transport=httpx2_transport(handle)).send)
@@ -286,7 +295,7 @@ async def test_compaction_between_cut_offs_does_not_renew_the_retries(
 
     response = await _reply(compacting_config, "Write the full simulation script to big.py.")
 
-    requests = [body for body in bodies if "tools" in body]
+    requests = [body for body in bodies if not _is_compaction_request(body)]
     assert len(requests) == 3
     # Both retries were compacted first, so neither carried an earlier cut-off response.
     assert len(bodies) - len(requests) == 2

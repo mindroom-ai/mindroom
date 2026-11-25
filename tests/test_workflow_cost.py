@@ -18,7 +18,6 @@ from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.llm.events import TextDelta
 from mindroom.providers.identity import model_identity
 from mindroom.script_runs.models import ScriptRunState
-from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.limits import run_usage
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.usage import MessageMetrics
+    from mindroom.llm.types import MessageMetrics
 
 _PROMPT = {"prompt": "Look into it."}
 # The model costs 1 USD per million input tokens, so a request of 100,000 tokens costs ten cents.
@@ -217,16 +216,16 @@ async def test_job_that_completed_before_a_restart_is_no_cost_of_the_attempt_tha
     second attempt's. The reproducer of the second full review (Sol Major 1).
     """
     stack.continues = lambda job: job.kind == "delegation"
-    settling, settle = asyncio.Event(), agent_dispatch_module.AgentDispatcher.settle_agent
-    first = stack.engine.agent_dispatch
+    settling, settle = asyncio.Event(), agent_nodes.settle_agent
+    first = stack.engine
 
-    async def held(self: agent_dispatch_module.AgentDispatcher, *args: object, **kwargs: object) -> None:
-        if self is first:
+    async def held(engine: object, *args: object, **kwargs: object) -> None:
+        if engine is first:
             settling.set()
             await asyncio.Event().wait()
-        await settle(self, *args, **kwargs)  # type: ignore[arg-type]
+        await settle(engine, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(agent_dispatch_module.AgentDispatcher, "settle_agent", held)
+    monkeypatch.setattr(agent_nodes, "settle_agent", held)
     stack.child_script(answer("done", _usd(0.20)))
     await stack.submit("@0", "agent", _PROMPT)
     await asyncio.wait_for(settling.wait(), 5)

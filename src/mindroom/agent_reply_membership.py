@@ -190,7 +190,7 @@ class AgentReplyMembershipIndex:
         """Return whether the snapshot knows the observers' rooms, which an invalidation or a failed room list unsets."""
         return self._snapshot.possible_joined_room_ids is not None
 
-    def _misses_member(self, sender_id: str, room_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
+    def misses_member(self, sender_id: str, room_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
         """Return whether the snapshot holds one room ready without a sender, as before the observer applies their join.
 
         The room's observer applies a join from its own sync, which can trail the room's live roster.
@@ -217,10 +217,10 @@ class AgentReplyMembershipIndex:
         refresh already in flight may have read the room before the join, so one more follows it.
         """
         for _ in range(2):
-            if self._misses_member(sender_id, room_id, config, runtime_paths):
+            if self.misses_member(sender_id, room_id, config, runtime_paths):
                 self._reread_room_ids.add(room_id)
             await refresh()
-            if not self._misses_member(sender_id, room_id, config, runtime_paths):
+            if not self.misses_member(sender_id, room_id, config, runtime_paths):
                 return
 
     def awaits_observer_join(

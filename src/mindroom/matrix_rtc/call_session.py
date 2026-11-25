@@ -26,7 +26,7 @@ from mindroom.matrix_rtc.events import (
     build_membership_content,
     membership_state_key,
 )
-from mindroom.matrix_rtc.frame_keys import USE_KEY_DELAY_MS, FrameKeyManager
+from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -408,7 +408,7 @@ class CallSession:
                 # fixes it too (fail closed), so the old key still retires.
                 own_key = (distribution.key, distribution.key_index, distribution.generation)
                 if first_attempt and not self._stopped and (raised or distribution.generation):
-                    delay_ms = USE_KEY_DELAY_MS if distribution.generation else 0
+                    delay_ms = _USE_KEY_DELAY_MS if distribution.generation else 0
                     self._spawn(self._apply_own_key_at(self.deps.monotonic_ms() + delay_ms, *own_key))
             if first_attempt and distribution.generation == 0:
                 self._apply_own_key(*own_key)

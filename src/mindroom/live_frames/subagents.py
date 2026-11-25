@@ -64,7 +64,7 @@ _MAX_MODEL_CHARACTERS = 200
 type _Frame = dict[str, object]
 
 
-class _FrameStream(Protocol):
+class FrameStream(Protocol):
     """One run's frames as the publisher of its account and room sends them, whatever they show."""
 
     # Whether the stream's latest state has not gone out yet.
@@ -331,7 +331,7 @@ class _Publisher:
         self._room_id = key[1]
         self._client = client
         self._homeserver_url = homeserver_url
-        self._streams: dict[str, _FrameStream] = {}
+        self._streams: dict[str, FrameStream] = {}
         # The latest status of each unfinished run whose frame the room refused.
         self._refused: dict[str, str] = {}
         self._wake = asyncio.Event()
@@ -343,7 +343,7 @@ class _Publisher:
         self._refused.pop(run, None)
         self._wake.set()
 
-    def update(self, run: str, status: str, *, ended: bool, put: Callable[[Any], _FrameStream]) -> None:
+    def update(self, run: str, status: str, *, ended: bool, put: Callable[[Any], FrameStream]) -> None:
         """Queue a run's latest state for its next frame, starting the publisher when it is idle.
 
         *put* returns the run's stream with that state: a new one for None, else the one it is handed.
@@ -477,7 +477,7 @@ def publish_stream(
     status: str,
     *,
     ended: bool,
-    put: Callable[[Any], _FrameStream],
+    put: Callable[[Any], FrameStream],
     client: Callable[[], nio.AsyncClient | None],
     homeserver_url: str,
 ) -> None:
