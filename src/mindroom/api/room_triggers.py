@@ -16,7 +16,7 @@ from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.api.external_triggers import notify_reactive_event_loop
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.matrix.state import resolve_room_id
-from mindroom.plugin_http import RoomReader, client_rooms, require_room_reader
+from mindroom.plugin_http import ClientUser, client_rooms, require_room_member
 from mindroom.reactive_triggers.management import (
     TriggerRecord,
     delete_trigger_sync,
@@ -25,8 +25,14 @@ from mindroom.reactive_triggers.management import (
     read_thread_tag_present,
     set_trigger_enabled_sync,
 )
-from mindroom.reactive_triggers.models import ReactiveTriggerRecord, RoomMessageSourceSpec, ThreadTagSourceSpec
+from mindroom.reactive_triggers.models import (
+    ReactiveTriggerRecord,
+    RoomMessageSourceSpec,
+    SourceType,
+    ThreadTagSourceSpec,
+)
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.room_steward import read_in_room
 
 if TYPE_CHECKING:
@@ -37,8 +43,8 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["room-triggers"])
 
-_Room = Annotated[RoomReader, Depends(require_room_reader)]
-_TriggerKind = Literal["webhook", "room_message", "thread_tag", "external_event"]
+_Member = Annotated[ClientUser, Depends(require_room_member)]
+_TriggerKind = Literal["webhook", SourceType]
 _TriggerRelation = Literal["target", "watch"]
 _TriggerThreadMode = Literal["room", "thread", "new_thread", "origin"]
 _MatchedTrigger = tuple[TriggerRecord, _TriggerRelation, str]
@@ -75,7 +81,7 @@ class UpdateRoomTriggerRequest(BaseModel):
 
 
 @router.get("/triggers")
-async def list_room_triggers(request: Request, room: _Room, room_id: str) -> dict[str, list[TriggerRow]]:
+async def list_room_triggers(request: Request, member: _Member, room_id: str) -> dict[str, list[TriggerRow]]:
     """Return triggers targeting or watching ``room_id`` with cross-room watch redaction."""
     config, runtime_paths = _require_trigger_runtime(request)
 
@@ -89,19 +95,23 @@ async def list_room_triggers(request: Request, room: _Room, room_id: str) -> dic
         return items
 
     matched = await _run_store(_load)
-    ownership = [is_trigger_owner(room.user.user_id, rec.owner_user_id, config, runtime_paths) for rec, _, _ in matched]
+    owner_ids = equivalent_requester_ids(member.user_id, config, runtime_paths)
     watch_targets = list(
         dict.fromkeys(
             target_room
-            for (_, rel, target_room), owned in zip(matched, ownership, strict=True)
-            if rel == "watch" and not owned
+            for record, rel, target_room in matched
+            if rel == "watch" and record.owner_user_id not in owner_ids
         ),
     )
     joined_targets = set(await client_rooms(request, watch_targets)) if watch_targets else set()
     return {
         "triggers": [
-            _build_trigger_row(item, can_manage=owned, joined_target_rooms=joined_targets)
-            for item, owned in zip(matched, ownership, strict=True)
+            _build_trigger_row(
+                item,
+                can_manage=item[0].owner_user_id in owner_ids,
+                joined_target_rooms=joined_targets,
+            )
+            for item in matched
         ],
     }
 
@@ -109,7 +119,7 @@ async def list_room_triggers(request: Request, room: _Room, room_id: str) -> dic
 @router.patch("/triggers/{trigger_id}")
 async def update_room_trigger(
     request: Request,
-    room: _Room,
+    member: _Member,
     room_id: str,
     trigger_id: str,
     body: UpdateRoomTriggerRequest,
@@ -121,7 +131,7 @@ async def update_room_trigger(
         config,
         room_id,
         trigger_id,
-        room.user.user_id,
+        member.user_id,
     )
 
     refreshed_tag_present: bool | None = None
@@ -145,8 +155,8 @@ async def update_room_trigger(
             config,
             trigger_id,
             enabled=body.enabled,
-            actor_user_id=room.user.user_id,
-            authorize_reactive=partial(_require_owner, room.user.user_id, config, runtime_paths),
+            actor_user_id=member.user_id,
+            authorize_reactive=partial(_require_owner, member.user_id, config, runtime_paths),
             refreshed_tag_present=refreshed_tag_present,
         ),
     )
@@ -156,17 +166,17 @@ async def update_room_trigger(
 
 
 @router.delete("/triggers/{trigger_id}", status_code=204)
-async def delete_room_trigger(request: Request, room: _Room, room_id: str, trigger_id: str) -> Response:
+async def delete_room_trigger(request: Request, member: _Member, room_id: str, trigger_id: str) -> Response:
     """Delete one trigger belonging to ``room_id``; owner only."""
     config, runtime_paths = _require_trigger_runtime(request)
-    await _require_owned_room_trigger(runtime_paths, config, room_id, trigger_id, room.user.user_id)
+    await _require_owned_room_trigger(runtime_paths, config, room_id, trigger_id, member.user_id)
     await _run_store(
         lambda: delete_trigger_sync(
             runtime_paths,
             config,
             trigger_id,
-            actor_user_id=room.user.user_id,
-            authorize_reactive=partial(_require_owner, room.user.user_id, config, runtime_paths),
+            actor_user_id=member.user_id,
+            authorize_reactive=partial(_require_owner, member.user_id, config, runtime_paths),
         ),
     )
     return Response(status_code=204)
@@ -174,12 +184,12 @@ async def delete_room_trigger(request: Request, room: _Room, room_id: str, trigg
 
 def _require_trigger_runtime(request: Request) -> tuple[Config, RuntimePaths]:
     snapshot = bind_current_request_snapshot(request)
-    if snapshot.runtime_config is None or snapshot.runtime_paths.control_state_root is None:
+    if snapshot.runtime_config is None:
         raise HTTPException(503, "Trigger store is not available.")
     return snapshot.runtime_config, snapshot.runtime_paths
 
 
-def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, record: ReactiveTriggerRecord) -> None:
+def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, record: TriggerRecord) -> None:
     if not is_trigger_owner(user_id, record.owner_user_id, config, runtime_paths):
         raise HTTPException(403, "Only the trigger owner can manage this trigger.")
 
@@ -187,7 +197,7 @@ def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, re
 async def _run_store[T](call: Callable[[], T]) -> T:
     try:
         return await asyncio.to_thread(call)
-    except (ExternalTriggerStoreError, ReactiveTriggerStoreError, sqlite3.Error) as exc:
+    except (ExternalTriggerStoreError, ReactiveTriggerStoreError, sqlite3.Error, OSError) as exc:
         raise HTTPException(503, "Trigger store is not available.") from exc
 
 
@@ -218,8 +228,7 @@ async def _require_owned_room_trigger(
     matched = await _run_store(_find)
     if matched is None:
         raise HTTPException(404, "Trigger not found in this room.")
-    if not is_trigger_owner(user_id, matched[0].owner_user_id, config, runtime_paths):
-        raise HTTPException(403, "Only the trigger owner can manage this trigger.")
+    _require_owner(user_id, config, runtime_paths, matched[0])
     return matched
 
 
