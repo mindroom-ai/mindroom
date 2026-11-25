@@ -125,7 +125,7 @@ calls:
 Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
 The saved config keeps `mind`, not the generated agent names.
 A generated agent that `calls.agents` also names directly keeps the profile given there.
-Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
+Templates and `users` overrides may also list `rooms`; direct room calls still follow the [sole-call-agent rule](https://docs.mindroom.chat/voice-calls/#when-an-agent-joins-a-call), so a room shared by multiple calls-enabled agents does not auto-join direct calls.
 
 ## Onboarding Behavior
 

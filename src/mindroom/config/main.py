@@ -132,7 +132,6 @@ from mindroom.constants import (
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
 from mindroom.entity_resolution import (
-    canonical_room_reference,
     names_room,
     resolve_agent_thread_mode,
     resolve_room_scoped_value,
@@ -162,7 +161,7 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Collection
 
     from pydantic_core import ErrorDetails
 
@@ -801,23 +800,7 @@ class Config(BaseModel):
             )
             raise ValueError(msg)
 
-        self._reject_call_agents_sharing_a_room(lambda room: room)
         return self
-
-    def _reject_call_agents_sharing_a_room(self, room_key: Callable[[str], str]) -> None:
-        """Reject a room, compared by ``room_key``, that more than one call agent joins."""
-        agents_by_room: dict[str, list[str]] = {}
-        for agent_name in self.calls.agents:
-            for room in self.agents[agent_name].rooms:
-                agents_by_room.setdefault(room_key(room), []).append(agent_name)
-        conflicts = [
-            f"{room} ({', '.join(sorted(agent_names))})"
-            for room, agent_names in sorted(agents_by_room.items())
-            if len(agent_names) > 1
-        ]
-        if conflicts:
-            msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
-            raise ConfigRuntimeValidationError(msg)
 
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
@@ -1323,7 +1306,6 @@ class Config(BaseModel):
                 "suppress_deprecation_warnings": suppress_deprecation_warnings,
             },
         )
-        config._reject_call_agents_sharing_a_room(lambda room: canonical_room_reference(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
