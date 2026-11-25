@@ -66,10 +66,10 @@ async def record_summary_usage(
     initial_session: ConversationSession | None = None,
 ) -> None:
     """Record a summary response's counters even when the summary is rejected or later cancelled."""
-    await run_blocking_until_complete(
+    await run_session_storage_operation(
+        lambda: storage,
         partial(
             save_compaction_usage,
-            storage,
             session_id=session_id,
             requester_id=requester_id,
             model=model,

@@ -20,6 +20,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage import usage_reader
 from mindroom.session_storage.agent_storage import (
     create_agent_state_storage,
     create_state_storage,
@@ -29,7 +30,6 @@ from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, q
 from mindroom.session_storage.store import begun, connect_conversation_database
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
-from mindroom.usage import stats_storage
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -46,8 +46,6 @@ from tests.session_storage.agno_layout import recorded_owner
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    from mindroom.session_storage.usage_reader import UnreadableLayout
 
 # Writes inside a transaction until its change reaches the file, then dies, leaving a hot journal beside the database.
 _DIE_MID_WRITE = """
@@ -350,8 +348,12 @@ def test_reader_since_skips_sessions_without_recent_usage(tmp_path: Path) -> Non
     assert len([row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]) == 2
 
 
-def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_path: Path) -> None:
-    """One corrupt usage row must not hide the rest of the store from a dated read."""
+@pytest.mark.parametrize("malformed_payload", ["{not json", None], ids=["invalid-json", "null"])
+def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(
+    tmp_path: Path,
+    malformed_payload: str | None,
+) -> None:
+    """One corrupt or null usage row must not hide the rest of the store from a dated read."""
     database = tmp_path / "code.db"
     _create_database(
         database,
@@ -361,7 +363,7 @@ def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_pat
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
-            ("session-1", "broken", "{not json"),
+            ("session-1", "broken", malformed_payload),
         )
 
     rows = list(iter_usage_storage_rows(source, since=datetime(2026, 9, 30, tzinfo=UTC).timestamp()))
@@ -620,34 +622,113 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
-def test_a_read_is_one_snapshot_from_its_layout_check_to_its_last_session(
+def _seed_usage_rows(database: Path, *, session_id: str, rows: list[tuple[str, float]]) -> None:
+    with closing(connect_conversation_database(database, timeout=1.0)) as writer, begun(writer, write=True):
+        writer.execute("INSERT OR IGNORE INTO code_sessions (session_id, created_at) VALUES (?, 1)", (session_id,))
+        writer.executemany(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
+            [
+                (session_id, run_id, json.dumps({**_run(), "run_id": run_id, "created_at": created_at}))
+                for run_id, created_at in rows
+            ],
+        )
+
+
+def _intercept_usage_chunks_and_commit_after_first(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    usage_table: str,
+) -> tuple[list[tuple[int, int]], list[bool]]:
+    """Record ``(scanned_rows, matched_rows)`` per usage chunk and commit a second DELETE-mode write after chunk 1."""
+    chunks: list[tuple[int, int]] = []
+    committed: list[bool] = []
+    fetch_chunk = usage_reader._fetch_chunk
+
+    def fetch_then_write(
+        connection: sqlite3.Connection,
+        query: str,
+        parameters: tuple[object, ...],
+    ) -> list[tuple[object, ...]]:
+        batch = fetch_chunk(connection, query, parameters)
+        if usage_table in query:
+            chunks.append((len(batch), sum(1 for row in batch if row[3])))
+            if len(chunks) == 1:
+                with (
+                    closing(connect_conversation_database(database, timeout=0.05)) as writer,
+                    begun(writer, write=True),
+                ):
+                    assert writer.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+                    writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('session-mid', 2)")
+                committed.append(True)
+        return batch
+
+    monkeypatch.setattr(usage_reader, "_fetch_chunk", fetch_then_write)
+    return chunks, committed
+
+
+def test_a_writer_commits_between_usage_chunks_without_lock_contention(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A writer that commits after the read checked the layout waits for the read, which never sees its change."""
-    database = tmp_path / "code.db"
-    _create_database(database)
-    source = _source(database)
-    writes: list[str] = []
-    check_layout = stats_storage.unreadable_layout
-
-    def check_then_write(connection: sqlite3.Connection, names: TableNames) -> UnreadableLayout | None:
-        problem = check_layout(connection, names)
-        with closing(sqlite3.connect(database, timeout=0.05)) as writer:
-            try:
-                with writer:
-                    writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('session-2', 1)")
-                writes.append("committed")
-            except sqlite3.OperationalError as error:
-                writes.append(str(error))
-        return problem
-
-    monkeypatch.setattr(stats_storage, "unreadable_layout", check_then_write)
+    """A writer in DELETE journal mode commits between usage chunks while a scan is in progress."""
+    storage = create_agent_state_storage("code", tmp_path)
+    total_rows = usage_reader.USAGE_CHUNK_SIZE + 5
+    _seed_usage_rows(
+        storage.path,
+        session_id="session-1",
+        rows=[(f"run-{i}", 1_723_837_600.0 + i) for i in range(total_rows)],
+    )
+    source = _source(storage.path)
+    usage_chunks, committed = _intercept_usage_chunks_and_commit_after_first(
+        monkeypatch,
+        storage.path,
+        source.names.usage,
+    )
 
     result = list(iter_usage_storage_rows(source))
 
-    assert [row.row_key for row in result if isinstance(row, UsageSessionRow)] == ["session-1"]
-    assert writes == ["database is locked"]
+    assert usage_chunks == [(usage_reader.USAGE_CHUNK_SIZE, usage_reader.USAGE_CHUNK_SIZE), (5, 5)]
+    assert committed == [True]
+    (row,) = result
+    assert isinstance(row, UsageSessionRow)
+    assert row.row_key == "session-1"
+    assert len(row.runs) == total_rows
+    with closing(sqlite3.connect(storage.path)) as connection:
+        assert connection.execute(
+            "SELECT session_id FROM code_sessions WHERE session_id = 'session-mid'",
+        ).fetchall() == [("session-mid",)]
+
+
+def test_dated_read_pages_raw_rows_and_lets_writers_commit_across_non_matching_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dated read bounds raw scanned rows per chunk even when early chunks match nothing."""
+    storage = create_agent_state_storage("code", tmp_path)
+    old_ts = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
+    since_ts = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    recent_ts = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    old_count = usage_reader.USAGE_CHUNK_SIZE * 2 + 10
+    _seed_usage_rows(
+        storage.path,
+        session_id="session-1",
+        rows=[*[(f"old-{i}", old_ts) for i in range(old_count)], ("recent", recent_ts)],
+    )
+    source = _source(storage.path)
+    usage_chunks, committed = _intercept_usage_chunks_and_commit_after_first(
+        monkeypatch,
+        storage.path,
+        source.names.usage,
+    )
+
+    result = list(iter_usage_storage_rows(source, since=since_ts))
+
+    assert usage_chunks == [(usage_reader.USAGE_CHUNK_SIZE, 0), (usage_reader.USAGE_CHUNK_SIZE, 0), (11, 1)]
+    assert committed == [True]
+    (row,) = result
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["recent"]
+    assert row.runs_available is True
 
 
 def test_a_caller_holding_a_row_does_not_keep_writers_waiting(tmp_path: Path) -> None:
