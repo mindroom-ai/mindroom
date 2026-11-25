@@ -793,6 +793,7 @@ async def test_compact_context_with_delegation_compacts_on_parent_resume(
         ),
         runtime_paths,
     )
+    config.background_tool_jobs.enabled = False
     with_responder_access(config, "helper", users=["@alice:localhost"])
     coder_model = ScriptedModel(
         [
@@ -820,7 +821,23 @@ async def test_compact_context_with_delegation_compacts_on_parent_resume(
         ),
         prompt="Delegate and compact",
         execution_identity=runtime_context.execution_identity,
+        supports_native_tool_approval=True,
     )
+    original_continue = ai._TurnRunContinuation.events
+    continued_runs: list[str] = []
+
+    def spy_continue(
+        self: ai._TurnRunContinuation,
+        paused: RunRecord,
+        decisions: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        assert paused.status is RunStatus.paused
+        assert summary_mock.await_count == 0
+        assert self.compaction_requests == {HistoryScope(kind="agent", scope_id="coder")}
+        continued_runs.append(paused.run_id)
+        return original_continue(self, paused, decisions)
+
+    monkeypatch.setattr(ai._TurnRunContinuation, "events", spy_continue)
 
     with (
         tool_runtime_context(runtime_context),
@@ -829,6 +846,7 @@ async def test_compact_context_with_delegation_compacts_on_parent_resume(
         result = await ai.ai_response(turn_ctx, runtime_paths, config)
 
     assert result.text.endswith("All done.")
+    assert len(continued_runs) == 1
     assert summary_mock.await_count == 1
     assert len(coder_model.requests) == 2
     assert any(

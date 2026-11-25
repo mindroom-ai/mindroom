@@ -618,7 +618,7 @@ async def test_compaction_cli_compacts_real_session_mid_turn(response_harness) -
     h.runtime.config.models["default"].context_window = 128000
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "compacted summary", "done"])
     assert "done" in result
-    assert "before the next model request in this turn" in h.shell.receipts[-1]["outcome"]
+    assert "before the next model request in this scope" in h.shell.receipts[-1]["outcome"]
     catalog = h.shell.owner.catalog
     assert catalog.store is not None
     assert not has_queued_force_compaction(catalog.store, catalog.run.session_id)

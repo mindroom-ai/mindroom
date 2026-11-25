@@ -75,7 +75,7 @@ class CompactContextTools(Toolkit):
                 return f"Error: Compaction is unavailable for this scope because {plan}."
             compaction_requests.add(scope)
             logger.info("Mid-turn compaction requested", agent=self._agent_name, scope=scope.key)
-            return "Compaction will run now before the next model request in this turn."
+            return "Compaction will run now before the next model request in this scope."
 
         return await request_compaction_before_next_reply(
             scope=scope,

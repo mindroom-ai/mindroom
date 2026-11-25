@@ -877,7 +877,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     compact_binding = await catalog.bind(ToolKey("compact_context", "compact_context"))
     events = [event async for event in execute_agent_tool_call(compact_binding, "compact", {})]
     assert events[-1].kind == "completed"
-    assert "before the next model request in this turn" in events[-1].call.result
+    assert "before the next model request in this scope" in events[-1].call.result
     assert HistoryScope(kind="agent", scope_id="helper") in catalog.run.compaction_requests
     assert catalog.run.session_state is original
     assert catalog.run.session_state["sentinel"] == "kept"

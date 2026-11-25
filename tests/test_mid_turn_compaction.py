@@ -72,6 +72,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
+from mindroom.teams.leader import LeaderRun
 from mindroom.token_counting.counts import count, utf8_byte_bound
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -2219,9 +2220,61 @@ async def test_compact_context_in_team_member_compacts_leader_in_team_scope(
     assert len(writer_requests) == 2
     assert not any(is_compaction_summary(message) for request in writer_requests for message in request.messages)
     assert any(
-        message.role == "tool" and "before the next model request in this turn" in str(message.content)
+        message.role == "tool" and "before the next model request in this scope" in str(message.content)
         for message in writer_requests[1].messages
     )
+    leader_requests = team.models["default"].requests
+    assert len(leader_requests) == 2
+    assert any(is_scope_summary(message) for message in leader_requests[1].messages)
+    assert len(summary_rows_of(team.storage, team.scope.key, session_id=SESSION_ID)) == 1
+    assert not has_queued_force_compaction(team.storage, SESSION_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_compact_context_in_team_member_preserved_across_member_delegation_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """LeaderRun preserves a team member's compaction request across a member delegation pause and resume."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Compact and delegate")),
+            answer("Leader finished."),
+        ],
+        writer=[
+            calls(tool_call("compact_context", "call-compact")),
+            calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Check status")),
+            answer("Writer finished."),
+        ],
+        helper=[answer("Helper checked.")],
+        context_window=48_000,
+    )
+    team.config.agents["writer"].tools = ["compact_context"]
+    team.config.agents["checker"].tools = []
+    team.config.agents["helper"].tools = []
+    original_resume = LeaderRun.resume
+    resumed_runs: list[str] = []
+
+    def spy_resume(self: LeaderRun, paused: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        assert summary_calls.inputs == []
+        assert self.compaction_requests == {team.scope}
+        resumed_runs.append(paused.run_id)
+        return original_resume(self, paused, *args, **kwargs)
+
+    monkeypatch.setattr(LeaderRun, "resume", spy_resume)
+
+    chunks = await team.stream()
+
+    assert chunks[-1].content.endswith("Leader finished.")
+    assert len(resumed_runs) == 1
+    assert len(summary_calls.inputs) == 1
+    writer_requests = team.models["writer-model"].requests
+    assert len(writer_requests) == 3
+    assert not any(is_compaction_summary(message) for request in writer_requests for message in request.messages)
     leader_requests = team.models["default"].requests
     assert len(leader_requests) == 2
     assert any(is_scope_summary(message) for message in leader_requests[1].messages)
