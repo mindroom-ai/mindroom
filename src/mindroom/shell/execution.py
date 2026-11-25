@@ -574,21 +574,21 @@ async def _start_command(
     stderr: int = asyncio.subprocess.PIPE,
 ) -> asyncio.subprocess.Process:
     """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    spawn_argv = _idle_launch_argv(argv, env, cwd)
+    launch = _idle_launch_argv(argv, env, cwd)
     process = await asyncio.create_subprocess_exec(
-        *spawn_argv,
+        *launch.argv,
         stdin=stdin,
         stdout=asyncio.subprocess.PIPE,
         stderr=stderr,
         cwd=cwd,
-        env=env,
+        env=launch.env,
         start_new_session=True,
     )
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
         os.setpriority(os.PRIO_PGRP, process.pid, 19)
-    if sys.platform == "linux" and spawn_argv is argv:
+    if sys.platform == "linux" and not launch.uses_chrt:
         _schedule_process_tree_idle(process.pid)
     return process
 
@@ -1319,6 +1319,16 @@ async def _await_reader_tasks_with_grace(
                 await task
 
 
+_SHELL_SYSTEMD_SLICE_ENV = "MINDROOM_SHELL_SYSTEMD_SLICE"
+_SYSTEMD_USER_BUS_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+
+
+class _IdleLaunch(NamedTuple):
+    argv: list[str]
+    env: dict[str, str]
+    uses_chrt: bool
+
+
 @functools.cache
 def _idle_launcher() -> str | None:
     """Return a ``chrt`` that can start a program at ``SCHED_IDLE``, or ``None`` when there is none or it fails."""
@@ -1331,6 +1341,64 @@ def _idle_launcher() -> str | None:
         if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
             return chrt
     return None
+
+
+@functools.cache
+def _idle_io_launcher() -> str | None:
+    """Return an ``ionice`` that can start a program in the idle I/O class, or ``None`` when unavailable."""
+    ionice = shutil.which("ionice")
+    if ionice is None:
+        return None
+    ionice = str(Path(ionice).absolute())  # commands run in other directories
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if subprocess.run([ionice, "-c", "3", ionice], capture_output=True, timeout=5, check=False).returncode == 0:
+            return ionice
+    return None
+
+
+@functools.cache
+def _probe_systemd_slice_launcher(
+    slice_name: str,
+    runtime_dir: str | None,
+    dbus_addr: str | None,
+) -> tuple[str, ...] | None:
+    """Return a ``systemd-run --user --scope`` prefix when probing *slice_name* succeeds, else ``None``."""
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None:
+        return None
+    systemd_run = str(Path(systemd_run).absolute())  # commands run in other directories
+    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv; older versions fail open here.
+    prefix = (systemd_run, "--user", "--scope", "--quiet", "--expand-environment=no", f"--slice={slice_name}", "--")
+    probe_env = {k: v for k, v in (("XDG_RUNTIME_DIR", runtime_dir), ("DBUS_SESSION_BUS_ADDRESS", dbus_addr)) if v}
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        probe = subprocess.run(
+            [*prefix, systemd_run, "--version"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+            env=probe_env,
+        )
+        if probe.returncode == 0:
+            return prefix
+    return None
+
+
+def _systemd_slice_launcher() -> tuple[str, ...] | None:
+    """Return a ``systemd-run --user --scope`` prefix for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
+    slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
+    if (
+        len(slice_name) <= len(".slice")
+        or not slice_name.endswith(".slice")
+        or slice_name.startswith("-")
+        or "/" in slice_name
+        or any(ch.isspace() or ch == "\x00" for ch in slice_name)
+    ):
+        return None
+    return _probe_systemd_slice_launcher(
+        slice_name,
+        os.environ.get("XDG_RUNTIME_DIR") or None,
+        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None,
+    )
 
 
 def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
@@ -1409,20 +1477,34 @@ def _launch_failure(
     return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
 
 
-def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> list[str]:
-    """Return *argv* behind ``chrt -i 0`` on Linux, so the command and everything it starts run at ``SCHED_IDLE``.
+def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> _IdleLaunch:
+    """Wrap *argv* on Linux for optional systemd slice, ``SCHED_IDLE``, and idle I/O priority.
 
     Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
     MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
     preempts them at once.
-    chrt execs the program in the same process with the same environment. A program that cannot be found starts
-    directly instead, so the spawn fails with the same error as before; so does every command when chrt is missing.
+    All wrappers exec the program in the same process. A program that cannot be found starts directly instead, so the
+    spawn fails with the same error as before; unavailable wrappers are skipped individually.
     """
-    if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
-        return argv
-    if _find_program(argv[0], env, cwd) is None:
-        return argv
-    return [chrt, "-i", "0", *argv]
+    if sys.platform != "linux" or not argv or _find_program(argv[0], env, cwd) is None:
+        return _IdleLaunch(argv, env, uses_chrt=False)
+
+    spawn_argv = argv
+    spawn_env = env
+    ionice = _idle_io_launcher()
+    chrt = _idle_launcher()
+    systemd_prefix = _systemd_slice_launcher()
+    if ionice is not None:
+        spawn_argv = [ionice, "-c", "3", "--", *spawn_argv]
+    if chrt is not None:
+        spawn_argv = [chrt, "-i", "0", *spawn_argv]
+    if systemd_prefix is not None:
+        spawn_argv = [*systemd_prefix, *spawn_argv]
+        spawn_env = dict(env)
+        for key in _SYSTEMD_USER_BUS_ENV_KEYS:
+            if key not in spawn_env and (value := os.environ.get(key)):
+                spawn_env[key] = value
+    return _IdleLaunch(spawn_argv, spawn_env, uses_chrt=chrt is not None)
 
 
 def _schedule_process_tree_idle(pid: int) -> None:

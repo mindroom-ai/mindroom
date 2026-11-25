@@ -7,6 +7,7 @@ import contextlib
 import itertools
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,9 +19,12 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    _idle_io_launcher,
     _idle_launch_argv,
     _idle_launcher,
+    _probe_systemd_slice_launcher,
     _schedule_process_tree_idle,
+    _systemd_slice_launcher,
     check_command,
     kill_all_records,
     kill_command,
@@ -511,11 +515,180 @@ def test_a_relative_path_entry_is_searched_from_the_command_directory(
         program.chmod(0o755)
     monkeypatch.chdir(tmp_path / "mindroom")
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     env = {"PATH": "scripts"}
     workspace = str(tmp_path / "workspace")
 
-    assert _idle_launch_argv(["only-in-workspace"], env, workspace) == ["/chrt", "-i", "0", "only-in-workspace"]
-    assert _idle_launch_argv(["only-in-mindroom"], env, workspace) == ["only-in-mindroom"]
+    assert _idle_launch_argv(["only-in-workspace"], env, workspace).argv == ["/chrt", "-i", "0", "only-in-workspace"]
+    assert _idle_launch_argv(["only-in-mindroom"], env, workspace).argv == ["only-in-mindroom"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="ionice is Linux-only")
+@pytest.mark.asyncio
+async def test_a_command_and_its_children_run_with_idle_io_priority(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """Spawned commands and their children inherit idle disk I/O priority when ionice is available."""
+    _idle_io_launcher.cache_clear()
+    if (ionice := _idle_io_launcher()) is None:
+        pytest.skip("needs an ionice binary that can set idle I/O priority")
+
+    message = await _run(registry, ["/bin/sh", "-c", f"sleep 0.05; {shlex.quote(ionice)}"], tmp_path)
+
+    assert message.startswith("idle")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Systemd slice wraps before chrt/ionice, copies env without mutating it, and leaves missing commands unwrapped."""
+    program = tmp_path / "run-me"
+    program.write_text("#!/bin/sh\n")
+    program.chmod(0o755)
+    prefix = ("/systemd-run", "--user", "--scope", "--quiet", "--expand-environment=no", "--slice=s.slice", "--")
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: "/ionice")
+    monkeypatch.setattr("mindroom.shell.execution._systemd_slice_launcher", lambda: prefix)
+    xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", bus)
+
+    caller_env = {"PATH": str(tmp_path)}
+    argv = ["run-me", "$$", "$VAR"]
+    launch = _idle_launch_argv(argv, caller_env, str(tmp_path))
+
+    assert launch.argv == [*prefix, "/chrt", "-i", "0", "/ionice", "-c", "3", "--", *argv]
+    assert launch.uses_chrt is True
+    assert launch.env == {"PATH": str(tmp_path), "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}
+    assert caller_env == {"PATH": str(tmp_path)}
+    assert (
+        _idle_launch_argv(argv, {**caller_env, "XDG_RUNTIME_DIR": "/custom"}, str(tmp_path)).env["XDG_RUNTIME_DIR"]
+        == "/custom"
+    )
+
+    missing = ["./no-such-program"]
+    missing_launch = _idle_launch_argv(missing, caller_env, str(tmp_path))
+    assert missing_launch == (missing, caller_env, False)
+    assert missing_launch.argv is missing
+    assert missing_launch.env is caller_env
+
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    no_chrt = _idle_launch_argv(argv, caller_env, str(tmp_path))
+    assert no_chrt.argv == [*prefix, "/ionice", "-c", "3", "--", *argv]
+    assert no_chrt.uses_chrt is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_rejected_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe passes --expand-environment=no, keys cache on bus env, and fails open on bad slices or errors."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        "mindroom.shell.execution.shutil.which",
+        lambda name, *args, **kwargs: "/systemd-run" if name == "systemd-run" else real_which(name, *args, **kwargs),
+    )
+    probe_calls: list[tuple[list[str], dict[str, str]]] = []
+    probe_rc = 0
+
+    def fake_probe(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        probe_env = kwargs["env"]
+        assert isinstance(probe_env, dict)
+        probe_calls.append((cmd, dict(probe_env)))
+        return subprocess.CompletedProcess(cmd, probe_rc)
+
+    monkeypatch.setattr("mindroom.shell.execution.subprocess.run", fake_probe)
+    _probe_systemd_slice_launcher.cache_clear()
+    try:
+        xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", " s.slice ")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
+        monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", bus)
+        expected = ("/systemd-run", "--user", "--scope", "--quiet", "--expand-environment=no", "--slice=s.slice", "--")
+
+        assert _systemd_slice_launcher() == expected
+        assert _systemd_slice_launcher() == expected
+        assert probe_calls == [
+            ([*expected, "/systemd-run", "--version"], {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}),
+        ]
+
+        monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/99")
+        assert _systemd_slice_launcher() == expected
+        assert len(probe_calls) == 2
+
+        for invalid in ("", "   ", "mindroom.service", ".slice", "-bad.slice", "a/b.slice", "a b.slice", "a\tb.slice"):
+            monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", invalid)
+            assert _systemd_slice_launcher() is None
+        assert len(probe_calls) == 2
+
+        probe_rc = 1
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
+        assert _systemd_slice_launcher() is None
+    finally:
+        _probe_systemd_slice_launcher.cache_clear()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+@pytest.mark.asyncio
+async def test_idle_fallback_runs_when_chrt_is_absent_even_if_other_wrappers_prepend(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When chrt is unavailable, _schedule_process_tree_idle still runs even though ionice wraps argv."""
+    _idle_io_launcher.cache_clear()
+    if _idle_io_launcher() is None:
+        pytest.skip("needs ionice so argv is still wrapped when chrt is absent")
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
+    fallback_pids: list[int] = []
+    real_fallback = _schedule_process_tree_idle
+    monkeypatch.setattr(
+        "mindroom.shell.execution._schedule_process_tree_idle",
+        lambda pid: (fallback_pids.append(pid), real_fallback(pid)),
+    )
+
+    check = "import os, time; time.sleep(0.1); print(os.sched_getscheduler(0) == os.SCHED_IDLE)"
+    assert await _run(registry, [sys.executable, "-c", check], tmp_path) == "True"
+    assert len(fallback_pids) == 1
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
+@pytest.mark.asyncio
+async def test_systemd_slice_moves_command_and_preserves_dollar_args(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live systemd-run --user moves the command into the slice and keeps $$ / $VAR verbatim in argv."""
+    if not os.environ.get("XDG_RUNTIME_DIR") and Path(f"/run/user/{os.getuid()}/bus").exists():
+        monkeypatch.setenv("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    _probe_systemd_slice_launcher.cache_clear()
+    if _systemd_slice_launcher() is None:
+        pytest.skip("requires a live systemd --user bus supporting --expand-environment=no")
+
+    caller_env = {"PATH": os.environ["PATH"], "MINDROOM_TEST_VAR": "expanded"}
+    script = "import pathlib, sys; print(sys.argv[1:], pathlib.Path('/proc/self/cgroup').read_text().strip())"
+    argv = [sys.executable, "-c", script, "$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=argv,
+        env=caller_env,
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+    )
+
+    assert result.handle is None
+    assert result.message.startswith("['$$', '$MINDROOM_TEST_VAR', '${MINDROOM_TEST_VAR}'] ")
+    assert "/app.slice/" in result.message
+    assert "XDG_RUNTIME_DIR" not in caller_env
 
 
 def _process_group_threads(pgid: int) -> list[int]:
