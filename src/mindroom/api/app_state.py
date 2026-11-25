@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workflow_runs.engine import WorkflowEngine
 
+logger = get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class EmbeddedRuntime:
@@ -136,9 +138,6 @@ def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
     state = _MindroomAppState()
     api_app.state.mindroom_app_state = state
     return state
-
-
-logger = get_logger(__name__)
 
 
 def app_state(api_app: FastAPI) -> _MindroomAppState:
