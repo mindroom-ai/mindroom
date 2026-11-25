@@ -59,6 +59,7 @@ from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
 from mindroom.api.response_activity import router as response_activity_router
+from mindroom.api.room_triggers import router as room_triggers_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
@@ -543,6 +544,7 @@ app.include_router(call_transcripts_router)  # Authenticates client sessions; 40
 app.include_router(dictation_router)  # Authenticates client sessions; 404 while dictation is off.
 app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(agent_profiles_router)  # Authenticates client sessions.
+app.include_router(room_triggers_router)  # Authenticates client sessions.
 app.include_router(secret_requests_router)  # Authenticates client sessions.
 app.include_router(github_requests_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
