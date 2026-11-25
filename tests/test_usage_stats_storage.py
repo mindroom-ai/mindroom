@@ -30,6 +30,7 @@ from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, q
 from mindroom.session_storage.store import begun, connect_conversation_database
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
+from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -840,6 +841,147 @@ def test_a_table_missing_a_column_the_read_needs_is_reported(
     result = list(iter_usage_storage_rows(source))
 
     assert result == [UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail)]
+
+
+@pytest.mark.parametrize(
+    ("table", "columns", "insert_sql", "detail"),
+    [
+        (
+            "code_sessions",
+            "rowid TEXT, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (rowid, session_id) VALUES ('not-an-int', 'session-1')",
+            "session schema unsupported",
+        ),
+        (
+            "code_sessions",
+            "rowid INTEGER, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (rowid, session_id) VALUES (1, 'session-1'), (1, 'session-2')",
+            "session schema unsupported",
+        ),
+        (
+            "code_sessions_usage",
+            "rowid TEXT, id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
+            "INSERT INTO code_sessions_usage (rowid, id, session_id, run_id, usage_data) VALUES ('x', 1, 'session-1', 'r1', '{}')",
+            "usage schema unsupported",
+        ),
+        (
+            "code_sessions_usage",
+            "OID INTEGER, id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
+            "INSERT INTO code_sessions_usage (OID, id, session_id, run_id, usage_data) VALUES (1, 1, 'session-1', 'r1', '{}'), (1, 2, 'session-1', 'r2', '{}')",
+            "usage schema unsupported",
+        ),
+    ],
+    ids=["sessions-text-rowid", "sessions-duplicate-int-rowid", "usage-text-rowid", "usage-oid-alias"],
+)
+def test_shadowed_rowid_column_is_reported_as_unsupported_schema(
+    tmp_path: Path,
+    table: str,
+    columns: str,
+    insert_sql: str,
+    detail: str,
+) -> None:
+    """Tables declaring a shadowed rowid alias fail with unsupported_schema instead of crashing or skipping rows."""
+    database = tmp_path / "code.db"
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name, definition in {**_READ_TABLES, table: columns}.items():
+            connection.execute(f'CREATE TABLE "{name}" ({definition})')
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 8, 'agent', 'code')")
+        if table != "code_sessions":
+            connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute(insert_sql)
+
+    assert list(iter_usage_storage_rows(source)) == [
+        UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail),
+    ]
+
+
+def test_admin_usage_keeps_healthy_agent_beside_shadowed_rowid_database(tmp_path: Path) -> None:
+    """A worker-created shadowed rowid table reports a diagnostic without aborting healthy sources."""
+    config = Config(
+        agents={"broken": AgentConfig(display_name="Broken"), "healthy": AgentConfig(display_name="Healthy")},
+    )
+    runtime_paths = _paths(tmp_path)
+    root = runtime_paths.config_dir / "sessions"
+    broken_db = root / "agents" / "broken" / "sessions" / "broken.db"
+    broken_db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(broken_db)) as connection, connection:
+        connection.execute("CREATE TABLE broken_sessions (rowid TEXT, session_id TEXT PRIMARY KEY, user_id TEXT)")
+        connection.execute(
+            "CREATE TABLE broken_sessions_log_meta (id INTEGER PRIMARY KEY, version INTEGER, owner_kind TEXT, owner_id TEXT)",
+        )
+        connection.execute("INSERT INTO broken_sessions_log_meta VALUES (1, 8, 'agent', 'broken')")
+        connection.execute("INSERT INTO broken_sessions (rowid, session_id) VALUES ('bad', 'session-1')")
+
+    healthy_storage = create_agent_state_storage("healthy", root / "agents" / "healthy")
+    persist_runs(
+        healthy_storage,
+        ConversationSession(kind="agent", session_id="session-1", owner_id="healthy"),
+        RunRecord(
+            run_id="run-1",
+            user_id="@alice:example.test",
+            created_at=1_723_837_600,
+            status=RunStatus.completed,
+            metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
+        ),
+    )
+
+    report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
+
+    assert report.totals.total_tokens == 20
+    assert [(row.key, row.totals.total_tokens) for row in report.breakdown] == [("healthy", 20)]
+    assert (report.coverage.scanned_sources, report.coverage.unavailable_sources) == (2, 1)
+
+
+@pytest.mark.parametrize(
+    ("table", "detail"),
+    [
+        ("code_sessions", "session schema unsupported"),
+        ("code_sessions_usage", "usage schema unsupported"),
+    ],
+    ids=["sessions", "usage"],
+)
+def test_without_rowid_table_is_reported_as_unsupported_schema(
+    tmp_path: Path,
+    table: str,
+    detail: str,
+) -> None:
+    """WITHOUT ROWID tables report unsupported_schema rather than failing later with database unavailable."""
+    database = tmp_path / "code.db"
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name, definition in _READ_TABLES.items():
+            suffix = " WITHOUT ROWID" if name == table else ""
+            connection.execute(f'CREATE TABLE "{name}" ({definition}){suffix}')
+        connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 8, 'agent', 'code')")
+
+    assert list(iter_usage_storage_rows(source)) == [
+        UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail),
+    ]
+
+
+def test_dated_read_ignores_out_of_range_session_with_invalid_utf8_user_id(tmp_path: Path) -> None:
+    """A dated read never selects user_id from out-of-range sessions, so invalid UTF-8 there cannot break it."""
+    storage = create_agent_state_storage("code", tmp_path)
+    old_ts = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
+    since_ts = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    recent_ts = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    _seed_usage_rows(storage.path, session_id="old-session", rows=[("old-run", old_ts)])
+    _seed_usage_rows(storage.path, session_id="recent-session", rows=[("recent-run", recent_ts)])
+    with closing(connect_conversation_database(storage.path, timeout=1.0)) as writer, begun(writer, write=True):
+        writer.execute("UPDATE code_sessions SET user_id = CAST(X'80' AS TEXT) WHERE session_id = 'old-session'")
+        writer.execute("UPDATE code_sessions SET user_id = '@alice:example.test' WHERE session_id = 'recent-session'")
+        assert writer.execute(
+            "SELECT typeof(user_id), hex(CAST(user_id AS BLOB)) FROM code_sessions WHERE session_id = 'old-session'",
+        ).fetchone() == ("text", "80")
+
+    (row,) = iter_usage_storage_rows(_source(storage.path), since=since_ts)
+
+    assert isinstance(row, UsageSessionRow)
+    assert row.row_key == "recent-session"
+    assert row.requester_id == "@alice:example.test"
+    assert [run.run_id for run in row.runs] == ["recent-run"]
 
 
 @pytest.mark.parametrize("since", [None, 0.0], ids=["undated", "dated"])
