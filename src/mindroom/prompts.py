@@ -274,7 +274,8 @@ Return the mode and a one-sentence reason why."""
 
 MEMORY_CONTEXT_PROMPT_TEMPLATE = "[Recalled {context_type} memories — may not be relevant]\n{memory_lines}"
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
-    "[File memory: `{memory_path}`] Preloaded every turn; do not re-read unless editing or marked truncated."
+    "[File memory: `{memory_path}` — preloaded every turn; do not re-read what is shown here "
+    "unless editing or checking for newer/truncated content]"
 )
 FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
     "Kept from this conversation's last load; open the file to see edits from other conversations."

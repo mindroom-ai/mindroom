@@ -319,7 +319,7 @@
         },
         {
           "name": "get_skill_reference",
-          "description": "Load a reference document from a skill (list available references with get_skill_instructions).",
+          "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -358,7 +358,7 @@
         },
         {
           "name": "get_skill_script",
-          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions).",
+          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {

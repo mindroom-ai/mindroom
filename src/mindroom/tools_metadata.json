@@ -7824,7 +7824,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Check MindRoom's installed and latest PyPI versions on demand, adding prompt notice when an update is available or uncertain",
+      "description": "Report installed and daily-cached latest MindRoom versions; adds a prompt notice when an update is available or uncertain",
       "display_name": "MindRoom Update Awareness",
       "docs_url": "https://docs.mindroom.chat/tools/#mindroom-update-awareness",
       "executes_code": false,
@@ -11468,7 +11468,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Control MindRoom's browser: browse websites, fill forms, and take screenshots (use desktop for the user's local browser)",
+      "description": "Control MindRoom's browser: browse websites, fill forms, and take screenshots (use target='desktop', when configured, for the user's local browser)",
       "display_name": "Browser",
       "docs_url": "https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser",
       "executes_code": false,

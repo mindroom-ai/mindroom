@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="MindRoom Update Awareness",
     description=(
-        "Check MindRoom's installed and latest PyPI versions on demand, "
-        "adding prompt notice when an update is available or uncertain"
+        "Report installed and daily-cached latest MindRoom versions; "
+        "adds a prompt notice when an update is available or uncertain"
     ),
     category=ToolCategory.INFORMATION,
     status=ToolStatus.AVAILABLE,

@@ -1732,7 +1732,7 @@ async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_tur
 
     prompt_parts = await build_memory_prompt_parts("deployment runbook", "general", config)
 
-    assert f"[File memory: `{workspace / 'MEMORY.md'}`]" in prompt_parts.session_preamble
+    assert f"[File memory: `{workspace / 'MEMORY.md'}` — " in prompt_parts.session_preamble
     assert "Project uses FastAPI." in prompt_parts.session_preamble
     assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.transient_turn_context
     assert "Project uses FastAPI." not in prompt_parts.transient_turn_context
@@ -1810,7 +1810,10 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
         config,
     )
 
-    assert "Preloaded every turn; do not re-read unless editing or marked truncated." in prompt_parts.session_preamble
+    assert (
+        "preloaded every turn; do not re-read what is shown here unless editing or checking for newer/truncated content]"
+        in prompt_parts.session_preamble
+    )
     assert str(memory_path) in prompt_parts.session_preamble
     assert "prompt limit" not in prompt_parts.session_preamble
 

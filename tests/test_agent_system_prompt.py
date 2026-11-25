@@ -354,8 +354,9 @@ def test_tool_execution_environment_modes_and_generated_tools(
     assert "- Worker-routed tools: `shell`." in mixed_role
     assert "- Worker backend: `kubernetes`." in mixed_role
     assert (
-        "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept)." in mixed_role
-    )
+        "- Worker state persists across turns for that scope "
+        "(stopped/scaled down when idle; persisted files and caches are kept)."
+    ) in mixed_role
     assert "- Execution location is determined per tool; this agent is not sandboxed as a whole." in mixed_role
 
     kb_only, _ = _build(tmp_path / "kb", monkeypatch, agent_cfg={"tools": []}, knowledge=_dummy_knowledge())

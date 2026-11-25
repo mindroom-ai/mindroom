@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     display_name="Browser",
     description=(
         "Control MindRoom's browser: browse websites, fill forms, and take screenshots "
-        "(use desktop for the user's local browser)"
+        "(use target='desktop', when configured, for the user's local browser)"
     ),
     category=ToolCategory.RESEARCH,
     file_access=ToolFileAccess.AGENT,

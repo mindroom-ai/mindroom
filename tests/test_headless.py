@@ -126,7 +126,7 @@ async def test_run_turn_runs_tools_and_returns_text(
     assert len(provider.requests) == 2
     # No Matrix room: the prompt neither describes one nor attributes the prompt to the requester's Matrix ID.
     sent = _sent(provider.requests[0])
-    assert "Matrix Reply Targeting" not in sent
+    assert "MindRoom selects which messages reach you" not in sent
     assert "@alice:localhost" not in sent
 
 

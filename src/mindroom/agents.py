@@ -799,6 +799,7 @@ def _render_tool_execution_environment(
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
     has_path_tools: bool,
+    has_other_tools: bool = False,
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
     workdir: Path | None,
@@ -809,13 +810,15 @@ def _render_tool_execution_environment(
     pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
+    has_tools = bool(local_tool_names or worker_routed_tool_names or has_other_tools)
     file_access_lines = _file_access_environment_lines(
-        show_file_access=bool(worker_routed_tool_names or has_path_tools or workdir is not None or shared_directories),
+        show_file_access=has_tools
+        and bool(worker_routed_tool_names or has_path_tools or workdir is not None or shared_directories),
         file_access=file_access,
-        workdir=workdir,
+        workdir=workdir if has_tools else None,
         workspace_root=workspace_root,
-        unconfined_tool_names=unconfined_tool_names,
-        primary_only_unconfined_tool_names=primary_only_unconfined_tool_names,
+        unconfined_tool_names=unconfined_tool_names if has_tools else (),
+        primary_only_unconfined_tool_names=primary_only_unconfined_tool_names if has_tools else (),
         shared_directories=shared_directories,
         pending_shared_directory_invitations=pending_shared_directory_invitations,
     )
@@ -847,7 +850,8 @@ def _render_tool_execution_environment(
         lines.extend(
             (
                 f"- Worker reuse: {scope_description}.",
-                "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept).",
+                "- Worker state persists across turns for that scope "
+                "(stopped/scaled down when idle; persisted files and caches are kept).",
             ),
         )
     lines.extend(file_access_lines)
@@ -1490,6 +1494,7 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    has_other_tools: bool,
     tools: ToolRegistry,
     file_access: FileAccess,
     include_identity: bool,
@@ -1509,6 +1514,7 @@ def _build_agent_role_context(
                 local_tool_names=local_tool_names,
                 worker_routed_tool_names=worker_routed_tool_names,
                 has_path_tools=_has_path_tools((*local_tool_names, *worker_routed_tool_names), tools=tools),
+                has_other_tools=has_other_tools,
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
                 workdir=current_tool_workdir(),
@@ -1614,7 +1620,8 @@ def _build_agent_instructions(
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
     ``output_redirect`` adds ``OUTPUT_REDIRECT_PROMPT`` when offered tools accept ``mindroom_output_path`` or include
-    ``shell``; ``skill_authoring`` adds ``WORKSPACE_SKILL_AUTHORING_PROMPT`` when workspace writers are offered without
+    ``shell`` and the prompt is non-empty (it defaults to empty and renders only when overridden in ``config.prompts``);
+    ``skill_authoring`` adds ``WORKSPACE_SKILL_AUTHORING_PROMPT`` when workspace writers are offered without
     ``skill_manage``.
     """
     instructions = [*configured_instructions, *skill_instructions]
@@ -1938,6 +1945,8 @@ def create_agent(
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+        has_other_tools=tool_assembly.has_offered_tools
+        and not (tool_assembly.local_tool_names or tool_assembly.worker_routed_tool_names),
         file_access=agent.file_access,
         include_identity=persona is None,
     )

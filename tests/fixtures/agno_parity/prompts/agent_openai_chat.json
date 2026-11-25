@@ -104,7 +104,7 @@
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>\n\n[File memory: `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md`] Preloaded every turn; do not re-read unless editing or marked truncated.\nKept from this conversation's last load; open the file to see edits from other conversations.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>\n\n[File memory: `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` — preloaded every turn; do not re-read what is shown here unless editing or checking for newer/truncated content]\nKept from this conversation's last load; open the file to see edits from other conversations.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>",
           "role": "system"
         },
         {
@@ -425,7 +425,7 @@
         },
         {
           "name": "get_skill_reference",
-          "description": "Load a reference document from a skill (list available references with get_skill_instructions).",
+          "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -464,7 +464,7 @@
         },
         {
           "name": "get_skill_script",
-          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions).",
+          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
           "parameters": {
             "type": "object",
             "properties": {
