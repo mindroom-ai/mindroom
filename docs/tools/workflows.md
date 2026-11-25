@@ -349,7 +349,7 @@ def main(args):
   To avoid long idle waits, use a sensible `wait_seconds` and the run's own limits.
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
-  Graph frames and the finished run card carry message-count `edges` (`{"from", "to", "kind": "message", "count"}`) and bounded, redacted peer message previews (`messages`), plus bounded, redacted result `preview` text on completed `agent`, `turn` and `tool` nodes; `shared_state` never enters room events or cards.
+  Graph frames and the finished run card carry message-count `edges` (`{"from", "to", "kind": "message", "count"}`) and bounded, redacted peer message previews (`messages`), plus bounded, redacted result `preview` text on completed `agent`, `turn` and `tool` nodes; `shared_state` never enters the workflow graph or run card.
   Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `get_workflow(run_id, messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
@@ -440,7 +440,7 @@ While the run works, clients that show live updates get its graph as `io.mindroo
 A frame is `{v, run, sid, seq, meta, snapshot}` or `{v, run, sid, seq, meta, delta}`.
 `meta` holds the run's agent, thread, title, status, attempt, times, `max_concurrent`, `max_cost_usd`, `large`, `counts` and `usage`.
 A snapshot holds `phases`, `groups`, `nodes`, `edges`, `messages`, `omitted` and `log`, and a delta the rows that changed since the frame before it (`nodes`, `groups`, `edges`, `log_append`, `messages_append`).
-Each row of `edges` is `{"from", "to", "kind": "message", "count"}`, and each row of `messages` is a bounded, redacted preview (`{"seq", "from", "from_name", "to", "to_name", "text", "sent_at"}`); `shared_state` never enters room frames or cards.
+Each row of `edges` is `{"from", "to", "kind": "message", "count"}`, and each row of `messages` is a bounded, redacted preview (`{"seq", "from", "from_name", "to", "to_name", "text", "sent_at"}`); `shared_state` never enters the workflow graph or run card.
 A snapshot is sent first, every ten seconds, at the run's end, and whenever a row left the graph.
 A graph too large for one event keeps the calls that wait for a person first, then failed, running and queued ones, then the newest completed ones, and counts the rest in `omitted`.
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.

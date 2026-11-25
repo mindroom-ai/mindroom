@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,8 @@ MAX_PEER_BYTES = 1024 * 1024
 _NAME_CHARS = 80
 _TEXT_CHARS = 200
 _PREVIEW_READ_CHARS = _TEXT_CHARS + 512
+_MAX_FULL_PREVIEW_BYTES = 64 * 1024
+_TRAILING_TOKEN_RE = re.compile(r"\S+\Z")
 
 _LIVE = frozenset(state.value for state in LIVE_NODE_STATES)
 _UNREACHABLE = "'{name}' has finished and will not read this. Use spawn() to keep an agent you want to talk to."
@@ -385,8 +388,9 @@ def visible_messages(
         return []
     ids, gens, sess_of, by_name = _message_index(nodes)
     q = (
-        "SELECT m.seq, m.sender_key, m.sender_generation, m.sender_name, m.recipient_name, "
-        "m.recipient_keys_json, substr(m.text, 1, ?) AS text, m.created_at "
+        "SELECT m.seq, m.sender_key, m.sender_generation, m.sender_name, m.recipient_name, m.recipient_keys_json, "
+        "CASE WHEN octet_length(m.text) <= ? THEN m.text ELSE substr(m.text, 1, ?) END AS text, "
+        "octet_length(m.text) > ? AS truncated_text, m.created_at "
         "FROM workflow_messages m "
         "JOIN workflow_nodes n "
         "  ON n.run_id = m.run_id AND n.key = m.sender_key AND n.stale = 0 AND n.generation = m.sender_generation "
@@ -394,12 +398,16 @@ def visible_messages(
         "ORDER BY m.seq DESC LIMIT ?"
     )
     with store.read_connection() as conn:
-        rows = conn.execute(q, (_PREVIEW_READ_CHARS, run_id, limit)).fetchall()
+        rows = conn.execute(
+            q,
+            (_MAX_FULL_PREVIEW_BYTES, _PREVIEW_READ_CHARS, _MAX_FULL_PREVIEW_BYTES, run_id, limit),
+        ).fetchall()
     out: list[dict[str, Any]] = []
     for r in reversed(rows):
         sender_key = r["sender_key"]
         if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
             continue
+        raw_text = _TRAILING_TOKEN_RE.sub("", r["text"]) if r["truncated_text"] else r["text"]
         targets = _resolved_recipients(r, from_id, ids, sess_of, by_name)
         out.append(
             {
@@ -408,7 +416,7 @@ def visible_messages(
                 "from_name": redact_sensitive_text(r["sender_name"], max_length=_NAME_CHARS),
                 "to": targets[0] if len(targets) == 1 else None,
                 "to_name": redact_sensitive_text(r["recipient_name"], max_length=_NAME_CHARS),
-                "text": redact_sensitive_text(r["text"], max_length=_TEXT_CHARS),
+                "text": redact_sensitive_text(raw_text, max_length=_TEXT_CHARS),
                 "sent_at": int(datetime.fromisoformat(r["created_at"]).timestamp()),
             },
         )

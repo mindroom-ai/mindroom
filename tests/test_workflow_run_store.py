@@ -1007,20 +1007,20 @@ def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path:
         store_module._create_schema(conn)
         conn.execute("INSERT INTO workflow_schema (version) VALUES (1)")
         conn.commit()
-    # Populate a v1 run at attempt 1 + a pre-upgrade log row (no attempt column yet) before opening v2 store.
+    # Populate v1 runs at attempt 1 (unambiguous) and attempt 2 (ambiguous) with pre-upgrade log rows.
     with sqlite3.connect(path) as conn:
         cols = [row[1] for row in conn.execute("PRAGMA table_info(workflow_log)")]
         assert "attempt" not in cols
-        run = _run(attempt=1)
-        values = {
-            **store_module._row_values(store_module.asdict(run), store_module._RUN_JSON_FIELDS),
-            "reservation_digest": "d",
-        }
-        store_module._insert(conn, "INSERT INTO workflow_runs", values)
-        conn.execute(
-            "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
-            (_RUN_A, "2026-01-01T00:00:00Z", "legacy attempt 1"),
-        )
+        for run, line in ((_run(_RUN_A, attempt=1), "legacy attempt 1"), (_run(_RUN_B, attempt=2), "legacy multi")):
+            values = {
+                **store_module._row_values(store_module.asdict(run), store_module._RUN_JSON_FIELDS),
+                "reservation_digest": "d",
+            }
+            store_module._insert(conn, "INSERT INTO workflow_runs", values)
+            conn.execute(
+                "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
+                (run.run_id, "2026-01-01T00:00:00Z", line),
+            )
         conn.commit()
 
     store = WorkflowRunStore(path)
@@ -1032,6 +1032,9 @@ def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path:
     assert "workflow_log_run_attempt_idx" in indexes
     assert store.log(_RUN_A, attempt=1) == ["legacy attempt 1"]
     assert store.log(_RUN_A, attempt=0) == []
+    # Ambiguous multi-attempt v1 runs keep pre-upgrade rows at attempt 0 rather than misattributing to attempt 2.
+    assert store.log(_RUN_B, attempt=0) == ["legacy multi"]
+    assert store.log(_RUN_B, attempt=2) == []
 
     store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 1 after upgrade")
     set_run(store, _RUN_A, attempt=2)
@@ -1080,6 +1083,13 @@ def test_node_previews_extracts_bounded_text_shell_and_json_and_skips_state_and_
         ("@10", "agent", WorkflowNodeState.COMPLETED, "surrogate \ud800 ok", False),
         ("@11", "agent", WorkflowNodeState.COMPLETED, "raw bad utf8 placeholder", False),
         ("@12", "agent", WorkflowNodeState.COMPLETED, "malformed json placeholder", False),
+        (
+            "@13",
+            "tool",
+            WorkflowNodeState.COMPLETED,
+            {"output": '{"name": "PASSWORD", "value": "example-private-value"}', "exit_code": 0},
+            False,
+        ),
     ]
     for key, kind, state, result, stale in cases:
         store.put_node(_node(key=key, kind=kind, state=WorkflowNodeState.RUNNING, stale=stale), 0)
@@ -1095,7 +1105,9 @@ def test_node_previews_extracts_bounded_text_shell_and_json_and_skips_state_and_
         conn.commit()
 
     previews = store.node_previews(_RUN_A, max_chars=80)
-    assert set(previews) == {"@0", "@1", "@2", "@3", "@10", "@11"}
+    assert set(previews) == {"@0", "@1", "@2", "@3", "@10", "@11", "@13"}
+    assert "example-private-value" not in previews["@13"]
+    assert previews["@13"] == '{"name":"PASSWORD","value":"***redacted***"}'
     assert previews["@0"].startswith("hello ")
     assert len(previews["@0"]) <= 80
     assert previews["@1"] == "shell stdout"

@@ -1690,6 +1690,29 @@ async def test_visible_messages_resolves_targets_redacts_and_caps_limit(stack: W
     ]
     assert peers.visible_messages(stack.store, stack.run_id, nodes, limit=0) == []
 
+    # A URL with credentials spanning past char 712 (and even >64 KiB) must never leak its password.
+    peers.send(
+        stack.store,
+        stack.run_id,
+        op_id="m4",
+        sender=alpha_ref,
+        to="beta",
+        text="see https://user:splitsecret-" + "a" * 710 + "@example.test/api",
+    )
+    peers.send(
+        stack.store,
+        stack.run_id,
+        op_id="m5",
+        sender=alpha_ref,
+        to="beta",
+        text="huge https://user:giantsecret-" + "b" * 70_000 + "@example.test/api",
+    )
+    tail_msgs = peers.visible_messages(stack.store, stack.run_id, nodes, limit=2)
+    assert [(m["seq"], "splitsecret" in m["text"], "giantsecret" in m["text"]) for m in tail_msgs] == [
+        (4, False, False),
+        (5, False, False),
+    ]
+
     gate.set()
     for index, name in enumerate(("alpha", "beta", "gamma")):
         await stack.result(f"/0:p{index}@0", "agent", {"prompt": "abc"[index], "name": name}, meta={"name": name})

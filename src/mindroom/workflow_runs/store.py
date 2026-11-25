@@ -474,7 +474,7 @@ class WorkflowRunStore:
             "FROM workflow_nodes "
             "WHERE run_id = ? AND stale = 0 AND state = 'completed' "
             "AND kind IN ('agent', 'turn', 'tool') AND result_file IS NULL "
-            "AND length(CAST(result_json AS BLOB)) <= ? AND result_json != 'null' "
+            "AND octet_length(result_json) <= ? AND result_json != 'null' "
             "ORDER BY seq"
         )
         with self.read_connection() as connection:
@@ -928,6 +928,16 @@ _LIGHT_COLUMNS = ", ".join(
 )
 
 
+def _redact_if_json_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped and stripped[0] in "{[":
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict | list):
+                return json.dumps(redact_sensitive_data(parsed), ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
 def _format_node_preview(blob: bytes | str, max_chars: int) -> str | None:
     """Decode, redact, and bound one node's JSON result for room display without crashing on bad UTF-8."""
     raw = blob.decode("utf-8", errors="replace") if isinstance(blob, bytes) else blob
@@ -935,9 +945,9 @@ def _format_node_preview(blob: bytes | str, max_chars: int) -> str | None:
     if obj is None:
         return None
     if isinstance(obj, str):
-        text = obj
+        text = _redact_if_json_text(obj)
     elif isinstance(obj, dict) and isinstance(obj.get("output"), str):
-        text = obj["output"]
+        text = _redact_if_json_text(obj["output"])
     elif isinstance(obj, dict | list):
         text = json.dumps(redact_sensitive_data(obj), ensure_ascii=False, separators=(",", ":"))
     else:
@@ -951,8 +961,8 @@ def _add_log_attempt(connection: sqlite3.Connection) -> None:
     if "attempt" not in columns:
         connection.execute("ALTER TABLE workflow_log ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
         connection.execute(
-            "UPDATE workflow_log "
-            "SET attempt = COALESCE((SELECT attempt FROM workflow_runs r WHERE r.run_id = workflow_log.run_id), 0)",
+            "UPDATE workflow_log SET attempt = 1 "
+            "WHERE EXISTS (SELECT 1 FROM workflow_runs r WHERE r.run_id = workflow_log.run_id AND r.attempt = 1)",
         )
     connection.execute("CREATE INDEX IF NOT EXISTS workflow_log_run_attempt_idx ON workflow_log(run_id, attempt, id)")
 
