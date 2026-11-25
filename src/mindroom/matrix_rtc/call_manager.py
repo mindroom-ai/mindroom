@@ -613,13 +613,21 @@ class CallManager:
             ):
                 self._request_reconcile(room)
 
+    def _schedule_unowned_eviction(self, room: nio.MatrixRoom) -> None:
+        """Evict a watched room in the background so sync callbacks never wait for call teardown."""
+        task = asyncio.create_task(
+            self._evict_unowned_room(room.room_id, room=room),
+            name=f"matrix_rtc_evict_{room.room_id}",
+        )
+        self._track_background_task(task, event="call_evict_failed", room_id=room.room_id)
+
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
         if event.type not in _CALL_EVENT_TYPES or self._shutting_down:
             return
         if not self._is_configured_call_room(room, call_event=event):
             if room.room_id in self._rooms:
-                await self._evict_unowned_room(room.room_id, room=room)
+                self._schedule_unowned_eviction(room)
             return
         self._request_reconcile(room)
 
@@ -637,7 +645,7 @@ class CallManager:
             return
         if not self._is_configured_call_room(room):
             if room.room_id in self._rooms:
-                await self._evict_unowned_room(room.room_id, room=room)
+                self._schedule_unowned_eviction(room)
             return
         self._request_reconcile(room)
 

@@ -7593,6 +7593,16 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
     assert manager.watches(ROOM_ID)
     assert bridge.connected_grant == GRANT
 
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def blocked_close() -> None:
+        close_started.set()
+        await release_close.wait()
+        bridge.closed = True
+
+    bridge.aclose = blocked_close  # type: ignore[method-assign]
+
     invited["other"] = {ROOM_ID}
     second_agent_join = nio.RoomMemberEvent.from_dict(
         {
@@ -7606,7 +7616,13 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
         },
     )
     assert isinstance(second_agent_join, nio.RoomMemberEvent)
-    await _deliver(manager, manager.on_room_membership_event(room, second_agent_join))
+    # The sync callback returns without waiting for bridge teardown.
+    await manager.on_room_membership_event(room, second_agent_join)
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+    assert not bridge.closed
+
+    release_close.set()
+    await asyncio.gather(*list(manager._background_tasks))
 
     assert not manager.watches(ROOM_ID)
     assert bridge.closed
