@@ -41,6 +41,19 @@ class DesktopRequestError(RuntimeError):
 
 
 _SHELL_CONCURRENT_ACTIONS = frozenset({"status", "request_status", "check_shell", "kill_shell"})
+_READ_ONLY_ACTIONS = frozenset(
+    {
+        "status",
+        "request_status",
+        "list_apps",
+        "get_app_state",
+        "screenshot",
+        "browser_observe",
+        "list_folders",
+        "list_directory",
+        "read_file",
+    },
+)
 
 
 def _actions_conflict(in_flight_action: str, new_action: str) -> bool:
@@ -48,7 +61,7 @@ def _actions_conflict(in_flight_action: str, new_action: str) -> bool:
         return new_action not in _SHELL_CONCURRENT_ACTIONS
     if new_action == "run_shell":
         return in_flight_action not in _SHELL_CONCURRENT_ACTIONS
-    return True
+    return not (in_flight_action in _READ_ONLY_ACTIONS and new_action in _READ_ONLY_ACTIONS)
 
 
 @dataclass(frozen=True, slots=True)

@@ -119,7 +119,7 @@ class DesktopProvider(Protocol):
         """Launch or foreground one exact allowlisted application."""
         ...
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Return one fresh app-scoped accessibility state."""
         ...
 
@@ -158,15 +158,33 @@ class DesktopProvider(Protocol):
         """Perform one action advertised by a state-scoped element."""
         ...
 
-    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Click normalized app coordinates after revalidating state."""
         ...
 
-    def hover(self, *, app_id: str, state_id: str, x: int, y: int) -> None:
+    def hover(self, *, app_id: str, state_id: str, x: int, y: int, allow_window_fallback: bool = False) -> None:
         """Move inside the revalidated allowed window without pressing a button."""
         ...
 
-    def double_click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+    def double_click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Perform a bounded double click at one validated app coordinate."""
         ...
 
@@ -180,11 +198,20 @@ class DesktopProvider(Protocol):
         end_x: int,
         end_y: int,
         duration_ms: int = 500,
+        allow_window_fallback: bool = False,
     ) -> None:
         """Drag within one observed window and release even if movement fails."""
         ...
 
-    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
+    def type_text(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        text: str,
+        element_index: int | None = None,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Type bounded text after revalidating and focusing the app."""
         ...
 
@@ -197,11 +224,12 @@ class DesktopProvider(Protocol):
         pages: int,
         x: int | None,
         y: int | None,
+        allow_window_fallback: bool = False,
     ) -> None:
         """Scroll at normalized app coordinates after revalidating state."""
         ...
 
-    def keypress(self, *, app_id: str, state_id: str, keys: list[str]) -> None:
+    def keypress(self, *, app_id: str, state_id: str, keys: list[str], allow_window_fallback: bool = False) -> None:
         """Press a short key combination after revalidating and focusing the app."""
         ...
 
@@ -276,9 +304,9 @@ class PyAutoGuiDesktopProvider:
         """Launch or foreground one exact allowlisted application."""
         self._accessibility.launch_app(app_id)
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Capture a fresh semantic state for one allowed application."""
-        return self._accessibility.get_app_state(app_id)
+        return self._accessibility.get_app_state(app_id, include_elements=include_elements)
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
         """Revalidate, foreground, capture, and downscale one allowed app as JPEG."""
@@ -377,17 +405,38 @@ class PyAutoGuiDesktopProvider:
         """Invoke one action explicitly advertised in the current state."""
         self._accessibility.perform_action(app_id, state_id, element_index, action_name)
 
-    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Click normalized coordinates within a freshly validated app window."""
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        target = self._accessibility.prepare_fallback(app_id, state_id)
-        screen_x, screen_y = _normalized_point(target.state.window, x=x, y=y)
-        self._mapped_display(target.state.window)
-        self._click_input(screen_x, screen_y, button=button, count=1, process_id=target.process_id)
+        point, process_id = self._fallback_point(
+            app_id,
+            state_id,
+            x,
+            y,
+            allow_window_fallback=allow_window_fallback,
+        )
+        self._click_input(*point, button=button, count=1, process_id=process_id)
 
-    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
+    def type_text(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        text: str,
+        element_index: int | None = None,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Type bounded text into a validated app or an exact focused text element."""
         if not text or len(text) > 2000:
             msg = "text must contain between 1 and 2000 characters."
@@ -400,7 +449,11 @@ class PyAutoGuiDesktopProvider:
             )
             raise DesktopProviderError(msg)
         if element_index is None:
-            guard = self._accessibility.prepare_keyboard(app_id, state_id)
+            guard = self._accessibility.prepare_keyboard(
+                app_id,
+                state_id,
+                allow_window_fallback=allow_window_fallback,
+            )
         else:
             if type(element_index) is not int or element_index < 0:
                 msg = "element_index must be a nonnegative integer."
@@ -421,44 +474,70 @@ class PyAutoGuiDesktopProvider:
         pages: int,
         x: int | None,
         y: int | None,
+        allow_window_fallback: bool = False,
     ) -> None:
         """Scroll a bounded amount at an optional normalized app coordinate."""
         if (x is None) != (y is None):
             msg = "x and y must either both be provided or both be omitted."
             raise DesktopProviderError(msg)
-        target = self._accessibility.prepare_fallback(app_id, state_id)
+        target = self._accessibility.prepare_fallback(
+            app_id,
+            state_id,
+            allow_window_fallback=allow_window_fallback,
+        )
         window = target.state.window
         point = _normalized_point(window, x=x, y=y) if x is not None and y is not None else _rect_center(window)
         self._mapped_display(window)
         clicks = _scroll_clicks(direction, pages)
         self._scroll_input(direction, clicks, *point, process_id=target.process_id)
 
-    def keypress(self, *, app_id: str, state_id: str, keys: list[str]) -> None:
+    def keypress(self, *, app_id: str, state_id: str, keys: list[str], allow_window_fallback: bool = False) -> None:
         """Press only an explicitly allowed application editing/navigation chord."""
         try:
             normalized = normalize_key_chord(keys)
         except ValueError as exc:
             raise DesktopProviderError(str(exc)) from exc
-        self._accessibility.prepare_keyboard(app_id, state_id)()
+        self._accessibility.prepare_keyboard(app_id, state_id, allow_window_fallback=allow_window_fallback)()
         if len(normalized) == 1:
             self._pyautogui.press(normalized[0])
         else:
             self._pyautogui.hotkey(*normalized)
 
-    def hover(self, *, app_id: str, state_id: str, x: int, y: int) -> None:
+    def hover(self, *, app_id: str, state_id: str, x: int, y: int, allow_window_fallback: bool = False) -> None:
         """Move inside the revalidated allowed window without pressing a button."""
-        point, process_id = self._fallback_point(app_id, state_id, x, y)
+        point, process_id = self._fallback_point(
+            app_id,
+            state_id,
+            x,
+            y,
+            allow_window_fallback=allow_window_fallback,
+        )
         if sys.platform == "darwin":
             macos_input.move(*point, check=self._pointer_check(process_id))
         else:
             self._pyautogui.moveTo(*point)
 
-    def double_click(self, *, app_id: str, state_id: str, x: int, y: int, button: str = "left") -> None:
+    def double_click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str = "left",
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Perform a bounded double click at one validated app coordinate."""
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        point, process_id = self._fallback_point(app_id, state_id, x, y)
+        point, process_id = self._fallback_point(
+            app_id,
+            state_id,
+            x,
+            y,
+            allow_window_fallback=allow_window_fallback,
+        )
         self._click_input(*point, button=button, count=2, process_id=process_id)
 
     def drag(
@@ -471,12 +550,17 @@ class PyAutoGuiDesktopProvider:
         end_x: int,
         end_y: int,
         duration_ms: int = 500,
+        allow_window_fallback: bool = False,
     ) -> None:
         """Drag within one observed window and release even if movement fails."""
         if type(duration_ms) is not int or not 100 <= duration_ms <= 2000:
             msg = "duration_ms must be an integer between 100 and 2000."
             raise DesktopProviderError(msg)
-        target = self._accessibility.prepare_fallback(app_id, state_id)
+        target = self._accessibility.prepare_fallback(
+            app_id,
+            state_id,
+            allow_window_fallback=allow_window_fallback,
+        )
         start = _normalized_point(target.state.window, x=start_x, y=start_y)
         end = _normalized_point(target.state.window, x=end_x, y=end_y)
         self._mapped_display(target.state.window)
@@ -486,19 +570,39 @@ class PyAutoGuiDesktopProvider:
                 end,
                 duration=duration_ms / 1000,
                 check=self._pointer_check(target.process_id),
-                before_press=lambda: self._accessibility.prepare_fallback(app_id, state_id),
+                before_press=lambda: self._accessibility.prepare_fallback(
+                    app_id,
+                    state_id,
+                    allow_window_fallback=allow_window_fallback,
+                ),
             )
             return
         self._pyautogui.moveTo(*start)
-        self._accessibility.prepare_fallback(app_id, state_id)
+        self._accessibility.prepare_fallback(
+            app_id,
+            state_id,
+            allow_window_fallback=allow_window_fallback,
+        )
         try:
             self._pyautogui.mouseDown(button="left")
             self._pyautogui.moveTo(*end, duration=duration_ms / 1000)
         finally:
             self._pyautogui.mouseUp(button="left")
 
-    def _fallback_point(self, app_id: str, state_id: str, x: int, y: int) -> tuple[tuple[int, int], int | None]:
-        target = self._accessibility.prepare_fallback(app_id, state_id)
+    def _fallback_point(
+        self,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> tuple[tuple[int, int], int | None]:
+        target = self._accessibility.prepare_fallback(
+            app_id,
+            state_id,
+            allow_window_fallback=allow_window_fallback,
+        )
         point = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
         return point, target.process_id
