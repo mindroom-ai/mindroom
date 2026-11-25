@@ -203,21 +203,18 @@ class ConsumptionOwner:
             return
         team = isinstance(run, TeamRunRecord)
         finished = _finished_call_ids(run)
-
-        def matches(consumption: _Consumption) -> bool:
-            return consumption.run_id == run.run_id and consumption.team == team and consumption.call_id in finished
-
-        if not any(matches(consumption) for consumption in self._claims):
+        by_runtime: dict[ToolJobRuntime, list[_Consumption]] = {}
+        remaining: list[_Consumption] = []
+        for consumption in self._claims:
+            if consumption.run_id == run.run_id and consumption.team == team and consumption.call_id in finished:
+                by_runtime.setdefault(consumption.runtime, []).append(consumption)
+            else:
+                remaining.append(consumption)
+        if not by_runtime:
             return
+        self._claims = remaining
 
         async def settle() -> None:
-            matched = [consumption for consumption in self._claims if matches(consumption)]
-            if not matched:
-                return
-            self._claims = [consumption for consumption in self._claims if not matches(consumption)]
-            by_runtime: dict[ToolJobRuntime, list[_Consumption]] = {}
-            for consumption in matched:
-                by_runtime.setdefault(consumption.runtime, []).append(consumption)
             for runtime, batch in by_runtime.items():
                 if not await _acknowledge_batch(runtime, batch):
                     self._claims.extend(batch)

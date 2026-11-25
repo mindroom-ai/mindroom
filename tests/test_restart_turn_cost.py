@@ -625,6 +625,7 @@ async def _collect_a_job_then_restart(
         )
         acknowledge = runtime.acknowledge_waits
         if not acknowledged:
+            # Fail the write rather than returning () so mid-turn checkpoint ack retains the claim for finalize() to release.
             monkeypatch.setattr(
                 runtime,
                 "acknowledge_waits",
