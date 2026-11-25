@@ -1039,7 +1039,7 @@ class TodoTools(Toolkit):
         )
 
     def list_templates(self) -> str:
-        """List available built-in and workspace todo templates with their descriptions and parameter schemas."""
+        """List available built-in and workspace todo templates with descriptions and parameter schemas when available."""
         templates: list[dict[str, Any]] = []
         remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
         template_roots = _visible_template_roots()

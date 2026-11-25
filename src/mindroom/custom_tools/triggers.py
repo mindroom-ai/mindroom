@@ -654,14 +654,14 @@ class TriggersTools(Toolkit):
     ) -> str:
         """Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
 
-        Actions (required params):
+        Actions (key params):
         - watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
         - watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
         - subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
         - create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
-        - list (`include_disabled`=True): list triggers and authorized `event_sources`.
+        - list (optional `include_disabled`=True): list triggers and authorized `event_sources`.
         - update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).
-        - set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`).
+        - set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).
         - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
         - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 

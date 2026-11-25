@@ -116,13 +116,13 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
             "type": "integer",
             "minimum": 0,
             "maximum": 1000,
-            "description": "Fallback window x (0-1000).",
+            "description": "Fallback normalized x (0-1000 within app window).",
         },
         "y": {
             "type": "integer",
             "minimum": 0,
             "maximum": 1000,
-            "description": "Fallback window y (0-1000).",
+            "description": "Fallback normalized y (0-1000 within app window).",
         },
         "button": {"type": "string", "enum": ["left", "middle", "right"], "default": "left"},
         "start_x": {"type": "integer", "minimum": 0, "maximum": 1000},
@@ -160,7 +160,7 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "return_attachment": {
             "type": "boolean",
             "default": False,
-            "description": "screenshot only: return turn-scoped att_* handle for matrix_message without saving to disk.",
+            "description": "screenshot only: return turn-scoped att_* handle for matrix_message without saving plaintext to disk.",
         },
         "root_id": {"type": "string", "description": "Folder ID from list_folders."},
         "path": {
@@ -211,7 +211,7 @@ _DESKTOP_DESCRIPTION = (
     "Status: status reports locally enabled capabilities (allowlisted apps, read-only folders, shell). "
     "gui_mode (observe_only or control) covers only app control; folders and shell are reported separately.\n"
     "Apps: list_apps -> launch_app (if stopped) -> get_app_state. Use observation=tree to avoid screenshots; "
-    "prefer click_element/set_value/scroll_element/perform_action over 0-1000 window pixel/keyboard fallbacks. "
+    "prefer click_element/set_value/scroll_element/perform_action over fallback coordinates (normalized 0-1000 within the app window, not screenshot pixels) or keyboard. "
     "Element refs/indices expire with state_id—always use fresh state. Never send passwords, tokens, or secrets "
     "via set_value or type_text. To send a screenshot to the user, call screenshot(return_attachment=true) and "
     "pass the att_* handle to matrix_message(attachments=[...]) in the same turn.\n"
@@ -227,7 +227,8 @@ _DESKTOP_DESCRIPTION = (
     "a running handle returns newest bytes only, so an output_start above the offset you asked for (0 if omitted) "
     "means earlier bytes were skipped—read from that offset). A handle stopped by kill_shell finishes with state "
     "killed and its exit code; completed means self-exited. Captures up to "
-    f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB/command (if attachment upload fails, returns fitting chunk + "
+    f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB/command; a finished result carries all captured output from "
+    "offset (if attachment upload fails, returns fitting chunk + "
     "warning + handle even when finished—continue with check_shell from next_offset). Results over "
     f"{DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB auto-save to a workspace file, or pass "
     "mindroom_output_path.\n"

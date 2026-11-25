@@ -853,7 +853,7 @@ class BrowserTools(Toolkit):
             element: CSS selector for element actions.
             type: Screenshot format (`png`/`jpeg`).
             saveOnly: Host screenshot: return artifact metadata only (omit image bytes).
-            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk.
+            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving plaintext to disk.
             level: Console log level filter.
             paths: Upload files (artifact/workspace paths or att_* IDs; use `./att_*` for workspace files named att_*). For `open`, one local HTML file instead of targetUrl (cannot load other local files; relative links don't resolve).
             inputRef: Host-target upload input selector/ref.
