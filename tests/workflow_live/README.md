@@ -14,7 +14,7 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `kill_after_write.py --barrier before-receipt` | Kills the backend with `SIGKILL` after the run's one write took effect and before its receipt was saved. | `lines=1 node=indeterminate attempt=2 run=failed deliveries=1 reports=0` |
 | `kill_after_write.py --barrier after-receipt` | Kills the backend with `SIGKILL` after the receipt was saved and before the run's node was written. | `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1` |
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
-| `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper; the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
+| `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper (the first with `minimal=True`); the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
 | `large_result.py` | Reads a 9 MiB file through `tool("python", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
 | `approval_restart.py` | One agent writes its one line and then calls `write_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
 | `diamond_restart.py` | A plan agent returns six lines, `foreach` runs one research agent per line, two at a time, and one agent joins their answers. The script stops the backend with `SIGTERM` after three research agents completed and starts it again. | `agents=8/8 subagents=8 paid_once=True attempt_below_run=True attempt=2 run=completed deliveries=1 reports=1` |
@@ -114,9 +114,10 @@ export OPENAI_API_KEY="$(sed -n 's/^\(export \)\{0,1\}OPENAI_API_KEY=//p' ~/.min
 python3 scripts/agent-stack/stack.py "$N" up --model live --client-sessions \
   --computers --computer-tools shell \
   --checkout ~/repos/worktrees/mindroom-agent-graphs --ref HEAD
-# The workers reach the backend's script gateway over the Docker bridge; the stack's backend listens on loopback only.
+# The workers reach the backend's script gateway and minimal-agent CLI API over the Docker bridge; the stack's backend listens on loopback only.
 API=$((29600 + N))
 echo "MINDROOM_SCRIPT_GATEWAY_URL=http://172.17.0.1:$API/api/script-gateway" >> "/tmp/mindroom-client-agents/slot-$N/.env"
+echo "MINDROOM_AGENT_CLI_PRIMARY_URL=http://172.17.0.1:$API" >> "/tmp/mindroom-client-agents/slot-$N/.env"
 nix shell nixpkgs#socat --command socat TCP-LISTEN:$API,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:$API &
 sudo nft add element inet nixos-fw temp-ports "{ tcp . $API }"     # NixOS firewall; drop it again after the teardown
 cd ~/repos/worktrees/mindroom-agent-graphs
@@ -135,6 +136,7 @@ bash scripts/e2e-slot.sh "$N" down                                  # stops the 
 The scripts restart the backend themselves and find the slot through the stack's own `state.json` in `/tmp/mindroom-client-agents/slot-N`.
 With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and a worker that is down refuses the run instead of falling back to this machine.
 `docker ps` must list a worker of the slot while a run is going on; if it lists none, the run did not use a worker and the result says nothing about Docker.
+Minimal agents in Docker workers (`agents_restart.py`'s `first` agent) also require `MINDROOM_API_KEY` (which `stack.py` already writes to the slot's `.env`) and `MINDROOM_AGENT_CLI_PRIMARY_URL` unless `MINDROOM_SCRIPT_GATEWAY_ISOLATED` and `MINDROOM_SCRIPT_GATEWAY_PORT` are set.
 
 ## What has been run
 

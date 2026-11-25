@@ -15,10 +15,12 @@ from datetime import timedelta
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 
+from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.approval import manager as approval_manager
 from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -33,13 +35,20 @@ from mindroom.tool_jobs import runtime as tool_job_runtime
 from mindroom.tool_jobs.client_cancel import conversation_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
-from mindroom.workflow_runs import agent_nodes
+from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.delegation_helpers import offered_tools
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    agent_cli_api,
+    cli_window,
+    install_scripted_shell,
+    settled_receipt,
+    shell_cli_owner,
+)
 from tests.scripted_agent_helpers import raising
 from tests.tool_job_helpers import JobApprovalCards, wait_for_status
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
@@ -1493,3 +1502,70 @@ async def test_agent_output_path_redirect_failure_fails_node(
                 assert stack.counting_tool.lines == ["a"]
         finally:
             await stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_minimal_agent_node_runs_through_bash_cli_without_membership_turn_id(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `minimal=True` workflow agent runs without `membership_turn_id`, offers only Bash, and calls CLI tools."""
+    assert stack.context.membership_turn_id is None
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        owner = shell_cli_owner(stack.context.orchestrator.agent_cli_registry)  # type: ignore[union-attr]
+        call_id = uuid4()
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                toolkit="workflow_peers",
+                function="set_shared_state",
+                arguments={"key": "from_minimal", "value": "ok"},
+                call_id=call_id,
+            ),
+        )
+        receipt = await settled_receipt(owner, str(call_id))
+        assert receipt["status"] == "completed", json.dumps(receipt, default=str)
+        return str(receipt["outcome"])
+
+    install_scripted_shell(monkeypatch, run_shell_command)
+    model = stack.child_script(
+        calls(tool_call("bash", "b1", command="mindroom-agent tools call workflow_peers.set_shared_state")),
+        answer("minimal-done"),
+    )
+
+    assert await stack.result("@0", "agent", _PROMPT | {"minimal": True}) == "minimal-done"
+
+    assert offered_tools(model) == [["bash"], ["bash"]]
+    assert delegation_child(stack.node_job("@0")).agent_mode == "minimal"
+    assert peers.all_state(stack.store, stack.run_id) == {"from_minimal": "ok"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_interrupted_minimal_agent_node_continues_after_restart_without_membership_turn_id(
+    stack: WorkflowStack,
+) -> None:
+    """An interrupted `minimal=True` workflow agent continues cleanly across a restart when `source_event_id` is None."""
+    assert stack.context.membership_turn_id is None
+    stack.continues = lambda job: job.kind == "delegation"
+    request: dict[str, object] = _PROMPT | {"minimal": True}
+    first = stack.child_script([Await(asyncio.Event().wait), *answer("never")])
+    await stack.submit("@0", "agent", request)
+    await stack.until(lambda: len(first.requests) == 1)
+    before = stack.node_job("@0")
+    assert before.source_event_id is None
+    assert offered_tools(first) == [["bash"]]
+
+    await stack.restart()
+    continued = stack.child_script(answer("continued-minimal"))
+    await stack.continue_agents()
+    assert await stack.recover() == [stack.run_id]
+
+    assert await stack.result("@0", "agent", request) == "continued-minimal"
+    assert stack.node_job("@0").job_id == before.job_id
+    assert delegation_child(stack.node_job("@0")).agent_mode == "minimal"
+    assert offered_tools(continued) == [["bash"]]
+    assert (_node(stack).generation, _node(stack).attempt) == (1, 2)

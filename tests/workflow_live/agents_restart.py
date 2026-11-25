@@ -4,7 +4,8 @@ Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/
 
     python3 -m tests.workflow_live.agents_restart [--slot N]
 
-The run calls `agent()` three times, one after the other: two copies of the Helper, then the lobby's second agent.
+The run calls `agent()` three times, one after the other: two copies of the Helper (the first in minimal mode),
+then the lobby's second agent.
 The backend is started again after the config edit, so the Helper has the toolkit before it is asked.
 The second agent appends one line to a file with its shell tool and then sleeps, so it is still working when the
 script stops the backend with SIGTERM and starts it again.
@@ -46,7 +47,7 @@ from mindroom.workflow import agent
 
 
 def main(args):
-    agent("Reply with the single word: one", name="first")
+    agent("Reply with the single word: one", name="first", minimal=True)
     agent(
         "Run the shell command `echo written >> {counter}` exactly once. Then run the shell command `sleep {sleep}`. "
         "Then reply with the single word: two. Never run the echo command a second time, whatever happens.",
