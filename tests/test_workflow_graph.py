@@ -441,6 +441,7 @@ def test_run_inside_a_run_is_a_group_under_the_call_that_started_it() -> None:
 
 def _msg(index: int, text: str | None = None) -> dict[str, Any]:
     return {
+        "seq": index + 1,
         "from": "n1",
         "from_name": "sender",
         "to": "n2",

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 MAX_PEER_BYTES = 1024 * 1024
 _NAME_CHARS = 80
 _TEXT_CHARS = 200
+_PREVIEW_READ_CHARS = _TEXT_CHARS + 512
 
 _LIVE = frozenset(state.value for state in LIVE_NODE_STATES)
 _UNREACHABLE = "'{name}' has finished and will not read this. Use spawn() to keep an agent you want to talk to."
@@ -384,20 +385,25 @@ def visible_messages(
         return []
     ids, gens, sess_of, by_name = _message_index(nodes)
     q = (
-        "SELECT sender_key, sender_generation, sender_name, recipient_name, recipient_keys_json, text, created_at "
-        "FROM workflow_messages WHERE run_id = ? AND withdrawn = 0 ORDER BY seq ASC"
+        "SELECT m.seq, m.sender_key, m.sender_generation, m.sender_name, m.recipient_name, "
+        "m.recipient_keys_json, substr(m.text, 1, ?) AS text, m.created_at "
+        "FROM workflow_messages m "
+        "JOIN workflow_nodes n "
+        "  ON n.run_id = m.run_id AND n.key = m.sender_key AND n.stale = 0 AND n.generation = m.sender_generation "
+        "WHERE m.run_id = ? AND m.withdrawn = 0 "
+        "ORDER BY m.seq DESC LIMIT ?"
     )
     with store.read_connection() as conn:
-        rows = conn.execute(q, (run_id,)).fetchall()
-    matched = [
-        r for r in rows if (sender_key := r["sender_key"]) in ids and int(r["sender_generation"]) == gens[sender_key]
-    ][-limit:]
+        rows = conn.execute(q, (_PREVIEW_READ_CHARS, run_id, limit)).fetchall()
     out: list[dict[str, Any]] = []
-    for r in matched:
-        from_id = ids[r["sender_key"]]
+    for r in reversed(rows):
+        sender_key = r["sender_key"]
+        if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
+            continue
         targets = _resolved_recipients(r, from_id, ids, sess_of, by_name)
         out.append(
             {
+                "seq": int(r["seq"]),
                 "from": from_id,
                 "from_name": redact_sensitive_text(r["sender_name"], max_length=_NAME_CHARS),
                 "to": targets[0] if len(targets) == 1 else None,

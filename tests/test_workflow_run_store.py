@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.workflow_runs import store as store_module
+from mindroom.workflow_runs.graph import graph_rows
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     DispatchHandle,
@@ -999,18 +1000,18 @@ def test_turn_costs_are_those_of_the_runs_own_priced_turns(tmp_path: Path) -> No
 
 
 def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path: Path) -> None:
-    """Opening a v1 database adds workflow_log.attempt (default 0) and scopes logs by attempt."""
+    """Opening a v1 database adds workflow_log.attempt, backfills it from workflow_runs, and scopes logs by attempt."""
     path = tmp_path / "v1.sqlite3"
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE workflow_schema (version INTEGER NOT NULL)")
         store_module._create_schema(conn)
         conn.execute("INSERT INTO workflow_schema (version) VALUES (1)")
         conn.commit()
-    # Populate a run + v1 log row (no attempt column yet) before opening v2 store.
+    # Populate a v1 run at attempt 1 + a pre-upgrade log row (no attempt column yet) before opening v2 store.
     with sqlite3.connect(path) as conn:
         cols = [row[1] for row in conn.execute("PRAGMA table_info(workflow_log)")]
         assert "attempt" not in cols
-        run = _run()
+        run = _run(attempt=1)
         values = {
             **store_module._row_values(store_module.asdict(run), store_module._RUN_JSON_FIELDS),
             "reservation_digest": "d",
@@ -1018,7 +1019,7 @@ def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path:
         store_module._insert(conn, "INSERT INTO workflow_runs", values)
         conn.execute(
             "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
-            (_RUN_A, "2026-01-01T00:00:00Z", "legacy"),
+            (_RUN_A, "2026-01-01T00:00:00Z", "legacy attempt 1"),
         )
         conn.commit()
 
@@ -1029,15 +1030,15 @@ def test_v1_to_v2_migration_adds_attempt_column_and_scopes_log_queries(tmp_path:
         indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "attempt" in cols
     assert "workflow_log_run_attempt_idx" in indexes
+    assert store.log(_RUN_A, attempt=1) == ["legacy attempt 1"]
+    assert store.log(_RUN_A, attempt=0) == []
 
-    set_run(store, _RUN_A, attempt=1)
-    store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 1")
+    store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 1 after upgrade")
     set_run(store, _RUN_A, attempt=2)
     store.append_log(_RUN_A, store.get_run(_RUN_A).epoch, "attempt 2")
 
-    assert store.log(_RUN_A) == ["legacy", "attempt 1", "attempt 2"]
-    assert store.log(_RUN_A, attempt=0) == ["legacy"]
-    assert store.log(_RUN_A, attempt=1) == ["attempt 1"]
+    assert store.log(_RUN_A) == ["legacy attempt 1", "attempt 1 after upgrade", "attempt 2"]
+    assert store.log(_RUN_A, attempt=1) == ["legacy attempt 1", "attempt 1 after upgrade"]
     assert store.log(_RUN_A, attempt=2) == ["attempt 2"]
 
 
@@ -1062,28 +1063,52 @@ def test_usage_summary_scopes_by_node_to_current_generations_while_keeping_total
 
 
 def test_node_previews_extracts_bounded_text_shell_and_json_and_skips_state_and_large_blobs(tmp_path: Path) -> None:
-    """node_previews returns bounded text/output/small-JSON previews and skips state, null, stale, and large blobs."""
+    """node_previews redacts structured secrets, survives bad UTF-8 surrogates, and skips state/null/stale/>16 KiB blobs."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     store.reserve_run(_run())
     cases: list[tuple[str, str, WorkflowNodeState, object, bool]] = [
         ("@0", "agent", WorkflowNodeState.COMPLETED, "  hello " + "a" * 80, False),
         ("@1", "tool", WorkflowNodeState.COMPLETED, {"output": "shell stdout\n", "exit_code": 0}, False),
         ("@2", "turn", WorkflowNodeState.COMPLETED, {"id": 9007199254740993, "ok": True}, False),
-        ("@3", "state", WorkflowNodeState.COMPLETED, "secret shared state", False),
-        ("@4", "tool", WorkflowNodeState.COMPLETED, {"blob": "x" * 5000}, False),
-        ("@5", "agent", WorkflowNodeState.COMPLETED, None, False),
-        ("@6", "agent", WorkflowNodeState.COMPLETED, {"text": "y" * (9 * 1024 * 1024)}, False),
-        ("@7", "agent", WorkflowNodeState.COMPLETED, "stale text", True),
-        ("@8", "agent", WorkflowNodeState.RUNNING, None, False),
+        ("@3", "agent", WorkflowNodeState.COMPLETED, {"name": "PASSWORD", "value": "example-private-value"}, False),
+        ("@4", "state", WorkflowNodeState.COMPLETED, "secret shared state", False),
+        ("@5", "tool", WorkflowNodeState.COMPLETED, {"blob": "x" * 20_000}, False),
+        ("@6", "agent", WorkflowNodeState.COMPLETED, None, False),
+        ("@7", "agent", WorkflowNodeState.COMPLETED, {"text": "y" * (9 * 1024 * 1024)}, False),
+        ("@8", "agent", WorkflowNodeState.COMPLETED, "stale text", True),
+        ("@9", "agent", WorkflowNodeState.RUNNING, None, False),
+        ("@10", "agent", WorkflowNodeState.COMPLETED, "surrogate \ud800 ok", False),
+        ("@11", "agent", WorkflowNodeState.COMPLETED, "raw bad utf8 placeholder", False),
+        ("@12", "agent", WorkflowNodeState.COMPLETED, "malformed json placeholder", False),
     ]
     for key, kind, state, result, stale in cases:
         store.put_node(_node(key=key, kind=kind, state=WorkflowNodeState.RUNNING, stale=stale), 0)
         if state is WorkflowNodeState.COMPLETED:
             store.settle_node(_RUN_A, key, 1, 0, state=state, result=result)
+    # Inject raw invalid UTF-8 surrogate bytes and malformed JSON directly into SQLite to verify resilience.
+    with sqlite3.connect(store.database_path) as conn:
+        conn.execute(
+            "UPDATE workflow_nodes SET result_json = CAST(? AS TEXT) WHERE run_id = ? AND key = '@11'",
+            (b'"\xed\xa0\x80raw"', _RUN_A),
+        )
+        conn.execute("UPDATE workflow_nodes SET result_json = '{bad' WHERE run_id = ? AND key = '@12'", (_RUN_A,))
+        conn.commit()
 
-    previews = store.node_previews(_RUN_A, max_chars=40)
-    assert set(previews) == {"@0", "@1", "@2"}
-    assert previews["@0"] == ("hello " + "a" * 80)[:38]  # 2 leading spaces stripped after substr(..., 1, 40)
+    previews = store.node_previews(_RUN_A, max_chars=80)
+    assert set(previews) == {"@0", "@1", "@2", "@3", "@10", "@11"}
+    assert previews["@0"].startswith("hello ")
+    assert len(previews["@0"]) <= 80
     assert previews["@1"] == "shell stdout"
     assert previews["@2"] == '{"id":9007199254740993,"ok":true}'
+    assert "example-private-value" not in previews["@3"]
+    assert previews["@3"] == '{"name":"PASSWORD","value":"***redacted***"}'
+    assert previews["@10"] == "surrogate ? ok"
+    assert previews["@10"].encode("utf-8")
+    assert "\ufffd" in previews["@11"]
+    assert previews["@11"].encode("utf-8")
+    assert previews["@11"].endswith("raw")
+    # Passing node_previews through graph_rows keeps structured secret masking intact.
+    rows = {row["id"]: row for row in graph_rows(store.nodes(_RUN_A, light=True), {}, [], [], previews=previews).nodes}
+    assert "example-private-value" not in rows["n4"]["preview"]
+    assert rows["n4"]["preview"] == '{"name":"PASSWORD","value":"***redacted***"}'
     assert store.node_previews(_RUN_A, max_chars=0) == {}

@@ -699,9 +699,11 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
             "n2",
             "frontend",
         )
+        assert isinstance(preview["seq"], int)
         assert isinstance(preview["sent_at"], int)
         assert "sk-invented" not in preview["text"]
         assert len(preview["text"]) <= 200
+    assert [preview["seq"] for preview in graph.messages] == [1, 2]
     assert "second message" in {preview["text"] for preview in graph.messages}
     assert any(preview["text"].startswith("contract ") for preview in graph.messages)
 
@@ -1673,15 +1675,18 @@ async def test_visible_messages_resolves_targets_redacts_and_caps_limit(stack: W
     beta_node = stack.store.get_node(stack.run_id, "/0:p1@0")
     assert beta_node is not None
     assert len(msgs) == 3
+    assert set(msgs[0]) == {"seq", "from", "from_name", "to", "to_name", "text", "sent_at"}
+    assert [m["seq"] for m in msgs] == [1, 2, 3]
     assert msgs[0]["to"] == f"n{beta_node.seq}"
     assert "sk-invented" not in msgs[0]["from_name"]
     assert "sk-invented" not in msgs[0]["text"]
     assert len(msgs[0]["text"]) <= 200
     assert (msgs[1]["to"], msgs[1]["to_name"]) == (None, "*")
     assert (msgs[2]["to"], msgs[2]["to_name"]) == (None, "script")
-    assert [m["text"] for m in peers.visible_messages(stack.store, stack.run_id, nodes, limit=2)] == [
-        "broadcast to both",
-        "report to script",
+    capped = peers.visible_messages(stack.store, stack.run_id, nodes, limit=2)
+    assert [(m["seq"], m["text"]) for m in capped] == [
+        (2, "broadcast to both"),
+        (3, "report to script"),
     ]
     assert peers.visible_messages(stack.store, stack.run_id, nodes, limit=0) == []
 
@@ -1739,5 +1744,7 @@ async def test_rerun_generation_excludes_superseded_read_messages_from_edges_and
 
     nodes = stack.store.nodes(stack.run_id)
     assert peers.message_edges(stack.store, stack.run_id, nodes) == [(f"n{be_node.seq}", f"n{fe_node.seq}", 1)]
-    assert [m["text"] for m in peers.visible_messages(stack.store, stack.run_id, nodes)] == ["v2 contract"]
+    assert [(m["seq"], m["text"]) for m in peers.visible_messages(stack.store, stack.run_id, nodes)] == [
+        (2, "v2 contract"),
+    ]
     assert [m["text"] for m in peers.all_messages(stack.store, stack.run_id)] == ["v1 contract", "v2 contract"]
