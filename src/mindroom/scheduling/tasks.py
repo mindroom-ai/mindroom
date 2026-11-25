@@ -54,12 +54,11 @@ from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_argume
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.scheduling.scheduled_tool_calls import LiveFunction
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -318,19 +317,17 @@ class ScheduledTaskReadModel:
     created_at: datetime | None
 
 
-@dataclass(frozen=True)
-class SchedulingRuntime:
-    """Live scheduling collaborators required to create or edit running tasks."""
+def _require_context_room(context: ToolRuntimeContext) -> nio.MatrixRoom:
+    """Return the cached Matrix room from ``context``, or raise when absent."""
+    if context.room is None:
+        msg = "Scheduling requires a cached Matrix room in tool runtime context"
+        raise RuntimeError(msg)
+    return context.room
 
-    client: nio.AsyncClient
-    config: Config
-    runtime_paths: RuntimePaths
-    room: nio.MatrixRoom
-    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
-    # Runs saved tasks; without an orchestrator a task is saved but no runner starts.
-    task_runtime: ScheduledTaskRuntime | None = None
-    # The agent scheduling through its tool, whose timezone new tasks take when omitted.
-    agent_name: str | None = None
+
+def _context_task_runtime(context: ToolRuntimeContext) -> ScheduledTaskRuntime | None:
+    """Return the live scheduled-task runtime attached to ``context``, if any."""
+    return context.orchestrator.scheduled_tasks if context.orchestrator is not None else None
 
 
 def _parse_datetime(value: object) -> datetime | None:
@@ -1036,10 +1033,13 @@ def _scheduled_task_response_text(
     return response_text + f"\n**Task ID:** `{task_id}`"
 
 
-async def _validate_schedule_responders(runtime: SchedulingRuntime, *, scheduled_by: str, message: str) -> None:
-    """Ensure at least one responder may answer ``scheduled_by`` and every mentioned entity is allowed in the room."""
-    config, runtime_paths = runtime.config, runtime.runtime_paths
-    candidates = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
+async def _validate_schedule_responders(context: ToolRuntimeContext, *, message: str) -> None:
+    """Ensure at least one responder may answer the requester and every mentioned entity is allowed in the room."""
+    config, runtime_paths = context.current_config, context.runtime_paths
+    candidates = await context.responder_candidates_for_current_room(
+        _require_context_room(context),
+        context.requester_id,
+    )
     if not candidates:
         _raise_schedule_edit_error("No agents or teams in this room are allowed to reply to you.")
     unavailable = [
@@ -1058,10 +1058,7 @@ async def _validate_schedule_responders(runtime: SchedulingRuntime, *, scheduled
 
 
 async def schedule_task(
-    runtime: SchedulingRuntime,
-    room_id: str,
-    thread_id: str | None,
-    scheduled_by: str,
+    context: ToolRuntimeContext,
     *,
     message: str,
     new_thread: bool,
@@ -1073,7 +1070,6 @@ async def schedule_task(
     history_limit: int | None = None,
     silent: bool = False,
     model: str | None = None,
-    source_event_id: str | None = None,
 ) -> str:
     """Schedule a structured one-time or recurring workflow and return the confirmation.
 
@@ -1086,20 +1082,22 @@ async def schedule_task(
         _raise_schedule_edit_error("message cannot be empty.")
 
     _validate_history_limit(history_limit)
-    config = runtime.config
+    config = context.current_config
+    room_id = context.room_id
+    task_runtime = _context_task_runtime(context)
     selected_model = _resolve_model(model, existing_model=None, config=config)
     if sum(value is not None for value in (execute_at, delay_seconds, cron)) != 1:
         _raise_schedule_edit_error("Provide exactly one of execute_at, delay_seconds, or cron.")
 
     task_timezone = (
-        _validate_timezone(timezone) if timezone is not None else entity_timezone(config, runtime.agent_name)
+        _validate_timezone(timezone) if timezone is not None else entity_timezone(config, context.agent_name)
     )
     resolved_execute_at = _parse_once_time(execute_at=execute_at, delay_seconds=delay_seconds, timezone=task_timezone)
     cron_schedule = _parse_cron_schedule(cron, cron_timezone=task_timezone) if cron is not None else None
     schedule_type: Literal["once", "cron"] = "cron" if cron_schedule is not None else "once"
     cron_timezone = task_timezone if cron_schedule is not None else None
 
-    await _validate_schedule_responders(runtime, scheduled_by=scheduled_by, message=message_value)
+    await _validate_schedule_responders(context, message=message_value)
 
     workflow = ScheduledWorkflow(
         schedule_type=schedule_type,
@@ -1109,14 +1107,14 @@ async def schedule_task(
         description=(description or "").strip() or message_value,
         history_limit=history_limit,
         model=selected_model,
-        created_by=scheduled_by,
-        thread_id=None if new_thread else thread_id,
+        created_by=context.requester_id,
+        thread_id=None if new_thread else context.resolved_thread_id,
         room_id=room_id,
         new_thread=new_thread,
         silent=silent,
         pre_approved_call=False,
         timezone=task_timezone,
-        source_event_id=source_event_id,
+        source_event_id=context.reply_to_event_id,
         cron_timezone=cron_timezone,
     )
 
@@ -1133,16 +1131,16 @@ async def schedule_task(
     try:
         # A new task is owned by the bot that saves it; the room's steward only writes its state.
         await persist_scheduled_task_state(
-            runtime.client,
+            context.client,
             room_id,
             task_id,
             workflow,
             config=config,
-            owner_id=runtime.client.user_id,
-            writers=runtime.task_runtime,
+            owner_id=context.client.user_id,
+            writers=task_runtime,
         )
-        if runtime.task_runtime is not None:
-            runtime.task_runtime.start_new_task(task_id, workflow, owner_id=runtime.client.user_id)
+        if task_runtime is not None:
+            task_runtime.start_new_task(task_id, workflow, owner_id=context.client.user_id)
     except SchedulingError as e:
         msg = f"Failed to schedule: {e}"
         raise SchedulingError(msg) from e
@@ -1214,18 +1212,18 @@ def _parse_send_time(execute_at: str) -> datetime:
 
 
 async def _checked_scheduled_call(
-    runtime: SchedulingRuntime,
+    context: ToolRuntimeContext,
     *,
-    scheduled_by: str,
-    agent_name: str,
     call: LiveFunction,
     tool_name: str,
     arguments: dict[str, object],
     execute_at: str,
 ) -> tuple[datetime, str]:
     """Return the send time and approver for a call that may be pre-approved, or raise why it may not."""
-    config = runtime.config
-    runtime_paths = runtime.runtime_paths
+    config = context.current_config
+    runtime_paths = context.runtime_paths
+    agent_name = context.agent_name
+    scheduled_by = context.requester_id
     if agent_name not in config.agents:
         msg = "Only an agent, not a team, can schedule a pre-approved tool call."
         raise SchedulingError(msg)
@@ -1249,7 +1247,7 @@ async def _checked_scheduled_call(
     if not requires_approval and not call.authored_confirmation:
         msg = f"`{tool_name}` does not require approval; use `schedule` instead."
         raise SchedulingError(msg)
-    responders = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
+    responders = await context.responder_candidates_for_current_room(_require_context_room(context), scheduled_by)
     if entity_identity_registry(config, runtime_paths).current_id(agent_name) not in responders:
         msg = f"`{agent_name}` cannot receive a scheduled call from you in this room."
         raise SchedulingError(msg)
@@ -1257,18 +1255,13 @@ async def _checked_scheduled_call(
 
 
 async def schedule_approved_tool_call(
+    context: ToolRuntimeContext,
     *,
-    runtime: SchedulingRuntime,
-    room_id: str,
-    thread_id: str | None,
-    scheduled_by: str,
-    agent_name: str,
     call: LiveFunction,
     tool_name: str,
     arguments: dict[str, object],
     execute_at: str,
     description: str,
-    source_event_id: str | None = None,
 ) -> str:
     """Store one gated call of the agent's own, ask the requester to approve it now, and return the confirmation.
 
@@ -1276,14 +1269,17 @@ async def schedule_approved_tool_call(
         SchedulingError: Why the call was not scheduled.
 
     """
+    room_id = context.room_id
+    thread_id = context.resolved_thread_id
+    scheduled_by = context.requester_id
+    agent_name = context.agent_name
     if thread_id is None:
         msg = "Pre-approved tool calls must be scheduled from a thread."
         raise SchedulingError(msg)
-    config = runtime.config
+    config = context.current_config
+    task_runtime = _context_task_runtime(context)
     send_at, approver_id = await _checked_scheduled_call(
-        runtime,
-        scheduled_by=scheduled_by,
-        agent_name=agent_name,
+        context,
         call=call,
         tool_name=tool_name,
         arguments=arguments,
@@ -1317,7 +1313,7 @@ async def schedule_approved_tool_call(
         room_id=room_id,
         pre_approved_call=True,
         timezone=timezone,
-        source_event_id=source_event_id,
+        source_event_id=context.reply_to_event_id,
     )
     binding = ScheduledCallBinding(
         task_id=task_id,
@@ -1349,13 +1345,13 @@ async def schedule_approved_tool_call(
             raise SchedulingError(msg)
         try:
             await persist_scheduled_task_state(
-                runtime.client,
+                context.client,
                 room_id,
                 task_id,
                 workflow,
                 config=config,
-                owner_id=runtime.client.user_id,
-                writers=runtime.task_runtime,
+                owner_id=context.client.user_id,
+                writers=task_runtime,
             )
         except SchedulingError as e:
             msg = f"Failed to schedule: {e}"
@@ -1365,8 +1361,8 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
     # Started only once the task is published, so a failed start never withdraws the approval a stored task uses.
-    if runtime.task_runtime is not None:
-        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=runtime.client.user_id)
+    if task_runtime is not None:
+        task_runtime.start_new_task(task_id, workflow, owner_id=context.client.user_id)
     scheduled_for = _format_scheduled_time(send_at, timezone)
     return (
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
@@ -1414,10 +1410,8 @@ def _resolve_tool_edit_schedule(
 
 
 async def edit_scheduled_task(
-    runtime: SchedulingRuntime,
-    room_id: str,
+    context: ToolRuntimeContext,
     task_id: str,
-    scheduled_by: str,
     *,
     message: str | None = None,
     description: str | None = None,
@@ -1436,11 +1430,12 @@ async def edit_scheduled_task(
         SchedulingError: Why the task was not edited; ScheduledTaskNotFoundError when the room does not store it.
 
     """
-    existing_task = await require_scheduled_task(runtime.client, room_id, task_id, runtime.runtime_paths)
+    room_id = context.room_id
+    existing_task = await require_scheduled_task(context.client, room_id, task_id, context.runtime_paths)
     _raise_unless_editable(existing_task)
 
     existing = existing_task.workflow
-    config = runtime.config
+    config = context.current_config
 
     try:
         selected_model = _resolve_model(model, existing_model=existing.model, config=config)
@@ -1465,18 +1460,18 @@ async def edit_scheduled_task(
             clear_history_limit=clear_history_limit,
             silent=silent,
             model="" if model is not None and selected_model is None else selected_model,
-            created_by=scheduled_by,
+            created_by=context.requester_id,
         )
         if existing == updated_workflow.model_copy(update={"created_by": existing.created_by}):
             _raise_schedule_edit_error("No changes specified for this scheduled task.")
-        await _validate_schedule_responders(runtime, scheduled_by=scheduled_by, message=updated_workflow.message)
+        await _validate_schedule_responders(context, message=updated_workflow.message)
         await save_edited_scheduled_task(
-            client=runtime.client,
+            client=context.client,
             workflow=updated_workflow,
             config=config,
             existing_task=existing_task,
-            runtime_paths=runtime.runtime_paths,
-            writers=runtime.task_runtime,
+            runtime_paths=context.runtime_paths,
+            writers=_context_task_runtime(context),
         )
     except SchedulingError as e:
         msg = f"Failed to edit task `{task_id}`.\n\n{e}"

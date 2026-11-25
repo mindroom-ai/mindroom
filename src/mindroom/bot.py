@@ -713,7 +713,6 @@ class AgentBot:
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 visible_responses=self._visible_responses,
-                conversation_reader=self._conversation_reader,
                 recover_config_confirmation_setup=self._recover_config_confirmation_setup,
                 controller_identity=self.orchestrator.desktop_controller_identity,
             ),

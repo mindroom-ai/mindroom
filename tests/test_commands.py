@@ -39,7 +39,6 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_reader_mock,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -571,7 +570,6 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!adhoc:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
@@ -625,7 +623,6 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
@@ -732,7 +729,6 @@ async def test_desktop_command_resolves_exact_agent_from_room_candidates(
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),

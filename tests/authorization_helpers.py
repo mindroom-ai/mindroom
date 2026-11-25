@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.users import AgentMatrixUser
-    from mindroom.scheduling.tasks import SchedulingRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.turn_policy import TurnPolicyDeps
 
@@ -106,15 +105,6 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
     )
     kwargs.setdefault("steward_may_write_state", lambda _room_id, _event_type: True)
     return CommandHandlerContext(*args, **kwargs)
-
-
-def make_test_scheduling_runtime(*args: Any, **kwargs: Any) -> SchedulingRuntime:  # noqa: ANN401
-    """Build a detached scheduling runtime with an explicit isolated index."""
-    from mindroom.scheduling.tasks import SchedulingRuntime  # noqa: PLC0415
-
-    _add_default_responder_candidate_resolver(kwargs)
-    kwargs.pop("agent_reply_memberships", None)
-    return SchedulingRuntime(*args, **kwargs)
 
 
 def make_test_bot_for_entity(

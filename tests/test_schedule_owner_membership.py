@@ -29,7 +29,7 @@ from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import install_bots, make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
 from tests.scheduling_helpers import (
@@ -827,10 +827,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         )
         timing_kwargs: dict[str, Any] = {"delay_seconds": 1} if schedule_type == "once" else {"cron": "* * * * *"}
         response = await scheduling.schedule_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@alice:server",
+            context,
             message="Check the queue",
             new_thread=False,
             **timing_kwargs,

@@ -18,7 +18,6 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )
 
@@ -106,10 +105,7 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await schedule_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
+            context=context,
             message=message,
             new_thread=new_thread,
             execute_at=execute_at,
@@ -120,7 +116,6 @@ class SchedulerTools(Toolkit):
             history_limit=history_limit,
             silent=silent,
             model=model,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def schedule_tool_call(
@@ -154,17 +149,12 @@ class SchedulerTools(Toolkit):
         context = _scheduling_context()
         live, arguments = prepare_scheduled_call(tool_name, arguments_json)
         return await schedule_approved_tool_call(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
-            agent_name=context.agent_name,
+            context=context,
             call=live,
             tool_name=tool_name,
             arguments=arguments,
             execute_at=execute_at,
             description=description,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def run_scheduled_call(
@@ -241,10 +231,8 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await edit_scheduled_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
+            context=context,
             task_id=task_id,
-            scheduled_by=context.requester_id,
             message=message,
             description=description,
             execute_at=execute_at,

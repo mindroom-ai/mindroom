@@ -6,7 +6,7 @@ import asyncio
 import threading
 import weakref
 from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -77,7 +77,6 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
@@ -1113,23 +1112,25 @@ def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolR
     )
 
 
+@contextmanager
 def _responders(
     config: Config,
     *entity_names: str,
     task_runtime: ScheduledTaskRuntime | None = None,
-) -> AbstractContextManager[object]:
+) -> Iterator[None]:
     """Let only these agents or teams reply to the requester in the scheduling room, and run saved tasks on ``task_runtime``."""
     registry = entity_identity_registry(config, runtime_paths_for(config))
     responder_ids = [registry.current_id(name) for name in entity_names]
-    build_runtime = build_scheduling_runtime_from_tool_runtime_context
-    return patch(
-        "mindroom.custom_tools.scheduler.build_scheduling_runtime_from_tool_runtime_context",
-        side_effect=lambda context: replace(
-            build_runtime(context),
-            responder_candidates_for_room=AsyncMock(return_value=responder_ids),
-            task_runtime=task_runtime,
-        ),
-    )
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(
+                ToolRuntimeContext,
+                "responder_candidates_for_current_room",
+                new=AsyncMock(return_value=responder_ids),
+            ),
+        )
+        stack.enter_context(patch("mindroom.scheduling.tasks._context_task_runtime", return_value=task_runtime))
+        yield
 
 
 def _persisted_workflows(context: ToolRuntimeContext) -> list[ScheduledTaskRecord]:

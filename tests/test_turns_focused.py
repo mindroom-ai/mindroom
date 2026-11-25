@@ -758,7 +758,6 @@ def _build_harness(
             logger=logger,
             runtime_paths=runtime_paths,
             normalizer=normalizer,
-            conversation_reader=make_conversation_reader_mock(),
             turn_policy=cast("TurnPolicy", policy),
             turn_store=turn_store,
             visible_responses=visible_responses,

@@ -31,10 +31,12 @@ from mindroom.scheduling.tasks import (
     scheduled_cron_timezone,
 )
 from tests.authorization_helpers import (
-    make_test_scheduling_runtime,
+    make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -614,15 +616,17 @@ class TestIntegrationWithScheduling:
         config, room = _research_room_config()
 
         message = await schedule_task(
-            runtime=make_test_scheduling_runtime(
+            make_test_tool_runtime_context(
+                agent_name="",
+                target=MessageTarget.resolve("!room:server", "$thread123", None),
+                requester_id="@user:server",
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
+                conversation_reader=make_conversation_reader_mock(),
+                relations=make_relation_lookup(),
                 room=room,
             ),
-            room_id="!room:server",
-            thread_id="$thread123",
-            scheduled_by="@user:server",
             message="@research Daily AI news",
             description="Daily AI research",
             cron="0 9 * * *",
@@ -697,15 +701,18 @@ class TestIntegrationWithScheduling:
         )
 
         message = await edit_scheduled_task(
-            runtime=make_test_scheduling_runtime(
+            make_test_tool_runtime_context(
+                agent_name="",
+                target=MessageTarget.resolve("!room:server", None, None),
+                requester_id="@user:server",
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
+                conversation_reader=make_conversation_reader_mock(),
+                relations=make_relation_lookup(),
                 room=room,
             ),
-            room_id="!room:server",
             task_id="task123",
-            scheduled_by="@user:server",
             delay_seconds=6 * 3600,
             clear_history_limit=clear_history_limit,
         )

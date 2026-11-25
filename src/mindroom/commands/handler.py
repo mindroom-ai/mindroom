@@ -77,7 +77,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.model_selection import CommandResultContent
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -238,7 +237,6 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    conversation_reader: ConversationReader
     stable_target: MessageTarget
     record_handled_turn: Callable[[str], Awaitable[None]]
     record_command_result: _CommandResultRecorder

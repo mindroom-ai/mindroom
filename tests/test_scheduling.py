@@ -7,8 +7,9 @@ import json
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -17,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
 from mindroom.scheduling.errors import ScheduledTaskStateReadError, ScheduledTaskStateRefusedError, SchedulingError
@@ -27,7 +29,6 @@ from mindroom.scheduling.tasks import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    SchedulingRuntime,
     _parse_cron_schedule,
     build_edited_scheduled_workflow,
     build_scheduled_task_read_model,
@@ -45,12 +46,13 @@ from mindroom.scheduling.tasks import (
     scheduled_task_timezone,
 )
 from tests.authorization_helpers import (
-    make_test_scheduling_runtime,
+    make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_relation_lookup,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.scheduling_helpers import (
@@ -73,6 +75,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
+    from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _runtime_paths() -> RuntimePaths:
@@ -126,22 +130,40 @@ def _matrix_room(room_id: str, *, members_synced: bool = True) -> nio.MatrixRoom
     return room
 
 
-def _scheduling_runtime(
+def _scheduling_context(
     *,
     client: AsyncMock | None = None,
-    config: object | None = None,
-    runtime_paths: object | None = None,
-    room: object | None = None,
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+    room: nio.MatrixRoom | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    scheduled_by: str = "@user:server",
     task_runtime: ScheduledTaskRuntime | None = None,
-    agent_name: str | None = None,
-) -> SchedulingRuntime:
-    return make_test_scheduling_runtime(
-        client=client or AsyncMock(),
-        config=config or MagicMock(),
-        runtime_paths=runtime_paths or _runtime_paths(),
-        room=room or MagicMock(),
-        task_runtime=task_runtime,
+    agent_name: str = "",
+    source_event_id: str | None = None,
+) -> ToolRuntimeContext:
+    resolved_room_id = room_id or (room.room_id if room is not None else "!test:server")
+    resolved_room = room or _matrix_room(resolved_room_id)
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
+        target=MessageTarget.resolve(
+            room_id=resolved_room_id,
+            thread_id=thread_id,
+            reply_to_event_id=source_event_id,
+        ),
+        requester_id=scheduled_by,
+        client=client or AsyncMock(),
+        config=config or Config(),
+        runtime_paths=runtime_paths or _runtime_paths(),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+        room=resolved_room,
+        orchestrator=(
+            cast("OrchestratorRuntime", SimpleNamespace(scheduled_tasks=task_runtime))
+            if task_runtime is not None
+            else None
+        ),
     )
 
 
@@ -1491,16 +1513,15 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
         return_value=[ids["assistant"]],
     ):
         result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=_matrix_room("!test:server"),
+                scheduled_by="@alice:server",
                 task_runtime=state_writers,
             ),
-            room_id="!test:server",
             task_id="task123",
-            scheduled_by="@alice:server",
             description="Updated description",
         )
 
@@ -1557,16 +1578,15 @@ async def test_edit_scheduled_task_persists_through_the_room_steward_and_preserv
         return_value=[ids["assistant"]],
     ):
         result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                scheduled_by="@bob:server",
                 task_runtime=state_writers,
             ),
-            room_id="!test:server",
             task_id="taskedit",
-            scheduled_by="@bob:server",
             message="updated message",
             description="updated task",
             delay_seconds=600,
@@ -1615,28 +1635,26 @@ async def test_an_explicit_argument_alone_makes_an_edit(tmp_path: Path, argument
     ):
         with pytest.raises(SchedulingError, match="No changes specified"):
             await edit_scheduled_task(
-                runtime=_scheduling_runtime(
+                _scheduling_context(
                     client=client,
                     config=config,
                     runtime_paths=runtime_paths,
                     room=_matrix_room("!test:server"),
+                    scheduled_by="@bob:server",
                 ),
-                room_id="!test:server",
                 task_id="taskedit",
-                scheduled_by="@bob:server",
             )
         client.room_put_state.assert_not_awaited()
 
         result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=_matrix_room("!test:server"),
+                scheduled_by="@alice:server",
             ),
-            room_id="!test:server",
             task_id="taskedit",
-            scheduled_by="@alice:server",
             **{argument: value},
         )
 
@@ -1761,10 +1779,7 @@ async def test_schedule_task_fails_when_sender_blocked_from_all_agents(new_threa
         pytest.raises(SchedulingError) as exc_info,
     ):
         await schedule_task(
-            runtime=_scheduling_runtime(config=Config()),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@blocked:server",
+            _scheduling_context(config=Config(), room_id="!test:server", scheduled_by="@blocked:server"),
             message="check logs",
             delay_seconds=300,
             new_thread=new_thread,
@@ -1967,16 +1982,15 @@ async def test_schedule_task_persists_through_the_room_steward(tmp_path: Path) -
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                thread_id="$thread",
+                scheduled_by="@alice:server",
                 task_runtime=state_writers,
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="check logs",
             delay_seconds=300,
             new_thread=False,
@@ -2028,15 +2042,14 @@ async def test_schedule_task_persists_zero_history_limit(tmp_path: Path) -> None
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                thread_id="$thread",
+                scheduled_by="@alice:server",
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="poll the queue",
             description="Queue poller",
             cron="*/25 * * * *",
@@ -2059,10 +2072,7 @@ async def test_schedule_task_rejects_invalid_history_limit(
     """An invalid history_limit fails fast."""
     with pytest.raises(SchedulingError) as exc_info:
         await schedule_task(
-            runtime=_scheduling_runtime(config=Config()),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@user:server",
+            _scheduling_context(config=Config(), room_id="!test:server", scheduled_by="@user:server"),
             message="check logs",
             delay_seconds=300,
             new_thread=False,
@@ -2092,16 +2102,15 @@ async def test_schedule_task_where_the_runtime_names_no_steward_fails_without_wr
         pytest.raises(SchedulingError) as exc_info,
     ):
         await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                thread_id="$thread",
+                scheduled_by="@alice:server",
                 task_runtime=scheduled_task_runtime(runtime_paths, config=config),
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="check logs",
             delay_seconds=300,
             new_thread=False,
@@ -2161,16 +2170,15 @@ async def test_schedule_task_fails_when_active_write_returns_unexpected_response
         pytest.raises(SchedulingError) as exc_info,
     ):
         await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                thread_id="$thread",
+                scheduled_by="@alice:server",
                 task_runtime=scheduled_task_runtime(runtime_paths, scheduling_bot(client), config=config),
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="check logs",
             delay_seconds=300,
             new_thread=False,
@@ -2207,7 +2215,13 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
         usernames={"router": "mindroom_router_oldns", "assistant": "mindroom_assistant_oldns"},
     )
     room.add_member(f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}", "Router", None)
-    runtime = _scheduling_runtime(client=client, config=config, runtime_paths=runtime_paths, room=room)
+    context = _scheduling_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        room=room,
+        scheduled_by=f"@alice:{config.get_domain(runtime_paths)}",
+    )
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
         {
             "joined": {
@@ -2224,10 +2238,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
-            runtime=runtime,
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by=f"@alice:{config.get_domain(runtime_paths)}",
+            context,
             message="check logs",
             delay_seconds=300,
             new_thread=False,
@@ -2267,18 +2278,17 @@ async def test_schedule_task_rejects_mentions_outside_room_responders_in_thread(
         ),
         patch("mindroom.scheduling.tasks.persist_scheduled_task_state", new=AsyncMock()) as save_task,
     ):
-        runtime = _scheduling_runtime(
+        context = _scheduling_context(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
             room=room,
+            thread_id="$thread",
+            scheduled_by="@alice:localhost",
         )
         with pytest.raises(SchedulingError) as exc_info:
             await schedule_task(
-                runtime=runtime,
-                room_id="!test:server",
-                thread_id="$thread",
-                scheduled_by="@alice:localhost",
+                context,
                 message="@writer check logs",
                 delay_seconds=300,
                 new_thread=False,
@@ -2330,16 +2340,15 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
+                thread_id="$thread",
+                scheduled_by="@alice:server",
                 task_runtime=state_writers,
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="poll the queue",
             description="Queue poller",
             cron="*/25 * * * *",
@@ -2384,16 +2393,15 @@ async def test_schedule_persists_model_and_history_limit_and_edits_model(
     ):
         for idx, (model, expected) in enumerate([(None, model_override), ("default", "default"), ("", None)]):
             result = await edit_scheduled_task(
-                runtime=_scheduling_runtime(
+                _scheduling_context(
                     client=client,
                     config=config,
                     runtime_paths=runtime_paths,
                     room=room,
+                    scheduled_by="@alice:server",
                     task_runtime=state_writers,
                 ),
-                room_id="!test:server",
                 task_id="task1234",
-                scheduled_by="@alice:server",
                 message=f"poll the queue {idx}",
                 model=model,
             )
@@ -2411,10 +2419,7 @@ async def test_schedule_rejects_unknown_model() -> None:
     """An unknown model must fail before writing schedule state."""
     with pytest.raises(SchedulingError) as exc_info:
         await schedule_task(
-            runtime=_scheduling_runtime(config=Config()),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@user:server",
+            _scheduling_context(config=Config(), room_id="!test:server", scheduled_by="@user:server"),
             message="check logs",
             cron="0 * * * *",
             new_thread=False,
@@ -2470,17 +2475,16 @@ async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timez
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         message = await schedule_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=_matrix_room("!test:server"),
+                thread_id="$thread",
+                scheduled_by="@alice:server",
                 task_runtime=_recording_state_writer(room_state)[0],
                 agent_name="atlas",
             ),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
             message="@atlas check the deploy",
             description="Deploy check",
             execute_at="2027-01-15T09:00:00",
@@ -2550,17 +2554,16 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
         patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
     ):
         result = await edit_scheduled_task(
-            runtime=_scheduling_runtime(
+            _scheduling_context(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
                 room=_matrix_room("!test:server"),
+                scheduled_by="@alice:server",
                 task_runtime=_recording_state_writer(room_state)[0],
                 agent_name="atlas",
             ),
-            room_id="!test:server",
             task_id="task1234",
-            scheduled_by="@alice:server",
             description="Standup at 9",
         )
 
@@ -2647,14 +2650,17 @@ async def test_a_task_keeps_the_message_its_scheduling_reply_answered(
     config = _timezone_test_config(runtime_paths)
     ids = entity_ids(config, runtime_paths)
 
-    def runtime() -> SchedulingRuntime:
-        return _scheduling_runtime(
+    def make_context(*, thread_id: str | None = None, source_event_id: str | None = None) -> ToolRuntimeContext:
+        return _scheduling_context(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
             room=_matrix_room("!test:server"),
+            thread_id=thread_id,
+            scheduled_by="@alice:server",
             task_runtime=_recording_state_writer(room_state)[0],
             agent_name="atlas",
+            source_event_id=source_event_id,
         )
 
     with (
@@ -2667,23 +2673,17 @@ async def test_a_task_keeps_the_message_its_scheduling_reply_answered(
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
         await schedule_task(
-            runtime=runtime(),
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:server",
+            make_context(thread_id="$thread", source_event_id="$answered"),
             message="@atlas check the deploy",
             description="Deploy check",
             execute_at="2027-01-15T08:00:00Z",
             new_thread=False,
-            source_event_id="$answered",
         )
         [task] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
         assert task.workflow.source_event_id == "$answered"
         await edit_scheduled_task(
-            runtime=runtime(),
-            room_id="!test:server",
+            make_context(),
             task_id="task1234",
-            scheduled_by="@alice:server",
             description="Deploy check at 10",
         )
 
@@ -2703,20 +2703,18 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$state", "!test:server"))
     runtime_paths = schedule_runtime_paths(tmp_path)
     config, ids = _assistant_config(runtime_paths)
-    rt = _scheduling_runtime(
+    ctx = _scheduling_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         room=_matrix_room("!test:server"),
+        scheduled_by="@alice:server",
     )
 
     # Empty message
     with pytest.raises(SchedulingError, match="message cannot be empty"):
         await schedule_task(
-            runtime=rt,
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@alice:server",
+            ctx,
             message="   ",
             delay_seconds=60,
             new_thread=False,
@@ -2731,10 +2729,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     ]:
         with pytest.raises(SchedulingError, match="Provide exactly one of execute_at, delay_seconds, or cron"):
             await schedule_task(
-                runtime=rt,
-                room_id="!test:server",
-                thread_id=None,
-                scheduled_by="@alice:server",
+                ctx,
                 message="ping",
                 new_thread=False,
                 **timing_kwargs,
@@ -2743,10 +2738,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     # Invalid timezone
     with pytest.raises(SchedulingError, match="Unknown timezone"):
         await schedule_task(
-            runtime=rt,
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@alice:server",
+            ctx,
             message="ping",
             delay_seconds=60,
             timezone="Not/A_Zone",
@@ -2762,10 +2754,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     ]:
         with pytest.raises(SchedulingError, match=match):
             await schedule_task(
-                runtime=rt,
-                room_id="!test:server",
-                thread_id=None,
-                scheduled_by="@alice:server",
+                ctx,
                 message="ping",
                 execute_at=bad_execute_at,
                 timezone=tz,
@@ -2781,10 +2770,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     ]:
         with pytest.raises(SchedulingError, match=match):
             await schedule_task(
-                runtime=rt,
-                room_id="!test:server",
-                thread_id=None,
-                scheduled_by="@alice:server",
+                ctx,
                 message="ping",
                 delay_seconds=bad_delay,
                 new_thread=False,
@@ -2794,10 +2780,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
     for bad_cron in ["0 9 * *", "0 0 9 * * *", "0 0 31 2 *"]:
         with pytest.raises(SchedulingError, match="Invalid cron expression"):
             await schedule_task(
-                runtime=rt,
-                room_id="!test:server",
-                thread_id=None,
-                scheduled_by="@alice:server",
+                ctx,
                 message="ping",
                 cron=bad_cron,
                 timezone="America/Los_Angeles",
@@ -2810,15 +2793,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
         return_value=[ids["assistant"]],
     ):
         await schedule_task(
-            runtime=_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths,
-                room=_matrix_room("!test:server"),
-            ),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@alice:server",
+            ctx,
             message="Fall-back ping",
             execute_at="2027-11-07T01:30:00-08:00",
             timezone="America/Los_Angeles",
@@ -2835,15 +2810,7 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(
         return_value=[ids["assistant"]],
     ):
         await schedule_task(
-            runtime=_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths,
-                room=_matrix_room("!test:server"),
-            ),
-            room_id="!test:server",
-            thread_id=None,
-            scheduled_by="@alice:server",
+            ctx,
             message="Space ping",
             execute_at="2027-01-15 09:00:00",
             timezone="America/Los_Angeles",
@@ -2881,14 +2848,14 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
     )
     ids = entity_ids(config, runtime_paths)
 
-    def make_rt() -> SchedulingRuntime:
-        return _scheduling_runtime(
-            client=client,
-            config=config,
-            runtime_paths=runtime_paths,
-            room=_matrix_room("!test:server"),
-            task_runtime=state_writers,
-        )
+    ctx = _scheduling_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        room=_matrix_room("!test:server"),
+        scheduled_by="@alice:server",
+        task_runtime=state_writers,
+    )
 
     legacy_cron = ScheduledWorkflow(
         schedule_type="cron",
@@ -2925,14 +2892,11 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
         return_value=[ids["assistant"]],
     ):
-        rt = make_rt()
         # 1. history_limit + clear_history_limit conflict
         with pytest.raises(SchedulingError, match="Cannot set both history_limit and clear_history_limit"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="once1",
-                scheduled_by="@alice:server",
                 history_limit=5,
                 clear_history_limit=True,
             )
@@ -2940,26 +2904,20 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         # 2. Type immutability (cron on once, execute_at/delay_seconds on cron, >1 timing param)
         with pytest.raises(SchedulingError, match="cron_expression is only valid for cron schedules"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="once1",
-                scheduled_by="@alice:server",
                 cron="0 9 * * *",
             )
         with pytest.raises(SchedulingError, match="Cannot set execute_at or delay_seconds on a cron schedule"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="legacy1",
-                scheduled_by="@alice:server",
                 delay_seconds=60,
             )
         with pytest.raises(SchedulingError, match="Provide at most one"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="once1",
-                scheduled_by="@alice:server",
                 execute_at="2027-06-02T12:00:00Z",
                 delay_seconds=60,
             )
@@ -2967,19 +2925,15 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         # 3. Updating timezone on a legacy UTC cron without cron fails closed
         with pytest.raises(SchedulingError, match="legacy UTC cron schedule without also passing `cron`"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="legacy1",
-                scheduled_by="@alice:server",
                 timezone="Europe/Berlin",
             )
 
         # 4. Passing cron upgrades legacy UTC cron to local-time cron in task timezone
         await edit_scheduled_task(
-            runtime=rt,
-            room_id="!test:server",
+            ctx,
             task_id="legacy1",
-            scheduled_by="@alice:server",
             cron="0 9 * * *",
         )
         upgraded = await get_scheduled_task(client, "!test:server", "legacy1", runtime_paths)
@@ -2989,10 +2943,8 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
 
         # 5. Once local-time, updating timezone alone updates both timezone and cron_timezone
         await edit_scheduled_task(
-            runtime=rt,
-            room_id="!test:server",
+            ctx,
             task_id="legacy1",
-            scheduled_by="@alice:server",
             timezone="Europe/Berlin",
         )
         moved = await get_scheduled_task(client, "!test:server", "legacy1", runtime_paths)
@@ -3036,10 +2988,8 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
             writers=state_writers,
         )
         await edit_scheduled_task(
-            runtime=rt,
-            room_id="!test:server",
+            ctx,
             task_id="api_tz1",
-            scheduled_by="@alice:server",
             cron="0 10 * * *",
         )
         after_tool_edit = await get_scheduled_task(client, "!test:server", "api_tz1", runtime_paths)
@@ -3051,9 +3001,7 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         # 7. Mention validation rejects mentioning an unavailable agent on edit
         with pytest.raises(SchedulingError, match="not available in this room"):
             await edit_scheduled_task(
-                runtime=rt,
-                room_id="!test:server",
+                ctx,
                 task_id="once1",
-                scheduled_by="@alice:server",
                 message="@other do this",
             )

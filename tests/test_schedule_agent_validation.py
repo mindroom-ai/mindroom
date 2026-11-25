@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import nio
@@ -13,17 +14,23 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling.errors import SchedulingError
-from mindroom.scheduling.tasks import SchedulingRuntime, schedule_task
+from mindroom.scheduling.tasks import schedule_task
 from tests.authorization_helpers import (
-    make_test_scheduling_runtime,
+    make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _runtime_bound_config(config: Config) -> Config:
@@ -50,16 +57,23 @@ def _allow_schedule_state_persistence(client: AsyncMock, room_id: str) -> None:
     client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", room_id))
 
 
-def _scheduling_runtime(
+def _scheduling_context(
     *,
     client: AsyncMock,
     config: Config,
     room: nio.MatrixRoom,
-) -> SchedulingRuntime:
-    return make_test_scheduling_runtime(
+    thread_id: str | None = None,
+    scheduled_by: str = "@user:localhost",
+) -> ToolRuntimeContext:
+    return make_test_tool_runtime_context(
+        agent_name="",
+        target=MessageTarget.resolve(room.room_id, thread_id, None),
+        requester_id=scheduled_by,
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
         room=room,
     )
 
@@ -90,10 +104,7 @@ async def test_schedule_validates_agents_in_scope(thread_id: str | None) -> None
 
     with pytest.raises(SchedulingError) as exc_info:
         await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=thread_id,
-            scheduled_by="@user:localhost",
+            _scheduling_context(client=client, config=config, room=room, thread_id=thread_id),
             message="@calculator please calculate 2+2",
             description="Calculate something",
             delay_seconds=300,
@@ -133,10 +144,7 @@ async def test_schedule_allows_agents_in_room() -> None:
     room = _test_room(config, "assistant", "calculator")
 
     response = await schedule_task(
-        runtime=_scheduling_runtime(client=client, config=config, room=room),
-        room_id="test_room",
-        thread_id="$thread123",
-        scheduled_by="@user:localhost",
+        _scheduling_context(client=client, config=config, room=room, thread_id="$thread123"),
         message="@calculator please calculate 2+2",
         description="Calculate something",
         delay_seconds=300,
@@ -178,10 +186,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
 
     with pytest.raises(SchedulingError) as exc_info:
         await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=None,
-            scheduled_by="@user:localhost",
+            _scheduling_context(client=client, config=config, room=room),
             message="@researcher find info and @calculator calculate it",
             description="Research and calculate",
             delay_seconds=300,
@@ -222,10 +227,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
     room = _test_room(config, "assistant", "researcher")
 
     response = await schedule_task(
-        runtime=_scheduling_runtime(client=client, config=config, room=room),
-        room_id="test_room",
-        thread_id="$thread123",
-        scheduled_by="@user:localhost",
+        _scheduling_context(client=client, config=config, room=room, thread_id="$thread123"),
         message="Remember to check the deployment",
         description="Deployment reminder",
         delay_seconds=300,
@@ -267,10 +269,7 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
 
     with pytest.raises(SchedulingError) as exc_info:
         await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=None,
-            scheduled_by="@blocked:localhost",
+            _scheduling_context(client=client, config=config, room=room, scheduled_by="@blocked:localhost"),
             message="@calculator please calculate 2+2",
             description="Calculate something",
             delay_seconds=300,
@@ -304,10 +303,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
     room = _test_room(config, "assistant")
 
     response = await schedule_task(
-        runtime=_scheduling_runtime(client=client, config=config, room=room),
-        room_id="test_room",
-        thread_id=None,
-        scheduled_by="@user:localhost",
+        _scheduling_context(client=client, config=config, room=room),
         message="@imaginary_agent do something",
         description="Imaginary task",
         delay_seconds=300,

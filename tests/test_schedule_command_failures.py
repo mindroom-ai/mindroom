@@ -21,7 +21,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_matrix_client_mock
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock
 from tests.identity_helpers import entity_ids
 from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
@@ -104,7 +104,6 @@ async def _reply(
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
