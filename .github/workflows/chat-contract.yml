@@ -44,5 +44,5 @@ jobs:
   chat-contract:
     uses: mindroom-ai/mindroom-chat/.github/workflows/agent-contract.yml@main
     with:
-      mindroom_ref: ${{ inputs.mindroom_ref || (github.event_name == 'pull_request' && github.ref || github.sha) }}
+      mindroom_ref: ${{ inputs.mindroom_ref || github.sha }}
       chat_ref: ${{ inputs.chat_ref || '' }}
