@@ -1061,7 +1061,7 @@ async def test_requests_carry_the_authored_headers_without_request_headers(
 
 @pytest.mark.asyncio
 async def test_compaction_request_carries_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A follow-up to a subagent that asked to compact sends its summary request with that subagent's headers."""
+    """A subagent that calls compact_context sends its mid-turn summary request with that subagent's headers."""
     wire = _model_server(
         monkeypatch,
         "chat",
@@ -1082,9 +1082,9 @@ async def test_compaction_request_carries_headers(tmp_path: Path, monkeypatch: p
     ]
     child_id = runs[1][1]
     assert child_id != "lead"
-    # The follow-up compacts its history before its first request, right after the lead's request that continued it.
-    assert summaries == [4]
-    assert runs[4] == ("helper", child_id, "-", "1")
+    # Compaction runs immediately mid-turn inside the subagent's turn and does not re-run on the follow-up.
+    assert summaries == [2]
+    assert runs[2] == ("helper", child_id, "-", "1")
 
 
 @pytest.mark.asyncio

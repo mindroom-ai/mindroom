@@ -22,6 +22,7 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
+from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
@@ -29,7 +30,12 @@ from mindroom.history.replay import configured_replay_plan, estimate_summary_tex
 from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.request_size import RequestSize, RequestSizer
-from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
+from mindroom.history.storage import (
+    has_queued_force_compaction,
+    new_scope_session,
+    read_scope_state,
+    with_force_compaction,
+)
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -74,9 +80,10 @@ from mindroom.tool_system.runtime_context import (
     detached_requester_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
-from tests.fakes.scripted_model import estimate_only_model
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     TEST_AGENT_SCOPE,
@@ -98,6 +105,7 @@ from tests.history_helpers import (
     seeded_storage,
     summary_rows_of,
 )
+from tests.team_turn_helpers import SESSION_ID, squad_turn
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -110,6 +118,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionLifecycle
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 
 def probe() -> str:
@@ -164,10 +173,11 @@ class _Agent:
     ``before_request`` hooks run ahead of the compaction hook; ``records`` keeps every run record a run stored.
     """
 
-    model: ToolLoopModel
+    model: ToolLoopModel | ScriptedModel
     config: Config
     runtime_paths: RuntimePaths
     tools: list[Callable[..., object] | Function] = field(default_factory=lambda: [probe])
+    extra_toolkits: tuple[AdaptedToolkit, ...] = ()
     store: ConversationStore | None = None
     replays_history: bool = False
     folds_into_scope: bool = False
@@ -185,7 +195,7 @@ class _Agent:
             name="test_agent",
             model=self.model,
             system_messages=self.system_messages,
-            toolkits=(adapt_toolkit(Toolkit(name="probes", tools=list(self.tools))),),
+            toolkits=(adapt_toolkit(Toolkit(name="probes", tools=list(self.tools))), *self.extra_toolkits),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
         )
 
@@ -266,7 +276,13 @@ async def _run(
             turn=turn,
             media=media or MediaInputs(),
         ),
-        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), user_id=user_id, metadata=metadata),
+        ctx=RunContext(
+            run_id=str(uuid4()),
+            session=UnstoredSession(session_id),
+            user_id=user_id,
+            metadata=metadata,
+            model_name="default",
+        ),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
         request_template=ModelRequest(messages=(), native_compaction=agent.native_compaction),
@@ -2067,3 +2083,187 @@ async def test_only_an_answer_after_the_native_checkpoint_anchors_a_request(
     assert not any(is_compaction_summary(message) for request in model.requests[:4] for message in request.messages)
     assert _first_compacted(model) is model.requests[4]
     assert model.requests[-1].request.native_compaction is None
+
+
+def _compact_context_toolkit(config: Config, runtime_paths: RuntimePaths) -> AdaptedToolkit:
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="test_agent",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id=None,
+        account_id=None,
+    )
+    return adapt_toolkit(
+        CompactContextTools(
+            agent_name="test_agent",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        ),
+    )
+
+
+def _ping() -> str:
+    return "pong"
+
+
+@pytest.mark.asyncio
+async def test_compact_context_tool_compacts_immediately_mid_turn_once(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """Calling compact_context compacts immediately before the next request, even far below limit, and only once."""
+    config, paths = _config(tmp_path, context_window=48_000)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    model = ScriptedModel(
+        [
+            calls(tool_call("compact_context", "call-compact")),
+            calls(tool_call("_ping", "call-ping")),
+            answer("All done."),
+        ],
+    )
+
+    output = await _run(
+        _scoped_agent(
+            model,
+            config,
+            paths,
+            storage,
+            tools=[_ping],
+            extra_toolkits=(_compact_context_toolkit(config, paths),),
+            lifecycle=lifecycle,
+        ),
+        "Compact and continue",
+    )
+
+    assert output.content == "All done."
+    assert len(summary_calls.inputs) == 1
+    assert len(model.requests) == 3
+    assert any(is_scope_summary(message) for message in model.requests[1].messages)
+    assert any(message.role == "tool" and message.content == "pong" for message in model.requests[2].messages)
+    assert len(summary_rows_of(storage, TEST_AGENT_SCOPE.key)) == 1
+    assert not has_queued_force_compaction(storage, "session-1")
+    assert [event.mode for event in lifecycle.events if isinstance(event, CompactionOutcome)] == ["auto"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_window", [48_000, None], ids=["auto-disabled", "no-active-window"])
+async def test_compact_context_tool_works_with_auto_disabled_and_compaction_model_only(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    context_window: int | None,
+) -> None:
+    """Mid-turn compact_context runs when automatic compaction is disabled or only compaction.model has a window."""
+    config, paths = _config(tmp_path, enabled=False, context_window=context_window, summary_context_window=32_000)
+    storage = seeded_storage(config, paths)
+    model = ScriptedModel(
+        [
+            calls(tool_call("compact_context", "call-compact")),
+            answer("Done after compaction."),
+        ],
+    )
+
+    output = await _run(
+        _scoped_agent(
+            model,
+            config,
+            paths,
+            storage,
+            tools=[],
+            extra_toolkits=(_compact_context_toolkit(config, paths),),
+        ),
+        "Compact now",
+    )
+
+    assert output.content == "Done after compaction."
+    assert len(summary_calls.inputs) == 1
+    assert any(is_scope_summary(message) for message in model.requests[1].messages)
+    assert len(summary_rows_of(storage, TEST_AGENT_SCOPE.key)) == 1
+    assert not has_queued_force_compaction(storage, "session-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_compact_context_in_team_member_compacts_leader_in_team_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A team member calling compact_context leaves its own loop uncompacted and compacts the leader's next request."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Compact please")),
+            answer("Leader finished."),
+        ],
+        writer=[
+            calls(tool_call("compact_context", "call-compact")),
+            answer("Writer finished."),
+        ],
+        context_window=48_000,
+    )
+    team.config.agents["writer"].tools = ["compact_context"]
+    team.config.agents["checker"].tools = []
+
+    chunks = await team.stream()
+
+    assert chunks[-1].content.endswith("Leader finished.")
+    assert len(summary_calls.inputs) == 1
+    writer_requests = team.models["writer-model"].requests
+    assert len(writer_requests) == 2
+    assert not any(is_compaction_summary(message) for request in writer_requests for message in request.messages)
+    assert any(
+        message.role == "tool" and "before the next model request in this turn" in str(message.content)
+        for message in writer_requests[1].messages
+    )
+    leader_requests = team.models["default"].requests
+    assert len(leader_requests) == 2
+    assert any(is_scope_summary(message) for message in leader_requests[1].messages)
+    assert len(summary_rows_of(team.storage, team.scope.key, session_id=SESSION_ID)) == 1
+    assert not has_queued_force_compaction(team.storage, SESSION_ID)
+
+
+@pytest.mark.asyncio
+async def test_compact_context_tool_when_unavailable_returns_error_without_compacting(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """When compaction is unavailable, compact_context returns an error and does not trigger mid-turn compaction."""
+    config, paths = _make_config(tmp_path, context_window=None)
+    storage = seeded_storage(config, paths)
+    model = ScriptedModel(
+        [
+            calls(tool_call("compact_context", "call-compact")),
+            answer("Continued without compaction."),
+        ],
+    )
+
+    output = await _run(
+        _scoped_agent(
+            model,
+            config,
+            paths,
+            storage,
+            tools=[],
+            extra_toolkits=(_compact_context_toolkit(config, paths),),
+        ),
+        "Try compacting",
+    )
+
+    assert output.content == "Continued without compaction."
+    assert summary_calls.inputs == []
+    assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
+    assert any(
+        message.role == "tool"
+        and str(message.content)
+        == "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
+        for message in model.requests[1].messages
+    )
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+    assert not has_queued_force_compaction(storage, "session-1")

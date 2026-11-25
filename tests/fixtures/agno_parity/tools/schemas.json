@@ -4609,7 +4609,7 @@
     "functions": [
       {
         "name": "compact_context",
-        "description": "Request compaction before the next reply.",
+        "description": "Compact conversation context now before the next model request.",
         "parameters": {
           "type": "object",
           "properties": {

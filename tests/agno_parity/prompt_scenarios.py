@@ -33,7 +33,9 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
@@ -1064,14 +1066,12 @@ _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversatio
 
 
 def answer_compaction(call: ModelCall) -> OwnedMessage:
-    """Call compact_context on the first turn, summarize on the summary request, and answer the rest.
+    """Summarize on the summary request and answer the conversation turns.
 
     The summary request is the only one that offers no tools.
     """
     if not call.tools:
         return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
-    if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
-        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
     return answer_ok(call)
 
 
@@ -1079,7 +1079,7 @@ _COMPACTION_FOLLOW_UP = "What is the travel policy?"
 
 
 def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
-    """Return the turn that calls compact_context and the next reply in the scope, which compacts first."""
+    """Return the first turn and the follow-up reply in the scope, which compacts after manual scheduling."""
     authored = _assistant_config(model={**_ANTHROPIC, "context_window": 200000}, tools=["compact_context"])
     config, runtime_paths = _bound_config(root, authored)
     scenario_input = {"config": authored, "turns": [_turn_input(_COMPACT_PROMPT), _turn_input(_COMPACTION_FOLLOW_UP)]}
@@ -1097,7 +1097,17 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
-    await _agent_turn(first)
+    identity = await _agent_turn(first)
+    await request_compaction_before_next_reply(
+        scope=HistoryScope(kind="agent", scope_id=first.agent_name),
+        agent_name=first.agent_name,
+        session_id=_SESSION_ID,
+        runtime_paths=first.runtime_paths,
+        config=first.config,
+        execution_identity=identity,
+        active_model_name=None,
+        room_id=_ROOM_ID,
+    )
     # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)
@@ -1327,8 +1337,8 @@ SCENARIOS: dict[str, Scenario] = {
         turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
-        "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then "
-        "replies with the summary in place of the compacted run.",
+        "History compaction: manual compaction is scheduled after a turn, so the next reply first sends the summary "
+        "request, then replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
         turn=lambda root: _compaction_turns(root)[0],

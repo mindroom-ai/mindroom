@@ -72,7 +72,8 @@ class RunContext:
     run stores none of its team's. ``history_scope`` is the stored conversation a team run and its member runs belong
     to, which tools that address history by scope read; None for an agent's own run, whose scope is its agent's.
     ``model_name`` is the configured model the run resolved, which its tool calls carry; a team's member runs carry
-    the leader's.
+    the leader's. ``compaction_requests`` holds the history scopes for which tools in this run requested immediate
+    mid-turn compaction before the next model request of that scope; a team's member runs share the leader's set.
     """
 
     run_id: str
@@ -82,6 +83,7 @@ class RunContext:
     metadata: dict[str, Any] | None = None
     history_scope: HistoryScope | None = None
     model_name: str | None = None
+    compaction_requests: set[HistoryScope] = field(default_factory=set)
 
     @property
     def session_id(self) -> str:
@@ -104,6 +106,7 @@ class RunContext:
             metadata=self.metadata or {},
             history_scope=self.history_scope,
             model_name=self.model_name,
+            compaction_requests=self.compaction_requests,
         )
 
 

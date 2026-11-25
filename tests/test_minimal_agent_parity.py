@@ -39,6 +39,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools import temporary_secrets
 from mindroom.history.storage import has_queued_force_compaction
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -611,17 +612,25 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
 
 
 @pytest.mark.asyncio
-async def test_compaction_cli_marks_real_session_before_next_reply(response_harness) -> None:
+async def test_compaction_cli_compacts_real_session_mid_turn(response_harness) -> None:
     h = response_harness
     h.runtime.config.agents["helper"].tools = ["shell", "compact_context"]
     h.runtime.config.models["default"].context_window = 128000
-    result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
+    result = await h.respond([_bash_call("compact_context", "compact_context", {}), "compacted summary", "done"])
     assert "done" in result
-    assert "before the next reply" in h.shell.receipts[-1]["outcome"]
+    assert "before the next model request in this turn" in h.shell.receipts[-1]["outcome"]
     catalog = h.shell.owner.catalog
     assert catalog.store is not None
-    assert has_queued_force_compaction(catalog.store, catalog.run.session_id)
-    assert len(h.provider.requests) == 2
+    assert not has_queued_force_compaction(catalog.store, catalog.run.session_id)
+    persisted = catalog.store.load_session(catalog.run.session_id)
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.text == "compacted summary"
+    assert len(h.provider.requests) == 3
+    assert any(
+        is_compaction_summary(message) and "compacted summary" in str(message.content)
+        for message in h.provider.requests[-1].messages
+    )
 
 
 @pytest.mark.asyncio

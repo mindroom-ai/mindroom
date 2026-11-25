@@ -8535,7 +8535,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Request context compaction before the next reply in this conversation scope",
+      "description": "Compact conversation context mid-turn in this conversation scope",
       "display_name": "Context Compaction",
       "docs_url": "https://docs.mindroom.chat/configuration/history/#manual-compaction",
       "executes_code": false,

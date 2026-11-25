@@ -676,7 +676,7 @@ async def compact_scope_mid_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
-    max_summary_tokens: int,
+    max_summary_tokens: int | None,
     model: ModelProvider,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
