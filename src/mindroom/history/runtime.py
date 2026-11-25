@@ -16,7 +16,12 @@ from mindroom.history.compaction import (
     compact_scope_history,
     scope_usage_recorder,
 )
-from mindroom.history.native import configure_native_history, native_history_route, with_native_history
+from mindroom.history.native import (
+    configure_native_history,
+    latest_answer_used_native_compaction,
+    native_history_route,
+    with_native_history,
+)
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
@@ -106,12 +111,10 @@ async def _build_scope_fork(
     plan: ResolvedHistoryExecutionPlan,
     session: ConversationSession,
     runs: Sequence[AnyRunRecord],
-    *,
-    native_compaction_active: bool = False,
 ) -> SummaryFork | None:
     if not runs or plan.compaction_context_window is None:
         return None
-    if native_compaction_active or template.native_compaction is not None:
+    if template.native_compaction is not None or latest_answer_used_native_compaction(runs):
         logger.info(
             "Compaction fork skipped",
             session_id=session.session_id,
@@ -274,7 +277,6 @@ async def prepare_scope_history(
     )
     visible_runs = scope_visible_runs(session)
     native_history = configure_native(session=session, runs=visible_runs)
-    prior_native_compaction = native_history_route(native_history) is not None
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
     _remember_scope_frame(scope_context, frame, native_history)
@@ -344,7 +346,6 @@ async def prepare_scope_history(
             execution_plan,
             session,
             visible_runs,
-            native_compaction_active=prior_native_compaction,
         )
         compaction_result = await _compact_stored_scope(
             scope_context,
@@ -412,22 +413,17 @@ async def compact_scope_now(
     lifecycle: CompactionLifecycle,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
-    state: HistoryScopeState | None = None,
 ) -> bool:
     """Fold a live manual request; return whether it had nothing left to compact."""
     session = context.session
     if session is None:
         return False
-    scope_state = state if state is not None else read_scope_state(session)
+    scope_state = read_scope_state(session)
     if not scope_state.force_compact_before_next_run:
         return False
     runs = scope_visible_runs(session)
     if not runs:
-        await run_session_storage_operation(
-            lambda: context.storage,
-            partial(set_force_compaction, session=session, forced=False),
-        )
+        await _clear_manual_compaction_request(storage=context.storage, session=session, state=scope_state)
         return True
     model = await run_blocking_until_complete(build_model)
     limit = inputs.execution_plan.limit_tokens

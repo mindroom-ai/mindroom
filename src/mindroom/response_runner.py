@@ -934,7 +934,7 @@ class ResponseRunner:
         model_name, inputs = plan
         load = partial(load_scope_session, scope, target.session_id, paths, config, identity)
         context, _ = await load_scrubbed_scope_session(load, partial(self.deps.redacted_history_events, target))
-        if context.session is None or not (state := read_scope_state(context.session)).force_compact_before_next_run:
+        if context.session is None or not read_scope_state(context.session).force_compact_before_next_run:
             return None
         if await store.room_history_recovery(room) is not None or epoch != await store.active_membership_epoch(room):
             return _COMPACTION_DEFERRED
@@ -953,7 +953,7 @@ class ResponseRunner:
         )
         async with lease_cm:
             with tool_runtime_context(tool_context):
-                empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths, state=state)
+                empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths)
         return "Nothing to compact." if empty else None
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:

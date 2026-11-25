@@ -414,14 +414,17 @@ def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings
 def _chat_prompt_cache_ttl(route_key: str, model_id: str, settings: ChatSettings) -> float | None:
     if not settings.cache_system_prompt:
         return None
-    if route_key == "openrouter":
-        control = openrouter_prompt_cache_control(
+    control = (
+        openrouter_prompt_cache_control(
             model_id,
             cache_system_prompt=True,
             extended_cache_time=settings.extended_cache_time,
         )
-        if control is not None and control.get("ttl") == "1h":
-            return EXTENDED_PROMPT_CACHE_TTL_SECONDS
+        if route_key == "openrouter"
+        else None
+    )
+    if control is not None and control.get("ttl") == "1h":
+        return EXTENDED_PROMPT_CACHE_TTL_SECONDS
     return STANDARD_PROMPT_CACHE_TTL_SECONDS
 
 

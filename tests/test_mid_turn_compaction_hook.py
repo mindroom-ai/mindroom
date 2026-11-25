@@ -347,7 +347,7 @@ async def test_mid_turn_compaction_propagates_explicit_context_window_and_resolv
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicitly prepared active_context_window bounds mid-turn compaction, and policy is resolved once."""
+    """Pre-resolved inputs bound mid-turn compaction without re-resolving, and unprovided inputs resolve once."""
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(model="summary", reserve_tokens=500),
@@ -356,8 +356,14 @@ async def test_mid_turn_compaction_propagates_explicit_context_window_and_resolv
             "summary": ModelConfig(provider="openai", id="summary-model", context_window=100_000),
         },
     )
-    summarizer = summary_model("SUMMARY")
-    install_model_providers(monkeypatch, {"summary": summarizer})
+    history_settings = config.resolve_scope("test_agent").history_settings
+    prepared_inputs = mid_turn_compaction.resolve_history_preparation_inputs(
+        config=config,
+        history_settings=history_settings,
+        active_model_name="default",
+        active_context_window=4_000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
     resolve_calls = 0
     real_resolve = mid_turn_compaction.resolve_history_preparation_inputs
 
@@ -367,33 +373,40 @@ async def test_mid_turn_compaction_propagates_explicit_context_window_and_resolv
         return real_resolve(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(mid_turn_compaction, "resolve_history_preparation_inputs", counted_resolve)
-    model = ScriptedModel([calls(tool_call("probe", "call_1")), answer("done")])
-    hook = mid_turn_compaction_hook(
-        config=config,
-        runtime_paths=runtime_paths,
-        scope=TEST_AGENT_SCOPE,
-        model_name="default",
-        model=model,
-        history_settings=config.resolve_scope("test_agent").history_settings,
-        storage=None,
-        replay_plan=None,
-        prompt_id=None,
-        lifecycle=None,
-        turn_recorder=None,
-        active_context_window=4_000,
-    )
 
-    _, record = await collect(
-        run_agent(
-            spec(model, toolkit(probe)),
-            [Message(role="user", content="Do the task")],
-            ctx=context(),
-            hooks=LoopHooks(before_request=(hook,)),
-            persist=None,
-            request_template=EMPTY_REQUEST,
-        ),
-    )
+    async def run_with_inputs(
+        inputs: mid_turn_compaction.HistoryPreparationInputs | None,
+    ) -> tuple[ScriptedModel, str | None]:
+        model = ScriptedModel([calls(tool_call("probe", "call_1")), answer("done")])
+        hook = mid_turn_compaction_hook(
+            config=config,
+            runtime_paths=runtime_paths,
+            scope=TEST_AGENT_SCOPE,
+            model_name="default",
+            model=model,
+            history_settings=history_settings,
+            storage=None,
+            replay_plan=None,
+            prompt_id=None,
+            lifecycle=None,
+            turn_recorder=None,
+            inputs=inputs,
+        )
+        _, record = await collect(
+            run_agent(
+                spec(model, toolkit(probe)),
+                [Message(role="user", content="Do the task")],
+                ctx=context(),
+                hooks=LoopHooks(before_request=(hook,)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
+        return model, record.content
 
-    assert record.content == "done"
-    assert resolve_calls == 1
+    model, content = await run_with_inputs(prepared_inputs)
+    assert (content, resolve_calls) == ("done", 0)
     assert any(is_compaction_summary(message) for message in model.requests[1].messages)
+
+    await run_with_inputs(None)
+    assert resolve_calls == 1

@@ -448,101 +448,54 @@ async def test_request_compaction_summary_warns_on_usage_error_and_propagates_ti
         await task
 
 
-def test_provider_capabilities_prompt_cache_ttl_seconds(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("family", "provider", "model_id", "extra", "api", "expected"),
+    [
+        ("anthropic", "anthropic", "claude-sonnet-5", {}, None, 3300.0),
+        ("anthropic", "anthropic", "claude-sonnet-5", {"extended_cache_time": False}, None, 240.0),
+        ("anthropic", "anthropic", "claude-sonnet-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {}, None, 3300.0),
+        ("openai", "openrouter", "~anthropic/claude-sonnet-5", {}, None, 3300.0),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {"extended_cache_time": False}, None, 240.0),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "openrouter", "openai/gpt-5", {}, None, 240.0),
+        ("openai", "openrouter", "openai/gpt-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "deepseek", "deepseek-chat", {}, None, 240.0),
+        ("openai", "openai", "gpt-5", {}, "responses", 240.0),
+        ("openai", "openai", "gpt-5", {"cache_system_prompt": False}, "responses", None),
+        ("claude_code", "claude_code", "claude-sonnet-5", {}, None, None),
+    ],
+)
+def test_provider_capabilities_prompt_cache_ttl_seconds(
+    tmp_path: Path,
+    family: str,
+    provider: str,
+    model_id: str,
+    extra: dict[str, Any],
+    api: str | None,
+    expected: float | None,
+) -> None:
     from mindroom.config.models import ModelConfig  # noqa: PLC0415
     from mindroom.providers.claude_code.builder import build_provider as build_claude_code  # noqa: PLC0415
 
-    client = httpx2.AsyncClient(transport=httpx2_transport(lambda _req: sse_reply([])))
-
-    def _dummy_resp(_req: Any) -> httpx.Response:  # noqa: ANN401
-        pytest.fail("provider build must not send HTTP requests")
-
+    spec: dict[str, Any] = {"provider": provider, "id": model_id, "extra_kwargs": {"api_key": "k", **extra}}
+    if api is not None:
+        spec["api"] = api
     with isolated_provider_environment():
-        for idx, (spec, expected) in enumerate(
-            [
-                ({"provider": "anthropic", "id": "claude-sonnet-5", "extra_kwargs": {"api_key": "k"}}, 3300.0),
-                (
-                    {
-                        "provider": "anthropic",
-                        "id": "claude-sonnet-5",
-                        "extra_kwargs": {"api_key": "k", "extended_cache_time": False},
-                    },
-                    240.0,
-                ),
-                (
-                    {
-                        "provider": "anthropic",
-                        "id": "claude-sonnet-5",
-                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
-                    },
-                    None,
-                ),
-            ],
-        ):
-            assert (
-                provider_for(spec, tmp_path / f"anth-{idx}", client).capabilities.prompt_cache_ttl_seconds == expected
+        if family == "anthropic":
+            client = httpx2.AsyncClient(transport=httpx2_transport(lambda _req: sse_reply([])))
+            built = provider_for(spec, tmp_path, client)
+        elif family == "openai":
+            built = openai_family_adapter(spec, tmp_path, lambda _req: pytest.fail("unexpected HTTP"))
+        else:
+            _, runtime_paths = _make_config(tmp_path)
+            built = build_claude_code(
+                ModelConfig(provider=provider, id=model_id),
+                runtime_paths,
+                execution_identity=None,
+                auto_install=False,
             )
-
-        for idx, (spec, expected) in enumerate(
-            [
-                (
-                    {"provider": "openrouter", "id": "anthropic/claude-sonnet-5", "extra_kwargs": {"api_key": "k"}},
-                    3300.0,
-                ),
-                (
-                    {"provider": "openrouter", "id": "~anthropic/claude-sonnet-5", "extra_kwargs": {"api_key": "k"}},
-                    3300.0,
-                ),
-                (
-                    {
-                        "provider": "openrouter",
-                        "id": "anthropic/claude-sonnet-5",
-                        "extra_kwargs": {"api_key": "k", "extended_cache_time": False},
-                    },
-                    240.0,
-                ),
-                (
-                    {
-                        "provider": "openrouter",
-                        "id": "anthropic/claude-sonnet-5",
-                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
-                    },
-                    None,
-                ),
-                ({"provider": "openrouter", "id": "openai/gpt-5", "extra_kwargs": {"api_key": "k"}}, 240.0),
-                (
-                    {
-                        "provider": "openrouter",
-                        "id": "openai/gpt-5",
-                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
-                    },
-                    None,
-                ),
-                ({"provider": "deepseek", "id": "deepseek-chat", "extra_kwargs": {"api_key": "k"}}, 240.0),
-                ({"provider": "openai", "id": "gpt-5", "api": "responses", "extra_kwargs": {"api_key": "k"}}, 240.0),
-                (
-                    {
-                        "provider": "openai",
-                        "id": "gpt-5",
-                        "api": "responses",
-                        "extra_kwargs": {"api_key": "k", "cache_system_prompt": False},
-                    },
-                    None,
-                ),
-            ],
-        ):
-            sub = tmp_path / f"oai-{idx}"
-            sub.mkdir()
-            assert openai_family_adapter(spec, sub, _dummy_resp).capabilities.prompt_cache_ttl_seconds == expected
-
-        _, runtime_paths = _make_config(tmp_path / "cc")
-        cc = build_claude_code(
-            ModelConfig(provider="claude_code", id="claude-sonnet-5"),
-            runtime_paths,
-            execution_identity=None,
-            auto_install=False,
-        )
-        assert cc.capabilities.prompt_cache_ttl_seconds is None
+    assert built.capabilities.prompt_cache_ttl_seconds == expected
 
 
 def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path: Path) -> None:
@@ -1696,8 +1649,9 @@ async def test_scope_fork_fails_fast_when_native_compaction_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scope fork short-circuits in O(1) as native_compaction_active without materializing history runs."""
+    """Native prior answers fail fast in O(1); canonical prior answers on the same native-capable model still fork."""
     from mindroom.history import runtime as history_runtime  # noqa: PLC0415
+    from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state  # noqa: PLC0415
 
     config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000, replay_window_tokens=20_000)
     inputs = _inputs(config)
@@ -1707,53 +1661,77 @@ async def test_scope_fork_fails_fast_when_native_compaction_active(
         def native_compaction_settings(self, **_kwargs: Any) -> NativeCompactionReplay:  # noqa: ANN401
             return native_settings
 
-    model = ScriptedModel([], capabilities=Capabilities(native_compaction=True), native_history_route=_NativeRoute())
-    _install_default(monkeypatch, model)
-    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", SummaryCalls(summary="xml-summary"))
+    def seed_forced(sid: str, run: RunRecord) -> ScopeSessionContext:
+        seed_session(storage, _session(sid, runs=[run]))
+        loaded = storage.load_session(sid)
+        assert loaded is not None
+        set_force_compaction(storage, session=loaded, forced=True)
+        return _scope_ctx(storage, sid, config, paths)
 
-    def forbid_build_scope_fork(**_kwargs: Any) -> Any:  # noqa: ANN401
-        pytest.fail("build_scope_fork must not run when native compaction is active")
-
-    monkeypatch.setattr(history_runtime, "build_scope_fork", forbid_build_scope_fork)
-
-    # 1. Pre-reply path with queued /compact on an active native-compaction route.
-    seed_session(storage, _session("sess-native-pre", runs=[_warm_run(model, ModelRequest(messages=()), 4_000)]))
-    sess = storage.load_session("sess-native-pre")
-    assert sess is not None
-    set_force_compaction(storage, session=sess, forced=True)
     frame = RequestFrame(ModelRequest(messages=()), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
+    fork_model = ScriptedModel(
+        [summary_steps("## Goal\nCanonical fork hit")],
+        capabilities=Capabilities(native_compaction=True),
+        native_history_route=_NativeRoute(),
+    )
+    xml_calls = SummaryCalls(summary="xml-summary")
+    _install_default(monkeypatch, fork_model)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
+
+    # 1. Warm canonical prior answer on a native-capable model still gets a warm fork hit.
+    canon = _warm_run(fork_model, ModelRequest(messages=(), portable_replay=True), 4_000, run_id="r-canon")
+    prepared_c = await prepare_scope_history(
+        sizer=RequestSizer(fork_model, "anthropic"),
+        frame=frame,
+        resolved_inputs=inputs,
+        runtime_paths=paths,
+        config=config,
+        scope_context=seed_forced("sess-canonical", canon),
+        compaction_lifecycle=RecordingCompactionLifecycle(),
+        pipeline_timing=None,
+        allow_native_compaction=True,
+    )
+    assert (prepared_c.compaction_reply_outcome, xml_calls.inputs, len(fork_model.requests)) == ("success", [], 1)
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-canonical")[-1].summary == "## Goal\nCanonical fork hit"
+
+    # 2. Native prior answer (recorded_native_settings present) skips fork construction in O(1).
+    monkeypatch.setattr(history_runtime, "build_scope_fork", lambda **_kw: pytest.fail("must not build fork"))
+    native_run = _warm_run(
+        fork_model,
+        ModelRequest(messages=(), native_compaction=native_settings),
+        4_000,
+        run_id="r-nat",
+    )
+    native_run.messages[-1].provider_data = {
+        **(native_run.messages[-1].provider_data or {}),
+        NATIVE_CHECKPOINT_KEY: native_checkpoint_state([], native_settings),
+    }
     with capture_logs() as pre_logs:
-        prepared = await prepare_scope_history(
-            sizer=RequestSizer(model, "anthropic"),
+        prepared_n = await prepare_scope_history(
+            sizer=RequestSizer(fork_model, "anthropic"),
             frame=frame,
             resolved_inputs=inputs,
             runtime_paths=paths,
             config=config,
-            scope_context=_scope_ctx(storage, "sess-native-pre", config, paths),
+            scope_context=seed_forced("sess-native-pre", native_run),
             compaction_lifecycle=RecordingCompactionLifecycle(),
             pipeline_timing=None,
             allow_native_compaction=True,
         )
-    assert prepared.compaction_reply_outcome == "success"
+    assert prepared_n.compaction_reply_outcome == "success"
     assert any(entry.get("fork_skip_reason") == "native_compaction_active" for entry in pre_logs)
 
-    # 2. Live /compact path with a remembered native-compaction frame.
-    seed_session(
-        storage,
-        _session("sess-native-live", runs=[_warm_run(model, ModelRequest(messages=()), 4_000, run_id="r-live")]),
-    )
-    sess_live = storage.load_session("sess-native-live")
-    assert sess_live is not None
-    set_force_compaction(storage, session=sess_live, forced=True)
+    # 3. Live /compact with a remembered native-compaction frame also skips fork construction in O(1).
+    ctx_live = seed_forced("sess-native-live", _warm_run(fork_model, ModelRequest(messages=()), 4_000, run_id="r-live"))
     remember_fork_frame(
         warm_frame_key(storage.path, TEST_AGENT_SCOPE, "sess-native-live"),
         ModelRequest(messages=(*_SYS, _msg("user", "hi")), native_compaction=native_settings),
     )
     with capture_logs() as live_logs:
         empty = await compact_scope_now(
-            _scope_ctx(storage, "sess-native-live", config, paths),
+            ctx_live,
             inputs,
-            lambda: model,
+            lambda: fork_model,
             RecordingCompactionLifecycle(),
             config,
             paths,

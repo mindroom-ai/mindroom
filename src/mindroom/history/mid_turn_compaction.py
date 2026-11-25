@@ -143,7 +143,6 @@ def mid_turn_compaction_hook(
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
     inputs: HistoryPreparationInputs | None = None,
-    active_context_window: int | None = None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
@@ -155,7 +154,6 @@ def mid_turn_compaction_hook(
         config=config,
         history_settings=history_settings,
         active_model_name=model_name,
-        active_context_window=active_context_window,
     )
     plan = resolved.execution_plan
     policy = (

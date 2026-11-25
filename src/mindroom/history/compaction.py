@@ -31,7 +31,6 @@ from mindroom.history.summarizer import (
     check_summary_budget,
     summarize_chunk,
     summarize_runs,
-    try_fork_summary,
 )
 from mindroom.history.types import (
     CompactionLifecycleProgress,
@@ -165,6 +164,7 @@ async def compact_scope_history(
 
     hooks_registered = _compaction_hooks_registered()
     compacted_transcript: list[TranscriptLine] = []
+    estimate_tokens = partial(estimate_prompt_visible_history_tokens, history_settings=history_settings, model=model)
 
     async def before_persist(included_runs: Sequence[AnyRunRecord]) -> None:
         await _emit_compaction_hook(
@@ -189,12 +189,7 @@ async def compact_scope_history(
             summary=ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC)),
             runs=list(remaining_runs),
         )
-        after_tokens = await asyncio.to_thread(
-            estimate_prompt_visible_history_tokens,
-            session=snapshot,
-            history_settings=history_settings,
-            model=model,
-        )
+        after_tokens = await asyncio.to_thread(estimate_tokens, session=snapshot)
         await progress(
             CompactionLifecycleProgress(
                 mode=mode,
@@ -223,12 +218,7 @@ async def compact_scope_history(
             compacted_runs=compacted_run_count,
             model=summary_model.model.identity.id,
         )
-        after_tokens = await asyncio.to_thread(
-            estimate_prompt_visible_history_tokens,
-            session=session,
-            history_settings=history_settings,
-            model=model,
-        )
+        after_tokens = await asyncio.to_thread(estimate_tokens, session=session)
         outcome = await _report_committed(
             CompactionOutcome(
                 mode=mode,
@@ -270,46 +260,6 @@ async def compact_scope_history(
     return outcome
 
 
-async def _next_compaction_chunk(
-    summarizer: Summarizer,
-    state: ChunkState,
-    previous_summary: str | None,
-    remaining: Sequence[AnyRunRecord],
-    *,
-    fork: SummaryFork | None,
-    max_summary_tokens: int | None,
-    model: ModelProvider,
-    session_id: str,
-    scope: HistoryScope,
-) -> tuple[SummaryChunk | None, Exception | None]:
-    if (
-        fork is not None
-        and (
-            chunk := await try_fork_summary(
-                summarizer,
-                state,
-                fork,
-                remaining,
-                max_summary_tokens=max_summary_tokens,
-                model=model,
-            )
-        )
-        is not None
-    ):
-        return chunk, None
-    chunk = await summarize_chunk(summarizer, previous_summary, remaining, state=state)
-    if chunk is None:
-        logger.warning(
-            "Compaction skipped because no run fit the single-pass summary budget",
-            session_id=session_id,
-            scope=scope.key,
-            candidate_runs=len(remaining),
-            summary_input_budget_tokens=state.current_model.input_budget_tokens,
-        )
-        return None, None
-    return chunk, await check_summary_budget(chunk.summary, max_summary_tokens, model)
-
-
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
 async def _rewrite_working_session_for_compaction(
     *,
@@ -326,10 +276,10 @@ async def _rewrite_working_session_for_compaction(
 ) -> None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
-    Tries ``fork`` once before chunking (already budget-validated on success); otherwise summarizes XML chunks.
+    Tries ``fork`` once on the first pass (already budget-validated on success); otherwise summarizes XML chunks.
     """
     scope = owner_scope(persisted_session)
-    state = ChunkState(summarizer.model, summarizer.fallback)
+    state = ChunkState(summarizer.model, summarizer.fallback, fork=fork)
     last_chunk: SummaryChunk | None = None
     previous_summary = current_summary_text(persisted_session)
     remaining = list(runs)
@@ -366,22 +316,25 @@ async def _rewrite_working_session_for_compaction(
         if basis is None:
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
-        chunk, error = await _next_compaction_chunk(
+        chunk = await summarize_chunk(
             summarizer,
-            state,
             previous_summary,
             remaining,
-            fork=fork,
+            state=state,
             max_summary_tokens=max_summary_tokens,
             model=model,
-            session_id=persisted_session.session_id,
-            scope=scope,
         )
-        fork = None
-        if error is not None:
-            _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
-            break
         if chunk is None:
+            logger.warning(
+                "Compaction skipped because no run fit the single-pass summary budget",
+                session_id=persisted_session.session_id,
+                scope=scope.key,
+                candidate_runs=len(remaining),
+                summary_input_budget_tokens=state.current_model.input_budget_tokens,
+            )
+            break
+        if (error := await check_summary_budget(chunk, max_summary_tokens, model)) is not None:
+            _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
         await before_persist(chunk.included_runs)
         remaining_after = remaining[len(chunk.included_runs) :]

@@ -166,15 +166,6 @@ def iter_readable_checkpoints(runs: Sequence[AnyRunRecord]) -> Iterator[tuple[in
                 yield index, position, checkpoint[0], checkpoint[1]
 
 
-def checkpoint_summary(message: Message, basis: str) -> str | None:
-    """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
-
-    Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
-    """
-    checkpoint = _readable_checkpoint_summary(message)
-    return checkpoint[1] if checkpoint is not None and checkpoint[0] == basis else None
-
-
 def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Message]:
     """Return what replaying the checkpoint on ``messages[checkpoint]`` keeps: it, its tail, and the system messages."""
     return [message for index, message in enumerate(messages) if index >= checkpoint or message.role == "system"]

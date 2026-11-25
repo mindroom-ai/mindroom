@@ -37,7 +37,7 @@ from mindroom.native_compaction import (
     ENCRYPTED_REPLAY_RESET_KEY,
     NATIVE_CHECKPOINT_KEY,
     NativeReplay,
-    checkpoint_summary,
+    iter_readable_checkpoints,
     native_replay,
     native_replay_messages,
     replay_basis,
@@ -706,7 +706,9 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         [{"type": "compaction", "content": "Checkpoint."}],
         prepared.native_history.native_compaction,
     )
-    assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
+    assert list(iter_readable_checkpoints([_completed_run("checkpoint", messages=[answer])])) == [
+        (0, 0, replay_basis("Archived summary.", [later]), "Checkpoint."),
+    ]
 
 
 @pytest.mark.asyncio
