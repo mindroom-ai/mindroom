@@ -1575,14 +1575,14 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
         runtime_paths,
         credential_overrides={"host": "https://search.example.com"},
         tool_config_overrides={
-            "include_tools": ["search_web", "news_search", "image_search"],
+            "include_tools": ["searxng_search"],
         },
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
 
-    assert set(toolkit_function_names(tool)) == {"search_web", "news_search", "image_search"}
+    assert set(toolkit_function_names(tool)) == {"searxng_search"}
 
 
 def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
