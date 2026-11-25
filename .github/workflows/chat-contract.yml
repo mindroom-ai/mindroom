@@ -1,0 +1,48 @@
+# Cross-repo Backend (mindroom) <-> Frontend (mindroom-chat) contract E2E.
+# Calls mindroom-chat's reusable real-backend contract workflow against this PR/commit.
+name: Chat Contract E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/chat-contract.yml"
+      - ".python-version"
+      - "hatch_build.py"
+      - "pyproject.toml"
+      - "src/**"
+      - "uv.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/chat-contract.yml"
+      - ".python-version"
+      - "hatch_build.py"
+      - "pyproject.toml"
+      - "src/**"
+      - "uv.lock"
+  workflow_dispatch:
+    inputs:
+      mindroom_ref:
+        description: Optional MindRoom ref override (defaults to the current commit).
+        required: false
+        type: string
+      chat_ref:
+        description: Optional mindroom-chat ref override (defaults to mindroom-chat main).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  chat-contract:
+    uses: mindroom-ai/mindroom-chat/.github/workflows/agent-contract.yml@main
+    with:
+      mindroom_ref: ${{ inputs.mindroom_ref || github.sha }}
+      chat_ref: ${{ inputs.chat_ref || '' }}
