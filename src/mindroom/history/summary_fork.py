@@ -58,17 +58,6 @@ class SummaryFork:
     mid_turn: bool
 
 
-@dataclass(frozen=True, slots=True)
-class ScopeForkSource:
-    """Request frame metadata for building a turn-less whole-history scope compaction fork."""
-
-    sizer: RequestSizer
-    template: ModelRequest
-    system_messages: tuple[Message, ...]
-    context_window: int
-    reserve_tokens: int
-
-
 def _supports_extended_cache(identity: ModelIdentity | None) -> bool:
     if identity is None:
         return True
@@ -126,8 +115,12 @@ def clear_fork_frames() -> None:
 
 
 def build_scope_fork(
-    source: ScopeForkSource,
     *,
+    sizer: RequestSizer,
+    template: ModelRequest,
+    system_messages: Sequence[Message],
+    context_window: int,
+    reserve_tokens: int,
     scope: HistoryScope,
     summary: ScopeSummary | None,
     runs: Sequence[AnyRunRecord],
@@ -140,12 +133,12 @@ def build_scope_fork(
         num_history_messages=None,
         max_tool_calls_from_history=None,
     )
-    messages = (*source.system_messages, *request_layout(summary=summary, history=history))
+    messages = (*system_messages, *request_layout(summary=summary, history=history))
     return SummaryFork(
-        sizer=source.sizer,
-        request=replace(source.template, messages=messages),
-        context_window=source.context_window,
-        reserve_tokens=source.reserve_tokens,
+        sizer=sizer,
+        request=replace(template, messages=messages),
+        context_window=context_window,
+        reserve_tokens=reserve_tokens,
         mid_turn=False,
     )
 
@@ -300,7 +293,6 @@ def prepare_fork_request(
 
 
 __all__ = [
-    "ScopeForkSource",
     "SummaryFork",
     "WarmFrameKey",
     "build_fork_compaction_prompt",

@@ -55,8 +55,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.runtime import HistoryPreparationInputs
-    from mindroom.history.types import CompactionLifecycle
+    from mindroom.history.types import CompactionLifecycle, HistoryPreparationInputs
     from mindroom.llm.provider import ModelRequest
 
 
