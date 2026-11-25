@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
+from pydantic import Strict
+
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
 from mindroom.scheduling.tasks import (
@@ -52,11 +56,11 @@ class SchedulerTools(Toolkit):
         message: str,
         new_thread: bool,
         execute_at: str | None = None,
-        delay_seconds: int | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
         cron: str | None = None,
         description: str | None = None,
         timezone: str | None = None,
-        history_limit: int | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
         silent: bool = False,
         model: str | None = None,
     ) -> str:
@@ -192,10 +196,10 @@ class SchedulerTools(Toolkit):
         message: str | None = None,
         description: str | None = None,
         execute_at: str | None = None,
-        delay_seconds: int | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
         cron: str | None = None,
         timezone: str | None = None,
-        history_limit: int | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
         clear_history_limit: bool = False,
         silent: bool | None = None,
         model: str | None = None,

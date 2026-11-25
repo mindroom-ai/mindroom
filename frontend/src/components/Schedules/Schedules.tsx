@@ -234,7 +234,10 @@ function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
     message: task.message,
     description: task.description,
     schedule_type: task.schedule_type,
-    execute_at_input: toTimezoneDateTimeInput(task.execute_at, timezone),
+    execute_at_input: toTimezoneDateTimeInput(
+      task.execute_at,
+      task.timezone || timezone,
+    ),
     cron_expression: task.cron_expression ?? "",
     silent: task.silent,
   };
@@ -400,7 +403,10 @@ export function Schedules() {
 
     if (draft.schedule_type === "once") {
       if (draft.execute_at_input !== savedDraft.execute_at_input) {
-        const executeAtIso = toUtcIso(draft.execute_at_input, timezone);
+        const executeAtIso = toUtcIso(
+          draft.execute_at_input,
+          selectedTask.timezone || timezone,
+        );
         if (!executeAtIso) {
           toast({
             title: "Time required",
@@ -742,7 +748,7 @@ export function Schedules() {
               {draft.schedule_type === "once" ? (
                 <FieldGroup
                   label="Run At"
-                  helperText={`One-time execution timestamp (${timezone})`}
+                  helperText={`One-time execution timestamp (${selectedTask.timezone || timezone})`}
                   htmlFor="schedule-once-time"
                 >
                   <Input

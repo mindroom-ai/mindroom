@@ -538,3 +538,35 @@ async def test_listing_schedules_needs_no_room() -> None:
         result = await _call("list_schedules", {})
 
     assert (result.status, result.value) == ("ok", "listed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "operation", "arguments"),
+    [
+        ("schedule", "schedule_task", {"message": "ping", "new_thread": False, "delay_seconds": True}),
+        (
+            "schedule",
+            "schedule_task",
+            {"message": "ping", "new_thread": False, "delay_seconds": 60, "history_limit": True},
+        ),
+        ("edit_schedule", "edit_scheduled_task", {"task_id": "task123", "delay_seconds": True}),
+        ("edit_schedule", "edit_scheduled_task", {"task_id": "task123", "history_limit": True}),
+    ],
+)
+async def test_scheduler_tool_rejects_booleans_for_integer_parameters(
+    name: str,
+    operation: str,
+    arguments: dict[str, object],
+) -> None:
+    """The offered scheduler tool rejects booleans for integer parameters instead of coercing True to 1."""
+    config = _general_config()
+    with (
+        patch(f"mindroom.custom_tools.scheduler.{operation}", new=AsyncMock()) as backend,
+        tool_runtime_context(_make_context(config)),
+    ):
+        result = await _call(name, arguments)
+
+    assert result.status == "failed"
+    assert "Input should be a valid integer" in (result.failure_text or "")
+    backend.assert_not_awaited()

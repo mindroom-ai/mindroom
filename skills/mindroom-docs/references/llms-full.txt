@@ -5397,6 +5397,7 @@ agents:
 
 A schedule keeps the timezone it was created in (defaulting to the creating agent's timezone unless `timezone` is passed explicitly), and later listings and edits use that timezone too.
 New recurring schedules evaluate their 5-field `cron` expression directly in that IANA timezone, so their local clock time stays consistent across daylight-saving transitions.
+A recurring local-time cron scheduled during a fall-back repeated hour (for example `01:30`) fires on both occurrences, matching `croniter`.
 The dashboard's Schedules page shows each recurring schedule's cron timezone (or `UTC (legacy)` for older UTC-based cron tasks) alongside its description, such as `At 09:00 (Europe/Amsterdam)`.
 Existing recurring schedules created before local-time crons keep running in UTC until edited with a new `cron` expression (via `edit_schedule`) or updated with `cron_timezone`.
 

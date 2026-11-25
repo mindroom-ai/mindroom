@@ -160,6 +160,7 @@ describe("Schedules", () => {
       next_run_at: "2026-11-25T17:00:00Z",
       cron_expression: null,
       cron_description: null,
+      timezone: "America/Los_Angeles",
       description: "One-time reminder",
       message: "Check deployment",
     } satisfies ScheduleTask;
@@ -175,6 +176,10 @@ describe("Schedules", () => {
     render(<Schedules />);
 
     fireEvent.click(await screen.findByText("One-time reminder"));
+    expect(screen.getByLabelText("Run At")).toHaveValue("2026-11-25T09:00");
+    expect(
+      screen.getByText("One-time execution timestamp (America/Los_Angeles)"),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Prompt Message"), {
       target: { value: "Check production deployment" },
     });

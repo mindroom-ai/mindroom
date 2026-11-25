@@ -47,12 +47,12 @@ type IndependentUsageKind = Literal[
 #   aggregate cleanly, while removing it from `IndependentUsageKind` so no new writer can emit it.
 # Coverage: tests/test_usage_stats_storage.py::test_retired_schedule_parse_usage_rows_still_read_and_aggregate.
 type _RetiredUsageKind = Literal["schedule_parse"]
-RETIRED_USAGE_KINDS: frozenset[str] = frozenset(get_args(_RetiredUsageKind.__value__))
+_RETIRED_USAGE_KINDS: frozenset[str] = frozenset(get_args(_RetiredUsageKind.__value__))
 # ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
 # replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.
 type UsageKind = Literal["run", "pre_ledger"] | IndependentUsageKind | _RetiredUsageKind
 USAGE_KINDS: frozenset[str] = frozenset(
-    {"run", "pre_ledger", *get_args(IndependentUsageKind.__value__), *RETIRED_USAGE_KINDS},
+    {"run", "pre_ledger", *get_args(IndependentUsageKind.__value__), *_RETIRED_USAGE_KINDS},
 )
 
 SYSTEM_USAGE_ENTITY = "system:internal"

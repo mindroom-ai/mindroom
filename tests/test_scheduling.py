@@ -2286,7 +2286,7 @@ async def test_schedule_task_rejects_mentions_outside_room_responders_in_thread(
 
     message = str(exc_info.value)
     assert message.startswith("Failed to schedule: ")
-    assert "@writer is not available in this thread" in message
+    assert "@writer is not available in this room" in message
     save_task.assert_not_awaited()
 
 
@@ -2423,6 +2423,16 @@ async def test_schedule_rejects_unknown_model() -> None:
     assert str(exc_info.value).startswith("Unknown model: missing-model.")
 
 
+def _freeze_scheduling_clock(monkeypatch: pytest.MonkeyPatch, now: datetime) -> None:
+    """Pin ``mindroom.scheduling.tasks.datetime.now`` to ``now`` so fixed-date tests never expire."""
+    frozen = type(
+        "_FrozenDateTime",
+        (datetime,),
+        {"now": staticmethod(lambda tz=None: now if tz is None else now.astimezone(tz))},
+    )
+    monkeypatch.setattr(scheduling, "datetime", frozen)
+
+
 def _timezone_test_config(runtime_paths: RuntimePaths) -> Config:
     """An install in Los Angeles with one agent, atlas, set to Amsterdam."""
     return bind_runtime_paths(
@@ -2436,8 +2446,12 @@ def _timezone_test_config(runtime_paths: RuntimePaths) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timezone(tmp_path: Path) -> None:
+async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The agent's timezone interprets naive execute_at, is stored on the task, and describes the task afterwards."""
+    _freeze_scheduling_clock(monkeypatch, datetime(2026, 11, 24, 12, 0, tzinfo=UTC))
     client = AsyncMock()
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
@@ -2616,8 +2630,12 @@ async def test_recurring_task_listing_names_each_tasks_timezone(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_a_task_keeps_the_message_its_scheduling_reply_answered(tmp_path: Path) -> None:
+async def test_a_task_keeps_the_message_its_scheduling_reply_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The answered message is stored on the task, kept out of the JSON schema, and kept when the task is edited."""
+    _freeze_scheduling_clock(monkeypatch, datetime(2026, 11, 24, 12, 0, tzinfo=UTC))
     assert "source_event_id" not in ScheduledWorkflow.model_json_schema()["properties"]
     client = AsyncMock()
     serve_task_state_events(client)
@@ -2675,8 +2693,12 @@ async def test_a_task_keeps_the_message_its_scheduling_reply_answered(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_validates_structured_timing_and_dst_inputs(tmp_path: Path) -> None:
+async def test_schedule_task_validates_structured_timing_and_dst_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Structured schedule_task validates message, mutual exclusion, ISO execute_at/DST, delay_seconds, cron, and tz."""
+    _freeze_scheduling_clock(monkeypatch, datetime(2026, 11, 24, 12, 0, tzinfo=UTC))
     client = AsyncMock()
     client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$state", "!test:server"))
     runtime_paths = schedule_runtime_paths(tmp_path)
@@ -2731,10 +2753,9 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(tmp_path
             new_thread=False,
         )
 
-    # execute_at rejections: date-only, space instead of T, past, DST spring-forward gap, DST fall-back fold
+    # execute_at rejections: date-only, past, DST spring-forward gap, DST fall-back fold
     for bad_execute_at, tz, match in [
         ("2027-01-15", "UTC", "time component"),
-        ("2027-01-15 09:00:00", "UTC", "time component"),
         ("2020-01-01T00:00:00Z", "UTC", "in the future"),
         ("2027-03-14T02:30:00", "America/Los_Angeles", "explicit UTC offset"),
         ("2027-11-07T01:30:00", "America/Los_Angeles", "explicit UTC offset"),
@@ -2808,10 +2829,39 @@ async def test_schedule_task_validates_structured_timing_and_dst_inputs(tmp_path
     assert persisted.timezone == "America/Los_Angeles"
     assert persisted.cron_timezone is None
 
+    # Space-separated ISO 8601 datetime with a time component is also accepted.
+    with patch(
+        "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+        return_value=[ids["assistant"]],
+    ):
+        await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=_matrix_room("!test:server"),
+            ),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@alice:server",
+            message="Space ping",
+            execute_at="2027-01-15 09:00:00",
+            timezone="America/Los_Angeles",
+            new_thread=False,
+        )
+    space_persisted = ScheduledWorkflow.model_validate_json(
+        client.room_put_state.await_args.kwargs["content"]["workflow"],
+    )
+    assert space_persisted.execute_at == datetime(2027, 1, 15, 17, 0, tzinfo=UTC)
+
 
 @pytest.mark.asyncio
-async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invariants(tmp_path: Path) -> None:
+async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invariants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tool edits enforce cron timezone migration rules, type immutability, history clear conflicts, and mention checks."""
+    _freeze_scheduling_clock(monkeypatch, datetime(2026, 11, 24, 12, 0, tzinfo=UTC))
     client = AsyncMock()
     serve_task_state_events(client)
     room_state: dict[str, dict[str, Any]] = {}
@@ -2888,7 +2938,7 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
             )
 
         # 2. Type immutability (cron on once, execute_at/delay_seconds on cron, >1 timing param)
-        with pytest.raises(SchedulingError, match="Cannot set cron on a one-time schedule"):
+        with pytest.raises(SchedulingError, match="cron_expression is only valid for cron schedules"):
             await edit_scheduled_task(
                 runtime=rt,
                 room_id="!test:server",
@@ -2950,7 +3000,55 @@ async def test_edit_scheduled_task_enforces_cron_timezone_type_and_history_invar
         assert moved.workflow.timezone == "Europe/Berlin"
         assert moved.workflow.cron_timezone == "Europe/Berlin"
 
-        # 6. Mention validation rejects mentioning an unavailable agent on edit
+        # 6. Cron-only tool edit preserves an API-updated cron_timezone and leaves timezone untouched
+        la_cron = ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=CronSchedule(minute="0", hour="9"),
+            message="la standup",
+            description="la standup",
+            created_by="@alice:server",
+            room_id="!test:server",
+            timezone="America/Los_Angeles",
+            cron_timezone="America/Los_Angeles",
+        )
+        await persist_scheduled_task_state(
+            client=client,
+            owner_id=None,
+            room_id="!test:server",
+            task_id="api_tz1",
+            workflow=la_cron,
+            writers=state_writers,
+            config=config,
+        )
+        api_existing = await get_scheduled_task(client, "!test:server", "api_tz1", runtime_paths)
+        assert api_existing is not None
+        api_edited = build_edited_scheduled_workflow(
+            api_existing.workflow,
+            room_id="!test:server",
+            cron_timezone="Europe/Berlin",
+        )
+        await save_edited_scheduled_task(
+            client=client,
+            workflow=api_edited,
+            config=config,
+            existing_task=api_existing,
+            runtime_paths=runtime_paths,
+            writers=state_writers,
+        )
+        await edit_scheduled_task(
+            runtime=rt,
+            room_id="!test:server",
+            task_id="api_tz1",
+            scheduled_by="@alice:server",
+            cron="0 10 * * *",
+        )
+        after_tool_edit = await get_scheduled_task(client, "!test:server", "api_tz1", runtime_paths)
+        assert after_tool_edit is not None
+        assert after_tool_edit.workflow.cron_timezone == "Europe/Berlin"
+        assert after_tool_edit.workflow.timezone == "America/Los_Angeles"
+        assert after_tool_edit.workflow.cron_schedule == CronSchedule(minute="0", hour="10")
+
+        # 7. Mention validation rejects mentioning an unavailable agent on edit
         with pytest.raises(SchedulingError, match="not available in this room"):
             await edit_scheduled_task(
                 runtime=rt,

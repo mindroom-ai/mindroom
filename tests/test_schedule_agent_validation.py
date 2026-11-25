@@ -65,9 +65,9 @@ def _scheduling_runtime(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("thread_id", "scope"), [(None, "room"), ("$thread123", "thread")])
-async def test_schedule_validates_agents_in_scope(thread_id: str | None, scope: str) -> None:
-    """Reject a mentioned agent not configured for the room, naming the room or thread scope."""
+@pytest.mark.parametrize("thread_id", [None, "$thread123"], ids=["room", "thread"])
+async def test_schedule_validates_agents_in_scope(thread_id: str | None) -> None:
+    """Reject a mentioned agent not configured for the room, always naming the room boundary."""
     config = _runtime_bound_config(
         Config(
             agents={
@@ -104,7 +104,7 @@ async def test_schedule_validates_agents_in_scope(thread_id: str | None, scope: 
     assert response.startswith("Failed to schedule")
     calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
     assert calculator_matrix_id in response
-    assert f"not available in this {scope}" in response
+    assert "not available in this room" in response
 
 
 @pytest.mark.asyncio
