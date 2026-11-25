@@ -12,6 +12,7 @@ from mindroom.live_frames.frames import (
     LIVE_EVENT_TYPE,
     LiveDocs,
     ToolFitCache,
+    fitted_tools,
     live_delta,
     live_frame,
     new_publisher_id,
@@ -73,7 +74,7 @@ class LivePublisher:
         if not snapshot_due:
             if docs is self._last_sent_source and self.bare == self._last_sent_bare:
                 return None
-            shown = replace(docs, tools=self._tool_fit.fit(docs.tools, bare=self.bare))
+            shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare, cache=self._tool_fit))
             if shown == self.last_sent:
                 self._last_sent_source, self._last_sent_bare = docs, self.bare
                 return None
@@ -120,7 +121,7 @@ class LivePublisher:
         """
 
         def built(bare: int) -> tuple[dict[str, object], LiveDocs]:
-            shown = replace(docs, tools=self._tool_fit.fit(docs.tools, bare=bare))
+            shown = replace(docs, tools=fitted_tools(docs.tools, bare=bare, cache=self._tool_fit))
             frame = live_frame(
                 reply_event_id=reply_event_id,
                 publisher_id=self.publisher_id,
@@ -132,7 +133,7 @@ class LivePublisher:
         count = len(docs.tools)
         self.bare = min(self.bare, count)
         frame, shown = built(self.bare)
-        if "_fits" not in self.__dict__ and type(self)._fits is LivePublisher._fits:
+        if "_fits" not in self.__dict__ and type(self)._fits is _DEFAULT_FITS:
             plaintext_size, encrypted = frame_plaintext_size(
                 self.client,
                 self.room_id,
@@ -184,3 +185,6 @@ class LivePublisher:
                 # A send that fails at once, as through a proxy while the homeserver restarts, is not repeated every
                 # tick; the next frame is a snapshot.
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS)
+
+
+_DEFAULT_FITS = LivePublisher._fits

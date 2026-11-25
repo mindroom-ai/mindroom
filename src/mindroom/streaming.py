@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.events import ToolTraceEntry, _PendingStreamingTool
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
 
 logger = get_logger(__name__)
@@ -336,7 +336,7 @@ class _LiveStateKey:
     segment_count: int
     activity_key: tuple[int, bool]
     compactions_key: tuple[ReplyCompactions | None, int]
-    tools_key: tuple[bool, int, int]
+    tools_key: tuple[bool, int, int, int]
 
 
 def interactive_response_for_visible_body(
@@ -682,7 +682,7 @@ class StreamingResponse:
     tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _tool_trace_version: int = field(default=0, init=False, repr=False)
     _last_delivered_tool_trace_version: int = field(default=0, init=False, repr=False)
-    _live_tools_version: int = field(default=0, init=False, repr=False)
+    _tool_progress_version: int = field(default=0, init=False, repr=False)
     _live_tool_cache: list[tuple[tuple[object, ...], dict[str, object]]] = field(
         default_factory=list,
         init=False,
@@ -763,48 +763,40 @@ class StreamingResponse:
         )
 
     def append_tool_trace(self, entry: ToolTraceEntry) -> None:
-        """Append one tool trace entry and bump trace versions."""
+        """Append one tool trace entry and bump the trace version."""
         self.tool_trace.append(entry)
         self._tool_trace_version += 1
-        self._live_tools_version += 1
 
-    def complete_tool_trace(
-        self,
-        tool_tracker: StreamingToolTracker,
-        pending_tool: _PendingStreamingTool,
-        completed_trace: ToolTraceEntry,
-    ) -> bool:
-        """Update one visible trace slot upon completion and bump trace versions."""
-        if not tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace):
-            return False
+    def note_tool_trace_changed(self) -> None:
+        """Record an in-place tool trace mutation."""
         self._tool_trace_version += 1
-        self._live_tools_version += 1
-        return True
 
     def replace_tool_trace(self, entries: list[ToolTraceEntry]) -> None:
-        """Replace the tool trace and bump trace versions."""
-        self.tool_trace = list(entries)
+        """Replace the tool trace with owned entry copies if anything changed."""
+        owned = [replace(entry) for entry in entries]
+        if _tool_traces_match(self.tool_trace, owned):
+            return
+        self.tool_trace = owned
         self._tool_trace_version += 1
-        self._live_tools_version += 1
 
     def set_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Set one running tool's live progress text if it changed."""
         if self.tool_progress.get(tool_call_id) == text:
             return
         self.tool_progress[tool_call_id] = text
-        self._live_tools_version += 1
+        self._tool_progress_version += 1
 
     def clear_tool_progress(self, tool_call_id: str | None) -> None:
         """Drop one tool's live progress text if present."""
         if tool_call_id is not None and self.tool_progress.pop(tool_call_id, None) is not None:
-            self._live_tools_version += 1
+            self._tool_progress_version += 1
 
     def replace_tool_progress(self, incoming: dict[str, str]) -> None:
         """Replace live tool progress if any entry changed."""
         if incoming == self.tool_progress:
             return
         self.tool_progress = dict(incoming)
-        self._live_tools_version += 1
+        self._tool_progress_version += 1
 
     def _sync_live_tools(self) -> tuple[dict[str, object], ...]:
         if not self.show_tool_calls:
@@ -837,7 +829,12 @@ class StreamingResponse:
             segment_count=len(self._reasoning_segments),
             activity_key=(self._warmup_state.version, self.show_tool_calls),
             compactions_key=(self.compactions, self.compactions.version if self.compactions is not None else 0),
-            tools_key=(self.show_tool_calls, self._live_tools_version, len(self.tool_trace)),
+            tools_key=(
+                self.show_tool_calls,
+                self._tool_trace_version,
+                self._tool_progress_version,
+                len(self.tool_trace),
+            ),
         )
         cached = self._live_state_cache
         if cached is not None and cached[0] == key:
@@ -882,12 +879,14 @@ class StreamingResponse:
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
         """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
         resumed_count = len(self.resumed_tool_trace)
-        self.tool_trace = [
+        merged = [
             *self.tool_trace[:resumed_count],
-            *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
+            *_merge_tool_trace(self.tool_trace[resumed_count:], [replace(entry) for entry in incoming]),
         ]
+        if _tool_traces_match(self.tool_trace, merged):
+            return
+        self.tool_trace = merged
         self._tool_trace_version += 1
-        self._live_tools_version += 1
 
     def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
         """Append additive streaming text regardless of snapshot replacement mode; a tool ``marker`` is a paragraph."""
@@ -1481,7 +1480,6 @@ class StreamingResponse:
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
         self._tool_trace_version += 1
-        self._live_tools_version += 1
         self._last_delivered_tool_trace_version = self._tool_trace_version
 
     def has_uncommitted_presentation(self) -> bool:
@@ -1963,7 +1961,9 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 text_changed = streaming.accumulated_text != previous_text
                 if text_changed:
                     streaming._mark_nonadditive_text_mutation()
-                if not streaming.complete_tool_trace(tool_tracker, pending_tool, completed_trace):
+                if tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
+                    streaming.note_tool_trace_changed()
+                else:
                     logger.warning(
                         "Missing tool trace slot in streaming response for completion",
                         tool_name=tool_name,

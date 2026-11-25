@@ -99,8 +99,10 @@ def plaintext_size_fits(plaintext_size: int, *, encrypted: bool) -> bool:
 
 def frame_fits(client: nio.AsyncClient, room_id: str, frame: dict[str, object], *, event_type: str) -> bool:
     """Return whether the frame is within the size limit as it goes out to the room, encrypted in an encrypted room."""
-    plaintext_size, encrypted = frame_plaintext_size(client, room_id, frame, event_type=event_type)
-    return plaintext_size_fits(plaintext_size, encrypted=encrypted)
+    room = client.rooms.get(room_id)
+    if room is None or not room.encrypted:
+        return _serialized_size(frame) <= _MAX_FRAME_BYTES
+    return _encrypted_size(room_id, frame, event_type=event_type) <= _MAX_FRAME_BYTES
 
 
 def _encrypted_size(room_id: str, frame: dict[str, object], *, event_type: str) -> int:

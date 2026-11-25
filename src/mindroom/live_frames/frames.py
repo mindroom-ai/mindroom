@@ -104,14 +104,19 @@ class ToolFitCache:
         return _bare_form(self._slots[index])[1]
 
 
-def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[dict[str, object], ...]:
+def fitted_tools(
+    tools: tuple[dict[str, object], ...],
+    *,
+    bare: int,
+    cache: ToolFitCache | None = None,
+) -> tuple[dict[str, object], ...]:
     """Return the tool entries a frame shows: previews cut to the frame cap, and none on the oldest ``bare`` entries.
 
     An entry that lost any of its previews says ``clipped``. A result that is a background job handle keeps the
     handle, which clients read for the call's status. A bare entry is never bigger than its cut form, so a frame only
     shrinks as ``bare`` grows.
     """
-    return ToolFitCache().fit(tools, bare=bare)
+    return (cache or ToolFitCache()).fit(tools, bare=bare)
 
 
 def _fitted_entry(entry: dict[str, object], *, bare: bool) -> dict[str, object]:
