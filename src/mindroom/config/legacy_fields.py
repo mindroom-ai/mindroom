@@ -452,3 +452,34 @@ _RETIRED_MODEL_SETTINGS = {
 def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
     """Return the first retired ``extra_kwargs`` setting among ``keys``, and its guidance."""
     return next(((key, _RETIRED_MODEL_SETTINGS[key]) for key in keys if key in _RETIRED_MODEL_SETTINGS), None)
+
+
+# LEGACY_COMPAT: Retired `dynamic_workflow` toolkit alias and its `allowed_tools` override.
+# Legacy format: `defaults.tools` and `agents.<name>.tools` accepted `dynamic_workflow` (optionally with an
+#   `allowed_tools` override restricting participant tools under the deleted Dynamic Workflows engine).
+# Last legacy release: v2026.11.582; replacement: v2026.11.583 aliases `dynamic_workflow` to `workflow` and deletes
+#   the old Dynamic Workflows engine.
+# Handling: Canonicalize `dynamic_workflow` to `workflow` via TOOL_ALIASES, strip `allowed_tools` from entries
+#   authored under the legacy alias, and log one concise deprecation warning per config load.
+# Coverage: tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_bare_agent_and_defaults_alias_with_warning,
+#   tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_strips_allowed_tools_and_warns,
+#   tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_deduplicates_with_workflow.
+def strip_legacy_dynamic_workflow_overrides(
+    tool_name: str,
+    overrides: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Strip retired `allowed_tools` from entries authored as `dynamic_workflow`."""
+    if tool_name != "dynamic_workflow" or "allowed_tools" not in overrides:
+        return overrides, False
+    return {key: value for key, value in overrides.items() if key != "allowed_tools"}, True
+
+
+def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
+    """Return the one-line deprecation warning for configs that still name `dynamic_workflow`."""
+    if ignored_allowed_tools:
+        return (
+            "Tool 'dynamic_workflow' is deprecated and now aliases 'workflow' "
+            "(ignoring 'allowed_tools' because a workflow inherits its caller's tools); "
+            "rename it to 'workflow' in your config."
+        )
+    return "Tool 'dynamic_workflow' is deprecated and now aliases 'workflow'; rename it to 'workflow' in your config."

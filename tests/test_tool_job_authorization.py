@@ -43,7 +43,7 @@ _OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:loca
 
 def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> None:
     """Direct toolkit construction admits its current options and rejects changed ones."""
-    entry = ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]})
+    entry = ToolConfigEntry(name="workflow", overrides={"max_concurrent_runs": 4})
     config = Config(agents={"lead": AgentConfig(display_name="Lead", tools=[entry])})
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     toolkit = build_agent_toolkit(
@@ -55,14 +55,14 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "list_workflows" in toolkit_function_names(toolkit)
+    assert "list_workflow_runs" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
         return locally_allowed(
             config,
             _OWNER,
-            tool_name="list_workflows",
+            tool_name="list_workflow_runs",
             toolkit_name=entry.name,
             origin={},
             depth=0,

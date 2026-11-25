@@ -555,6 +555,14 @@ def _decoded_snapshot(payload: object) -> object:
     return json.loads(payload)
 
 
+# LEGACY_COMPAT: Retired `dynamic_workflow` helper usage rows in existing SQLite databases.
+# Legacy format: Pre-removal Dynamic Workflow participant turns wrote usage rows with `"kind": "dynamic_workflow"`.
+# Last legacy release: v2026.11.582; replacement: v2026.11.583 removed the Dynamic Workflows engine.
+# Handling: Skip rows whose kind is in `_RETIRED_USAGE_KINDS` cleanly during usage reads so historical DBs never fail.
+# Coverage: tests/test_dynamic_workflow_alias.py::test_legacy_dynamic_workflow_usage_row_is_skipped_cleanly.
+_RETIRED_USAGE_KINDS = frozenset({"dynamic_workflow"})
+
+
 def _extract_run(
     raw_run: object,
     *,
@@ -565,6 +573,8 @@ def _extract_run(
         raise TypeError
     run = cast("dict[str, object]", raw_run)
     kind = run.get("kind", "run")
+    if kind in _RETIRED_USAGE_KINDS:
+        return None
     if kind not in USAGE_KINDS:
         raise ValueError
     parent_run_id = run.get("parent_run_id")

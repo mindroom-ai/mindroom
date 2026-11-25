@@ -17,6 +17,7 @@ from mindroom.config.legacy_fields import (
     RETIRED_DEFAULTS_FIELDS,
     drop_retired_fields,
     reject_legacy_defaults_fields,
+    strip_legacy_dynamic_workflow_overrides,
 )
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
@@ -254,11 +255,17 @@ class ToolConfigEntry(BaseModel):
     )
     # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
     _spellings: tuple[str, ...] = PrivateAttr(default=())
+    _ignored_allowed_tools: bool = PrivateAttr(default=False)
 
     @property
     def spellings(self) -> tuple[str, ...]:
         """Return every name this entry's layer authored it under, which may be aliases of ``name``."""
         return self._spellings or (self.name,)
+
+    @property
+    def ignored_legacy_allowed_tools(self) -> bool:
+        """Return whether retired `allowed_tools` was stripped from a legacy `dynamic_workflow` spelling."""
+        return self._ignored_allowed_tools
 
     @model_validator(mode="before")
     @classmethod
@@ -316,16 +323,28 @@ def validate_unique_tool_entries(
     validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
     kept: dict[str, ToolConfigEntry] = {}
     for entry in tools:
-        name = canonical_tool_name(entry.name)
+        cleaned_overrides, stripped_allowed_tools = strip_legacy_dynamic_workflow_overrides(
+            entry.name,
+            entry.overrides,
+        )
+        normalized = entry.model_copy(update={"overrides": cleaned_overrides}) if stripped_allowed_tools else entry
+        name = canonical_tool_name(normalized.name)
         first = kept.get(name)
         if first is not None:
-            reject_unmergeable_spellings(first, entry, scope=f"{scope_name} tools")
-        spellings = (*(first.spellings if first is not None else ()), entry.name)
-        if spellings == (name,):
-            kept[name] = entry
+            reject_unmergeable_spellings(first, normalized, scope=f"{scope_name} tools")
+        spellings = (*(first.spellings if first is not None else ()), normalized.name)
+        ignored_allowed_tools = (
+            (first._ignored_allowed_tools if first is not None else False)
+            or entry._ignored_allowed_tools
+            or stripped_allowed_tools
+        )
+        if spellings == (name,) and not ignored_allowed_tools:
+            kept[name] = normalized
         else:
-            kept[name] = (entry if first is None else first).model_copy(update={"name": name})
-            kept[name]._spellings = spellings
+            merged = (normalized if first is None else first).model_copy(update={"name": name})
+            merged._spellings = spellings
+            merged._ignored_allowed_tools = ignored_allowed_tools
+            kept[name] = merged
     return list(kept.values())
 
 

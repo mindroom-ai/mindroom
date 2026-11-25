@@ -21,13 +21,10 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig, RouterConfig
+from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
-from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
-from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
@@ -55,11 +52,6 @@ from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _t
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
-from tests.test_delegation_direct_audit import _identity
-from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
-from tests.test_dynamic_workflow_subagents import _spec as _subagent_workflow_spec
-from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
-from tests.test_dynamic_workflows import _make_context, _make_multi_agent_context, _room_agent_model, _workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -503,52 +495,6 @@ def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, str
     assert prepare.await_args.kwargs["team_model_name"] == "luna"
 
 
-def _budget_context_config(config: Config) -> None:
-    config.models["default"].pricing = ModelPricing(input=3, output=15)
-    config.models["luna"] = ModelConfig(
-        provider="openai",
-        id="gpt-6-luna",
-        pricing=ModelPricing(input=0.2, output=1.25),
-    )
-    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=0)
-
-
-@pytest.mark.asyncio
-async def test_dynamic_workflow_room_agent_participant_uses_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
-    _budget_context_config(context.config)
-    _model, loaded = _room_agent_model(monkeypatch, answer("done"))
-
-    await dynamic_workflow_module._execute_room_agent_participant(
-        context,
-        RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
-        "Write a report.",
-        run_key="report:run_1",
-    )
-
-    assert loaded == ["luna"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_workflow_subagent_participant_uses_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-
-    run = await workflow.run(
-        _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "default"}]),
-    )
-
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]
-
-
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("model", ["general", "team/super_team"])
 def test_openai_compat_completion_adds_its_cost_for_its_requester(
@@ -582,153 +528,3 @@ def test_openai_compat_completion_adds_its_cost_for_its_requester(
     # Alice is over her zero cap, so the reply runs on luna: 1,000 input tokens at $0.20 and 100 at $1.25 per million.
     response_finished.assert_called_once_with("@alice:localhost", pytest.approx(0.000325), ANY)
     assert response_finished.call_args.args[2] <= datetime.now(UTC)
-
-
-async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:
-    """Create and run the workflow from a reply that runs on ``active_model_name``."""
-    spec = _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": []}], models=["default-model"])
-    context = replace(
-        _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity()),
-        active_model_name=active_model_name,
-    )
-    with tool_runtime_context(context):
-        created = json.loads(await workflow.tools.create_workflow(spec))
-        assert created["status"] == "ok", created
-        return json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
-
-
-@pytest.mark.asyncio
-async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A workflow that names the caller's priced model keeps working once the caller is over budget."""
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-
-    # The response runner hands tools the budgeted model of the reply.
-    run = await _run_workflow_as(workflow, "luna")
-
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]
-
-
-@pytest.mark.asyncio
-async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
-    context = _make_context(tmp_path)
-    _budget_context_config(context.config)
-    context.config.models["opus"] = ModelConfig(
-        provider="anthropic",
-        id="claude-opus-5",
-        pricing=ModelPricing(input=5, output=25),
-    )
-    context = replace(context, active_model_name="luna")
-    spec = _workflow_spec()
-    spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
-
-    with tool_runtime_context(context):
-        payload = json.loads(await DynamicWorkflowTools().create_workflow(spec))
-
-    assert payload["status"] == "error"
-    assert "not allowed by permissions.models" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("participant_model", "allowed"),
-    [("cheap@low", True), ("cheap@high", False), ("lookalike", False), ("twin@low", False)],
-)
-async def test_a_level_permission_admits_only_its_fallbacks_level(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    participant_model: str,
-    allowed: bool,
-) -> None:
-    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low`` only.
-
-    Not ``cheap`` at another level, nor a model whose provider ID reads ``cheap@low`` or equals the fallback's.
-    """
-    config = _subagent_workflow_config()
-    reasoning = ReasoningConfig(levels=["low", "high"], default="high")
-    pricing = ModelPricing(input=5, output=30)
-    config.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning, pricing=pricing)
-    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
-    config.models["twin"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
-    config.models["lookalike"] = ModelConfig(provider="openai", id="cheap@low")
-    config.budgets = BudgetsConfig(fallback_model="cheap@low", monthly_limit_usd=0)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": participant_model}
-    spec = _subagent_workflow_spec([participant], models=["sol@low"])
-
-    with workflow.context():
-        payload = json.loads(await workflow.tools.validate_workflow(spec))
-
-    assert (payload["status"] == "ok") is allowed, payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("fallback", "requested", "permitted", "runs"),
-    [("cheap", "cheap@low", "cheap@low", "cheap@low"), ("cheap@low", "cheap@high", "cheap", "cheap@low")],
-    ids=["fallback-without-a-level", "fallback-at-a-level"],
-)
-async def test_a_level_of_the_fallback_model_runs_at_a_fixed_level_over_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fallback: str,
-    requested: str,
-    permitted: str,
-    runs: str,
-) -> None:
-    """Over budget, a level of the fallback model keeps its level unless the fallback names one, which then wins.
-
-    Either way a reload of the model's default cannot move a later step.
-    """
-
-    def config(default: str) -> Config:
-        loaded = _subagent_workflow_config()
-        reasoning = ReasoningConfig(levels=["low", "high"], default=default)
-        pricing = ModelPricing(input=1, output=2)
-        loaded.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning, pricing=pricing)
-        loaded.budgets = BudgetsConfig(fallback_model=fallback, monthly_limit_usd=0)
-        return loaded
-
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config("low"))
-    live = [workflow.config]
-    loaded: list[str] = []
-
-    def load_model(*args: object, **_kwargs: object) -> object:
-        loaded.append(str(args[2]))
-        live[0] = config("high")
-        return workflow.model
-
-    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
-    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
-    monkeypatch.setattr(
-        workflow,
-        "context",
-        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
-    )
-    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": requested}
-
-    run = await workflow.run(_subagent_workflow_spec([participant], steps=2, models=[permitted]))
-
-    assert run["status"] == "completed", run
-    assert loaded == [runs, runs]
-
-
-@pytest.mark.asyncio
-async def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The caller's reply started on the priced model; its workflow then runs on the fallback."""
-    config = _subagent_workflow_config()
-    _budget(config)
-    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
-
-    run = await _run_workflow_as(workflow, "default")
-
-    assert run["status"] == "completed", run
-    assert workflow.models_loaded == ["luna"]

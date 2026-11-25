@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import threading
-from dataclasses import replace
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
 
@@ -17,36 +19,59 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
-from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
-from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.spec import parse_workflow_spec
-from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.workflow_runs.models import WorkflowRun, WorkflowRunState, new_workflow_run_id
+from mindroom.workflow_runs.store import WorkflowRunStore
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.test_dynamic_workflows import _RESEARCH_BRIEF_STEPS, file_work_waiting_for_the_loop
-from tests.test_dynamic_workflows import _workflow_spec as dynamic_workflow_spec
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
-def _workflow_spec() -> dict[str, object]:
-    return dynamic_workflow_spec(**_RESEARCH_BRIEF_STEPS)
+@dataclass
+class LoopFreedom:
+    """The wrapped file operations that ran, and the first one the event loop could not run other work beside."""
+
+    called: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+
+
+@contextmanager
+def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> Iterator[LoopFreedom]:
+    """Make each named method wait, before its file work, until the event loop has run other work."""
+    loop = asyncio.get_running_loop()
+    freedom = LoopFreedom()
+
+    def waiting(method: Callable[..., object], name: str) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            freedom.called.append(name)
+            if not freedom.blocked and not loop_runs_while_blocked(loop):
+                freedom.blocked.append(name)
+            return method(*args, **kwargs)
+
+        return call
+
+    with ExitStack() as stack:
+        for owner, names in methods.items():
+            for name in names:
+                stack.enter_context(patch.object(owner, name, waiting(getattr(owner, name), name)))
+        yield freedom
 
 
 def _make_context(
@@ -68,7 +93,7 @@ def _make_context(
             agents={
                 "general": AgentConfig(
                     display_name="General Agent",
-                    tools=["dynamic_workflow", "report_publishing"],
+                    tools=["workflow", "report_publishing"],
                     memory_backend=agent_memory_backend,
                 ),
             },
@@ -110,12 +135,9 @@ def test_report_publishing_tool_registered() -> None:
     )
 
 
-@pytest.mark.parametrize("toolkit_class", [DynamicWorkflowTools, ReportPublishingTools])
-def test_each_offered_function_runs_the_toolkit_method_of_its_name(
-    toolkit_class: type[DynamicWorkflowTools | ReportPublishingTools],
-) -> None:
+def test_each_offered_function_runs_the_toolkit_method_of_its_name() -> None:
     """Each tool is one method under its own name, the one entrypoint the toolkit offers for it."""
-    toolkit = toolkit_class()
+    toolkit = ReportPublishingTools()
 
     assert toolkit.functions == {name: getattr(toolkit, name) for name in toolkit.functions}
 
@@ -123,40 +145,26 @@ def test_each_offered_function_runs_the_toolkit_method_of_its_name(
 @pytest.mark.asyncio
 async def test_tool_file_work_leaves_the_event_loop_free(tmp_path: Path) -> None:
     """While a tool's file work, a static-site copy included, is under way, other coroutines on the loop keep running."""
-    dynamic_workflow_tool = DynamicWorkflowTools()
+    control_root, run_id = _seed_workflow_run(tmp_path, title="Pricing Report", result="Findings")
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, agent_memory_backend="file")
+    base_context = _make_context(tmp_path, agent_memory_backend="file")
+    context = replace(
+        base_context,
+        runtime_paths=replace(base_context.runtime_paths, control_state_root=control_root),
+    )
     site_dir = context.runtime_paths.storage_root / "agents" / "general" / "workspace" / "public-demo"
     site_dir.mkdir(parents=True)
     (site_dir / "index.html").write_text("<!doctype html><h1>Demo</h1>", encoding="utf-8")
     store_methods: dict[type, tuple[str, ...]] = {
-        DynamicWorkflowStore: (
-            "create_workflow",
-            "update_workflow",
-            "list_workflows",
-            "list_workflow_revisions",
-            "start_workflow_run",
-            "load_workflow_revision",
-            "complete_workflow_run",
-            "get_workflow_run",
-        ),
+        WorkflowRunStore: ("get_run",),
         ReportPublishingStore: ("publish_report", "get_public_report", "revoke_public_report"),
     }
-    workflow_id = "competitor-research-report"
 
     with file_work_waiting_for_the_loop(store_methods) as freedom, tool_runtime_context(context):
-        created = _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
-        updated = _tool_payload(
-            await dynamic_workflow_tool.update_workflow(workflow_id, {"description": "Updated."}, "Clarify"),
-        )
-        listed = _tool_payload(await dynamic_workflow_tool.list_workflows())
-        revisions = _tool_payload(await dynamic_workflow_tool.list_workflow_revisions(workflow_id))
-        run = _tool_payload(await dynamic_workflow_tool.run_workflow(workflow_id, {"topic": "pricing"}))
-        loaded_run = _tool_payload(await dynamic_workflow_tool.get_workflow_run(workflow_id, run["run_id"]))
         run_report = _tool_payload(
             await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": workflow_id, "run_id": run["run_id"]},
+                source_type="workflow_run",
+                source={"run_id": run_id},
                 confirm_public=True,
             ),
         )
@@ -171,8 +179,6 @@ async def test_tool_file_work_leaves_the_event_loop_free(tmp_path: Path) -> None
 
     assert freedom.blocked == []
     assert set(freedom.called) == {name for names in store_methods.values() for name in names}
-    assert [created["status"], updated["status"], listed["status"], revisions["status"]] == ["ok"] * 4
-    assert [run["status"], loaded_run["status"]] == ["completed"] * 2
     assert [run_report["status"], site["status"], revoked["status"]] == ["ok"] * 3
 
 
@@ -699,19 +705,15 @@ async def test_a_model_sending_a_false_like_confirmation_does_not_publish(
     confirm_public: bool | str,
 ) -> None:
     """The model's arguments are validated as their declared types, so a string "no" means False."""
-    dynamic_workflow_tool = DynamicWorkflowTools()
+    control_root, run_id = _seed_workflow_run(tmp_path)
     publish = toolkit_offers(ReportPublishingTools(), "publish_report").entrypoint
-    context = _make_context(tmp_path)
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
 
     with tool_runtime_context(context):
-        _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
-        run = _tool_payload(
-            await dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
-        )
         result = _tool_payload(
             await publish(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"]},
+                source_type="workflow_run",
+                source={"run_id": run_id},
                 confirm_public=confirm_public,
             ),
         )
@@ -740,46 +742,37 @@ async def test_a_model_sending_a_non_string_slug_is_refused_before_the_revoke_ru
     ],
     ids=["public-url", "padded-public-url", "no-public-url"],
 )
-async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(
+async def test_report_publishing_tool_publishes_workflow_run_report_links(
     tmp_path: Path,
     public_url: str,
     link_base: str | None,
 ) -> None:
-    """Report Publishing should expose Dynamic Workflow reports through a source reference."""
-    dynamic_workflow_tool = DynamicWorkflowTools()
+    """Report Publishing should expose completed workflow runs through a source reference."""
+    control_root, run_id = _seed_workflow_run(tmp_path)
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, public_url=public_url)
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root, public_url=public_url)
 
     with tool_runtime_context(context):
-        _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
-        run = _tool_payload(
-            await dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
-        )
         with_scope = _tool_payload(
             await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"], "scope": "agent"},
+                source_type="workflow_run",
+                source={"run_id": run_id, "scope": "agent"},
                 confirm_public=True,
             ),
         )
         published = _tool_payload(
             await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"]},
+                source_type="workflow_run",
+                source={"run_id": run_id},
                 confirm_public=True,
             ),
         )
         revoked = _tool_payload(await report_tool.revoke_public_report(published["slug"]))
 
-    assert with_scope["message"] == "dynamic_workflow_run source contains unsupported field 'scope'."
+    assert with_scope["message"] == "workflow_run source contains unsupported field 'scope'."
     assert published["status"] == "ok"
-    assert published["source_type"] == "dynamic_workflow_run"
-    assert published["source"] == {
-        "workflow_id": "competitor-research-report",
-        "run_id": run["run_id"],
-    }
-    report_path = f"/reports/private/agent/general/competitor-research-report/{run['run_id']}"
-    assert run["report_url"] == (None if link_base is None else f"{link_base}{report_path}")
+    assert published["source_type"] == "workflow_run"
+    assert published["source"] == {"run_id": run_id}
     assert published["public_url"] == (None if link_base is None else f"{link_base}/reports/public/{published['slug']}")
     assert published["public_path"] == (
         f"/reports/public/{published['slug']}" if link_base is None else f"/mindroom/reports/public/{published['slug']}"
@@ -940,10 +933,9 @@ async def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) 
         )
         extra_field = _tool_payload(
             await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
+                source_type="workflow_run",
                 source={
-                    "workflow_id": "competitor-research-report",
-                    "run_id": "run_missing",
+                    "run_id": "wf-" + "0" * 32,
                     "artifact_path": "unregistered/report.html",
                 },
                 confirm_public=True,
@@ -982,67 +974,18 @@ async def test_report_publishing_tool_requires_nonblank_source_text(
 
 
 @pytest.mark.asyncio
-async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
-    """Only completed Dynamic Workflow runs should be exposed as public report links."""
-    report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path)
-    spec = _workflow_spec()
-    spec["workflow"] = [
-        {
-            "id": "write",
-            "type": "agent_step",
-            "participant": "writer",
-            "prompt": "Write about {input.topic}.",
-        },
-    ]
-    spec["outputs"] = [{"id": "brief", "type": "text", "from_step": "write"}]
-
-    with tool_runtime_context(context):
-        store, owner_id = dynamic_workflow_store_and_owner(context)
-        store.create_workflow(
-            spec=parse_workflow_spec(spec),
-            scope="agent",
-            owner_id=owner_id,
-            created_by=context.agent_name or "general",
-            reason="initial design",
-        )
-        run = await DynamicWorkflowService(store).run_workflow(
-            workflow_id="competitor-research-report",
-            scope="agent",
-            owner_id=owner_id,
-            input_data={"topic": "Agno factories"},
-            requested_by=context.requester_id,
-        )
-        rejected = _tool_payload(
-            await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run.run_id},
-                confirm_public=True,
-            ),
-        )
-
-    assert run.status == "failed"
-    assert rejected["status"] == "error"
-    assert "Only completed" in rejected["message"]
-
-
-@pytest.mark.asyncio
 async def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: Path) -> None:
     """Public report revocation should stay limited to the source requester or publisher."""
-    dynamic_workflow_tool = DynamicWorkflowTools()
+    control_root, run_id = _seed_workflow_run(tmp_path)
     report_tool = ReportPublishingTools()
-    alice_context = _make_context(tmp_path)
+    alice_context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
     bob_context = replace(alice_context, requester_id="@bob:localhost")
 
     with tool_runtime_context(alice_context):
-        _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
-        run = _tool_payload(
-            await dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
-        )
         published = _tool_payload(
             await report_tool.publish_report(
-                source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"]},
+                source_type="workflow_run",
+                source={"run_id": run_id},
                 confirm_public=True,
             ),
         )
@@ -1051,3 +994,308 @@ async def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_
 
     assert revoked["status"] == "error"
     assert "not available to the current requester" in revoked["message"]
+
+
+def _seed_workflow_run(
+    tmp_path: Path,
+    *,
+    run_id: str | None = None,
+    agent_name: str = "general",
+    owner_user_id: str = "@user:localhost",
+    state: WorkflowRunState = WorkflowRunState.COMPLETED,
+    title: str | None = "Weekly Research",
+    result: object = "Summary <script>alert(1)</script>",
+) -> tuple[Path, str]:
+    control_state_root = tmp_path / "control_state"
+    store = WorkflowRunStore(control_state_root / "workflow_runs" / "workflow_runs.sqlite3")
+    actual_run_id = run_id or new_workflow_run_id()
+    run = WorkflowRun(
+        run_id=actual_run_id,
+        agent_name=agent_name,
+        owner_user_id=owner_user_id,
+        room_id="!room:localhost",
+        thread_root_event_id="$thread:localhost",
+        execution_identity={},
+        persona=None,
+        title=title,
+        source="def main(args): return 'ok'",
+        source_digest="digest",
+        args={},
+        max_concurrent=4,
+        max_cost_usd=None,
+        resource_profile=None,
+        runtime_seconds_left=None,
+        origin_job_id=None,
+        state=state,
+        result=result,
+    )
+    store.reserve_run(run)
+    return control_state_root, actual_run_id
+
+
+def _make_workflow_report_context(
+    tmp_path: Path,
+    *,
+    control_state_root: Path | None,
+    public_url: str = "https://acme.mindroom.chat",
+    agent_name: str = "general",
+    requester_id: str = "@user:localhost",
+) -> ToolRuntimeContext:
+    context = _make_context(tmp_path, public_url=public_url)
+    runtime_paths = replace(context.runtime_paths, control_state_root=control_state_root)
+    return replace(context, agent_name=agent_name, requester_id=requester_id, runtime_paths=runtime_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_value", "expected_snippet"),
+    [
+        (
+            "Findings & <script>alert('xss')</script>",
+            "Findings &amp; &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;",
+        ),
+        ({"score": 42, "items": ["a", "<b>"]}, "&quot;score&quot;: 42"),
+        ([1, "two", "<three>"], "&lt;three&gt;"),
+    ],
+)
+async def test_workflow_run_publishes_escaped_html_and_revokes(
+    tmp_path: Path,
+    result_value: object,
+    expected_snippet: str,
+) -> None:
+    """Completed workflow runs (text or JSON) publish escaped HTML reports that serve and revoke cleanly."""
+    control_root, run_id = _seed_workflow_run(tmp_path, title="Q4 <Report>", result=result_value)
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
+    report_tool = ReportPublishingTools()
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            await report_tool.publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "ok", published
+    assert published["source_type"] == "workflow_run"
+    assert published["source"] == {"run_id": run_id}
+    assert published["public_url"] == f"https://acme.mindroom.chat/reports/public/{published['slug']}"
+
+    store = ReportPublishingStore(context.runtime_paths.storage_root)
+    loaded = store.get_public_report(published["slug"])
+    assert loaded.title == "Q4 <Report>"
+    html_text = store.report_asset_path(loaded).read_text(encoding="utf-8")
+    assert "Q4 &lt;Report&gt;" in html_text
+    assert "<script>" not in html_text
+    assert expected_snippet in html_text
+
+    with tool_runtime_context(context):
+        revoked = _tool_payload(await report_tool.revoke_public_report(published["slug"]))
+    assert revoked["status"] == "ok"
+    assert revoked["revoked_at"] is not None
+    with pytest.raises(ReportPublishingError, match="revoked"):
+        store.get_public_report(published["slug"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_title", "override_title", "expected_title"),
+    [
+        ("Run Title", "Custom Override", "Custom Override"),
+        ("Run Title", None, "Run Title"),
+        (None, None, None),
+    ],
+)
+async def test_workflow_run_title_override_and_fallback(
+    tmp_path: Path,
+    run_title: str | None,
+    override_title: str | None,
+    expected_title: str | None,
+) -> None:
+    """Title prefers explicit override, then run.title, then `Workflow Run <run_id>`."""
+    control_root, run_id = _seed_workflow_run(tmp_path, title=run_title, result="Done")
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
+    source: dict[str, Any] = {"run_id": run_id}
+    if override_title is not None:
+        source["title"] = override_title
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source=source,
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "ok", published
+    store = ReportPublishingStore(context.runtime_paths.storage_root)
+    loaded = store.get_public_report(published["slug"])
+    assert loaded.title == (expected_title or f"Workflow Run {run_id}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("other_agent", "other_requester"),
+    [
+        ("general", "@other:localhost"),
+        ("other_agent", "@user:localhost"),
+    ],
+)
+async def test_workflow_run_owner_check_hides_other_owners_runs(
+    tmp_path: Path,
+    other_agent: str,
+    other_requester: str,
+) -> None:
+    """Another requester or another agent gets the same not-found error with no existence leak."""
+    control_root, run_id = _seed_workflow_run(tmp_path, agent_name="general", owner_user_id="@user:localhost")
+    context = _make_workflow_report_context(
+        tmp_path,
+        control_state_root=control_root,
+        agent_name=other_agent,
+        requester_id=other_requester,
+    )
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert f"No workflow run {run_id} in your runs." in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state_name",
+    ["starting", "running", "waiting", "failed", "cancelled", "interrupted"],
+)
+async def test_workflow_run_rejects_non_completed_states(tmp_path: Path, state_name: str) -> None:
+    """Non-completed workflow runs cannot be published."""
+    control_root, run_id = _seed_workflow_run(tmp_path, state=WorkflowRunState(state_name), result="partial")
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "Only completed workflow runs can be published." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_rejects_completed_run_with_none_result(tmp_path: Path) -> None:
+    """A completed workflow run with result=None is rejected cleanly."""
+    control_root, run_id = _seed_workflow_run(tmp_path, result=None)
+    context = _make_workflow_report_context(tmp_path, control_state_root=control_root)
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "no result" in result["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_workflow_run_source_type_returns_removal_error(tmp_path: Path) -> None:
+    """`source_type="dynamic_workflow_run"` returns a clear error pointing callers to `workflow_run`."""
+    context = _make_workflow_report_context(tmp_path, control_state_root=tmp_path / "control_state")
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="dynamic_workflow_run",
+                source={"workflow_id": "legacy", "run_id": "run_1"},
+                confirm_public=True,
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "dynamic_workflow_run" in result["message"]
+    assert "workflow_run" in result["message"]
+
+
+def test_legacy_persisted_dynamic_workflow_run_report_loads_and_revokes(tmp_path: Path) -> None:
+    """An existing PublishedReport JSON on disk with source_type='dynamic_workflow_run' loads and revokes cleanly."""
+    storage_root = tmp_path / "mindroom_data"
+    artifact_path = storage_root / "reports" / "legacy.html"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("<!doctype html><h1>Old Report</h1>", encoding="utf-8")
+    slug = "pub_11111111111111111111111111111111"
+    record_path = storage_root / "report_publishing" / "public_reports" / f"{slug}.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "slug": slug,
+                "source_type": "dynamic_workflow_run",
+                "source": {"workflow_id": "old-wf", "run_id": "run_123"},
+                "artifact_kind": "html_file",
+                "artifact_path": "reports/legacy.html",
+                "title": "Old Report",
+                "requested_by": "@alice:localhost",
+                "published_by": "@alice:localhost",
+                "published_at": "2026-10-01T00:00:00Z",
+                "public_url": f"https://acme.mindroom.chat/reports/public/{slug}",
+                "revoked_at": None,
+                "revoked_by": None,
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    store = ReportPublishingStore(storage_root)
+    loaded = store.get_public_report(slug)
+    assert loaded.source_type == "dynamic_workflow_run"
+    assert store.report_asset_path(loaded) == artifact_path
+    revoked = store.revoke_public_report(slug, revoked_by="@alice:localhost")
+    assert revoked.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_uses_orchestrator_store_and_handles_missing_control_root(tmp_path: Path) -> None:
+    """When an orchestrator is attached its store is used; without orchestrator or control root publishing errors clearly."""
+    control_root, run_id = _seed_workflow_run(tmp_path, title="From Orchestrator", result="Orchestrator output")
+    store = WorkflowRunStore(control_root / "workflow_runs" / "workflow_runs.sqlite3")
+    no_root_context = _make_workflow_report_context(tmp_path, control_state_root=None)
+    orchestrator_context = replace(
+        no_root_context,
+        orchestrator=SimpleNamespace(workflow_engine=SimpleNamespace(store=store)),
+    )
+
+    with tool_runtime_context(no_root_context):
+        missing = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+    with tool_runtime_context(orchestrator_context):
+        published = _tool_payload(
+            await ReportPublishingTools().publish_report(
+                source_type="workflow_run",
+                source={"run_id": run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert missing["status"] == "error"
+    assert "control state root" in missing["message"]
+    assert published["status"] == "ok", published

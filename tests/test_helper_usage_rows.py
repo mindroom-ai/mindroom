@@ -26,7 +26,6 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 from openai.types import CompletionUsage
 
 from mindroom import routing, topic_generator
-from mindroom.agents import create_agent
 from mindroom.call_transcripts.notes import ModelNotesWriter
 from mindroom.call_transcripts.service import CallTranscript, _Turn
 from mindroom.call_transcripts.transcriber import SpeechTranscriber
@@ -37,8 +36,7 @@ from mindroom.config.models import CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
-from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
-from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
+from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
@@ -63,14 +61,12 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.thread_summary.generation import generate_summary
-from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.history_helpers import _forced_compaction_context, _make_config, _session
 from tests.identity_helpers import persist_actual_entity_accounts
-from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -341,24 +337,6 @@ async def _claude_agent(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Pat
     return paths.storage_root
 
 
-async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    config, paths, owner, context = _conversation(tmp_path)
-    _scripted(monkeypatch, "Sample helper output.")
-    identity = context.execution_identity
-    build = create_agent(
-        "test_agent",
-        config,
-        paths,
-        identity,
-        knowledge=None,
-        model=turn_model(config, paths, "test_agent"),
-        plugins=config_plugins(config, paths),
-    )
-    with helper_usage_owner_context(owner):
-        await _run_room_agent_turn(context, build, "Sample task.")
-    return paths.storage_root
-
-
 async def _skill_learning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config, paths, _owner, _context = _conversation(tmp_path)
     _scripted(monkeypatch, "Nothing worth keeping as a skill.")
@@ -463,7 +441,6 @@ _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
     "call_transcript": _call_transcript,
     "claude_agent": _claude_agent,
     "compaction_summary": _compaction_summary,
-    "dynamic_workflow": _dynamic_workflow,
     "knowledge_chunk_context": _knowledge_chunk_context,
     "knowledge_graph": _knowledge_graph,
     "live_voice": _live_voice,

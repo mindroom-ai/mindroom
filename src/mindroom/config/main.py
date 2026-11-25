@@ -58,6 +58,7 @@ from mindroom.config.legacy_fields import (
     RETIRED_PROMPT_NAMES,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
+    dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
     retired_trigger_approval_error,
 )
@@ -677,6 +678,22 @@ class Config(BaseModel):
                 default = defaults.get(entry.name)
                 if default is not None and len({*default.spellings, *entry.spellings}) > 1:
                     reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
+        return self
+
+    @model_validator(mode="after")
+    def warn_deprecated_dynamic_workflow_alias(self) -> Config:
+        """Log one concise warning when a config still names the retired `dynamic_workflow` tool."""
+        entries = (
+            *self.defaults.tools,
+            *(entry for agent in self.agents.values() for entry in agent.tools),
+        )
+        aliased = [entry for entry in entries if "dynamic_workflow" in entry.spellings]
+        if aliased:
+            logger.warning(
+                dynamic_workflow_deprecation_warning(
+                    ignored_allowed_tools=any(entry.ignored_legacy_allowed_tools for entry in aliased),
+                ),
+            )
         return self
 
     @model_validator(mode="after")

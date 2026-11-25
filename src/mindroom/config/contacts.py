@@ -15,7 +15,7 @@ CONTACT_CONTROL_TOOLS = frozenset(
         "agent_manager",
         "self_config",
         "config_manager",
-        "dynamic_workflow",
+        "workflow",
         "claude_agent",
         "skill_manage",
         "dynamic_tools",
