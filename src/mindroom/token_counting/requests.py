@@ -9,8 +9,10 @@ route's size and its identity read one rendering.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import io
+import stat
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,6 +31,8 @@ if TYPE_CHECKING:
 __all__ = [
     "MEDIA_ALLOWANCE_TOKENS",
     "RequestParts",
+    "file_byte_size",
+    "file_tokens_within_budget",
     "plain_request_parts",
     "route_context_key",
     "route_request_tokens",
@@ -38,6 +42,11 @@ __all__ = [
 # each page of a PDF on a model that does not price pages lower (``TokenCounter.pdf_page_tokens``); Claude reads a
 # page as 1,500 to 3,000 tokens of text beside the page's image.
 MEDIA_ALLOWANCE_TOKENS = 5_000
+_PDF_MAGIC = b"%PDF-"
+# No tokenizer or estimator packs more than 16 bytes of text per token, so any non-PDF text file larger than
+# ``max_tokens * 16`` bytes is guaranteed to exceed ``max_tokens`` without reading or tokenizing it.
+_MAX_TEXT_BYTES_PER_TOKEN = 16
+_UTF8_CHECK_CHUNK_BYTES = 65_536
 
 
 @dataclass(slots=True)
@@ -119,7 +128,7 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
     data = _file_bytes(file)
     if data is None:
         return MEDIA_ALLOWANCE_TOKENS
-    if data.startswith(b"%PDF-"):
+    if data.startswith(_PDF_MAGIC):
         return _pdf_pages(data) * (counter.pdf_page_tokens or MEDIA_ALLOWANCE_TOKENS)
     if is_text_mime_type(file.mime_type):
         return count(counter, file_text(data))
@@ -127,6 +136,92 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
         return count(counter, data.decode("utf-8"))
     except UnicodeDecodeError:
         return MEDIA_ALLOWANCE_TOKENS
+
+
+def _is_utf8_file(path: Path) -> bool | None:
+    """Return whether ``path`` decodes as UTF-8, streaming in chunks, or None if it cannot be read."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(_UTF8_CHECK_CHUNK_BYTES):
+                decoder.decode(chunk)
+            decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    except OSError:
+        return None
+    return True
+
+
+def _content_exceeds_text_byte_guard(content: bytes | str, mime_type: str | None, byte_limit: int) -> bool | None:
+    """Apply the text byte guard to in-memory ``content`` without decoding or tokenizing oversized text."""
+    if isinstance(content, str):
+        exceeds = not content.startswith("%PDF-") and (
+            len(content) > byte_limit
+            or (not content.isascii() and len(content) * 4 > byte_limit and len(content.encode("utf-8")) > byte_limit)
+        )
+        return True if exceeds else None
+    if len(content) <= byte_limit or content.startswith(_PDF_MAGIC):
+        return None
+    if is_text_mime_type(mime_type):
+        return True
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _filepath_exceeds_text_byte_guard(path: Path, mime_type: str | None, byte_limit: int) -> bool | None:
+    """Apply the text byte guard to ``path`` using ``stat()`` and at most a 5-byte PDF header peek."""
+    try:
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= byte_limit:
+            return None
+        with path.open("rb") as handle:
+            header = handle.read(len(_PDF_MAGIC))
+    except OSError:
+        return None
+    if header.startswith(_PDF_MAGIC):
+        return None
+    if is_text_mime_type(mime_type):
+        return True
+    return _is_utf8_file(path)
+
+
+def file_byte_size(file: File) -> int | None:
+    """Return ``file``'s size in bytes without reading its full contents from disk, or None when unavailable."""
+    if isinstance(file.content, bytes):
+        return len(file.content)
+    if isinstance(file.content, str):
+        if file.content.isascii():
+            return len(file.content)
+        return file.size if file.size is not None else len(file.content.encode("utf-8"))
+    if file.filepath is not None:
+        try:
+            st = Path(file.filepath).stat()
+        except OSError:
+            return file.size
+        if stat.S_ISREG(st.st_mode):
+            return st.st_size
+    return file.size
+
+
+def file_tokens_within_budget(counter: TokenCounter, file: File, max_tokens: int) -> int | None:
+    """Return ``file``'s token count when it fits within ``max_tokens``, or None when it exceeds that budget."""
+    if max_tokens <= 0:
+        return None
+    byte_limit = max_tokens * _MAX_TEXT_BYTES_PER_TOKEN
+    if file.content is not None:
+        guarded = _content_exceeds_text_byte_guard(file.content, file.mime_type, byte_limit)
+    elif file.filepath is not None:
+        guarded = _filepath_exceeds_text_byte_guard(Path(file.filepath), file.mime_type, byte_limit)
+    else:
+        guarded = None
+    if guarded is True:
+        return None
+    tokens = MEDIA_ALLOWANCE_TOKENS if guarded is False else _file_tokens(counter, file)
+    return tokens if tokens <= max_tokens else None
 
 
 def _media_tokens(counter: TokenCounter, messages: Sequence[Message], *, keep_images: bool) -> int:

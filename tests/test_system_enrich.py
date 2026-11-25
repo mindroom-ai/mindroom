@@ -31,7 +31,6 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.llm.messages import system_text
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
@@ -459,7 +458,7 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
     )
 
     assert prepared.turn.context == ()
-    assert [message.content for message in prepared.run_input(MediaInputs())] == ["Coordinate"]
+    assert [message.content for message in prepared.run_input()] == ["Coordinate"]
 
 
 @pytest.mark.asyncio
@@ -501,7 +500,7 @@ async def test_a_routed_team_reads_each_message_of_its_batch_once(
         current_sender_id="@user:localhost",
     )
 
-    rendered = "\n".join(str(message.content) for message in prepared.run_input(MediaInputs()))
+    rendered = "\n".join(str(message.content) for message in prepared.run_input())
     assert "Planning the release" in rendered
     assert rendered.count("The release date is Thursday.") == 1
     assert rendered.count("What day did I say?") == 1

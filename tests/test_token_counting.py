@@ -3,17 +3,22 @@
 
 from __future__ import annotations
 
+import io
 import math
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tiktoken
+from pypdf import PdfWriter
 
+from mindroom.llm.media import File
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import families
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.token_counting.families import counter_for_model, load_o200k
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, file_tokens_within_budget
 from tests.fakes.token_counter import quarter_tokens
 
 if TYPE_CHECKING:
@@ -175,3 +180,78 @@ def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> 
     assert count(counter, spaced) == _o200k(spaced)
     for run in ("abc" * 6_000, " " * 20_000):
         assert abs(count(counter, run) - _o200k(run)) <= len(run) // 8_192 + 1
+
+
+def _padded_pdf(pages: int, padding_bytes: int) -> bytes:
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=612, height=792)
+    writer.add_metadata({"/Padding": "p" * padding_bytes})
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_file_tokens_within_budget_skips_reading_and_tokenizing_large_text_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized non-PDF text files fail the fast byte guard via stat() + 5-byte peek without full reads or tokenizing."""
+    export_path = tmp_path / "export.json"
+    export_path.write_bytes(b'{"items": "' + b"x" * 700_000 + b'"}')
+    untyped_log = tmp_path / "app.log"
+    untyped_log.write_bytes(b"entry\n" * 120_000)
+    binary_archive = tmp_path / "archive.zip"
+    binary_archive.write_bytes(b"PK\x03\x04\x89\xff" + b"\xff" * 700_000)
+
+    tokenized: list[int] = []
+    counter = TokenCounter(estimate=lambda value: (tokenized.append(len(value)), quarter_tokens(value))[1])
+
+    def forbid_read_bytes(self: Path) -> bytes:
+        msg = f"unexpected full read of {self}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+
+    assert (
+        file_tokens_within_budget(
+            counter,
+            File(filepath=str(export_path), filename="export.json", mime_type="application/json"),
+            32_000,
+        )
+        is None
+    )
+    assert file_tokens_within_budget(counter, File(filepath=str(untyped_log), filename="app.log"), 32_000) is None
+    assert (
+        file_tokens_within_budget(
+            counter,
+            File(filepath=str(binary_archive), filename="archive.zip", mime_type="application/zip"),
+            32_000,
+        )
+        == MEDIA_ALLOWANCE_TOKENS
+    )
+    assert tokenized == []
+
+
+def test_file_tokens_within_budget_counts_large_pdfs_by_page_and_preserves_small_and_missing_files(
+    tmp_path: Path,
+) -> None:
+    """Multi-MB low-page PDFs still count by page, small files by tokens, and missing files by MEDIA_ALLOWANCE_TOKENS."""
+    pdf_path = tmp_path / "report.pdf"
+    pdf_bytes = _padded_pdf(2, 1_100_000)
+    assert len(pdf_bytes) > 1_000_000
+    pdf_path.write_bytes(pdf_bytes)
+    notes_path = tmp_path / "notes.txt"
+    notes_path.write_text("hello world " * 40, encoding="utf-8")
+
+    counter = TokenCounter(estimate=quarter_tokens, pdf_page_tokens=2_000)
+    pdf_file = File(filepath=str(pdf_path), filename="report.pdf", mime_type="application/pdf")
+    notes_file = File(filepath=str(notes_path), filename="notes.txt", mime_type="text/plain")
+    missing_file = File(filepath=str(tmp_path / "missing.json"), filename="missing.json", mime_type="application/json")
+
+    assert file_tokens_within_budget(counter, pdf_file, 32_000) == 4_000
+    assert file_tokens_within_budget(counter, pdf_file, 3_000) is None
+    assert file_tokens_within_budget(counter, notes_file, 500) == quarter_tokens("hello world " * 40)
+    assert file_tokens_within_budget(counter, notes_file, 50) is None
+    assert file_tokens_within_budget(counter, missing_file, 32_000) == MEDIA_ALLOWANCE_TOKENS
+    assert file_tokens_within_budget(counter, notes_file, 0) is None

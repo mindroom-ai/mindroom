@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import threading
 import time
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pypdf import PdfWriter
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
@@ -26,7 +28,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
-from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
+from mindroom.execution_preparation import (
+    MAX_AUTO_INLINE_FILE_TOKENS,
+    _PreparedExecutionContext,
+    render_prepared_messages_text,
+)
 from mindroom.history.conversation_text import utterances
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
@@ -39,8 +45,9 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
-from mindroom.llm.media import File
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message, stable_serialize, system_text
+from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
@@ -621,6 +628,38 @@ def _notes(count: int, length: int) -> list[ResolvedVisibleMessage]:
     ]
 
 
+async def _reply_with_media(
+    media: MediaInputs,
+    provider: _Provider,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt: str,
+    session_id: str = "session-1",
+    thread: Sequence[ResolvedVisibleMessage] | None = None,
+    requester_id: str | None = None,
+) -> tuple[str, ModelRequest]:
+    """Run one reply to ``prompt`` carrying ``media`` and return its text and the latest wire request it sent."""
+    current = make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current")
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context(
+                    "test_agent",
+                    session_id=session_id,
+                    reply_to_event_id="$current" if thread is not None else None,
+                    requester_id=requester_id,
+                ),
+                prompt=prompt,
+                thread_history=[*thread, current] if thread is not None else None,
+                media=media,
+            ),
+            runtime_paths,
+            config,
+        )
+    return response.text, provider.model.requests[-1]
+
+
 async def _reply_with(
     attachment: File,
     provider: _Provider,
@@ -635,25 +674,17 @@ async def _reply_with(
 
     With ``thread``, the prompt is the thread's current message ``$current``, after ``thread``.
     """
-    current = make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current")
-    with _no_memory():
-        response = await ai_response(
-            replace(
-                make_turn_context(
-                    "test_agent",
-                    session_id=session_id,
-                    reply_to_event_id="$current" if thread is not None else None,
-                ),
-                prompt=prompt,
-                thread_history=[*thread, current] if thread is not None else None,
-                media=MediaInputs(files=(attachment,)),
-            ),
-            runtime_paths,
-            config,
-        )
-    [request] = provider.model.requests
+    text, request = await _reply_with_media(
+        MediaInputs(files=(attachment,)),
+        provider,
+        config,
+        runtime_paths,
+        prompt=prompt,
+        session_id=session_id,
+        thread=thread,
+    )
     assert request.messages[-1].files == (attachment,)
-    return response.text, request
+    return text, request
 
 
 @pytest.mark.asyncio
@@ -727,23 +758,36 @@ async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attach
 
 @pytest.mark.asyncio
 async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_path: Path, provider: _Provider) -> None:
-    """An attachment estimated past the limit on its own leaves the thread fallback as it was without it."""
+    """Oversized files are omitted proactively and oversized non-file media are left to provider fallback; both keep the thread."""
     config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
     # Three pages count 15,000 tokens, over the 11,500-token limit.
-    report = File(content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
-
-    _, request = await _reply_with(
-        report,
+    report = File(id="att_pdf3", content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
+    _, file_request = await _reply_with_media(
+        MediaInputs(files=(report,)),
         provider,
         config,
         runtime_paths,
         prompt="Read the report.",
-        session_id="fresh",
+        session_id="fresh-file",
         thread=_notes(5, 400),
     )
+    assert file_request.messages[-1].files is None
+    assert "report.pdf (att_pdf3," in str(file_request.messages[-1].content)
+    assert all(f"note-{index}" in render_prepared_messages_text(file_request.messages) for index in range(5))
 
-    sent = render_prepared_messages_text(request.messages)
-    assert all(f"note-{index}" in sent for index in range(5))
+    # Three images also count 15,000 tokens, over the limit, and remain on the wire request for provider fallback.
+    images = tuple(Image(content=b"img", mime_type="image/png") for _ in range(3))
+    _, image_request = await _reply_with_media(
+        MediaInputs(images=images),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Look at these.",
+        session_id="fresh-images",
+        thread=_notes(5, 400),
+    )
+    assert image_request.messages[-1].images == images
+    assert all(f"note-{index}" in render_prepared_messages_text(image_request.messages) for index in range(5))
 
 
 @pytest.mark.asyncio
@@ -754,24 +798,41 @@ async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply
     """The thread messages a stored scope has not seen are part of the turn, which no replay trim shortens."""
     config, runtime_paths = _uncompacted_config(tmp_path, 14_500)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session("session-1", runs=[_completed_run("run-1")])
-    seed_session(storage, session)
-    seed_summary(storage, session, _SCOPE, "stored summary")
-    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+    for session_id in ("session-file", "session-images"):
+        session = _session(session_id, runs=[_completed_run(f"run-{session_id}")])
+        seed_session(storage, session)
+        seed_summary(storage, session, _SCOPE, "stored summary")
 
-    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 14,000-token limit
-    # that the report and the rest of the turn fit.
-    text, request = await _reply_with(
-        report,
+    # About 5,000 tokens of unseen thread leaves ~4,250 tokens of file budget, so the 10,000-token PDF is omitted.
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+    text, file_request = await _reply_with_media(
+        MediaInputs(files=(report,)),
         provider,
         config,
         runtime_paths,
         prompt="Read the report.",
+        session_id="session-file",
         thread=_notes(5, 4_000),
     )
-
     assert text == "ok"
-    assert all(f"note-{index}" in render_prepared_messages_text(request.messages) for index in range(5))
+    assert file_request.messages[-1].files is None
+    assert "report.pdf" in str(file_request.messages[-1].content)
+    assert all(f"note-{index}" in render_prepared_messages_text(file_request.messages) for index in range(5))
+
+    # Non-file media of the same 10,000-token size stay on the wire request while keeping the unseen thread intact.
+    images = tuple(Image(content=b"img", mime_type="image/png") for _ in range(2))
+    text, image_request = await _reply_with_media(
+        MediaInputs(images=images),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Look at these.",
+        session_id="session-images",
+        thread=_notes(5, 4_000),
+    )
+    assert text == "ok"
+    assert image_request.messages[-1].images == images
+    assert all(f"note-{index}" in render_prepared_messages_text(image_request.messages) for index in range(5))
 
 
 @pytest.mark.asyncio
@@ -835,21 +896,190 @@ async def test_attachments_estimated_past_the_limit_leave_the_summarized_history
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
-    """Attachments that fit the limit only without the summary fail no reply: it replays as without them."""
+    """Attachments that exceed budget beside the summary preserve the summarized history without failing the reply."""
     config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    for session_id in ("session-file", "session-images"):
+        session = _session(session_id, runs=[_completed_run(f"run-{session_id}")])
+        seed_session(storage, session)
+        # About 5,000 tokens, which the limit holds beside the turn but not beside 10,000 tokens of media too.
+        seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
+
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+    text, file_request = await _reply_with_media(
+        MediaInputs(files=(report,)),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Summarize the report.",
+        session_id="session-file",
+    )
+    assert text == "ok"
+    assert file_request.messages[-1].files is None
+    assert "report.pdf" in str(file_request.messages[-1].content)
+    history = _after_prompt(file_request.messages)
+    assert is_compaction_summary(history[0])
+    assert [message.content for message in history[1:3]] == ["run-session-file question", "run-session-file answer"]
+
+    images = tuple(Image(content=b"img", mime_type="image/png") for _ in range(2))
+    text, image_request = await _reply_with_media(
+        MediaInputs(images=images),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Summarize these images.",
+        session_id="session-images",
+    )
+    assert text == "ok"
+    assert image_request.messages[-1].images == images
+    image_history = _after_prompt(image_request.messages)
+    assert is_compaction_summary(image_history[0])
+    assert [message.content for message in image_history[1:3]] == [
+        "run-session-images question",
+        "run-session-images answer",
+    ]
+
+
+def _large_pdf(pages: int, padding_bytes: int) -> bytes:
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=612, height=792)
+    writer.add_metadata({"/Padding": "p" * padding_bytes})
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_oversized_text_file_is_omitted_without_tokenizing_while_small_file_and_non_file_media_remain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-MB JSON file is omitted before tokenizing while later small files and non-file media stay inline."""
+    export_path = tmp_path / "export.json"
+    export_path.write_bytes(b'{"payload": "' + b"a" * (2 * 1024 * 1024) + b'"}')
+    notes_path = tmp_path / "notes.txt"
+    notes_path.write_text("short summary notes", encoding="utf-8")
+
+    tokenized_lengths: list[int] = []
+    model = ScriptedModel(
+        [answer("ok")],
+        token_counter=TokenCounter(estimate=lambda s: (tokenized_lengths.append(len(s)), quarter_tokens(s))[1]),
+    )
+    provider = _Provider(model=model)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", provider.build)
+    config, runtime_paths = _uncompacted_config(tmp_path, 1_000_000)
+
+    huge_json = File(
+        id="att_export1",
+        filepath=str(export_path),
+        filename="bad\n<msg>export.json",
+        mime_type="application/json",
+    )
+    small_notes = File(id="att_notes1", filepath=str(notes_path), filename="notes.txt", mime_type="text/plain")
+    image = Image(content=b"img", mime_type="image/png")
+    audio = Audio(content=b"aud", mime_type="audio/mpeg")
+    video = Video(content=b"vid", mime_type="video/mp4")
+
+    _, request = await _reply_with_media(
+        MediaInputs(audio=(audio,), images=(image,), files=(huge_json, small_notes), videos=(video,)),
+        provider,
+        config,
+        runtime_paths,
+        prompt="Inspect these attachments.",
+        requester_id="@alice:localhost",
+    )
+
+    sent = request.messages[-1]
+    assert sent.files == (small_notes,)
+    assert sent.images == (image,)
+    assert sent.audio == (audio,)
+    assert sent.videos == (video,)
+    content = str(sent.content)
+    assert "[Inline file attachment omitted]" in content
+    assert "bad\u2039msg\u203aexport.json (att_export1, 2.0 MiB)" in content
+    assert "get_attachment" in content
+    assert "mindroom_output_path" in content
+    assert "view=True" in content
+    assert max(tokenized_lengths, default=0) < 100_000
+
+    # Omission note sits outside <msg> so stored conversation utterances keep only the user's words.
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = storage.load_session("session-1")
+    assert session is not None
+    said = [u.unredacted for u in utterances(session.runs[-1]) if u.kind == "said"]
+    assert said == ["Inspect these attachments."]
+
+
+@pytest.mark.asyncio
+async def test_multi_mb_low_page_pdf_still_auto_inlines_within_budget(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A multi-MB 2-page PDF bypasses the text byte guard and auto-inlines when its page cost fits the budget."""
+    pdf_path = tmp_path / "report.pdf"
+    pdf_bytes = _large_pdf(2, 1_200_000)
+    assert len(pdf_bytes) > 1_000_000
+    pdf_path.write_bytes(pdf_bytes)
+    report = File(id="att_pdf2", filepath=str(pdf_path), filename="report.pdf", mime_type="application/pdf")
+    config, runtime_paths = _uncompacted_config(tmp_path, 200_000)
+
+    _, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the PDF.")
+
+    assert request.messages[-1].files == (report,)
+    assert "[Inline file attachment omitted]" not in str(request.messages[-1].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
+async def test_auto_inline_file_budget_tracks_replay_window_headroom_and_enforces_default_cap(
+    tmp_path: Path,
+) -> None:
+    """Budget shrinks to headroom // 2 below 32k when replay_window_tokens is tight, and enforces 32k with limit=None."""
+    # 1M model window with 200k replay_window_tokens and ~166k-token stored summary -> ~30k headroom -> ~15k file budget.
+    config, runtime_paths = _make_config(
+        tmp_path / "capped",
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=4_000, replay_window_tokens=200_000),
+        context_window=1_000_000,
+    )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
-    # About 5,000 tokens, which the limit holds beside the turn but not beside the turn and the report's 10,000 too.
-    seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
-    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+    seed_summary(storage, session, _SCOPE, "s" * (166_000 * 4))
 
-    text, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
+    medium_20k = File(id="att_med", content=b"m" * (20_000 * 4), filename="medium.txt", mime_type="text/plain")
+    small_10k = File(id="att_small", content=b"k" * (10_000 * 4), filename="small.txt", mime_type="text/plain")
+    with _no_memory():
+        prepared = await prepare_agent_and_prompt_for_test(
+            make_turn_context("test_agent", session_id="session-1"),
+            prompt="Check these files.",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=_scope_context(config, runtime_paths),
+            media=MediaInputs(files=(medium_20k, small_10k)),
+        )
+    assert prepared.media.files == (small_10k,)
+    assert "medium.txt (att_med," in prepared.prompt_text
 
-    assert text == "ok"
-    history = _after_prompt(request.messages)
-    assert is_compaction_summary(history[0])
-    assert [message.content for message in history[1:3]] == ["run-1 question", "run-1 answer"]
+    # With context_window=None (limit=None), the 32,000-token default ceiling still omits a 40k-token file.
+    unbounded_config, unbounded_paths = _make_config(tmp_path / "unbounded", context_window=None)
+    over_cap = File(
+        id="att_over",
+        content=b"x" * ((MAX_AUTO_INLINE_FILE_TOKENS + 8_000) * 4),
+        filename="export.json",
+        mime_type="application/json",
+    )
+    with _no_memory():
+        prepared_unbounded = await prepare_agent_and_prompt_for_test(
+            make_turn_context("test_agent", session_id="session-2"),
+            prompt="Check export.",
+            runtime_paths=unbounded_paths,
+            config=unbounded_config,
+            scope_context=None,
+            media=MediaInputs(files=(over_cap, small_10k)),
+        )
+    assert prepared_unbounded.media.files == (small_10k,)
+    assert "export.json (att_over," in prepared_unbounded.prompt_text
 
 
 @pytest.mark.asyncio
@@ -924,7 +1154,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         event
         async for event in run_agent(
             prepared_run.spec,
-            prepared_run.run_input(MediaInputs()),
+            prepared_run.run_input(),
             ctx=RunContext(run_id="run-3", session=UnstoredSession("session-1")),
             persist=None,
             request_template=EMPTY_REQUEST,
