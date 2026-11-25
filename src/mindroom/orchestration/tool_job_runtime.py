@@ -48,6 +48,7 @@ from mindroom.tool_jobs.publication import JobStatePublisher
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
+    FollowUpKey,
     JobAccessError,
     JobGrant,
     JobSpec,
@@ -186,10 +187,7 @@ class ToolJobRuntimeCoordinator:
     # Held-jobs notices this process posted, by the jobs each names; kept until one of those jobs is reported or gone.
     _sent_notices: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
     # Pure follow-up/held-notice IDs cached per candidate bucket revision so unchanged buckets skip hashing.
-    _follow_up_known: dict[tuple[str, str, str | None, str, bool], tuple[int, frozenset[str]]] = field(
-        default_factory=dict,
-        init=False,
-    )
+    _follow_up_known: dict[FollowUpKey, tuple[int, frozenset[str]]] = field(default_factory=dict, init=False)
     _follow_up_known_runtime: ToolJobRuntime | None = field(default=None, init=False)
 
     async def initialize(self) -> None:
@@ -560,14 +558,15 @@ class ToolJobRuntimeCoordinator:
 
     def _known_follow_up_ids(
         self,
-        raw_key: tuple[str, str, str | None, str, bool],
+        runtime: ToolJobRuntime,
+        raw_key: FollowUpKey,
         key: ConversationKey,
         revision: int,
-        group: tuple[BackgroundJob, ...],
     ) -> frozenset[str]:
         cached = self._follow_up_known.get(raw_key)
         if cached is not None and cached[0] == revision:
             return cached[1]
+        group = runtime.follow_up_candidate_jobs(raw_key)
         candidates, held = follow_up_jobs(group), held_jobs(group)
         known_ids = {next_follow_up_id(key, candidates)} if candidates else set()
         if held and not key.silent:
@@ -587,13 +586,12 @@ class ToolJobRuntimeCoordinator:
             self._follow_up_known_runtime = runtime
         due: set[str] = set()
         holds: dict[str, dict[str, bool]] = {}
-        raw_candidates = runtime.follow_up_candidates()
-        for raw_key in sorted(raw_candidates, key=lambda raw: _key_order(ConversationKey(*raw))):
+        revisions = runtime.follow_up_candidate_revisions()
+        for raw_key in sorted(revisions, key=lambda raw: _key_order(ConversationKey(*raw))):
             key = ConversationKey(*raw_key)
-            revision, group = raw_candidates[raw_key]
             # Jobs an admitted follow-up or a sent notice already reports need no access check again.
-            known = self._known_follow_up_ids(raw_key, key, revision, group)
-            if not known or known <= self._admitted_follow_ups | self._sent_notices.keys():
+            known = self._known_follow_up_ids(runtime, raw_key, key, revisions[raw_key])
+            if not known or all(item in self._admitted_follow_ups or item in self._sent_notices for item in known):
                 due |= known
                 continue
             # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
@@ -628,12 +626,12 @@ class ToolJobRuntimeCoordinator:
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
-        remaining = runtime.follow_up_candidates()
-        waiting = {job.job_id for _rev, group in remaining.values() for job in group}
-        self._sent_notices = {notice: ids for notice, ids in self._sent_notices.items() if ids <= waiting}
-        self._follow_up_known = {
-            raw_key: value for raw_key, value in self._follow_up_known.items() if raw_key in remaining
-        }
+        if self._sent_notices:
+            self._sent_notices = {
+                n: ids for n, ids in self._sent_notices.items() if all(runtime.is_follow_up_candidate(j) for j in ids)
+            }
+        remaining = runtime.follow_up_candidate_revisions()
+        self._follow_up_known = {k: v for k, v in self._follow_up_known.items() if k in remaining}
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""

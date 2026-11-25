@@ -84,7 +84,7 @@ type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
 type _Continues = Callable[[BackgroundJob], bool]
 # A job's current access: proven allowed, proven denied, or still resolving, such as while room membership loads.
 type JobGrant = Literal["allowed", "denied", "pending"]
-type _FollowUpKey = tuple[str, str, str | None, str, bool]
+type FollowUpKey = tuple[str, str, str | None, str, bool]
 
 
 class JobAccessError(ValueError):
@@ -427,7 +427,7 @@ def _ended_room_key(job: BackgroundJob | None) -> tuple[str, str] | None:
     return (job.owner.recipient, job.owner.room_id)
 
 
-def _follow_up_candidate_key(job: BackgroundJob | None) -> _FollowUpKey | None:
+def _follow_up_candidate_key(job: BackgroundJob | None) -> FollowUpKey | None:
     if (
         job is None
         or job.status not in TERMINAL_STATUSES
@@ -439,13 +439,8 @@ def _follow_up_candidate_key(job: BackgroundJob | None) -> _FollowUpKey | None:
     owner = job.owner
     if owner.room_id is None or owner.requester_id is None:
         return None
-    return (
-        owner.recipient,
-        owner.room_id,
-        owner.resolved_thread_id,
-        owner.requester_id,
-        job.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
-    )
+    silent = job.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    return (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id, silent)
 
 
 def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> None:
@@ -593,8 +588,8 @@ class ToolJobRuntime:
         self._by_conversation: dict[tuple[str, str | None, str | None, str | None], dict[str, _Entry]] = {}
         self._live: dict[str, _Entry] = {}
         self._claimed: set[str] = set()
-        self._follow_up_candidates: dict[_FollowUpKey, dict[str, _Entry]] = {}
-        self._follow_up_revisions: dict[_FollowUpKey, int] = {}
+        self._follow_up_candidates: dict[FollowUpKey, dict[str, _Entry]] = {}
+        self._follow_up_revisions: dict[FollowUpKey, int] = {}
         self._candidate_revision = 0
         self._ended_room_counts: dict[tuple[str, str], int] = {}
         self._lock = asyncio.Lock()
@@ -634,18 +629,23 @@ class ToolJobRuntime:
         """Return every ``(recipient, room_id)`` pair that currently retains at least one terminal job."""
         return frozenset(self._ended_room_counts)
 
-    def follow_up_candidates(self) -> dict[_FollowUpKey, tuple[int, tuple[BackgroundJob, ...]]]:
-        """Return each conversation's unconsumed depth-0 terminal candidates alongside their bucket revision."""
-        return {
-            key: (self._follow_up_revisions[key], tuple(entry.job for entry in bucket.values()))
-            for key, bucket in self._follow_up_candidates.items()
-        }
+    def follow_up_candidate_revisions(self) -> dict[FollowUpKey, int]:
+        """Return the current revision for every conversation with unconsumed depth-0 terminal candidates."""
+        return dict(self._follow_up_revisions)
+
+    def follow_up_candidate_jobs(self, key: FollowUpKey) -> tuple[BackgroundJob, ...]:
+        """Return one conversation's unconsumed depth-0 terminal candidates."""
+        return tuple(entry.job for entry in self._follow_up_candidates.get(key, {}).values())
+
+    def is_follow_up_candidate(self, job_id: str) -> bool:
+        """Return whether *job_id* is still retained as an unconsumed depth-0 terminal candidate."""
+        return (entry := self._entries.get(job_id)) is not None and _follow_up_candidate_key(entry.job) is not None
 
     def awaited_job_ids(self) -> frozenset[str]:
         """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""
         return frozenset(self._claimed)
 
-    def _bump_candidate_revision(self, key: _FollowUpKey) -> None:
+    def _bump_candidate_revision(self, key: FollowUpKey) -> None:
         self._candidate_revision += 1
         self._follow_up_revisions[key] = self._candidate_revision
 
@@ -700,7 +700,7 @@ class ToolJobRuntime:
 
     def _claim_for(self, entry: _Entry, claim: JobClaim | None) -> JobClaim | None:
         claimed = entry.claim_for(claim)
-        if entry.claim is not None:
+        if entry.claim is not None and self._entries.get(entry.job.job_id) is entry:
             self._claimed.add(entry.job.job_id)
         return claimed
 

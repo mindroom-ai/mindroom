@@ -899,7 +899,7 @@ async def test_node_jobs_are_in_no_list_no_room_state_and_no_follow_up(stack: Wo
     ended = stack.jobs.retained_jobs()
 
     assert [(job.status, job.consumed) for job in ended] == [("completed", False)]
-    assert stack.jobs.follow_up_candidates() == {}
+    assert stack.jobs.follow_up_candidate_revisions() == {}
     assert await stack.jobs.ended_jobs(key) == ()
     assert await stack.jobs.list_jobs(owner=owner, depth=0) == []
 
