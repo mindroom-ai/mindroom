@@ -20,7 +20,7 @@ register_builtin_tool_metadata(
         name="memory",
         file_access=ToolFileAccess.NONE,
         display_name="Agent Memory",
-        description="Save, find, and update information the agent remembers",
+        description="Persist, semantically search, update, and delete long-term memories across conversations",
         docs_url="https://docs.mindroom.chat/memory/#memory",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,

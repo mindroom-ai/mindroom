@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     name="browser",
     display_name="Browser",
     description=(
-        "Control MindRoom's browser: browse websites, fill forms, and take screenshots "
-        "(use target='desktop', when configured, for the user's local browser)"
+        "Drive a live Chromium browser: open URLs or local HTML, inspect element snapshots, "
+        "click/type/fill forms, capture screenshots/PDFs, upload files (or target='desktop' to observe the user's browser)"
     ),
     category=ToolCategory.RESEARCH,
     file_access=ToolFileAccess.AGENT,

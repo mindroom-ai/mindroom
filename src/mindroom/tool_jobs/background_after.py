@@ -16,16 +16,14 @@ def background_after_schema(default_wait: float | None) -> dict[str, Any]:
 
     ``default_wait`` is how many seconds a call that omits the budget or passes null waits, None for no limit.
     """
-    waits = "until completion or a newer message you answer"
-    if default_wait is not None:
-        waits = f"until completion, a newer message you answer, or {default_wait:g} seconds"
+    description = (
+        "Seconds before continuing in background (0 = immediately; omit/null = wait)."
+        if default_wait is None
+        else f"Seconds before continuing in background (0 = immediately; omit/null = up to {default_wait:g}s)."
+    )
     return {
         "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
-        "description": (
-            "Seconds to wait for this call before it continues in the background, without cancelling it. "
-            f"Omit or pass null to wait {waits}; "
-            "zero continues in the background at once and returns a job handle."
-        ),
+        "description": description,
     }
 
 
