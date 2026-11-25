@@ -83,7 +83,7 @@ class SchedulerTools(Toolkit):
         """Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.
 
         - `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.
-        - `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; `model=""` resets; `clear_history_limit=True` clears limit).
+        - `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; empty `model` resets; `clear_history_limit=True` restores unlimited history).
         - `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).
 
         Args:
@@ -97,9 +97,9 @@ class SchedulerTools(Toolkit):
             description: Short label (defaults to trimmed `message`).
             timezone: IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`).
             history_limit: Max thread messages per fire (`0` = none; unset = unlimited).
-            clear_history_limit: `edit` only: remove history limit.
+            clear_history_limit: `edit` only: set `True` to remove the history limit (unlimited).
             silent: Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`).
-            model: Per-run model alias or `name@level` (`""` resets on `edit`; conversation model unchanged).
+            model: Per-run model alias or `name@level` (pass an empty string on `edit` to reset to default; conversation model unchanged).
 
         """
         if action == "create":

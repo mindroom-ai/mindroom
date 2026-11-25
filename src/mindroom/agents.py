@@ -1095,16 +1095,6 @@ def _deferred_entry_writes_workspace(
 
 
 _SCHEDULED_CALL_FUNCTIONS = frozenset({"schedule_tool_call", "run_scheduled_call"})
-_AUTHORED_CONFIRM_TOOLKIT_FUNCTIONS: dict[str, frozenset[str]] = {
-    "agent_manager": frozenset({"create_agent", "update_agent", "set_avatar", "delete_agent"}),
-    "contacts": frozenset(
-        {"request_contact", "accept_contact", "decline_contact", "update_contact", "remove_contact"},
-    ),
-    "self_config": frozenset({"update_own_config"}),
-}
-_CONTROLS_RUN_TOOLKIT_FUNCTIONS: dict[str, frozenset[str]] = {
-    "thread_model": frozenset({"switch_thread_model", "reset_thread_model"}),
-}
 
 
 def _explicitly_included_tool_names(entry: EffectiveToolConfig | None) -> frozenset[str]:
@@ -1141,7 +1131,7 @@ def _deferred_entry_has_schedulable_gated_function(
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
 ) -> bool:
-    """Return whether a CLI-deferred toolkit entry may offer any schedulable approval-gated function."""
+    """Return whether a CLI-deferred toolkit entry may offer any policy-gated schedulable function."""
     if (
         not supports_native_tool_approval
         or entry.name in {"scheduler", "delegate"}
@@ -1157,13 +1147,10 @@ def _deferred_entry_has_schedulable_gated_function(
         return config.tool_approval.default == "require_approval" or any(
             rule.action != "auto_approve" for rule in config.tool_approval.rules
         )
-    confirmed = _AUTHORED_CONFIRM_TOOLKIT_FUNCTIONS.get(entry.name, frozenset())
-    controls_run = _CONTROLS_RUN_TOOLKIT_FUNCTIONS.get(entry.name, frozenset())
     return any(
         (room_tools or offered_without_room(entry.name, name))
         and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-        and name not in controls_run
-        and (name in confirmed or _approval_may_gate(config, agent_tools.tools, name, entry.name))
+        and _approval_may_gate(config, agent_tools.tools, name, entry.name)
         for name in functions
     )
 
@@ -1513,38 +1500,40 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, left_out)
     scheduler_entry = resolved_tool_configs.get("scheduler") or deferred_configs.get("scheduler")
-    explicit_scheduler_includes = _explicitly_included_tool_names(scheduler_entry)
-    has_schedulable_gated_tool = any(
-        _is_schedulable_gated_function(function) for entry in offered for function in entry.adapted.functions
-    ) or any(
-        _deferred_entry_has_schedulable_gated_function(
-            entry,
-            agent_tools=agent_tools,
-            runtime_paths=runtime_paths,
-            worker_target=agent_runtime.execution.worker_target,
-            config=config,
-            room_tools=room_tools,
-            narrowed_tools=narrowed_tools,
-            supports_native_tool_approval=supports_native_tool_approval,
+    has_schedulable_gated_tool = False
+    if scheduler_entry is not None:
+        explicit_scheduler_includes = _explicitly_included_tool_names(scheduler_entry)
+        has_schedulable_gated_tool = any(
+            _is_schedulable_gated_function(function) for entry in offered for function in entry.adapted.functions
+        ) or any(
+            _deferred_entry_has_schedulable_gated_function(
+                entry,
+                agent_tools=agent_tools,
+                runtime_paths=runtime_paths,
+                worker_target=agent_runtime.execution.worker_target,
+                config=config,
+                room_tools=room_tools,
+                narrowed_tools=narrowed_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
+            )
+            for entry in deferred_configs.values()
         )
-        for entry in deferred_configs.values()
-    )
-    if not has_schedulable_gated_tool:
-        pruned_offered: list[_ToolkitEntry] = []
-        for entry in offered:
-            if any(
-                function.registered_toolkit == "scheduler" and function.name in _SCHEDULED_CALL_FUNCTIONS
-                for function in entry.adapted.functions
-            ):
-                adapted = _without_unneeded_scheduled_call_helpers(
-                    entry.adapted,
-                    explicit_includes=explicit_scheduler_includes,
-                )
-                if adapted.functions:
-                    pruned_offered.append(replace(entry, adapted=adapted))
-            else:
-                pruned_offered.append(entry)
-        offered = tuple(pruned_offered)
+        if not has_schedulable_gated_tool:
+            pruned_offered: list[_ToolkitEntry] = []
+            for entry in offered:
+                if any(
+                    function.registered_toolkit == "scheduler" and function.name in _SCHEDULED_CALL_FUNCTIONS
+                    for function in entry.adapted.functions
+                ):
+                    adapted = _without_unneeded_scheduled_call_helpers(
+                        entry.adapted,
+                        explicit_includes=explicit_scheduler_includes,
+                    )
+                    if adapted.functions:
+                        pruned_offered.append(replace(entry, adapted=adapted))
+                else:
+                    pruned_offered.append(entry)
+            offered = tuple(pruned_offered)
     cli_deferred = []
     for deferred_entry in deferred_configs.values():
 

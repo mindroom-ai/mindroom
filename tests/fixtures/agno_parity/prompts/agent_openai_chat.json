@@ -590,7 +590,7 @@
         },
         {
           "name": "scheduler",
-          "description": "Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.\n- `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.\n- `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; `model=\"\"` resets; `clear_history_limit=True` clears limit).\n- `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).",
+          "description": "Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.\n- `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.\n- `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; empty `model` resets; `clear_history_limit=True` restores unlimited history).\n- `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -705,7 +705,7 @@
               },
               "clear_history_limit": {
                 "type": "boolean",
-                "description": "`edit` only: remove history limit."
+                "description": "`edit` only: set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -727,7 +727,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Per-run model alias or `name@level` (`\"\"` resets on `edit`; conversation model unchanged)."
+                "description": "Per-run model alias or `name@level` (pass an empty string on `edit` to reset to default; conversation model unchanged)."
               },
               "mindroom_output_path": {
                 "anyOf": [

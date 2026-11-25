@@ -774,13 +774,13 @@ class TodoTools(Toolkit):
 
         Args:
             action: Operation to perform.
-            tasks: Newline-separated lines (`plan`).
+            tasks: Newline-separated lines (`plan`; optional `[low|medium|high|critical]` prefix per line).
             todo_id: Target ID (`update`).
             title: Task title (`add` required; `update` empty keeps current).
             priority: `low`, `medium` (`add` default), `high`, or `critical`.
             status: `open`, `done`, or `cancelled` (`update`).
-            depends_on: Comma-separated prerequisite IDs (cycle-checked; `update` null keeps current, `""` clears).
-            assigned_agent: Agent name (`add` defaults to caller; `update` empty/null keeps current, whitespace clears).
+            depends_on: Comma-separated prerequisite IDs (`add`/`update`; cycle-checked; `update`: null keeps current, empty string clears).
+            assigned_agent: Agent name (`add` defaults to caller; `update`: null/empty keeps current, single space " " clears).
             show_all: Include done/cancelled (`list`).
             template_name: Template name (`apply_template`).
             params: Template parameter map (`apply_template`).
