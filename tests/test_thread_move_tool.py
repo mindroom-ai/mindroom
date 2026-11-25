@@ -956,3 +956,53 @@ async def test_move_thread_names_the_sending_account_of_a_delegated_agent(tmp_pa
         payload = await _run()
 
     assert payload["message"] == "Invite general to the target room before moving a thread there."
+
+
+@pytest.mark.asyncio
+async def test_move_thread_encrypted_to_encrypted_carries_filtered_inline_media(tmp_path: Path) -> None:
+    """Moving between two encrypted rooms carries only referenced io.mindroom.inline_media keys intact."""
+    from mindroom.constants import INLINE_MEDIA_CONTENT_KEY  # noqa: PLC0415
+    from mindroom.matrix.encrypted_file import encrypted_file_content_from_values  # noqa: PLC0415
+    from mindroom.matrix.inline_media import attach_inline_media  # noqa: PLC0415
+
+    move = _move(tmp_path)
+    used = encrypted_file_content_from_values(
+        url="mxc://hs/used",
+        key="k1",
+        iv="iv1",
+        sha256="s1",
+        mime_type="image/png",
+        size=10,
+    )
+    unused = encrypted_file_content_from_values(
+        url="mxc://hs/unused",
+        key="k2",
+        iv="iv2",
+        sha256="s2",
+        mime_type="image/png",
+        size=10,
+    )
+    history = _thread(move)
+    history[1] = _message(
+        move.ids["code"],
+        {
+            "msgtype": "m.text",
+            "body": "See ![chart](mxc://hs/used)",
+            "format": "org.matrix.custom.html",
+            "formatted_body": '<p>See <img src="mxc://hs/used" alt="chart"></p>',
+            INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/used": used, "mxc://hs/unused": unused},
+        },
+        "$code:localhost",
+    )
+    sends = _delivered_sends()
+
+    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+        attached = attach_inline_media(content, room_id, room_encrypted=True)
+        return await sends(client, room_id, attached, **kwargs)
+
+    with _matrix(move, history, encryption=(True, True), send=AsyncMock(side_effect=send)) as mocks:
+        payload = await _run()
+
+    assert payload["status"] == "ok"
+    copied_reply = mocks.send.await_args_list[1].args[2]
+    assert copied_reply[INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/used": used}

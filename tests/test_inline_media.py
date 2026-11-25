@@ -15,14 +15,18 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import INLINE_MEDIA_CONTENT_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps
+from mindroom.custom_tools.matrix_api import MatrixApiTools
+from mindroom.custom_tools.matrix_conversation_operations import _message_payload
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, _reply_row_wire_content
 from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.models import MatrixDelivery, ReplyRowFacts
 from mindroom.matrix.client_delivery import (
     build_edit_event_content,
     edit_message_outcome,
     prepare_message_content,
     send_message_outcome,
 )
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
 from mindroom.matrix.inline_media import _REGISTRY, attach_inline_media, register_inline_media
 from mindroom.matrix.large_messages import prepare_large_message
@@ -375,3 +379,91 @@ async def test_delivery_gateway_prepared_for_wire_attaches_inline_media_in_encry
         content=content,
     )
     assert INLINE_MEDIA_CONTENT_KEY not in plain_prepared.content
+
+
+def test_attach_inline_media_strips_preexisting_map_when_unencrypted() -> None:
+    """Plaintext/unknown rooms always strip any pre-existing io.mindroom.inline_media from top-level and m.new_content."""
+    file1 = _encrypted_file("mxc://hs/drop1")
+    plain = {**build_message_content("![a](mxc://hs/drop1)"), INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/drop1": file1}}
+    assert INLINE_MEDIA_CONTENT_KEY not in attach_inline_media(plain, "!plain:localhost", room_encrypted=False)
+
+    edit = {
+        **build_edit_event_content(
+            event_id="$orig",
+            new_content=plain,
+            new_text="![a](mxc://hs/drop1)",
+        ),
+        INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/drop1": file1},
+    }
+    stripped_edit = attach_inline_media(edit, "!plain:localhost", room_encrypted=False)
+    assert INLINE_MEDIA_CONTENT_KEY not in stripped_edit
+    assert INLINE_MEDIA_CONTENT_KEY not in stripped_edit["m.new_content"]
+
+
+def test_late_bound_edit_drops_inline_media_from_outer_envelope() -> None:
+    """Late-bound outbox edit wrapping keeps io.mindroom.inline_media only inside m.new_content."""
+    file1 = _encrypted_file("mxc://hs/late1")
+    frozen = {**build_message_content("![a](mxc://hs/late1)"), INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/late1": file1}}
+    claimed = MatrixDelivery(
+        delivery_id="d1",
+        stage=DeliveryStage.FINAL,
+        room_id="!enc:localhost",
+        membership_epoch=1,
+        thread_id="$thread",
+        transaction_id="tx1",
+        payload=frozen,
+        edits_event_id="$target",
+        acknowledged_event_id=None,
+        created_at_ns=1,
+        reply_id="r1",
+        reply_row=ReplyRowFacts(placeholder_only=False, new_text="![a](mxc://hs/late1)"),
+    )
+    envelope = _reply_row_wire_content(claimed)
+    assert INLINE_MEDIA_CONTENT_KEY not in envelope
+    assert envelope["m.new_content"][INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/late1": file1}
+
+
+@pytest.mark.asyncio
+async def test_model_read_boundaries_strip_inline_media_keys(tmp_path: Path) -> None:
+    """matrix_message read and matrix_api get_event strip io.mindroom.inline_media from top-level and m.new_content."""
+    room_id = "!enc:localhost"
+    file1 = _encrypted_file("mxc://hs/read1")
+    register_inline_media(room_id, "mxc://hs/read1", file1)
+    ctx = _tool_context(tmp_path, room_id=room_id, encrypted=True)
+
+    await send_message_outcome(ctx.client, room_id, build_message_content("![a](mxc://hs/read1)"))
+    sent = ctx.client.room_send.await_args.kwargs["content"]
+    assert INLINE_MEDIA_CONTENT_KEY in sent
+
+    # matrix_message(action="read") boundary
+    msg = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_agent:localhost",
+        body="![a](mxc://hs/read1)",
+        event_id="$e1",
+        content=sent,
+    )
+    read_payload = _message_payload(msg)
+    assert INLINE_MEDIA_CONTENT_KEY not in read_payload["content"]
+    assert "k-secret-value" not in json.dumps(read_payload)
+
+    # matrix_api(action="get_event") boundary (both top-level and m.new_content)
+    edit_with_keys = {
+        **build_edit_event_content(event_id="$e1", new_content=sent, new_text="![a](mxc://hs/read1)"),
+        INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/read1": file1},
+    }
+    raw_response = nio.RoomGetEventResponse.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$e2",
+            "sender": "@mindroom_agent:localhost",
+            "origin_server_ts": 1000,
+            "content": edit_with_keys,
+        },
+    )
+    ctx.client.room_get_event = AsyncMock(return_value=raw_response)
+    with tool_runtime_context(ctx):
+        api_payload = json.loads(await MatrixApiTools().matrix_api(action="get_event", event_id="$e2"))
+    assert api_payload["status"] == "ok"
+    assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]
+    assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]["m.new_content"]
+    assert "k-secret-value" not in json.dumps(api_payload)

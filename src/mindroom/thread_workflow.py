@@ -175,8 +175,6 @@ def latest_reply_question_ts(
     A reply that names another person as its acting requester asks that person, as the client skips it.
     """
     reply = thread_metadata.get("io.mindroom.latest_reply")
-    if not isinstance(reply, dict):
-        reply = thread_metadata.get("latest_event")
     sender = reply.get("sender") if isinstance(reply, dict) else None
     if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
         return None

@@ -307,6 +307,10 @@ class MatrixRoomTools(Toolkit):
                 retry_after_ms=getattr(state, "retry_after_ms", None),
             )
         facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
+        room_encrypted = any(
+            isinstance(event, dict) and event.get("type") == "m.room.encryption" and event.get("state_key") == ""
+            for event in state.events
+        )
         bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
         replying = set[str | None]().union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
         manager = get_approval_store()
@@ -327,6 +331,7 @@ class MatrixRoomTools(Toolkit):
             bot_ids=bot_ids,
             requester_ids=requester_ids,
             now=now,
+            room_encrypted=room_encrypted,
         )
         return {
             event.event_id: thread_workflow(
@@ -347,10 +352,11 @@ class MatrixRoomTools(Toolkit):
         thread_roots: list[nio.Event],
         *,
         facts: Mapping[str, dict[str, Any]],
-        approvals: Mapping[str, int],
+        approvals: Mapping[str | None, int],
         bot_ids: Collection[str],
         requester_ids: Collection[str],
         now: int,
+        room_encrypted: bool,
     ) -> dict[str, int | None]:
         def is_summary(source: Mapping[str, Any]) -> bool:
             content = source.get("content")
@@ -392,21 +398,21 @@ class MatrixRoomTools(Toolkit):
                     async with contextlib.aclosing(relations):
                         scanned = 0
                         async for related in relations:
-                            if (scanned := scanned + 1) > self._TITLE_NOTICE_BACKWALK_LIMIT:
+                            scanned += 1
+                            if not isinstance(related, nio.RedactedEvent):
+                                if (
+                                    not isinstance(related.source, dict)
+                                    or (reply := decrypt_bot_reply(related.source)) is None
+                                ):
+                                    return thread_id, None
+                                if not is_summary(reply):
+                                    return thread_id, latest_reply_question_ts(
+                                        {"io.mindroom.latest_reply": reply},
+                                        bot_ids,
+                                        requester_ids,
+                                    )
+                            if scanned >= self._TITLE_NOTICE_BACKWALK_LIMIT:
                                 return thread_id, None
-                            if isinstance(related, nio.RedactedEvent):
-                                continue
-                            if (
-                                not isinstance(related.source, dict)
-                                or (reply := decrypt_bot_reply(related.source)) is None
-                            ):
-                                return thread_id, None
-                            if not is_summary(reply):
-                                return thread_id, latest_reply_question_ts(
-                                    {"io.mindroom.latest_reply": reply},
-                                    bot_ids,
-                                    requester_ids,
-                                )
                 except (nio.ProtocolError, ClientError, TimeoutError):
                     logger.debug(
                         "matrix_room_threads_title_backwalk_failed",
@@ -431,7 +437,11 @@ class MatrixRoomTools(Toolkit):
             meta = self._thread_metadata(event.source)
             if isinstance(meta.get("io.mindroom.latest_reply"), dict):
                 question_times[event.event_id] = latest_reply_question_ts(meta, bot_ids, requester_ids)
-            elif isinstance(raw := meta.get("latest_event"), dict) and (reply := decrypt_bot_reply(raw)) is not None:
+            elif (
+                room_encrypted
+                and isinstance(raw := meta.get("latest_event"), dict)
+                and (reply := decrypt_bot_reply(raw)) is not None
+            ):
                 if is_summary(reply):
                     ts = raw.get("origin_server_ts")
                     if not isinstance(ts, int) or isinstance(ts, bool) or ts > now - QUESTION_WAITS_MS:

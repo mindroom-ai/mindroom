@@ -2274,10 +2274,13 @@ def _encrypted_root(
     return parsed
 
 
+_ENCRYPTION_STATE = {"type": "m.room.encryption", "state_key": "", "content": {"algorithm": "m.megolm.v1.aes-sha2"}}
+
+
 @pytest.mark.asyncio
 async def test_threads_encrypted_latest_event_question_streamed_edit_missing_key_and_human_reply() -> None:
     """Encrypted threads detect questions from latest_event and bundled encrypted edits, failing closed and skipping human decrypts."""
-    ctx = _workflow_context([])
+    ctx = _workflow_context([_ENCRYPTION_STATE])
     persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     prompt = _question_prompt()
@@ -2363,8 +2366,8 @@ async def test_threads_encrypted_latest_event_question_streamed_edit_missing_key
 
 @pytest.mark.asyncio
 async def test_threads_encrypted_title_notice_backwalk() -> None:
-    """When an encrypted title notice shadows a question, one bounded /relations walk finds it and stops on human or unreadable replies."""
-    ctx = _workflow_context([])
+    """When an encrypted title notice shadows a question, one bounded /relations walk finds it and stops at limit without a second page."""
+    ctx = _workflow_context([_ENCRYPTION_STATE])
     persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     prompt = _question_prompt()
@@ -2412,16 +2415,23 @@ async def test_threads_encrypted_title_notice_backwalk() -> None:
         },
     )
 
+    notice_capped = _encrypted_wire_event("$notice_q", sender=_AGENT_ID, ts=now_ms)
+    second_page_fetched = False
     relations_by_thread: dict[str, list[nio.Event]] = {
         "$t_q": [nio.Event.parse_event(notice_q), walk_q],
         "$t_answered": [nio.Event.parse_event(notice_answered), walk_human, walk_older_q],
         "$t_unreadable": [nio.Event.parse_event(notice_unreadable), walk_unreadable, walk_older_q],
+        "$t_capped": [nio.Event.parse_event(notice_capped)] * 5,
     }
 
     def _relations(_room_id: str, event_id: str, *_args: object, **_kwargs: object) -> object:
         async def _gen() -> object:
+            nonlocal second_page_fetched
             for item in relations_by_thread[event_id]:
                 yield item
+            if event_id == "$t_capped":
+                second_page_fetched = True
+                yield walk_older_q
 
         return _gen()
 
@@ -2430,6 +2440,7 @@ async def test_threads_encrypted_title_notice_backwalk() -> None:
         _encrypted_root("$t_q", latest_event=notice_q),
         _encrypted_root("$t_answered", latest_event=notice_answered),
         _encrypted_root("$t_unreadable", latest_event=notice_unreadable),
+        _encrypted_root("$t_capped", latest_event=notice_capped),
     ]
 
     with (
@@ -2443,10 +2454,55 @@ async def test_threads_encrypted_title_notice_backwalk() -> None:
         ("$t_q", "question"),
         ("$t_answered", "your_turn"),
         ("$t_unreadable", "your_turn"),
+        ("$t_capped", "your_turn"),
     ]
+    assert not second_page_fetched
     decrypted_ids = [call.args[0].event_id for call in decrypt_mock.call_args_list]
     assert "$walk_human" not in decrypted_ids
     assert "$walk_older_q" not in decrypted_ids
+
+
+@pytest.mark.asyncio
+async def test_threads_plaintext_room_without_latest_reply_skips_latest_event_fallback() -> None:
+    """A plaintext room without io.mindroom.latest_reply keeps main's behavior: no question and no /relations call."""
+    ctx = _workflow_context([])
+    persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    plain_question = {
+        "type": "m.room.message",
+        "event_id": "$q1",
+        "sender": _AGENT_ID,
+        "origin_server_ts": now_ms,
+        "content": {"msgtype": "m.text", "body": "Pick one", **_question_prompt()},
+    }
+    plain_title = {
+        "type": "m.room.message",
+        "event_id": "$n1",
+        "sender": _AGENT_ID,
+        "origin_server_ts": now_ms,
+        "content": {
+            "msgtype": "m.notice",
+            "body": "Title",
+            "io.mindroom.thread_summary": {"version": 1, "summary": "Title"},
+        },
+    }
+    q_root = _thread_event("$plain_q", sender="@user:localhost")
+    q_root.source["unsigned"] = {"m.relations": {"m.thread": {"count": 1, "latest_event": plain_question}}}
+    t_root = _thread_event("$plain_title", sender="@user:localhost")
+    t_root.source["unsigned"] = {"m.relations": {"m.thread": {"count": 1, "latest_event": plain_title}}}
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=([q_root, t_root], None)),
+        patch(_APPROVAL_STORE, return_value=None),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="needs_you"))
+
+    assert [(row["thread_id"], row["why"]) for row in payload["threads"]] == [
+        ("$plain_q", "your_turn"),
+        ("$plain_title", "your_turn"),
+    ]
+    ctx.client.room_get_event_relations.assert_not_called()
 
 
 @pytest.mark.asyncio

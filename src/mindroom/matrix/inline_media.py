@@ -15,7 +15,6 @@ from mindroom.constants import INLINE_MEDIA_CONTENT_KEY
 _MAX_ENTRIES = 512
 _LOCK = Lock()
 _REGISTRY: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
-_CODE_REGION_PATTERN = re.compile(r"<(?:code|pre)\b[^>]*>.*?</(?:code|pre)>", re.DOTALL | re.IGNORECASE)
 _IMG_SRC_PATTERN = re.compile(r"""<img\b[^>]*?\bsrc=(?:"(mxc://[^"]+)"|'(mxc://[^']+)')""", re.IGNORECASE)
 
 
@@ -35,8 +34,17 @@ def register_inline_media(room_id: str, mxc_uri: str, encrypted_file: Mapping[st
 def _img_mxc_uris(formatted_body: object) -> list[str]:
     if not isinstance(formatted_body, str) or "mxc://" not in formatted_body:
         return []
-    stripped = _CODE_REGION_PATTERN.sub("", formatted_body)
-    return list(dict.fromkeys(html.unescape(m.group(1) or m.group(2)) for m in _IMG_SRC_PATTERN.finditer(stripped)))
+    return list(
+        dict.fromkeys(html.unescape(m.group(1) or m.group(2)) for m in _IMG_SRC_PATTERN.finditer(formatted_body)),
+    )
+
+
+def strip_inline_media_from_content(content: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of one Matrix event content dict without ``io.mindroom.inline_media`` keys."""
+    cleaned = {k: v for k, v in content.items() if k != INLINE_MEDIA_CONTENT_KEY}
+    if isinstance(new_content := cleaned.get("m.new_content"), Mapping):
+        cleaned["m.new_content"] = {k: v for k, v in new_content.items() if k != INLINE_MEDIA_CONTENT_KEY}
+    return cleaned
 
 
 def filter_inline_media_for_html(source: Mapping[str, Any], formatted_body: str) -> dict[str, dict[str, Any]] | None:
@@ -55,7 +63,10 @@ def filter_inline_media_for_html(source: Mapping[str, Any], formatted_body: str)
 def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted: bool) -> dict[str, Any]:
     """Attach same-room encrypted inline image keys for ``<img src>`` URIs in ``content``."""
     if room_encrypted is not True:
-        return content
+        has_key = INLINE_MEDIA_CONTENT_KEY in content or (
+            isinstance(new_content := content.get("m.new_content"), Mapping) and INLINE_MEDIA_CONTENT_KEY in new_content
+        )
+        return strip_inline_media_from_content(content) if has_key else content
     relates = content.get("m.relates_to")
     is_edit = (
         isinstance(content.get("m.new_content"), dict)
@@ -64,6 +75,8 @@ def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted
     )
     visible = content["m.new_content"] if is_edit else content
     uris = _img_mxc_uris(visible.get("formatted_body"))
+    existing = visible.get(INLINE_MEDIA_CONTENT_KEY)
+    existing_map = existing if isinstance(existing, Mapping) else None
     inline_media: dict[str, dict[str, Any]] = {}
     if uris:
         with _LOCK:
@@ -71,6 +84,12 @@ def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted
                 if (entry := _REGISTRY.get((room_id, uri))) is not None:
                     _REGISTRY.move_to_end((room_id, uri))
                     inline_media[uri] = copy.deepcopy(entry)
+                elif (
+                    existing_map is not None
+                    and isinstance(prior := existing_map.get(uri), Mapping)
+                    and prior.get("url") == uri
+                ):
+                    inline_media[uri] = copy.deepcopy(dict(prior))
     if (
         not inline_media
         and INLINE_MEDIA_CONTENT_KEY not in visible

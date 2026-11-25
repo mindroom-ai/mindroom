@@ -267,11 +267,6 @@ def _edit(new_content: dict[str, object], *, sender: str = _BOT) -> dict[str, ob
         pytest.param(_reply(_NUMBERS_ONLY), None, id="no option to react with"),
         pytest.param(_reply({"io.mindroom.interactive": {"options": {"👍": "a"}}}), None, id="no question text"),
         pytest.param({"count": 3}, None, id="no bundle"),
-        pytest.param(
-            {"latest_event": _reply(_PROMPT)["io.mindroom.latest_reply"]},
-            100,
-            id="standard latest_event fallback",
-        ),
     ],
 )
 def test_latest_reply_question_ts(thread_metadata: dict[str, Any], expected: int | None) -> None:
