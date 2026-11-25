@@ -65,7 +65,13 @@ class _TrackedGoogleAuthorizedHttp(AuthorizedHttp):
         return response, content
 
 
-def google_http_error_result(service_name: str, operation: str, exc: HttpError) -> str:
+def google_http_error_result(
+    service_name: str,
+    operation: str,
+    exc: HttpError,
+    *,
+    guidance: str | None = None,
+) -> str:
     """Return a tool error exposing only the HTTP status, never provider-controlled text."""
     status = exc.resp.status
     logger.warning(
@@ -78,6 +84,8 @@ def google_http_error_result(service_name: str, operation: str, exc: HttpError) 
     message = f"{service_name} request failed"
     if not isinstance(status, bool) and isinstance(status, int):
         message = f"{message} (HTTP {status})"
+    if guidance:
+        message = f"{message}. {guidance}"
     return json.dumps({"error": message})
 
 

@@ -14183,7 +14183,7 @@
       },
       {
         "name": "google_docs_batch_update",
-        "description": "Apply Google Docs API batchUpdate requests to a document, in order and all or none.\nUse this for what the text functions cannot do, such as tables, headings, text and paragraph styles,\nlists, links, page breaks, headers, footers, footnotes, and images from a public URL.\nA request can also delete what is in the document, as deleteContentRange does.\nEach request is one Docs API Request object, for example\n{\"updateParagraphStyle\": {\"range\": {\"startIndex\": 1, \"endIndex\": 6, \"tabId\": \"t.0\"},\n\"paragraphStyle\": {\"namedStyleType\": \"HEADING_1\"}, \"fields\": \"namedStyleType\"}}.\nIndexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location\nwithout a tabId is in the first tab.\nEach request sees the document as the requests before it left it, so make several edits from the end of\nthe document toward its start.",
+        "description": "Apply Google Docs API batchUpdate requests to a document, in order and all or none.\nUse this for what the text functions cannot do, such as tables, headings, text and paragraph styles,\nlists, links, page breaks, headers, footers, footnotes, and images from a public URL.\nA request can also delete what is in the document, as deleteContentRange does.\nEach request is one Docs API Request object, for example\n{\"updateParagraphStyle\": {\"range\": {\"startIndex\": 1, \"endIndex\": 6, \"tabId\": \"t.0\"},\n\"paragraphStyle\": {\"namedStyleType\": \"HEADING_1\"}, \"fields\": \"namedStyleType\"}}.\nIndexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location\nwithout a tabId is in the first tab.\nEach request sees the document as the requests before it left it, so make several edits from the end of\nthe document toward its start.\nPass required_revision_id (the revisionId from google_docs_get_document) for atomic optimistic\nconcurrency via writeControl.requiredRevisionId; if a stale revision rejects the batch, re-read the\ndocument/tab, verify the target text, and recompute UTF-16 start-inclusive/end-exclusive ranges\nbefore retrying.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14201,6 +14201,17 @@
                 "additionalProperties": {}
               },
               "description": "Docs API batchUpdate Request objects."
+            },
+            "required_revision_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Docs revisionId to require via writeControl.requiredRevisionId."
             },
             "mindroom_output_path": {
               "anyOf": [
