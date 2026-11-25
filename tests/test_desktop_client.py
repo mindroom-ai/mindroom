@@ -236,3 +236,85 @@ async def test_handle_check_timeout_recovers_through_request_status(monkeypatch:
     message = str(exc_info.value)
     assert "do not call check_shell again" in message
     assert "only if request_status reports not_found" in message
+
+
+@pytest.mark.asyncio
+async def test_management_actions_run_concurrently_with_run_shell_and_serialize_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One management action can run alongside run_shell with serialized sends, while conflicting lanes still reject."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
+
+    first_send_entered = asyncio.Event()
+    release_first_send = asyncio.Event()
+    send_events: list[tuple[str, str]] = []
+
+    async def tracked_send(_client: object, _target: object, *, event_type: str, content: dict[str, object]) -> None:
+        del event_type
+        req_id = str(content["request_id"])
+        send_events.append(("start", req_id))
+        if req_id == "shell-1":
+            first_send_entered.set()
+            await release_first_send.wait()
+        send_events.append(("end", req_id))
+
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", tracked_send)
+
+    shell_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="shell-1", action="run_shell"), timeout_seconds=1),
+    )
+    await first_send_entered.wait()
+
+    # Management command starts while run_shell is still sending: allowed, but waits for send_lock.
+    status_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="status-1", action="status"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+    assert send_events == [("start", "shell-1")]
+
+    # Conflicting commands while both lanes are occupied are rejected.
+    for req_id, action in (("shell-2", "run_shell"), ("status-2", "status"), ("click-1", "click")):
+        with pytest.raises(DesktopRequestError, match="already in progress"):
+            await router.request(TARGET, _command(request_id=req_id, action=action), timeout_seconds=1)
+
+    release_first_send.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert send_events == [("start", "shell-1"), ("end", "shell-1"), ("start", "status-1"), ("end", "status-1")]
+
+    # Resolve management command while run_shell is still waiting on its future.
+    status_resp = DesktopResponse("status-1", "session-1", True, result={"online": True})
+    router.on_to_device_event(_event(status_resp))
+    assert await status_task == status_resp
+
+    # Non-management actions remain rejected while run_shell is still in flight; another management action is allowed.
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, _command(request_id="click-2", action="click"), timeout_seconds=1)
+
+    check_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="check-1", action="check_shell"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+    check_resp = DesktopResponse("check-1", "session-1", True, result={"state": "running"})
+    router.on_to_device_event(_event(check_resp))
+    assert await check_task == check_resp
+
+    shell_resp = DesktopResponse("shell-1", "session-1", True, result={"state": "completed"})
+    router.on_to_device_event(_event(shell_resp))
+    assert await shell_task == shell_resp
+
+    # Symmetric check: non-management in flight rejects run_shell.
+    click_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="click-3", action="click"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, _command(request_id="shell-3", action="run_shell"), timeout_seconds=1)
+    click_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await click_task
+
+    assert not router._pending
+    assert TARGET not in router._send_locks

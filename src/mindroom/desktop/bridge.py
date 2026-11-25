@@ -57,7 +57,7 @@ from mindroom.desktop.provider import (
     DesktopProviderError,
     missing_macos_desktop_permissions,
 )
-from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
+from mindroom.desktop.reply_fitting import fits_inline, leftmost_fitting, response_metrics, success_response
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
 from mindroom.logging_config import get_logger
@@ -77,12 +77,17 @@ if TYPE_CHECKING:
     import nio
     from nio import AuthenticatedToDeviceEvent
 
+    from mindroom.desktop.accessibility import AccessibilityState
+    from mindroom.desktop.protocol import EncryptedDesktopMedia
+
 logger = get_logger(__name__)
 
 _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
+_MAX_ERROR_CHARS = 2_048
+_OMITTED_STATE_WARNING = "Desktop state exceeded the inline reply size limit and was omitted."
 
 
 async def _run_macos_application_events() -> None:
@@ -202,6 +207,7 @@ class _ControlGrant:
 @dataclass(frozen=True, slots=True)
 class _Execution:
     result: dict[str, object]
+    observed_state: AccessibilityState | None = None
     capture_app: str | None = None
     capture_state_id: str | None = None
     follow_up_app: str | None = None
@@ -695,7 +701,11 @@ class DesktopBridge:
             return self._error_response(command, "Unexpected desktop parameters: observation.")
         try:
             mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
-            resolved = self._observations.resolve(command) if "state_id" in command.parameters else command
+            resolved = (
+                self._observations.resolve(command, controller_key=controller_key)
+                if "state_id" in command.parameters
+                else command
+            )
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
         self._journal.remember_started(command, command_fingerprint, controller_key)
@@ -717,19 +727,21 @@ class DesktopBridge:
         if isinstance(execution, DesktopResponse):
             return execution
         if execution.follow_up_app is not None:
-            execution = await self._attach_follow_up_state(command, execution, controller_key)
+            execution = await self._attach_follow_up_state(command, execution, controller_key, mode=mode)
             if isinstance(execution, DesktopResponse):
                 return execution
         if command.action in DESKTOP_APP_ACTIONS:
-            result = {**execution.result, "observation": {"mode": mode}}
-            state_result = result.get("state")
-            if mode == "screenshot" and isinstance(state_result, dict):
-                result["state"] = {key: value for key, value in state_result.items() if key != "elements"}
-            execution = replace(execution, result=result)
+            execution = replace(execution, result={**execution.result, "observation": {"mode": mode}})
             if mode == "tree":
-                return success_response(command, result=execution.result)
+                return self._finalize_app_response(
+                    command,
+                    execution.result,
+                    observed_state=execution.observed_state,
+                    mode=mode,
+                    controller_key=controller_key,
+                )
         if execution.browser_image is not None:
-            return await self._browser_image_response(command, execution)
+            return await self._browser_image_response(command, execution, controller_key=controller_key)
         if execution.capture_app is None or execution.capture_state_id is None:
             return success_response(command, result=execution.result)
         return self._observation_refused(
@@ -737,14 +749,24 @@ class DesktopBridge:
             execution,
             execution.capture_app,
             controller_key,
+            mode=mode,
         ) or await self._capture_response(
             command,
             result=execution.result,
+            observed_state=execution.observed_state,
+            mode=mode,
+            controller_key=controller_key,
             app_id=execution.capture_app,
             state_id=execution.capture_state_id,
         )
 
-    async def _browser_image_response(self, command: DesktopCommand, execution: _Execution) -> DesktopResponse:
+    async def _browser_image_response(
+        self,
+        command: DesktopCommand,
+        execution: _Execution,
+        *,
+        controller_key: str,
+    ) -> DesktopResponse:
         image = execution.browser_image
         if image is None:
             return success_response(command, result=execution.result)
@@ -758,10 +780,20 @@ class DesktopBridge:
                 timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
-            return self._capture_error_response(command, result=execution.result, error=str(exc))
+            return self._capture_error_response(
+                command,
+                result=execution.result,
+                error=str(exc),
+                controller_key=controller_key,
+            )
         except Exception:
             logger.exception("browser_image_upload_failed", action=command.action)
-            return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
+            return self._capture_error_response(
+                command,
+                result=execution.result,
+                error="Browser image upload failed.",
+                controller_key=controller_key,
+            )
         return success_response(command, result=execution.result, screenshot=screenshot)
 
     async def _execute_safely(
@@ -799,16 +831,17 @@ class DesktopBridge:
         command: DesktopCommand,
         execution: _Execution,
         controller_key: str,
+        *,
+        mode: DesktopObservationMode,
     ) -> _Execution | DesktopResponse:
         app_id = execution.follow_up_app
         if app_id is None:
             return execution
-        refused = self._observation_refused(command, execution, app_id, controller_key)
+        refused = self._observation_refused(command, execution, app_id, controller_key, mode=mode)
         if refused is not None:
             return refused
         try:
             state = await asyncio.to_thread(self._required_gui_provider().get_app_state, app_id)
-            self._observations.remember(state, command)
         except Exception:
             logger.exception(
                 "desktop_control_follow_up_state_failed",
@@ -824,7 +857,8 @@ class DesktopBridge:
                 result={**execution.result, "warning": warning, "follow_up_state": "failed"},
             )
         return _Execution(
-            result={**execution.result, "state": state.to_result()},
+            result=execution.result,
+            observed_state=state,
             capture_app=state.app_id,
             capture_state_id=state.state_id,
         )
@@ -834,6 +868,9 @@ class DesktopBridge:
         command: DesktopCommand,
         *,
         result: dict[str, object],
+        observed_state: AccessibilityState | None,
+        mode: DesktopObservationMode,
+        controller_key: str,
         app_id: str,
         state_id: str,
     ) -> DesktopResponse:
@@ -851,13 +888,27 @@ class DesktopBridge:
                 timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
-            return self._capture_error_response(command, result=result, error=self._with_shell_hint(str(exc)))
+            return self._capture_error_response(
+                command,
+                result=result,
+                error=self._with_shell_hint(str(exc)),
+                observed_state=observed_state,
+                mode=mode,
+                controller_key=controller_key,
+            )
         except Exception:
             logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
-            return self._capture_error_response(command, result=result, error="Local screenshot operation failed.")
-        return success_response(
+            return self._capture_error_response(
+                command,
+                result=result,
+                error="Local screenshot operation failed.",
+                observed_state=observed_state,
+                mode=mode,
+                controller_key=controller_key,
+            )
+        return self._finalize_app_response(
             command,
-            result={
+            {
                 **result,
                 "screen": {"width": capture.screen_width, "height": capture.screen_height},
                 "capture": {
@@ -869,6 +920,9 @@ class DesktopBridge:
                 "image": {"width": capture.image_width, "height": capture.image_height},
                 **({"coordinates": capture.coordinates} if capture.coordinates is not None else {}),
             },
+            observed_state=observed_state,
+            mode=mode,
+            controller_key=controller_key,
             screenshot=screenshot,
         )
 
@@ -1029,9 +1083,9 @@ class DesktopBridge:
         if command.action in {"get_app_state", "screenshot"}:
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             state = await asyncio.to_thread(provider.get_app_state, required_str_parameter(parameters, "app"))
-            self._observations.remember(state, command)
             return _Execution(
-                {"action": command.action, "state": state.to_result()},
+                {"action": command.action},
+                observed_state=state,
                 capture_app=state.app_id,
                 capture_state_id=state.state_id,
             )
@@ -1198,18 +1252,122 @@ class DesktopBridge:
             self.provider.set_all_apps(all_apps)
         return all_apps
 
+    def _finalize_app_response(
+        self,
+        command: DesktopCommand,
+        result: dict[str, object],
+        *,
+        observed_state: AccessibilityState | None,
+        mode: DesktopObservationMode,
+        controller_key: str,
+        screenshot: EncryptedDesktopMedia | None = None,
+    ) -> DesktopResponse:
+        """Fit an app reply within the inline to-device budget and remember only the state sent."""
+        if observed_state is None:
+            if fits_inline(command, result, screenshot=screenshot):
+                return success_response(command, result=result, screenshot=screenshot)
+            return self._bounded_fallback_response(command, result, screenshot=screenshot)
+
+        fitted = self._fit_observed_state(
+            command,
+            result,
+            observed_state=observed_state,
+            mode=mode,
+            screenshot=screenshot,
+        )
+        if fitted is None:
+            return self._bounded_fallback_response(command, result, screenshot=screenshot)
+        fitted_state, candidate = fitted
+        self._observations.remember(fitted_state, command, controller_key=controller_key)
+        return success_response(command, result=candidate, screenshot=screenshot)
+
+    @staticmethod
+    def _fit_observed_state(
+        command: DesktopCommand,
+        result: dict[str, object],
+        *,
+        observed_state: AccessibilityState,
+        mode: DesktopObservationMode,
+        screenshot: EncryptedDesktopMedia | None,
+    ) -> tuple[AccessibilityState, dict[str, object]] | None:
+        if mode == "screenshot":
+            candidate = {**result, "state": observed_state.to_result(include_elements=False)}
+            return (
+                (replace(observed_state, elements=()), candidate)
+                if fits_inline(command, candidate, screenshot=screenshot)
+                else None
+            )
+
+        full_candidate = {**result, "state": observed_state.to_result()}
+        if fits_inline(command, full_candidate, screenshot=screenshot):
+            return observed_state, full_candidate
+
+        elements = observed_state.elements
+        total = len(elements)
+        if total == 0:
+            return None
+
+        def state_with_dropped(dropped: int) -> AccessibilityState:
+            return replace(
+                observed_state,
+                elements=elements[: total - dropped],
+                truncated=True,
+                stability="truncated",
+            )
+
+        def build(dropped: int) -> dict[str, object]:
+            return {**result, "state": state_with_dropped(dropped).to_result()}
+
+        dropped = leftmost_fitting(command, 1, total, build, screenshot=screenshot)
+        fitted_state = state_with_dropped(dropped)
+        candidate = {**result, "state": fitted_state.to_result()}
+        return (fitted_state, candidate) if fits_inline(command, candidate, screenshot=screenshot) else None
+
+    @staticmethod
+    def _bounded_fallback_response(
+        command: DesktopCommand,
+        result: dict[str, object],
+        *,
+        screenshot: EncryptedDesktopMedia | None = None,
+    ) -> DesktopResponse:
+        preserved: dict[str, object] = {
+            key: result[key]
+            for key in (
+                "action",
+                "action_completed",
+                "action_outcome",
+                "observation",
+                "follow_up_screenshot",
+                "follow_up_state",
+            )
+            if key in result
+        }
+        bounded = {**preserved, "warning": _OMITTED_STATE_WARNING}
+        attached_screenshot = (
+            screenshot if screenshot is not None and fits_inline(command, bounded, screenshot=screenshot) else None
+        )
+        return success_response(command, result=bounded, screenshot=attached_screenshot)
+
     def _observation_refused(
         self,
         command: DesktopCommand,
         execution: _Execution,
         app_id: str,
         controller_key: str,
+        *,
+        mode: DesktopObservationMode,
     ) -> DesktopResponse | None:
         """Return the receipt alone when the app left the live scope before a new observation of it began."""
         if app_targetable(app_id, self.policy.allowed_app_ids, all_apps=self._live_scope(controller_key)):
             return None
         warning = "Access to this application ended before a new observation; none was taken."
-        return success_response(command, result={**execution.result, "warning": warning})
+        return self._finalize_app_response(
+            command,
+            {**execution.result, "warning": warning},
+            observed_state=execution.observed_state,
+            mode=mode,
+            controller_key=controller_key,
+        )
 
     def _capture_error_response(
         self,
@@ -1217,6 +1375,9 @@ class DesktopBridge:
         *,
         result: dict[str, object],
         error: str,
+        observed_state: AccessibilityState | None = None,
+        mode: DesktopObservationMode = "both",
+        controller_key: str = "",
     ) -> DesktopResponse:
         if command.action == "get_app_state":
             warning = (
@@ -1224,9 +1385,12 @@ class DesktopBridge:
                 "The state may now be stale; "
                 "request get_app_state again before acting."
             )
-            return success_response(
+            return self._finalize_app_response(
                 command,
-                result={**result, "warning": warning, "follow_up_screenshot": "failed"},
+                {**result, "warning": warning, "follow_up_screenshot": "failed"},
+                observed_state=observed_state,
+                mode=mode,
+                controller_key=controller_key,
             )
         if command.action not in DESKTOP_CONTROL_ACTIONS:
             return self._error_response(command, error)
@@ -1242,9 +1406,12 @@ class DesktopBridge:
             agent_name=command.agent_name,
             error=error,
         )
-        return success_response(
+        return self._finalize_app_response(
             command,
-            result={**result, "warning": warning, "follow_up_screenshot": "failed"},
+            {**result, "warning": warning, "follow_up_screenshot": "failed"},
+            observed_state=observed_state,
+            mode=mode,
+            controller_key=controller_key,
         )
 
     def _unknown_control_response(self, command: DesktopCommand, *, reason: str | None = None) -> DesktopResponse:
@@ -1274,10 +1441,10 @@ class DesktopBridge:
             agent_name=command.agent_name,
             error=reason,
         )
-        return success_response(
-            command,
-            result={"action": command.action, "action_outcome": "unknown", "warning": warning},
-        )
+        result: dict[str, object] = {"action": command.action, "action_outcome": "unknown", "warning": warning}
+        if fits_inline(command, result):
+            return success_response(command, result=result)
+        return self._bounded_fallback_response(command, result)
 
     def _interrupted_response(self, command: DesktopCommand) -> DesktopResponse:
         if command.action in DESKTOP_CONTROL_ACTIONS | _EFFECTFUL_SHELL_ACTIONS:
@@ -1302,6 +1469,8 @@ class DesktopBridge:
 
     @staticmethod
     def _error_response(command: DesktopCommand, error: str) -> DesktopResponse:
+        if len(error) > _MAX_ERROR_CHARS:
+            error = f"{error[: _MAX_ERROR_CHARS - 3]}..."
         return DesktopResponse(
             request_id=command.request_id,
             session_id=command.session_id,
