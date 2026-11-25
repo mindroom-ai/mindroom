@@ -74,7 +74,7 @@ Every command also prints its options with `--help`.
 
 Start MindRoom with your configuration.
 
-On first run in a terminal, `mindroom run` creates the hosted starter config, pairs with MindRoom Chat, and offers to install the [login service](#service).
+On first run in a terminal, `mindroom run` creates a starter config (defaulting to MindRoom Chat, or connecting to your own Matrix server), pairs when using hosted or local provisioning, and offers to install the [login service](#service).
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the setup questions and for unattended setup with `--provider` and `--service`.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
 On a hosted install, the dashboard becomes available after pairing is approved.
@@ -97,11 +97,12 @@ On a hosted install, the dashboard becomes available after pairing is approved.
 
  Set up on first run, pair, and start MindRoom.
 
- When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for
- the model provider in a terminal or taking it from --provider.
- An install on MindRoom Chat that is not paired yet pairs this machine with your account,
- and a first run in a terminal offers to keep running in the background at login (see
- --service).
+ When no config exists, MindRoom creates a starter config, asking for the Matrix server
+ (defaulting to MindRoom Chat) and model provider in a terminal, or using mindroom.chat
+ and --provider without one.
+ An install using hosted or local provisioning that is not paired yet pairs this machine
+ with your account, and a first run in a terminal offers to keep running in the
+ background at login (see --service).
  MindRoom then creates the agent accounts and rooms from config.yaml, keeps room
  memberships in sync, and starts the dashboard and API (disable with --no-api).
 
@@ -226,12 +227,12 @@ Create, view, edit, and validate `config.yaml`.
 ### config init
 
 Create a starter `config.yaml` and `.env` with the personal Mind agent, starter models, file-based memory, and sensible defaults.
-For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so use `config init` to choose presets up front, use a self-hosted homeserver, or create files without starting.
+`mindroom run` runs this setup interactively on first run when no config exists, so use `config init` to choose presets up front or create files without starting.
 
 | Option | Effect |
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
-| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
+| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). Omitting it in an interactive terminal (without `--provider`, `--no-input`, or `--print`) prompts you to choose between `mindroom.chat` and a custom Matrix server; passing `--matrix-server self-hosted` interactively prompts for your homeserver URL, server name, and registration or pairing settings. |
 | `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |

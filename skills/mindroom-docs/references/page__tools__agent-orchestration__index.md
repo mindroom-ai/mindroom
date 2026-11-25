@@ -337,9 +337,9 @@ A job with no useful output, or a cancelled one, still needs acknowledging.
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
-Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
-The agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
+Cancelled jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects them like any other. A silent schedule's ended jobs get a silent follow-up (still isolated from ordinary replies and capped at 20 without posting a visible pause notice), so the schedule stays silent unless there is something to report.
+Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them (a silent schedule's wait for its next silent run instead).
+For non-silent jobs, the agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -405,6 +405,8 @@ A job's full result, including media and files, may be up to 64 MiB; a larger re
 The configured large-output policy can save long text to a file before that limit applies.
 
 ## [`dynamic_workflow`]
+
+`dynamic_workflow` is deprecated in favour of [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
 
 `dynamic_workflow` lets an agent save a reusable multi-step workflow, publish new revisions, run it, and inspect run records.
 Add it to the `tools:` of each agent that should create and run workflows.
