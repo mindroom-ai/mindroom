@@ -471,12 +471,17 @@ class WorkflowRunStore:
         """Return bounded, redacted result previews for completed non-stale agent, turn and tool nodes."""
         if max_chars <= 0:
             return {}
+        length_expr = (
+            "octet_length(result_json)"
+            if sqlite3.sqlite_version_info >= (3, 43, 0)
+            else "length(CAST(result_json AS BLOB))"
+        )
         sql = (
             "SELECT key, CAST(result_json AS BLOB) AS result_blob "
             "FROM workflow_nodes "
             "WHERE run_id = ? AND stale = 0 AND state = 'completed' "
             "AND kind IN ('agent', 'turn', 'tool') AND result_file IS NULL "
-            "AND octet_length(result_json) <= ? AND result_json != 'null' "
+            f"AND {length_expr} <= ? AND result_json != 'null' "
             "ORDER BY seq"
         )
         with self.read_connection() as connection:

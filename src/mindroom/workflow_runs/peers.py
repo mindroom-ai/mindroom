@@ -414,7 +414,12 @@ def visible_messages_with_omitted(
         sender_key = r["sender_key"]
         if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
             continue
-        raw_text = _TRAILING_TOKEN_RE.sub("", r["text"]) if r["truncated_text"] else r["text"]
+        if r["truncated_text"]:
+            raw_text = (
+                "[truncated]" if r["text"].lstrip().startswith(("{", "[")) else _TRAILING_TOKEN_RE.sub("", r["text"])
+            )
+        else:
+            raw_text = r["text"]
         targets = _resolved_recipients(r, from_id, ids, sess_of, by_name)
         out.append(
             {
