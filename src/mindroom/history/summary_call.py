@@ -60,10 +60,6 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
-class _CompactionSummaryUsageError(RuntimeError):
-    """Usage persistence failed after a paid response; never retry the model for this."""
-
-
 _TYPED_SHRINKABLE_ERRORS = (
     _CompactionSummaryEmptyResultError,
     TimeoutError,
@@ -128,7 +124,7 @@ class SummaryRetryPolicy:
         every run; shrink targets clamp there so a granted shrink is issued only
         when it rebuilds to a strictly smaller request with summarizable content.
         """
-        if isinstance(error, _CompactionSummaryUsageError) or attempt >= self.max_attempts:
+        if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
             smaller_budget = min(
@@ -220,8 +216,11 @@ async def _request_summary(
         try:
             await on_usage(usage)
         except Exception as error:
-            msg = "Could not persist compaction summary usage"
-            raise _CompactionSummaryUsageError(msg) from error
+            logger.warning(
+                "compaction_summary_usage_save_failed",
+                error_type=type(error).__name__,
+                exc_info=True,
+            )
     if failure is not None:
         raise failure
     assert completed is not None

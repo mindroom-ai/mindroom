@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -18,11 +19,13 @@ from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    SUPPRESS_PUSH_KEY,
     runtime_matrix_homeserver,
 )
 from mindroom.final_delivery import StreamTransportOutcome
@@ -61,7 +64,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     import nio
 
@@ -384,6 +387,7 @@ class _StreamingDeliverySnapshot:
     markdown_renderer: Callable[[str], str]
     chars_since_last_update: int
     untransformed_text: str | None = None
+    suppress_push: bool = False
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -423,6 +427,12 @@ def _visible_text(
     return display_text, response.interactive_metadata
 
 
+def is_error_ai_run(extra_content: Mapping[str, Any] | None) -> bool:
+    """Return whether reply metadata marks a handled failed run."""
+    ai_run = extra_content.get(AI_RUN_METADATA_KEY) if extra_content is not None else None
+    return isinstance(ai_run, Mapping) and ai_run.get("status") == STREAM_STATUS_ERROR
+
+
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
     """Format one outbound payload from immutable stream state."""
     in_progress = snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES
@@ -446,6 +456,8 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
                 source_event_id=snapshot.interactive_source_event_id,
             ),
         )
+    if snapshot.stream_status == STREAM_STATUS_COMPLETED and snapshot.suppress_push and interactive_metadata is None:
+        extra_content[SUPPRESS_PUSH_KEY] = True
     tool_trace = list(snapshot.tool_trace)
 
     content = format_message_with_mentions(
@@ -616,6 +628,8 @@ class StreamingResponse:
     compactions: ReplyCompactions | None = None
     # Reads the active model payload for provisional streaming metadata until settled run metadata arrives.
     active_model: Callable[[], Mapping[str, str] | None] | None = None
+    # Returns whether the finalized reply should suppress push while background work continues.
+    suppress_final_push: Callable[[], Awaitable[bool]] | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -1302,6 +1316,14 @@ class StreamingResponse:
                         accumulated_text=transformed,
                         untransformed_text=snapshot.accumulated_text,
                     )
+        if (
+            is_final
+            and not self._saw_failed_reply
+            and not is_error_ai_run(snapshot.extra_content)
+            and self.suppress_final_push is not None
+            and await self.suppress_final_push()
+        ):
+            snapshot = replace(snapshot, suppress_push=True)
         return await asyncio.to_thread(_prepare_delivery_from_snapshot, snapshot)
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
@@ -2291,6 +2313,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     allow_new_terminal_message: Callable[[], bool] | None = None,
     resumed: UnfinishedStreamedReply | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
+    suppress_final_push: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome.
 
@@ -2325,6 +2348,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
         compactions=compactions,
         active_model=active_model,
+        suppress_final_push=suppress_final_push,
         initial_send=initial_send,
         progress_write_ahead=progress_write_ahead,
         progress_delivered=progress_delivered,
