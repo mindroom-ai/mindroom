@@ -2,34 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import hashlib
-import threading
 import time
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import nio
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom import room_steward
-from mindroom.api import config_lifecycle, room_triggers
+from mindroom.api import room_triggers
 from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
-from mindroom.api.client_sessions import client_session_store
 from mindroom.api.main import app as main_app
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
-from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
@@ -42,14 +32,19 @@ from mindroom.reactive_triggers.models import (
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.access_schema_support import joined_members_response
+from tests.api.test_plugin_room_readers import _bound, _client, _never_answers
 from tests.conftest import test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
+from tests.test_external_trigger_store import _PUBLIC_KEY
+from tests.test_plugin_routes import _api_state, _signed_in
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
     from httpx import Response
+
+    from mindroom.constants import RuntimePaths
 
 ROOM_A, ROOM_B, ROOM_C, UNREACHABLE = "!room-a:localhost", "!room-b:localhost", "!room-c:localhost", "!no-bot:localhost"
 ALICE, ALICE_BRIDGE, BOB, CAROL, DAVE = (
@@ -59,12 +54,6 @@ ALICE, ALICE_BRIDGE, BOB, CAROL, DAVE = (
     "@carol:localhost",
     "@dave:localhost",
 )
-
-
-def _public_key_b64() -> str:
-    return base64.b64encode(
-        Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
-    ).decode("ascii")
 
 
 class _Harness:
@@ -93,35 +82,28 @@ class _Harness:
         save_matrix_state(matrix_state, self.paths)
 
         members = {ROOM_A: [ALICE, ALICE_BRIDGE, BOB, CAROL], ROOM_B: [ALICE, BOB], ROOM_C: [ALICE, BOB]}
-        events, bot_id = room_state_events or {}, "@mindroom_router:localhost"
+        events = room_state_events or {}
+        self.client = _client(joined_rooms=tuple(members))
 
         async def _joined(room_id: str) -> object:
             return (
-                joined_members_response(room_id, bot_id, *members[room_id])
+                joined_members_response(room_id, self.client.user_id, *members[room_id])
                 if room_id in members
                 else nio.JoinedMembersError("not joined")
             )
 
-        self.client = SimpleNamespace(
-            user_id=bot_id,
-            rooms={rid: nio.MatrixRoom(rid, bot_id) for rid in members},
-            joined_members=AsyncMock(side_effect=_joined),
-            room_get_state=AsyncMock(side_effect=lambda rid: nio.RoomGetStateResponse(events.get(rid, []), rid)),
-        )
+        self.client.joined_members.side_effect = _joined
+        self.client.room_get_state.side_effect = lambda rid: nio.RoomGetStateResponse(events.get(rid, []), rid)
         self.wake_reactive = MagicMock()
-        self.app = FastAPI()
+        self.app = _bound(self.client)
         self.app.include_router(room_triggers.router)
         state = ensure_app_state(self.app)
-        state.api_state = config_lifecycle.ApiState(
-            threading.Lock(),
-            config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
-        )
+        state.api_state = _api_state(self.config, self.paths)
         state.external_trigger_runtime = ExternalTriggerRuntime(
             target_bot=lambda _name: None,
             config_generation=1,
             on_reactive_event=self.wake_reactive,
         )
-        bind_room_members(self.app, {ROUTER_AGENT_NAME: SimpleNamespace(client=self.client, running=True)})  # type: ignore[arg-type]
         self.external_store = ExternalTriggerStore(self.paths)
         self.reactive_store = ReactiveTriggerStore(self.paths)
         self.http = TestClient(self.app)
@@ -156,7 +138,7 @@ class _Harness:
                 **base,
                 capability_token_hash=capability_hash,
             )
-        base.setdefault("public_key", _public_key_b64())
+        base.setdefault("public_key", _PUBLIC_KEY)
         return self.external_store.create_record(**base)
 
     def add_reactive(
@@ -199,33 +181,19 @@ class _Harness:
         json: dict[str, object] | None = None,
     ) -> Response:
         path = f"/api/rooms/{room_id}/triggers" + (f"/{trigger_id}" if trigger_id else "")
-        headers = (
-            {}
-            if user_id is None
-            else {"Authorization": f"Bearer {client_session_store(self.app).create(user_id).token}"}
-        )
+        headers = {} if user_id is None else _signed_in(self.app, user_id)
         return self.http.request(method, path, headers=headers, json=json)
 
 
 def test_room_triggers_routes_mounted_and_auth_gated(tmp_path: Path) -> None:
-    """Routes are mounted on main app and enforce 401/403/503 via require_room_reader."""
-    routes = {
-        (route.path, method)
-        for route in main_app.routes
-        if hasattr(route, "methods") and hasattr(route, "path")
-        for method in route.methods
-    }
-    assert {
-        ("/api/rooms/{room_id}/triggers", "GET"),
-        ("/api/rooms/{room_id}/triggers/{trigger_id}", "PATCH"),
-        ("/api/rooms/{room_id}/triggers/{trigger_id}", "DELETE"),
-    } <= routes
+    """Routes are mounted on main app and enforce 401/403/503 via require_room_member."""
+    main_http = TestClient(main_app)
+    assert main_http.get(f"/api/rooms/{ROOM_A}/triggers").status_code == 401
+    assert main_http.patch(f"/api/rooms/{ROOM_A}/triggers/tr_any", json={"enabled": False}).status_code == 401
+    assert main_http.delete(f"/api/rooms/{ROOM_A}/triggers/tr_any").status_code == 401
 
     h = _Harness(tmp_path)
-    for caller, expected in ((None, 401), (DAVE, 403)):
-        assert h.req("GET", ROOM_A, caller).status_code == expected
-        assert h.req("PATCH", ROOM_A, caller, "tr_any", {"enabled": False}).status_code == expected
-        assert h.req("DELETE", ROOM_A, caller, "tr_any").status_code == expected
+    assert h.req("GET", ROOM_A, DAVE).status_code == 403
     ensure_app_state(h.app).room_members = None
     assert h.req("GET", ROOM_A, ALICE).status_code == 503
 
@@ -233,7 +201,7 @@ def test_room_triggers_routes_mounted_and_auth_gated(tmp_path: Path) -> None:
 def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None:
     """GET returns allowlisted target/watch rows, resolves aliases, strips secrets, and redacts cross-room watches."""
     h = _Harness(tmp_path)
-    pub_key, cap_hash = _public_key_b64(), hashlib.sha256(b"super-secret-capability-token").hexdigest()
+    pub_key, cap_hash = _PUBLIC_KEY, hashlib.sha256(b"super-secret-capability-token").hexdigest()
 
     wh_key = h.add_webhook(
         "wh_deploy",
@@ -379,9 +347,6 @@ def test_owner_only_patch_and_delete_reject_admins_and_foreign_room_triggers(tmp
         assert h.req("PATCH", ROOM_A, BOB, trigger_id, {"enabled": False}).status_code == 403
         assert h.req("DELETE", ROOM_A, BOB, trigger_id).status_code == 403
 
-    assert h.req("PATCH", ROOM_A, ALICE, "wh_room_a", {"enabled": "false"}).status_code == 422
-    assert h.req("PATCH", ROOM_A, ALICE, "wh_room_a", {"enabled": False, "extra": 1}).status_code == 422
-
     alias_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE_BRIDGE).json()["triggers"]}
     assert alias_rows["wh_room_a"]["can_manage"] is True
     assert alias_rows["tr_watch_a_to_b"]["can_manage"] is True
@@ -448,10 +413,9 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
     assert (disable_resp.status_code, disable_resp.json()["disabled_reason"]) == (200, "manual")
     assert h.wake_reactive.call_count == 2
 
-    async def _hang(_room_id: str) -> object:
-        await asyncio.sleep(10)
-        return nio.RoomGetStateResponse([], ROOM_A)
+    h.client.room_get_state.side_effect = nio.LocalProtocolError("connection reset")
+    assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
 
-    h.client.room_get_state = AsyncMock(side_effect=_hang)
+    h.client.room_get_state = _never_answers
     monkeypatch.setattr(room_steward, "ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503

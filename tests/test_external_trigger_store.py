@@ -864,16 +864,7 @@ def test_old_trigger_record_without_last_fired_at_loads_as_none_and_records_fire
     """Legacy records lacking last_fired_at load with None, and record_fired updates live records only."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ExternalTriggerStore(runtime_paths)
-    record = store.create_record(
-        trigger_id="deploy",
-        owner_user_id=_OWNER,
-        created_by_agent_name="watcher",
-        created_in_room_id="!room:example.org",
-        created_in_thread_id=None,
-        target=_target(),
-        public_key=_PUBLIC_KEY,
-        config=_config(),
-    )
+    record = _create(store, _config(), trigger_id="deploy")
     raw = json.loads(store.store_path.read_text(encoding="utf-8"))
     raw["triggers"]["deploy"].pop("last_fired_at", None)
     store.store_path.write_text(json.dumps(raw), encoding="utf-8")

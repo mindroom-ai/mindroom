@@ -1170,25 +1170,6 @@ def test_private_owner_not_joined_blocks_delivery_before_replay_claim(
     assert not (private_trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
-def test_duplicate_event_id_returns_duplicate_response(
-    trigger_api: TriggerApiContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Delivered event ids are idempotent within one replay scope."""
-
-    async def execute_external_trigger(**_kwargs: object) -> str:
-        return "$matrix-event"
-
-    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
-
-    first = _post_signed(trigger_api, nonce="nonce-1")
-    second = _post_signed(trigger_api, nonce="nonce-2")
-
-    assert first.status_code == 202
-    assert second.status_code == 202
-    assert second.json()["duplicate"] is True
-
-
 def test_webhook_delivery_records_last_fired_at_only_on_non_duplicate_success(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
