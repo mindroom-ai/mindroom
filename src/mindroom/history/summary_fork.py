@@ -15,7 +15,7 @@ from mindroom.history.types import replayed_summary_text
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.request_identity import message_digest
+from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_digest, message_digest
 from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
 
 if TYPE_CHECKING:
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 type WarmFrameKey = tuple[Path, str, str]
-type CacheRoutingKey = tuple[object, object]
 
 _STANDARD_CACHE_TTL_SECONDS = 240.0
 _EXTENDED_CACHE_TTL_SECONDS = 3300.0
@@ -45,7 +44,7 @@ _EXTENDED_CACHE_PROVIDERS = frozenset(
 _OPENROUTER_ANTHROPIC_PREFIXES = ("anthropic/", "~anthropic/")
 
 _WARM_FRAMES_LOCK = threading.Lock()
-_WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...], CacheRoutingKey]] = OrderedDict()
+_WARM_FRAMES: OrderedDict[WarmFrameKey, tuple[ModelRequest, tuple[Message, ...]]] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,21 +94,14 @@ def warm_cache_ttl_seconds(
     return _STANDARD_CACHE_TTL_SECONDS
 
 
-def cache_routing_key(model_params: Mapping[str, Any]) -> CacheRoutingKey:
-    """Return the provider cache-routing identity tuple ``(prompt_cache_key, session_id)``."""
-    return (model_params.get("prompt_cache_key"), model_params.get("session_id"))
-
-
 def remember_fork_frame(
     key: WarmFrameKey,
     template: ModelRequest,
     system_messages: Sequence[Message],
-    *,
-    routing_key: CacheRoutingKey = (None, None),
 ) -> None:
-    """Store a message-free request template, leading system messages, and cache routing key for live ``/compact``."""
+    """Store a message-free request template and leading system messages for live ``/compact``."""
     clean = replace(template, messages=(), retry_budget=None, on_send=_DEFAULT_ON_SEND, prompt_hold_pin=None)
-    entry = (clean, tuple(system_messages), routing_key)
+    entry = (clean, tuple(system_messages))
     with _WARM_FRAMES_LOCK:
         _WARM_FRAMES[key] = entry
         _WARM_FRAMES.move_to_end(key)
@@ -117,20 +109,14 @@ def remember_fork_frame(
             _WARM_FRAMES.popitem(last=False)
 
 
-def lookup_fork_frame(
-    key: WarmFrameKey,
-    *,
-    routing_key: CacheRoutingKey | None = None,
-) -> tuple[ModelRequest, tuple[Message, ...]] | None:
-    """Return ``(template, system_messages)`` for ``key`` when present and matching ``routing_key``."""
+def lookup_fork_frame(key: WarmFrameKey) -> tuple[ModelRequest, tuple[Message, ...]] | None:
+    """Return ``(template, system_messages)`` for ``key`` when present."""
     with _WARM_FRAMES_LOCK:
         entry = _WARM_FRAMES.get(key)
         if entry is None:
             return None
-        if routing_key is not None and entry[2] != routing_key:
-            return None
         _WARM_FRAMES.move_to_end(key)
-        return (entry[0], entry[1])
+        return entry
 
 
 def clear_fork_frames() -> None:
@@ -289,32 +275,34 @@ def prepare_fork_request(
     )
 
     size = fork.sizer.size(fork_request)
-    if not size.reported or size.anchor_index != newest_assistant_index:
-        return None, "prefix_not_anchored"
-
     current_time = time.time() if now is None else now
     ttl = warm_cache_ttl_seconds(fork.sizer.model.model_params, identity=fork.sizer.model.identity)
-    if size.answered_at is None or not (0 <= current_time - size.answered_at < ttl):
-        return None, "cache_cold"
-
-    if not _fits_context_window(
-        size.tokens,
-        context_window=fork.context_window,
-        reserve_tokens=fork.reserve_tokens,
-    ):
-        return None, "exceeds_context_window"
-
+    expected_routing = cache_routing_digest(fork.sizer.model.model_params)
+    recorded_routing = (base.messages[newest_assistant_index].provider_data or {}).get(CACHE_ROUTING_KEY)
+    dynamic_checks = (
+        (not size.reported or size.anchor_index != newest_assistant_index, "prefix_not_anchored"),
+        (recorded_routing != expected_routing, "routing_key_mismatch"),
+        (size.answered_at is None or not (0 <= current_time - size.answered_at < ttl), "cache_cold"),
+        (
+            not _fits_context_window(
+                size.tokens,
+                context_window=fork.context_window,
+                reserve_tokens=fork.reserve_tokens,
+            ),
+            "exceeds_context_window",
+        ),
+    )
+    if (reason := next((label for failed, label in dynamic_checks if failed), None)) is not None:
+        return None, reason
     return fork_request, None
 
 
 __all__ = [
-    "CacheRoutingKey",
     "ScopeForkSource",
     "SummaryFork",
     "WarmFrameKey",
     "build_fork_compaction_prompt",
     "build_scope_fork",
-    "cache_routing_key",
     "clear_fork_frames",
     "holds_fold_basis",
     "lookup_fork_frame",

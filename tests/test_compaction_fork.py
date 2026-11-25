@@ -40,7 +40,6 @@ from mindroom.history.summary_fork import (
     ScopeForkSource,
     SummaryFork,
     build_scope_fork,
-    cache_routing_key,
     clear_fork_frames,
     holds_fold_basis,
     lookup_fork_frame,
@@ -73,6 +72,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_digest
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -137,7 +137,7 @@ def _msg(role: str, content: str | None) -> Message:
 
 
 def _answered(
-    model: ScriptedModel,
+    model: ModelProvider,
     req: ModelRequest,
     text: str = "Hello",
     reported: int = 1_000,
@@ -204,7 +204,7 @@ def _inputs(config: Any, *, compaction_model: str | None = None) -> HistoryPrepa
     return HistoryPreparationInputs(history_settings=settings, execution_plan=plan)
 
 
-def _install_default(mp: pytest.MonkeyPatch, model: ScriptedModel, **extra: Any) -> None:  # noqa: ANN401
+def _install_default(mp: pytest.MonkeyPatch, model: ModelProvider, **extra: Any) -> None:  # noqa: ANN401
     install_model_providers(
         mp,
         {"default": summary_model(model_id=model.identity.id, provider=model.identity.provider), **extra},
@@ -497,6 +497,22 @@ def test_prepare_fork_request_gates() -> None:
 
     older_msgs = (*fork.request.messages, _msg("user", "More"), _msg("assistant", "Unanchored"))
     uncached = ScriptedModel([], model_params={"cache_system_prompt": False})
+    alice_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-alice", "session_id": "sess-alice"})
+    bob_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-bob", "session_id": "sess-bob"})
+    _, alice_fork = _warm_fork(alice_routed)
+    assert _gate(alice_fork)[1] is None
+    bob_against_alice = replace(alice_fork, sizer=RequestSizer(bob_routed, "openai"))
+    unbound_against_alice = replace(alice_fork, sizer=RequestSizer(ScriptedModel([]), "openai"))
+    legacy_answer = replace(
+        alice_fork.request.messages[-1],
+        provider_data={
+            k: v for k, v in (alice_fork.request.messages[-1].provider_data or {}).items() if k != CACHE_ROUTING_KEY
+        },
+    )
+    routed_against_legacy = replace(
+        alice_fork,
+        request=replace(alice_fork.request, messages=(*alice_fork.request.messages[:-1], legacy_answer)),
+    )
     for bad_fork, expected in [
         (_warm_fork(uncached)[1], "prompt_cache_disabled"),
         (
@@ -507,6 +523,9 @@ def test_prepare_fork_request_gates() -> None:
         (_warm_fork(tool_choice="none")[1], "tool_choice_set"),
         (replace(fork, request=replace(fork.request, messages=fork.request.messages[:2])), "no_assistant_anchor"),
         (replace(fork, request=replace(fork.request, messages=older_msgs)), "prefix_not_anchored"),
+        (bob_against_alice, "routing_key_mismatch"),
+        (unbound_against_alice, "routing_key_mismatch"),
+        (routed_against_legacy, "routing_key_mismatch"),
         (_warm_fork(reported=95_000, window=100_000)[1], "exceeds_context_window"),
     ]:
         assert _gate(bad_fork) == (None, expected)
@@ -563,9 +582,8 @@ def test_fork_frame_lru_isolation_sanitization_and_eviction(tmp_path: Path) -> N
         prompt_hold_pin=[{"h": 1}],
     )
     key_a = (tmp_path / "a.db", "agent:code", "sess-1")
-    remember_fork_frame(key_a, tpl, _SYS, routing_key=("cache-alice", "sess-alice"))
-    assert lookup_fork_frame(key_a, routing_key=("cache-bob", "sess-bob")) is None
-    found = lookup_fork_frame(key_a, routing_key=("cache-alice", "sess-alice"))
+    remember_fork_frame(key_a, tpl, _SYS)
+    found = lookup_fork_frame(key_a)
     assert found is not None
     stored_tpl, stored_sys = found
     assert (stored_tpl.messages, stored_tpl.retry_budget, stored_tpl.prompt_hold_pin) == ((), None, None)
@@ -736,6 +754,7 @@ async def test_wire_codex_fork_preserves_prompt_cache_key_and_session_id(tmp_pat
     live = ModelRequest(messages=(*_SYS, _msg("user", "Explain caching.")))
     turn = await complete(active, live)
     stamp_request_identity(turn.message, active, live)
+    assert (turn.message.provider_data or {}).get(CACHE_ROUTING_KEY) == cache_routing_digest(active.model_params)
 
     fork = SummaryFork(
         RequestSizer(active, "codex"),
@@ -874,10 +893,7 @@ async def test_wire_openai_responses_stored_pre_reply_fork_preserves_portable_re
     serialized_input = json.dumps(fork_body["input"])
     assert "Remember alpha." in serialized_input
     assert "Stored answer" in serialized_input
-    remembered = lookup_fork_frame(
-        (storage.path, TEST_AGENT_SCOPE.key, "sess-resp"),
-        routing_key=cache_routing_key(model.model_params),
-    )
+    remembered = lookup_fork_frame((storage.path, TEST_AGENT_SCOPE.key, "sess-resp"))
     assert remembered is not None
     assert remembered[0].portable_replay is True
 
@@ -890,7 +906,7 @@ async def test_wire_openai_responses_stored_pre_reply_fork_preserves_portable_re
 async def _run_pre_reply(
     tmp_path: Path,
     mp: pytest.MonkeyPatch,
-    active: ScriptedModel,
+    active: ModelProvider,
     run: RunRecord,
     sid: str,
     xml_calls: SummaryCalls,
@@ -958,6 +974,63 @@ async def test_pre_reply_auto_compaction_fork_fallbacks(
 
 
 @pytest.mark.asyncio
+async def test_pre_reply_auto_compaction_skips_fork_for_different_requester_routing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alice_model = ScriptedModel(
+        [answer("Alice answer", metrics=usage(6_000, 20))],
+        model_params={"prompt_cache_key": "cache-alice", "session_id": "sess-alice"},
+    )
+    bob_model = ScriptedModel([], model_params={"prompt_cache_key": "cache-bob", "session_id": "sess-bob"})
+    search_tool = ToolFunction(
+        name="search",
+        description="Search",
+        parameters={"type": "object"},
+        entrypoint=lambda: "",
+    )
+    alice_spec = AgentSpec(
+        id="test_agent",
+        name="test_agent",
+        model=alice_model,
+        system_messages=_SYS,
+        toolkits=(AdaptedToolkit(name="search_kit", functions=(search_tool,), instructions=None),),
+    )
+    turn = TurnMessages(prompt=_msg("user", "Alice prompt"))
+    req = build_request(summary=None, history=[], turn=turn, media=MediaInputs())
+    events = run_agent(
+        alice_spec,
+        req,
+        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession("sess-shared-pre-reply")),
+        persist=None,
+        request_template=ModelRequest(messages=()),
+    )
+    finished = [event async for event in events][-1]
+    assert isinstance(finished, RunFinished)
+    assert isinstance(finished.record, RunRecord)
+    alice_answer = finished.record.messages[-1]
+    assert (alice_answer.provider_data or {}).get(CACHE_ROUTING_KEY) == cache_routing_digest(
+        alice_model.model_params,
+    )
+
+    stored_run = _completed_run("r-alice", messages=[turn.prompt, alice_answer])
+    xml_calls = SummaryCalls(summary="xml-for-bob-pre-reply")
+    prepared, storage, logs = await _run_pre_reply(
+        tmp_path,
+        monkeypatch,
+        bob_model,
+        stored_run,
+        "sess-shared-pre-reply",
+        xml_calls,
+    )
+    assert (prepared.compaction_reply_outcome, len(xml_calls.inputs), bob_model.requests) == ("success", 1, [])
+    assert any(entry.get("fork_skip_reason") == "routing_key_mismatch" for entry in logs)
+    assert (
+        summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-shared-pre-reply")[-1].summary == "xml-for-bob-pre-reply"
+    )
+
+
+@pytest.mark.asyncio
 async def test_live_compact_scope_now_warm_hit_and_cold_or_drifted_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1012,20 +1085,24 @@ async def test_live_compact_scope_now_skips_fork_for_different_requester_routing
     sess = storage.load_session("sess-shared")
     assert sess is not None
     set_force_compaction(storage, session=sess, forced=True)
-    remember_fork_frame(
-        (storage.path, TEST_AGENT_SCOPE.key, "sess-shared"),
-        template,
-        _SYS,
-        routing_key=cache_routing_key(alice_model.model_params),
-    )
+    remember_fork_frame((storage.path, TEST_AGENT_SCOPE.key, "sess-shared"), template, _SYS)
 
     # Bob triggers /compact with a different requester-derived (prompt_cache_key, session_id) -> falls back to XML.
     xml_calls = SummaryCalls(summary="xml-for-bob")
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
     _install_default(monkeypatch, bob_model)
     ctx = _scope_ctx(storage, "sess-shared", config, paths)
-    empty = await compact_scope_now(ctx, inputs, lambda: bob_model, RecordingCompactionLifecycle(), config, paths)
+    with capture_logs() as logs:
+        empty = await compact_scope_now(
+            ctx,
+            inputs,
+            lambda: bob_model,
+            RecordingCompactionLifecycle(),
+            config,
+            paths,
+        )
     assert (empty, len(xml_calls.inputs), bob_model.requests) == (False, 1, [])
+    assert any(entry.get("fork_skip_reason") == "routing_key_mismatch" for entry in logs)
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-shared")[-1].summary == "xml-for-bob"
 
 
@@ -1037,12 +1114,13 @@ def _probe_tool() -> str:
 async def _run_mid_turn(
     mp: pytest.MonkeyPatch,
     env: tuple[Any, Any, Any],
-    model: ScriptedModel,
+    model: ModelProvider,
     sid: str,
     *,
     scoped: bool,
     xml_calls: SummaryCalls,
     tools: list[Any] | None = None,
+    media: MediaInputs | None = None,
 ) -> RunRecord:
     config, paths, store = env
     storage = store if scoped else None
@@ -1091,7 +1169,12 @@ async def _run_mid_turn(
     )
     toolkit = AdaptedToolkit(name="probes", functions=funcs, instructions=None)
     spec = AgentSpec(id="test_agent", name="test_agent", model=model, system_messages=_SYS, toolkits=(toolkit,))
-    req = build_request(summary=session.summary if scoped else None, history=history, turn=turn, media=MediaInputs())
+    req = build_request(
+        summary=session.summary if scoped else None,
+        history=history,
+        turn=turn,
+        media=media or MediaInputs(),
+    )
     persist = persist_to(storage, session) if storage else None
     events = run_agent(
         spec,
@@ -1176,6 +1259,39 @@ async def test_mid_turn_scoped_and_run_local_fork_compaction(tmp_path: Path, mon
         is_compaction_summary(m) and "Run-local forked summary" in str(m.content)
         for m in local_model.requests[2].messages
     )
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_fork_with_inline_media_does_not_retry_media_dropped_on_context_window_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _fork_config(tmp_path, reserve_tokens=500, replay_window_tokens=6_000)
+    storage = env[2]
+    xml_calls = SummaryCalls(summary="xml-after-media-cwe")
+    inner = ScriptedModel(
+        [
+            [*calls(tool_call("_probe_tool", "c1"), metrics=usage(5_200, 20))],
+            [_raise_step(ContextWindowExceeded("prompt too long", provider="Synthetic", status_code=400))],
+            answer("Finished after XML fallback", metrics=usage(400, 10)),
+        ],
+    )
+    active = pipeline_provider(inner)
+    chart = Image(id="att_chart", content=b"PNG-chart-bytes", mime_type="image/png")
+    record = await _run_mid_turn(
+        monkeypatch,
+        env,
+        active,
+        "sess-mid-media-cwe",
+        scoped=True,
+        xml_calls=xml_calls,
+        media=MediaInputs(images=[chart]),
+    )
+    fork_requests = [req for req in inner.requests if req.overrides.caller_retries]
+    assert len(fork_requests) == 1
+    assert any(message.images for message in fork_requests[0].messages)
+    assert (len(inner.requests), len(xml_calls.inputs), record.content) == (3, 1, "Finished after XML fallback")
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-mid-media-cwe")[-1].summary == "xml-after-media-cwe"
 
 
 @pytest.mark.asyncio

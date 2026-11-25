@@ -48,7 +48,12 @@ from mindroom.llm.messages import (
     usage_sums_attempts,
 )
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -536,12 +541,7 @@ async def _stream_turn(
                 elif isinstance(event, TurnCompleted):
                     turn = event
         turn = _validate_completed_turn(turn, provider=identity.provider)
-        answered = turn.message.provider_data or {}
-        if not answered.get(REWRITTEN_ATTEMPT_KEY) and REQUEST_IDENTITY_KEY not in answered:
-            # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
-            request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
-            if request_identity is not None:
-                turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
+        await _stamp_turn_identity(model, request, turn)
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True
@@ -555,6 +555,22 @@ async def _stream_turn(
                 usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
             )
             _keep_cut_off(messages, metrics, identity, billed, "".join(shown), sums_attempts=sums_attempts)
+
+
+async def _stamp_turn_identity(model: ModelProvider, request: ModelRequest, turn: TurnCompleted) -> None:
+    answered = turn.message.provider_data or {}
+    if answered.get(REWRITTEN_ATTEMPT_KEY):
+        return
+    updated = answered
+    if REQUEST_IDENTITY_KEY not in updated:
+        # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
+        request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
+        if request_identity is not None:
+            updated = {**updated, REQUEST_IDENTITY_KEY: request_identity}
+    if CACHE_ROUTING_KEY not in updated and (routing := cache_routing_digest(model.model_params)) is not None:
+        updated = {**updated, CACHE_ROUTING_KEY: routing}
+    if updated is not answered:
+        turn.message.provider_data = updated
 
 
 def _validate_completed_turn(turn: TurnCompleted | None, *, provider: str) -> TurnCompleted:

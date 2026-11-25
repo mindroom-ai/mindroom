@@ -46,7 +46,6 @@ from mindroom.history.summary_call import is_summary_timeout
 from mindroom.history.summary_fork import (
     ScopeForkSource,
     SummaryFork,
-    cache_routing_key,
     lookup_fork_frame,
     remember_fork_frame,
 )
@@ -97,7 +96,6 @@ def _remember_scope_frame(
     scope_context: ScopeSessionContext | None,
     frame: RequestFrame,
     native_history: NativeHistory | None,
-    model: ModelProvider,
 ) -> None:
     if scope_context is None:
         return
@@ -107,7 +105,6 @@ def _remember_scope_frame(
         (scope_context.storage.path, scope_context.scope.key, session_id),
         with_native_history(frame.template, fork_native),
         frame.system_messages,
-        routing_key=cache_routing_key(model.model_params),
     )
 
 
@@ -252,7 +249,7 @@ async def prepare_scope_history(
     )
     if scope_context is None or scope_context.session is None:
         native_history = configure_native(session=None, runs=())
-        _remember_scope_frame(scope_context, frame, native_history, model)
+        _remember_scope_frame(scope_context, frame, native_history)
         return PreparedScopeHistory(
             session=None,
             resolved_inputs=resolved_inputs,
@@ -275,7 +272,7 @@ async def prepare_scope_history(
     native_history = configure_native(session=session, runs=visible_runs)
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
-    _remember_scope_frame(scope_context, frame, native_history, model)
+    _remember_scope_frame(scope_context, frame, native_history)
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     history = prompt_visible_history(session, resolved_inputs.history_settings)
     request = partial(frame.request, summary=session.summary, history=history)
@@ -415,10 +412,7 @@ async def compact_scope_now(
         model=model,
     )
     plan = inputs.execution_plan
-    frame = lookup_fork_frame(
-        (context.storage.path, context.scope.key, session.session_id),
-        routing_key=cache_routing_key(model.model_params),
-    )
+    frame = lookup_fork_frame((context.storage.path, context.scope.key, session.session_id))
     scope_fork_source = (
         _scope_fork_source(request_sizer(model, config, plan.compaction_model_name), frame[0], frame[1], plan)
         if frame is not None

@@ -29,7 +29,7 @@ from mindroom.history.runtime import (
     summarize_run_locally,
 )
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
-from mindroom.history.summary_fork import SummaryFork, cache_routing_key, holds_fold_basis, remember_fork_frame
+from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
     compaction_summary_message,
     compaction_summary_text,
@@ -220,7 +220,6 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             (store.path, owner_scope(session).key, session.session_id),
             live_request,
             messages[:leading],
-            routing_key=cache_routing_key(compaction.model.model_params),
         )
     if compaction.stopped:
         return
