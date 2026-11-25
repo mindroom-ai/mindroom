@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     name="todo",
     file_access=ToolFileAccess.NONE,
     display_name="Todo",
-    description="Track tasks, progress, and dependencies in a conversation thread",
+    description="Manage a visible per-thread task plan with priorities, dependencies, and reusable templates",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
