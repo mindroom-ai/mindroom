@@ -363,7 +363,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
         plugins=config_plugins(config, runtime_paths),
     )
 
-    assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
+    assert [middleware.__name__ for middleware in build.tool_policy] == ["middleware"]
     carried = {
         function.name: [middleware.__name__ for middleware in function.middleware]
         for toolkit in build.spec.toolkits
