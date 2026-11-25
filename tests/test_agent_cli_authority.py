@@ -206,7 +206,7 @@ async def test_a_reload_adding_approval_rules_checks_only_the_called_tool_before
 ) -> None:
     runtime = _runtime_context(tmp_path)
     current = runtime.config.model_copy(deep=True)
-    current.tool_approval.rules = [ApprovalRuleConfig(match=rule_match, script="approval_mind_anita_only.py")]
+    current.tool_approval.rules = [ApprovalRuleConfig(match=rule_match, script="approval_other_agent_only.py")]
     runtime = replace(
         runtime,
         orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),

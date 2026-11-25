@@ -1030,7 +1030,7 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         lambda config: setattr(
             config.tool_approval,
             "rules",
-            [ApprovalRuleConfig(match="act*", script="approval_mind_anita_only.py")],
+            [ApprovalRuleConfig(match="act*", script="approval_other_agent_only.py")],
         ),
         False,
     ),
@@ -1048,8 +1048,8 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
             config.tool_approval,
             "rules",
             [
-                ApprovalRuleConfig(match="google_drive_upload_file", script="approval_mind_anita_only.py"),
-                ApprovalRuleConfig(match="create_sheet", script="approval_mind_anita_only.py"),
+                ApprovalRuleConfig(match="google_drive_upload_file", script="approval_other_agent_only.py"),
+                ApprovalRuleConfig(match="create_sheet", script="approval_other_agent_only.py"),
             ],
         ),
         True,
