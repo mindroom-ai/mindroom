@@ -485,7 +485,7 @@ def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path
     assert is_transient_context(fork_req.messages[-1].content)
     assert "CUSTOM PROMPT" in prompt_text
     assert "<mindroom_transient_context>" in prompt_text
-    assert "Do NOT copy system-prompt rules" in prompt_text
+    assert "Do NOT copy or project standing system-prompt rules" in prompt_text
 
 
 def test_prepare_fork_request_gates() -> None:
