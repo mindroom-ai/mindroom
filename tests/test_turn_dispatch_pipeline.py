@@ -2463,7 +2463,7 @@ class TestAgentBot(AgentBotTestBase):
         sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
         assert [content.get("m.new_content", content)["body"] for content in sent] == [
             "Thinking...",
-            "[calculator] ⚠️ Error: Failed to download image",
+            "⚠️ Failed to download image",
         ]
         answered = await unwrap_extracted_collaborator(bot._turn_store).get_turn_record("$img_event_fail")
         assert answered is not None
@@ -2495,8 +2495,20 @@ class TestAgentBot(AgentBotTestBase):
         bot._delivery_gateway.send_text.assert_awaited_once_with(
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                response_text="[calculator] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                response_text="⚠️ boom",
+                extra_content={
+                    STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+                    "io.mindroom.ai_run": {
+                        "version": 1,
+                        "status": "error",
+                        "error": {
+                            "kind": "runtime_error",
+                            "title": "Reply failed",
+                            "summary": "boom",
+                            "retryable": False,
+                        },
+                    },
+                },
             ),
         )
         await assert_turn_answered(bot, TurnRecord.create(["$event"], response_event_id="$error"))
@@ -2554,8 +2566,20 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._delivery_gateway.send_text.await_args.args == (
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                response_text="[team_bot] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                response_text="⚠️ boom",
+                extra_content={
+                    STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+                    "io.mindroom.ai_run": {
+                        "version": 1,
+                        "status": "error",
+                        "error": {
+                            "kind": "runtime_error",
+                            "title": "Reply failed",
+                            "summary": "boom",
+                            "retryable": False,
+                        },
+                    },
+                },
             ),
         )
 
@@ -2618,7 +2642,7 @@ class TestAgentBot(AgentBotTestBase):
         sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
         assert [content.get("m.new_content", content)["body"] for content in sent] == [
             "Thinking...",
-            "[calculator] ⚠️ Error: setup failed",
+            "⚠️ setup failed",
         ]
         # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)

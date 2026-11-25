@@ -47,6 +47,7 @@ from mindroom.constants import (
 )
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.state import DelegationState
+from mindroom.error_handling import describe_reply_error, model_error_labels
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.run_checkpoint import recover_stopped_run
@@ -776,6 +777,8 @@ class HandledAttempt:
     reply: FailedReply
     # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
     build_run_metadata: Callable[[], dict[str, Any]] | None = None
+    # Structured ``io.mindroom.ai_run["error"]`` payload when no run-record metadata builder carries it.
+    error_info: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -909,7 +912,11 @@ def _persist_interrupted(
         logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
 
 
-def publish_error_run_metadata(sinks: TurnSinks) -> None:
+def publish_error_run_metadata(
+    sinks: TurnSinks,
+    *,
+    error_info: Mapping[str, Any] | None = None,
+) -> None:
     """Publish terminal error ``io.mindroom.ai_run`` metadata when a handled failure has no run record.
 
     A run the turn already published, such as one whose cleanup then failed, keeps what it published under the error
@@ -919,8 +926,15 @@ def publish_error_run_metadata(sinks: TurnSinks) -> None:
     if collector is None:
         return
     model = sinks.active_model() if sinks.active_model is not None else None
-    error = build_terminal_note_ai_run_metadata_content("error", model=model)[AI_RUN_METADATA_KEY]
-    collector[AI_RUN_METADATA_KEY] = {**error, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
+    terminal = build_terminal_note_ai_run_metadata_content(
+        "error",
+        model=model,
+        error_info=error_info,
+    )[AI_RUN_METADATA_KEY]
+    merged = {**terminal, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
+    if error_info is not None:
+        merged["error"] = dict(error_info)
+    collector[AI_RUN_METADATA_KEY] = merged
 
 
 async def _settle_failure(
@@ -934,7 +948,16 @@ async def _settle_failure(
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
     if failure.build_run_metadata is None:
-        publish_error_run_metadata(sinks)
+        error_info = failure.error_info
+        if error_info is None:
+            model = sinks.active_model() if sinks.active_model is not None else None
+            model_label, provider = model_error_labels(model)
+            error_info = describe_reply_error(
+                failure.reply.error,
+                model_label=model_label,
+                provider=provider,
+            ).to_wire()
+        publish_error_run_metadata(sinks, error_info=error_info)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)

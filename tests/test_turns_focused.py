@@ -7162,7 +7162,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
 
     assert harness.runner.requests == []
     assert len(harness.gateway.sent) == 1
-    assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "[general] ⚠️ Error: attachment lookup failed")]
+    assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "⚠️ attachment lookup failed")]
     assert await harness.turn_store.is_handled(_ROOM_ID, selection.question_event_id) is True
     assert await harness.turn_store.is_handled(_ROOM_ID, "$selection:localhost") is True
 

@@ -1630,7 +1630,12 @@ class TestUserIdPassthrough:
             runtime_paths,
         )
 
-        assert response.text == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
+        assert response.text == get_user_friendly_error_message(
+            error,
+            "general",
+            runtime_paths=runtime_paths,
+            include_agent_prefix=False,
+        )
         [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         assert stored.metadata["mindroom_original_status"] == "error"
@@ -1721,8 +1726,8 @@ class TestUserIdPassthrough:
         )
 
         assert response.text == (
-            "[general] ⚠️ This model's safeguards blocked the request. "
-            "Choose a different model (`/model list`) or revise the prompt, then try again."
+            "⚠️ Blocked by model safeguards — scripted-model's safeguards blocked this request. "
+            "Choose another model (/model list) or revise the prompt."
         )
         assert len(model.requests) == 1
 

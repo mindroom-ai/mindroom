@@ -1604,7 +1604,7 @@ def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
         if "content" in delta
     ]
     assert contents[0] == "Checking..."
-    assert contents[-1] == "\n\n[general] ⚠️ Error: Connection reset by peer"
+    assert contents[-1] == "\n\n⚠️ Connection reset by peer"
 
 
 @dataclass

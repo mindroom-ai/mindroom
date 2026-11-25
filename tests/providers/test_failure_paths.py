@@ -28,7 +28,7 @@ from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import run_agent
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error, get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
@@ -78,13 +78,29 @@ _PNG = base64.b64decode(
 )
 _PARTIAL = "partial"
 
-RATE_LIMITED = "⏱️ Rate limited."
-UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries."
-ERROR = "⚠️ Error: "
+RATE_LIMITED = "⏱️ Rate limit reached — "
+UNAVAILABLE = "unavailable"
+ERROR = "⚠️ "
 AUTHENTICATION = "❌ Authentication failed"
-CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."
-OVER_TOKENS_PER_MINUTE = "⚠️ This request is larger than the account's tokens-per-minute limit."
-QUOTA_EXHAUSTED_REPLY = "💳 The AI budget for this MindRoom is used up"
+CONTEXT_WINDOW = "⚠️ Context window full — "
+OVER_TOKENS_PER_MINUTE = "⚠️ Request too large for rate limit — "
+QUOTA_EXHAUSTED_REPLY = "💳 Account quota reached — "
+
+
+def _assert_friendly_error(error: ProviderError, expected: str) -> None:
+    message = get_user_friendly_error_message(error)
+    info = describe_reply_error(error)
+    if expected == UNAVAILABLE:
+        if error.code == STREAM_STALLED:
+            assert info.kind == "stream_stalled"
+            assert message.startswith("⚠️ The model stopped responding — ")
+            assert "sent no data for" in message
+        else:
+            assert info.kind == "provider_unavailable"
+            assert message.startswith(f"⚠️ {info.provider} unavailable")
+            assert message.endswith("The model could not complete the reply after automatic retries.")
+        return
+    assert message.startswith(expected)
 
 
 @pytest.fixture(autouse=True)
@@ -1527,7 +1543,7 @@ async def test_a_failed_request_is_retried_and_reported_as_its_row_says(row: Row
         await complete(provider, request)
 
     assert (type(raised.value), len(sent)) == (row.error, row.requests)
-    assert get_user_friendly_error_message(raised.value).startswith(row.message)
+    _assert_friendly_error(raised.value, row.message)
     if row.code is not None:
         assert raised.value.code == row.code
 
@@ -1901,7 +1917,7 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
         await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
     assert (type(raised.value), len(attempts)) == (error, refreshes)
-    assert get_user_friendly_error_message(raised.value).startswith(message)
+    _assert_friendly_error(raised.value, message)
     status = refresh_reply.status_code if isinstance(refresh_reply, httpx.Response) else None
     assert raised.value.status_code == status
 

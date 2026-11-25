@@ -542,7 +542,7 @@ async def test_session_started_fires_for_the_record_of_a_failed_first_turn(
     ):
         await coordinator.generate_response(_thread_request())
 
-    assert sequence == [f"started:{THREAD_SESSION_ID}", "answered:[general] ⚠️ Error: model down"]
+    assert sequence == [f"started:{THREAD_SESSION_ID}", "answered:⚠️ model down"]
     assert _persisted_run(storage).messages[-1].content == "(turn failed before completion)"
 
 

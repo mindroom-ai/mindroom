@@ -246,7 +246,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
-    assert f"Error: {reason}. " in message
+    assert f"⚠️ {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
     assert ("Start a new subagent without minimal." if delegation_depth else "/mode helper standard") in message
     assert raised.value.__cause__ is failure

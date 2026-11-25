@@ -8,13 +8,14 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom import interactive
+from mindroom.ai_run_metadata import build_terminal_note_ai_run_metadata_content
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.coalescing.batch import PendingEvent, requester_coalescing_key
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_SOURCE_KIND
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error, get_user_friendly_error_message
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayloadWithAttachmentsRequest
 from mindroom.matrix.member_display_names import room_member_display_names
@@ -451,10 +452,12 @@ class InteractiveSelections:
         and own the notice until it is delivered. Otherwise nothing durable owns
         the notice, so it is sent directly and the turn records it as its answer.
         """
+        error_info = describe_reply_error(error, runtime_paths=self.deps.runtime_paths).to_wire()
         error_text = get_user_friendly_error_message(
             error,
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
+            include_agent_prefix=False,
         )
         if await self.deps.delivery_gateway.fail_reply_dispatch(existing_event_id, error_text):
             return existing_event_id
@@ -462,7 +465,10 @@ class InteractiveSelections:
             SendTextRequest(
                 target=target,
                 response_text=error_text,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                extra_content={
+                    STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+                    **build_terminal_note_ai_run_metadata_content("error", error_info=error_info),
+                },
             ),
         )
         if response_event_id is not None:

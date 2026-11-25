@@ -114,7 +114,7 @@ _REQUESTER = "@user:localhost"
 _ECHO_TOOL = "reply_endings_echo"
 _MEMBERS = ("writer", "checker")
 _CANCEL_NOTE = "**[Response cancelled by user]**"
-_MODEL_ERROR = "[general] ⚠️ Error: model exploded"
+_MODEL_ERROR = "⚠️ model exploded"
 # What a stored run of this turn holds as its user message: the model prompt, and the bare message tag.
 _MODEL_PROMPT = f'Current message:\n<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
 _BARE_PROMPT = f'<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
@@ -1735,7 +1735,7 @@ async def test_an_unexpected_agent_turn_error_answers_with_redacted_friendly_tex
 
     await turn.runner.generate_response(_plain_request(_target()))
 
-    shown = "[general] ⚠️ Error: attempt setup broke with api_key=***redacted***"
+    shown = "⚠️ attempt setup broke with api_key=***redacted***"
     assert all(secret not in body for body in turn.homeserver.bodies)
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.COMPLETED

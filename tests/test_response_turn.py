@@ -1256,7 +1256,18 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
 
     assert attempts == 2
     assert chunks == [_FRIENDLY_ERROR]
-    assert collector == {"io.mindroom.ai_run": {"version": 1, "status": "error"}}
+    assert collector == {
+        "io.mindroom.ai_run": {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "friendly error",
+                "retryable": False,
+            },
+        },
+    }
 
 
 def test_superseded_continuation_metadata_stays_out_of_collector() -> None:

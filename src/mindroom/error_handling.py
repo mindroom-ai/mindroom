@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
+    STREAM_STALLED,
     TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -18,22 +21,83 @@ from mindroom.llm.errors import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.origins import configured_public_url
+from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.runtime_context import current_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
-_PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
-_RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
-# The provider's own text names its billing pages, which the person in the room may not be able to open.
-_QUOTA_EXHAUSTED_MESSAGE = (
-    "💳 The AI budget for this MindRoom is used up or its plan has expired{provider_hint}, so I can't answer right now. "
-    "Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), "
-    "then try again."
-)
+_STALL_DURATION_RE = re.compile(r"\bfor\s+(\d+(?:\.\d+)?)s\b")
+
+type ReplyErrorKind = Literal[
+    "safeguard_refusal",
+    "missing_api_key",
+    "quota_exhausted",
+    "authentication_failed",
+    "tokens_per_minute",
+    "context_window",
+    "rate_limited",
+    "stream_stalled",
+    "provider_unavailable",
+    "timeout",
+    "runtime_error",
+]
+type ReplyErrorAction = Literal["continue", "retry", "compact"]
+
+_PLAIN_TEXT_ICONS: dict[ReplyErrorKind, str] = {
+    "quota_exhausted": "💳",
+    "rate_limited": "⏱️",
+    "timeout": "⏰",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyErrorInfo:
+    """Structured classification of a reply failure for ``io.mindroom.ai_run.error`` and plain-text fallback."""
+
+    kind: ReplyErrorKind
+    title: str
+    summary: str
+    detail: str | None = None
+    code: str | None = None
+    status_code: int | None = None
+    provider: str | None = None
+    retryable: bool = False
+    action: ReplyErrorAction | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the wire object published at ``io.mindroom.ai_run["error"]``."""
+        optional = (
+            ("detail", self.detail),
+            ("code", self.code),
+            ("status_code", self.status_code),
+            ("provider", self.provider),
+            ("action", self.action),
+        )
+        return {
+            "kind": self.kind,
+            "title": self.title,
+            "summary": self.summary,
+            "retryable": self.retryable,
+            **{key: value for key, value in optional if value is not None and value != ""},
+        }
+
+    @property
+    def plain_text(self) -> str:
+        """Return the plain-text fallback shown in Matrix clients that do not render structured error cards."""
+        if self.kind == "missing_api_key":
+            return f"🔑 {self.summary}"
+        if self.kind == "authentication_failed":
+            return f"❌ {self.title}: {self.summary}"
+        if self.kind == "runtime_error":
+            return f"⚠️ {self.summary}"
+        icon = _PLAIN_TEXT_ICONS.get(self.kind, "⚠️")
+        return f"{icon} {self.title} — {self.summary}"
 
 
 class AvatarGenerationError(RuntimeError):
@@ -55,19 +119,182 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
     return f"{reason.rstrip('.')}. Return to standard mode with `/mode {agent_name} standard`."
 
 
+def model_error_labels(model: Mapping[str, str] | None) -> tuple[str | None, str | None]:
+    """Return ``(model_label, provider)`` from a published ``io.mindroom.ai_run["model"]`` payload."""
+    if not model:
+        return None, None
+    return model.get("display_name") or model.get("id") or None, model.get("provider") or None
+
+
+def _display_provider_name(provider: str | None) -> str | None:
+    if not provider or not provider.strip():
+        return None
+    stripped = provider.strip()
+    return ROUTE_PROVIDERS.get(provider_route(stripped), stripped)
+
+
+def _stall_duration_label(safe_error: str) -> str | None:
+    match = _STALL_DURATION_RE.search(safe_error)
+    if match is None:
+        return None
+    seconds = float(match.group(1))
+    if seconds <= 0:
+        return None
+    if seconds >= 60:
+        minutes, rem = divmod(round(seconds), 60)
+        return f"{minutes} min" if rem == 0 else f"{minutes} min {rem}s"
+    return f"{seconds:g}s"
+
+
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error: str) -> str:
     identity = current_execution_identity()
     if runtime_paths is not None and identity is not None and identity.channel == "headless":
         # A headless run has no dashboard: its keys come from the process environment or the storage's `.env`.
         return (
-            f"🔑 No AI provider key is set up yet, so I can't reply. {safe_error.rstrip('.')}. "
+            f"No AI provider key is set up yet, so I can't reply. {safe_error.rstrip('.')}. "
             f"A `.env` file at {runtime_paths.env_path} works too."
         )
     dashboard_url = configured_public_url(runtime_paths) if runtime_paths else None
     dashboard = f"the MindRoom dashboard ({dashboard_url})" if dashboard_url else "the MindRoom dashboard"
     return (
-        "🔑 No AI provider key is set up yet, so I can't reply. "
+        "No AI provider key is set up yet, so I can't reply. "
         f"Open {dashboard}, choose **Connect your AI provider**, paste your key, then send your message again."
+    )
+
+
+def _classify_provider_error(  # noqa: PLR0911 - one return per provider error kind
+    error: ProviderError,
+    *,
+    safe_error: str,
+    resolved_model: str | None,
+    resolved_provider: str | None,
+) -> tuple[ReplyErrorKind, str, str, bool, ReplyErrorAction | None]:
+    model_text = resolved_model or "The model"
+    model_inline = resolved_model or "the model"
+    provider_text = resolved_provider or "The model provider"
+    provider_inline = resolved_provider or "the model provider"
+
+    if error.code == QUOTA_EXHAUSTED:
+        return (
+            "quota_exhausted",
+            "Account quota reached",
+            f"{provider_text} rejected this request because the account's quota or credits are exhausted.",
+            False,
+            None,
+        )
+    if isinstance(error, AuthenticationFailed):
+        title = f"Authentication failed ({resolved_provider})" if resolved_provider else "Authentication failed"
+        return ("authentication_failed", title, safe_error, False, None)
+    if isinstance(error, ContextWindowExceeded) and error.code == TOKENS_PER_MINUTE:
+        return (
+            "tokens_per_minute",
+            "Request too large for rate limit",
+            "This request exceeded the account's tokens-per-minute limit. Compact the thread or start a new one.",
+            False,
+            "compact",
+        )
+    if isinstance(error, ContextWindowExceeded):
+        return (
+            "context_window",
+            "Context window full",
+            f"This conversation exceeded {model_inline}'s context window. Compact the thread or start a new one.",
+            False,
+            "compact",
+        )
+    if isinstance(error, RateLimited):
+        return (
+            "rate_limited",
+            "Rate limit reached",
+            f"{model_text} hit {provider_inline}'s rate limit after automatic retries.",
+            True,
+            "retry",
+        )
+    if isinstance(error, ProviderUnavailable) and error.code == STREAM_STALLED:
+        duration = _stall_duration_label(safe_error)
+        summary = (
+            f"{provider_text} sent no data for {duration} (retried once automatically)."
+            if duration
+            else f"{provider_text} stopped sending data after automatic retry."
+        )
+        return ("stream_stalled", f"{model_text} stopped responding", summary, True, "continue")
+    if isinstance(error, ProviderUnavailable):
+        status = error.status_code
+        status_hint = f" ({status})" if status is not None and 500 <= status < 600 else ""
+        return (
+            "provider_unavailable",
+            f"{provider_text} unavailable{status_hint}",
+            f"{model_text} could not complete the reply after automatic retries.",
+            True,
+            "continue",
+        )
+    return ("runtime_error", "Reply failed", safe_error, False, None)
+
+
+def describe_reply_error(
+    error: Exception,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    model_label: str | None = None,
+    provider: str | None = None,
+) -> ReplyErrorInfo:
+    """Classify ``error`` into structured wire metadata and clean plain-text copy.
+
+    An error's type alone decides its classification: a provider error was classified from the provider's status and
+    wording where its adapter raised it, and any other error shows its own text, except that a timeout says so.
+    """
+    safe_error = redact_sensitive_text(failure_text(error))
+    provider_error = error if isinstance(error, ProviderError) else None
+    resolved_model = model_label.strip() if model_label and model_label.strip() else None
+    model_text = resolved_model or "The model"
+    raw_provider = (provider_error.provider or provider) if provider_error is not None else None
+    resolved_provider = _display_provider_name(raw_provider)
+    status_code = provider_error.status_code if provider_error is not None else None
+    code = provider_error.code if provider_error is not None else None
+
+    retryable = False
+    action: ReplyErrorAction | None = None
+    if isinstance(error, ModelSafeguardRefusal):
+        reason_hint = f" ({error.provider_code})" if error.provider_code else ""
+        kind: ReplyErrorKind = "safeguard_refusal"
+        title = "Blocked by model safeguards"
+        summary = (
+            f"{model_text}'s safeguards blocked this request{reason_hint}. "
+            "Choose another model (/model list) or revise the prompt."
+        )
+        code = error.provider_code
+    elif needs_provider_key(error):
+        kind = "missing_api_key"
+        title = "No AI provider key configured"
+        summary = _missing_provider_key_message(runtime_paths, safe_error)
+        code = MISSING_API_KEY
+    elif provider_error is not None:
+        kind, title, summary, retryable, action = _classify_provider_error(
+            provider_error,
+            safe_error=safe_error,
+            resolved_model=resolved_model,
+            resolved_provider=resolved_provider,
+        )
+    elif isinstance(error, TimeoutError):
+        kind = "timeout"
+        title = "Request timed out"
+        summary = f"{model_text} timed out waiting for a response. Try again shortly."
+        retryable = True
+        action = "retry"
+    else:
+        kind = "runtime_error"
+        title = "Reply failed"
+        summary = safe_error
+
+    return ReplyErrorInfo(
+        kind=kind,
+        title=title,
+        summary=summary,
+        detail=None if not safe_error or safe_error == summary else safe_error,
+        code=code,
+        status_code=status_code,
+        provider=resolved_provider,
+        retryable=retryable,
+        action=action,
     )
 
 
@@ -76,15 +303,16 @@ def get_user_friendly_error_message(
     agent_name: str | None = None,
     *,
     runtime_paths: RuntimePaths | None = None,
+    model_label: str | None = None,
+    provider: str | None = None,
+    include_agent_prefix: bool | None = None,
 ) -> str:
-    """Return the reply that reports ``error``, prefixed with ``[agent_name]`` when one is given.
+    """Return the reply that reports ``error``, optionally prefixed with ``[agent_name]``.
 
-    An error's type alone decides its message: a provider error was classified from the provider's status and wording
-    where its adapter raised it, and any other error shows its own text, except that a timeout says so.
     ``runtime_paths`` points a missing-key reply at the dashboard URL, or in a headless run at its `.env` file.
+    Pass ``include_agent_prefix=False`` when the Matrix sender is already the agent itself, while still passing
+    ``agent_name`` for structured error logging.
     """
-    safe_error = redact_sensitive_text(failure_text(error))
-    agent_prefix = f"[{agent_name}] " if agent_name else ""
     provider_error = error if isinstance(error, ProviderError) else None
 
     logger.error(
@@ -97,19 +325,14 @@ def get_user_friendly_error_message(
         provider=provider_error.provider if provider_error else None,
     )
 
-    if isinstance(error, ModelSafeguardRefusal):
-        reason_hint = f" ({error.provider_code})" if error.provider_code else ""
-        return (
-            f"{agent_prefix}⚠️ This model's safeguards blocked the request{reason_hint}. "
-            "Choose a different model (`/model list`) or revise the prompt, then try again."
-        )
-    if needs_provider_key(error):
-        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths, safe_error)}"
-    if isinstance(error, ProviderError):
-        return f"{agent_prefix}{_provider_error_message(error, safe_error)}"
-    if isinstance(error, TimeoutError):
-        return f"{agent_prefix}⏰ Request timed out. Please try again."
-    return f"{agent_prefix}⚠️ Error: {safe_error}"
+    info = describe_reply_error(
+        error,
+        runtime_paths=runtime_paths,
+        model_label=model_label,
+        provider=provider,
+    )
+    use_prefix = bool(agent_name) if include_agent_prefix is None else (include_agent_prefix and bool(agent_name))
+    return f"[{agent_name}] {info.plain_text}" if use_prefix else info.plain_text
 
 
 def needs_provider_key(error: Exception) -> bool:
@@ -119,26 +342,3 @@ def needs_provider_key(error: Exception) -> bool:
     typed missing-key error an adapter raises at its boundary means it.
     """
     return isinstance(error, AuthenticationFailed) and error.code == MISSING_API_KEY
-
-
-def _provider_error_message(error: ProviderError, safe_error: str) -> str:  # noqa: PLR0911 - one return per kind
-    provider_hint = f" ({error.provider})" if error.provider else ""
-    if error.code == QUOTA_EXHAUSTED:
-        return _QUOTA_EXHAUSTED_MESSAGE.format(provider_hint=provider_hint)
-    if isinstance(error, AuthenticationFailed):
-        return f"❌ Authentication failed{provider_hint}: {safe_error}"
-    if isinstance(error, ContextWindowExceeded) and error.code == TOKENS_PER_MINUTE:
-        return (
-            "⚠️ This request is larger than the account's tokens-per-minute limit. "
-            "Start a new thread or compact the conversation, then try again."
-        )
-    if isinstance(error, ContextWindowExceeded):
-        return (
-            "⚠️ The conversation no longer fits the model's context window. "
-            "Start a new thread or compact the conversation, then try again."
-        )
-    if isinstance(error, RateLimited):
-        return _RATE_LIMITED
-    if isinstance(error, ProviderUnavailable):
-        return _PROVIDER_UNAVAILABLE
-    return f"⚠️ Error: {safe_error}"

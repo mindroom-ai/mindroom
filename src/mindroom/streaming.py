@@ -28,6 +28,7 @@ from mindroom.constants import (
     SUPPRESS_PUSH_KEY,
     runtime_matrix_homeserver,
 )
+from mindroom.error_handling import describe_reply_error, model_error_labels
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
 from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs, utf16_length
@@ -239,9 +240,13 @@ def clean_partial_reply_text(text: str) -> str:
     """Strip partial-reply status notes from persisted text."""
     cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
-    for marker in _PARTIAL_REPLY_NOTES:
-        if cleaned.endswith(marker):
-            cleaned = cleaned[: -len(marker)].rstrip()
+    while True:
+        for marker in _PARTIAL_REPLY_NOTES:
+            if cleaned.endswith(marker):
+                cleaned = cleaned[: -len(marker)].rstrip()
+                break
+        else:
+            break
 
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
@@ -256,6 +261,8 @@ def build_restart_interrupted_body(text: str, note: str = RESTART_INTERRUPTED_RE
     stripped_text = text.rstrip()
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
         return note
+    if stripped_text.endswith(note):
+        return stripped_text
     return f"{stripped_text}\n\n{note}"
 
 
@@ -715,8 +722,12 @@ class StreamingResponse:
     _has_hidden_tool_calls: bool = field(default=False, init=False, repr=False)
     # Whether the next text starts a paragraph of its own, as text after a tool call does, shown or hidden.
     _separate_next_text: bool = field(default=False, init=False, repr=False)
-    # Set when the stream yields a handled FailedReply, so final ai_run reports status="error" even without run metrics.
-    _saw_failed_reply: bool = field(default=False, init=False, repr=False)
+    # Set when the stream yields a handled FailedReply, so final ai_run reports status="error" and error details.
+    _failed_reply_error: Exception | None = field(default=None, init=False, repr=False)
+
+    @property
+    def _saw_failed_reply(self) -> bool:
+        return self._failed_reply_error is not None
 
     def __post_init__(self) -> None:
         """Derive Matrix delivery fields from the canonical target."""
@@ -1349,6 +1360,22 @@ class StreamingResponse:
         model = self.active_model()
         return dict(model) if model is not None else None
 
+    def _failed_reply_error_info(
+        self,
+        model: Mapping[str, str] | None,
+        ai_run: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if self._failed_reply_error is None or (ai_run is not None and "error" in ai_run):
+            return None
+        error_model = model if model is not None else (ai_run.get("model") if ai_run is not None else None)
+        model_label, provider = model_error_labels(error_model if isinstance(error_model, Mapping) else None)
+        return describe_reply_error(
+            self._failed_reply_error,
+            runtime_paths=self.runtime_paths,
+            model_label=model_label,
+            provider=provider,
+        ).to_wire()
+
     def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
         """Attach ``io.mindroom.ai_run`` metadata: provisional on a progress write, terminal on the final one.
 
@@ -1369,15 +1396,19 @@ class StreamingResponse:
                 del extra_content[AI_RUN_METADATA_KEY]
             return
         terminal_status: Literal["completed", "error"] = "error" if self._saw_failed_reply else "completed"
+        error_info = self._failed_reply_error_info(model, ai_run)
         if ai_run is None:
             if model is not None or self._saw_failed_reply:
-                extra_content.update(build_terminal_note_ai_run_metadata_content(terminal_status, model=model))
+                extra_content.update(
+                    build_terminal_note_ai_run_metadata_content(terminal_status, model=model, error_info=error_info),
+                )
             return
-        if "status" in ai_run:
-            return
-        if model is not None and "model" not in ai_run:
-            ai_run["model"] = model
-        ai_run["status"] = terminal_status
+        if "status" not in ai_run:
+            if model is not None and "model" not in ai_run:
+                ai_run["model"] = model
+            ai_run["status"] = terminal_status
+        if error_info is not None and ai_run["status"] == "error":
+            ai_run["error"] = error_info
         extra_content[AI_RUN_METADATA_KEY] = ai_run
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
@@ -1918,7 +1949,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     _queue_delivery_request(delivery_queue, progress_hint=True)
                     continue
             elif isinstance(chunk, FailedReply):
-                streaming._saw_failed_reply = True
+                streaming._failed_reply_error = chunk.error
                 text_chunk = chunk.text
             elif isinstance(chunk, RunFinished):
                 if chunk.record.content is not None:
