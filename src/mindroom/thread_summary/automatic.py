@@ -658,7 +658,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
         logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
-async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
+async def maybe_generate_thread_summary(  # noqa: C901, PLR0911, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -679,6 +679,8 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
+        if not retitle and baselines.in_failure_cooldown(room_id, thread_id):
+            return
         projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
         if projected is None:
             return
@@ -763,8 +765,11 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
-            # Record current count to prevent retry storms until next threshold
-            baselines.record(room_id, thread_id, message_count)
+            if state.summary is None:
+                baselines.record_failure_cooldown(room_id, thread_id)
+            else:
+                # Already titled: record current count to wait until the next threshold.
+                baselines.record(room_id, thread_id, message_count)
             return
 
         if generated is None:
