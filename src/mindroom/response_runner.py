@@ -946,8 +946,14 @@ class ResponseRunner:
             turn_id=origin,
         )
         lifecycle = MatrixCompactionLifecycle(self.deps.delivery_gateway, target, origin)
-        with tool_runtime_context(tool_context):
-            empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths)
+        lease_cm = (
+            self.active_runs.track(room, thread)
+            if self.active_runs is not None and contact_room(config, paths, room, self.deps.agent_name) is None
+            else nullcontext()
+        )
+        async with lease_cm:
+            with tool_runtime_context(tool_context):
+                empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths)
         return "Nothing to compact." if empty else None
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
