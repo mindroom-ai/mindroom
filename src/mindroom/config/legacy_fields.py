@@ -328,6 +328,41 @@ RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
+RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
+    "scheduler": {
+        "schedule": "scheduler",
+        "edit_schedule": "scheduler",
+        "list_schedules": "scheduler",
+        "cancel_schedule": "scheduler",
+    },
+    "searxng": {
+        "search_web": "searxng_search",
+        "image_search": "searxng_search",
+        "it_search": "searxng_search",
+        "map_search": "searxng_search",
+        "music_search": "searxng_search",
+        "news_search": "searxng_search",
+        "science_search": "searxng_search",
+        "video_search": "searxng_search",
+    },
+    "memory": {
+        "add_memory": "memory",
+        "search_memories": "memory",
+        "list_memories": "memory",
+        "get_memory": "memory",
+        "update_memory": "memory",
+        "delete_memory": "memory",
+    },
+    "todo": {
+        "plan": "todo",
+        "add_todo": "todo",
+        "list_todos": "todo",
+        "update_todo": "todo",
+        "apply_template": "todo",
+        "list_templates": "todo",
+    },
+}
+
 
 def _effective_approval_decision(
     rule: _ApprovalRule | None,
@@ -391,6 +426,34 @@ def retired_trigger_approval_error(
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
     for old, new in RETIRED_TRIGGER_FUNCTIONS.items():
+        if (
+            error := _retired_approval_pair_error(
+                rules,
+                old=old,
+                new=new,
+                default=default,
+                default_timeout_days=default_timeout_days,
+            )
+        ) is not None:
+            return error
+    return None
+
+
+def retired_consolidated_approval_error(
+    toolkit_name: str,
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+    *,
+    offered_elsewhere: Collection[str] = (),
+) -> str | None:
+    """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+    if renames is None:
+        return None
+    for old, new in renames.items():
+        if old in offered_elsewhere:
+            continue
         if (
             error := _retired_approval_pair_error(
                 rules,

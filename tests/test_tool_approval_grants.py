@@ -1031,6 +1031,72 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
     )
 
 
+@pytest.mark.parametrize(
+    ("toolkit", "old_name", "new_name"),
+    [
+        ("memory", "delete_memory", "memory"),
+        ("memory", "add_memory", "memory"),
+        ("todo", "update_todo", "todo"),
+        ("scheduler", "schedule", "scheduler"),
+        ("searxng", "image_search", "searxng_search"),
+        ("searxng", "search_web", "searxng_search"),
+    ],
+)
+def test_retired_consolidated_approval_rules_fail_closed(
+    tmp_path: Path,
+    toolkit: str,
+    old_name: str,
+    new_name: str,
+) -> None:
+    """Approval rules targeting retired consolidated function names must fail config load instead of failing open."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    tool_entry: object = {toolkit: {"host": "https://search.example.test"}} if toolkit == "searxng" else toolkit
+    stale_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=new_name):
+        Config.validate_with_runtime(stale_data, runtime_paths)
+
+    updated_data = {
+        **stale_data,
+        "tool_approval": {"rules": [{"match": new_name, "action": "require_approval"}]},
+    }
+    loaded = Config.validate_with_runtime(updated_data, runtime_paths)
+    assert loaded.tool_approval.rules[0].match == new_name
+
+
+def test_retired_consolidated_approval_rules_skip_names_offered_by_other_enabled_toolkits(tmp_path: Path) -> None:
+    """Shared names like `add_memory` (mem0) and `search_web` (serper) still load when those toolkits are enabled."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [
+                    "memory",
+                    "mem0",
+                    {"searxng": {"host": "https://search.example.test"}},
+                    "serper",
+                ],
+                "include_default_tools": False,
+            },
+        },
+        "tool_approval": {
+            "rules": [
+                {"match": "add_memory", "action": "require_approval"},
+                {"match": "search_web", "action": "require_approval"},
+            ],
+        },
+    }
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == ["add_memory", "search_web"]
+
+
 @pytest.mark.parametrize("seconds", [300, 600, 1800])
 def test_timed_wire_round_trip_keeps_original_card(seconds: int) -> None:
     """A custom threaded action targets the reply card, not the thread root."""

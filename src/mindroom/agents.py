@@ -1097,18 +1097,6 @@ def _deferred_entry_writes_workspace(
 _SCHEDULED_CALL_FUNCTIONS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 
 
-def _explicitly_included_tool_names(entry: EffectiveToolConfig | None) -> frozenset[str]:
-    """Return function names explicitly listed in ``entry``'s ``include_tools`` override."""
-    if entry is None:
-        return frozenset()
-    raw = entry.tool_config_overrides.get("include_tools")
-    if isinstance(raw, str):
-        return frozenset(name.strip() for name in raw.split(",") if name.strip())
-    if isinstance(raw, list | tuple | set | frozenset):
-        return frozenset(name for name in raw if isinstance(name, str))
-    return frozenset()
-
-
 def _is_schedulable_gated_function(function: ToolFunction) -> bool:
     """Return whether ``function`` is a non-scheduler approval-gated function that can be scheduled."""
     return (
@@ -1502,7 +1490,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     scheduler_entry = resolved_tool_configs.get("scheduler") or deferred_configs.get("scheduler")
     has_schedulable_gated_tool = False
     if scheduler_entry is not None:
-        explicit_scheduler_includes = _explicitly_included_tool_names(scheduler_entry)
+        explicit_scheduler_includes = agent_tools.explicit_include_tools(
+            scheduler_entry,
+            runtime_paths,
+            agent_runtime.execution.worker_target,
+        )
         has_schedulable_gated_tool = any(
             _is_schedulable_gated_function(function) for entry in offered for function in entry.adapted.functions
         ) or any(
@@ -1546,7 +1538,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             if tool_entry.name == "scheduler" and not has_schedulable_gated_tool:
                 adapted = _without_unneeded_scheduled_call_helpers(
                     adapted,
-                    explicit_includes=_explicitly_included_tool_names(tool_entry),
+                    explicit_includes=agent_tools.explicit_include_tools(
+                        tool_entry,
+                        runtime_paths,
+                        agent_runtime.execution.worker_target,
+                    ),
                 )
             return adapted
 

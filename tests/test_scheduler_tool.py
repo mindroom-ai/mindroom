@@ -787,3 +787,37 @@ async def test_scheduled_call_helpers_in_minimal_mode_respect_cli_deferred_gated
     gated_scheduler = next(d for d in gated_build.surface.deferred if d.name == "scheduler")
     gated_adapted = await gated_scheduler.materialize()
     assert {f.name for f in gated_adapted.functions} == {"scheduler", "schedule_tool_call", "run_scheduled_call"}
+
+
+def test_explicit_include_tools_in_saved_settings_keeps_scheduled_call_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved dashboard `include_tools` on `scheduler` is honored when pruning scheduled-call helpers."""
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=["scheduler"],
+                    include_default_tools=False,
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "scheduler",
+        {"include_tools": ["scheduler", "run_scheduled_call"]},
+    )
+
+    build = _build_agent(config, monkeypatch)
+
+    assert "scheduler" in build.spec.functions
+    assert "run_scheduled_call" in build.spec.functions
+    assert "schedule_tool_call" not in build.spec.functions
+    assert any(mw.__name__ == "bind_live_functions" for mw in build.tool_policy)
