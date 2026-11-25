@@ -40,10 +40,22 @@ class DesktopRequestError(RuntimeError):
         self.action_outcome = "unknown" if request_id is not None else "not_sent"
 
 
+_SHELL_CONCURRENT_ACTIONS = frozenset({"status", "request_status", "check_shell", "kill_shell"})
+
+
+def _actions_conflict(in_flight_action: str, new_action: str) -> bool:
+    if in_flight_action == "run_shell":
+        return new_action not in _SHELL_CONCURRENT_ACTIONS
+    if new_action == "run_shell":
+        return in_flight_action not in _SHELL_CONCURRENT_ACTIONS
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingDesktopResponse:
     target: PinnedMatrixDevice
     session_id: str
+    action: str
     future: asyncio.Future[DesktopResponse]
 
 
@@ -53,7 +65,7 @@ class DesktopResponseRouter:
     def __init__(self, client: nio.AsyncClient) -> None:
         self._client_ref = weakref.ref(client)
         self._pending: dict[str, _PendingDesktopResponse] = {}
-        self._targets_in_flight: set[PinnedMatrixDevice] = set()
+        self._send_locks: dict[PinnedMatrixDevice, asyncio.Lock] = {}
         client.add_to_device_callback(self.on_to_device_event, AuthenticatedToDeviceEvent)
 
     async def request(
@@ -72,7 +84,10 @@ class DesktopResponseRouter:
         if command.request_id in self._pending:
             msg = f"Desktop request ID is already pending: {command.request_id}."
             raise DesktopRequestError(msg)
-        if target in self._targets_in_flight:
+        if any(
+            entry.target == target and _actions_conflict(entry.action, command.action)
+            for entry in self._pending.values()
+        ):
             msg = "A desktop request is already in progress for this device; inspect its result before the next action."
             raise DesktopRequestError(msg)
         loop = asyncio.get_running_loop()
@@ -80,22 +95,24 @@ class DesktopResponseRouter:
         self._pending[command.request_id] = _PendingDesktopResponse(
             target=target,
             session_id=command.session_id,
+            action=command.action,
             future=future,
         )
-        self._targets_in_flight.add(target)
+        send_lock = self._send_locks.setdefault(target, asyncio.Lock())
         try:
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    client = self._client_ref()
-                    if client is None:
-                        msg = "Desktop Matrix client closed before the request could be sent."
-                        raise DesktopRequestError(msg)
-                    await send_encrypted_to_device(
-                        client,
-                        target,
-                        event_type=DESKTOP_COMMAND_EVENT_TYPE,
-                        content=command.to_content(),
-                    )
+                    async with send_lock:
+                        client = self._client_ref()
+                        if client is None:
+                            msg = "Desktop Matrix client closed before the request could be sent."
+                            raise DesktopRequestError(msg)
+                        await send_encrypted_to_device(
+                            client,
+                            target,
+                            event_type=DESKTOP_COMMAND_EVENT_TYPE,
+                            content=command.to_content(),
+                        )
                     return await future
             except TimeoutError as exc:
                 msg = _timeout_message(command, timeout_seconds=timeout_seconds)
@@ -108,7 +125,8 @@ class DesktopResponseRouter:
                 raise DesktopRequestError(msg, request_id=command.request_id) from exc
         finally:
             self._pending.pop(command.request_id, None)
-            self._targets_in_flight.discard(target)
+            if not any(entry.target == target for entry in self._pending.values()):
+                self._send_locks.pop(target, None)
 
     def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Resolve a waiter only for a valid response from its exact pinned device."""

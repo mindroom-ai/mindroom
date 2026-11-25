@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.compact_context import CompactContextTools
-from mindroom.history.manual import request_compaction_before_next_reply
+from mindroom.history.manual import schedule_compaction_before_next_reply
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.storage import (
     has_queued_force_compaction,
@@ -141,7 +141,7 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
     [None, CompactionConfig(enabled=False), CompactionConfig()],
     ids=["built-in", "disabled", "enabled"],
 )
-async def test_request_compaction_before_next_reply_is_public_manual_seam(
+async def test_schedule_compaction_before_next_reply_is_public_manual_seam(
     tmp_path: Path,
     compaction: CompactionConfig | None,
 ) -> None:
@@ -151,7 +151,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
-    result = await request_compaction_before_next_reply(
+    unavailable = await schedule_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
@@ -163,7 +163,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
     )
 
     assert has_queued_force_compaction(storage, "session-1")
-    assert result == COMPACT_CONTEXT_SUCCESS
+    assert unavailable is None
 
 
 @pytest.mark.asyncio

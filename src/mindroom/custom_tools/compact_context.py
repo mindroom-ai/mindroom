@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.main import Config  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
-from mindroom.history.manual import request_compaction_before_next_reply, resolve_manual_compaction_plan
+from mindroom.history.manual import resolve_manual_compaction_plan, schedule_compaction_before_next_reply
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
@@ -77,7 +77,7 @@ class CompactContextTools(Toolkit):
             logger.info("Mid-turn compaction requested", agent=self._agent_name, scope=scope.key)
             return "Compaction will run now before the next model request in this scope."
 
-        return await request_compaction_before_next_reply(
+        unavailable = await schedule_compaction_before_next_reply(
             scope=scope,
             agent_name=self._agent_name,
             session_id=session_id,
@@ -88,3 +88,6 @@ class CompactContextTools(Toolkit):
             room_id=room_id,
             thread_id=thread_id,
         )
+        if unavailable is not None:
+            return f"Error: Compaction is unavailable for this scope because {unavailable}."
+        return "Compaction will run before the next reply in this conversation scope."

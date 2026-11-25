@@ -77,6 +77,13 @@ _PRESENTATION_ONLY_ACTIONS = frozenset({"AXShowAlternateUI", "AXShowDefaultUI"})
 _PASSIVE_VOLATILE_ROLES = frozenset({"AXStaticText", "AXProgressIndicator", "AXBusyIndicator"})
 
 
+class _UnsetType:
+    """Sentinel distinguishing omitted optional arguments from ``None``."""
+
+
+_UNSET = _UnsetType()
+
+
 class AccessibilityError(RuntimeError):
     """An accessibility observation or validation failed safely."""
 
@@ -153,24 +160,26 @@ class AccessibilityState:
 
     def element_ref(self, index: int) -> str:
         """Return the opaque reference for an element in this exact snapshot."""
-        return hashlib.sha256(f"{self.state_id}:{index}".encode()).hexdigest()
+        return hashlib.sha256(f"{self.state_id}:{index}".encode()).hexdigest()[:24]
 
-    def to_result(self) -> dict[str, object]:
+    def to_result(self, *, include_elements: bool = True) -> dict[str, object]:
         """Return the app state sent to the model."""
-        return {
+        result: dict[str, object] = {
             "state_id": self.state_id,
             "app": {"id": self.app_id, "name": self.app_name},
             "window": self.window.to_result(),
-            "elements": [
+        }
+        if include_elements:
+            result["elements"] = [
                 {
                     **element.to_result(),
                     "ref": self.element_ref(element.index),
                 }
                 for element in self.elements
-            ],
-            "truncated": self.truncated,
-            "stability": "truncated" if self.truncated else self.stability,
-        }
+            ]
+        result["truncated"] = self.truncated
+        result["stability"] = "truncated" if self.truncated else self.stability
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,29 +668,27 @@ class MacAccessibilityBackend:
             msg = "Accessibility target is stale; request get_app_state again before acting."
             raise AccessibilityError(msg)
         try:
-            current = self._collect_app_state(
+            current_application, _window_element, window = self._resolve_window(
                 app_id,
-                state_id=state_id,
                 expected_pid=application.processIdentifier(),
                 expected_window=observed.window_reference,
             )
         except AccessibilityError:
             self._states.pop(state_id, None)
             raise
-        if current.public.window != observed.public.window:
+        if window != observed.public.window:
             self._states.pop(state_id, None)
             msg = "Accessibility target window geometry changed; request get_app_state again before capture."
             raise AccessibilityError(msg)
-        return current
+        return replace(observed, application=current_application)
 
-    def _collect_app_state(
+    def _resolve_window(
         self,
         app_id: str,
         *,
-        state_id: str,
         expected_pid: int | None = None,
         expected_window: object | None = None,
-    ) -> _StoredMacState:
+    ) -> tuple[_RunningApplication, object, DesktopRect]:
         if not self._services.AXIsProcessTrusted():
             msg = "macOS Accessibility permission is required for semantic desktop state."
             raise AccessibilityError(msg)
@@ -695,11 +702,26 @@ class MacAccessibilityBackend:
         if window is None:
             msg = f"Allowed application {app_id!r} has no readable window bounds."
             raise AccessibilityError(msg)
+        return application, window_element, window
+
+    def _collect_app_state(
+        self,
+        app_id: str,
+        *,
+        state_id: str,
+        expected_pid: int | None = None,
+        expected_window: object | None = None,
+    ) -> _StoredMacState:
+        application, window_element, window = self._resolve_window(
+            app_id,
+            expected_pid=expected_pid,
+            expected_window=expected_window,
+        )
         elements, references, identities, truncated = self._flatten_tree(window_element)
         state = AccessibilityState(
             state_id=state_id,
             app_id=app_id,
-            app_name=str(application.localizedName() or app_id),
+            app_name=_bounded_text(application.localizedName()) or _bounded_text(app_id) or app_id[:_MAX_TEXT_LENGTH],
             window=window,
             elements=elements,
             truncated=truncated,
@@ -711,7 +733,7 @@ class MacAccessibilityBackend:
         root: object,
     ) -> tuple[tuple[AccessibilityElement, ...], tuple[object, ...], tuple[_MacElementIdentity, ...], bool]:
         queue: deque[tuple[object, int, int | None, tuple[object, ...]]] = deque([(root, 0, None, ())])
-        seen: set[object] = set()
+        seen: set[object] = {root}
         elements: list[AccessibilityElement] = []
         references: list[object] = []
         identities: list[_MacElementIdentity] = []
@@ -719,23 +741,24 @@ class MacAccessibilityBackend:
         truncated = False
         while queue and visited < _MAX_VISITED_ELEMENTS:
             reference, depth, parent_index, ancestors = queue.popleft()
-            if reference in seen:
-                continue
-            seen.add(reference)
             visited += 1
             role = _bounded_text(self._copy_attribute(reference, self._services.kAXRoleAttribute)) or "AXUnknown"
             subrole = _bounded_text(self._copy_attribute(reference, self._services.kAXSubroleAttribute))
-            actions = self._action_names(reference)
-            name = self._element_name(reference)
+            raw_actions = self._raw_action_names(reference)
+            actions = _public_action_names(raw_actions)
+            raw_labels = self._raw_labels(reference)
+            name = _first_bounded_text(raw_labels)
             secure = role == "AXSecureTextField" or subrole == "AXSecureTextField"
             raw_value = None if secure else self._copy_attribute(reference, self._services.kAXValueAttribute)
             value = _bounded_value(raw_value)
-            include = (
-                depth == 0
-                or role not in _CONTAINER_ROLES
-                or name is not None
-                or value is not None
-                or any(action not in _PRESENTATION_ONLY_ACTIONS for action in actions)
+            include, settable = self._element_inclusion(
+                reference,
+                depth=depth,
+                role=role,
+                name=name,
+                value=value,
+                actions=actions,
+                secure=secure,
             )
             current_parent = parent_index
             if include:
@@ -743,7 +766,8 @@ class MacAccessibilityBackend:
                     truncated = True
                     break
                 index = len(elements)
-                settable = not secure and self._attribute_settable(reference, self._services.kAXValueAttribute)
+                if settable is None:
+                    settable = not secure and self._attribute_settable(reference, self._services.kAXValueAttribute)
                 enabled_value = self._copy_attribute(reference, self._services.kAXEnabledAttribute)
                 enabled = enabled_value if isinstance(enabled_value, bool) else None
                 elements.append(
@@ -763,39 +787,72 @@ class MacAccessibilityBackend:
                 )
                 references.append(reference)
                 identities.append(
-                    _MacElementIdentity(ancestors, self._element_content_fingerprint(reference, raw_value)),
+                    _MacElementIdentity(
+                        ancestors,
+                        self._element_content_fingerprint(
+                            reference,
+                            raw_value,
+                            raw_labels=raw_labels,
+                            raw_actions=raw_actions,
+                        ),
+                    ),
                 )
                 current_parent = index
             children = self._children(reference, role=role)
             if depth >= _MAX_ACCESSIBILITY_DEPTH:
-                if children:
-                    truncated = True
+                truncated = truncated or bool(children)
                 continue
-            for child in children:
-                queue.append((child, depth + 1, current_parent, (*ancestors, reference)))
+            truncated |= _enqueue_children(
+                queue,
+                seen,
+                children,
+                depth=depth + 1,
+                parent_index=current_parent,
+                ancestors=(*ancestors, reference),
+                remaining=_MAX_VISITED_ELEMENTS - visited - len(queue),
+            )
         if queue or visited >= _MAX_VISITED_ELEMENTS:
             truncated = True
         return tuple(elements), tuple(references), tuple(identities), truncated
 
-    def _element_content_fingerprint(self, reference: object, raw_value: object) -> str:
+    def _element_inclusion(
+        self,
+        reference: object,
+        *,
+        depth: int,
+        role: str,
+        name: str | None,
+        value: object,
+        actions: tuple[str, ...],
+        secure: bool,
+    ) -> tuple[bool, bool | None]:
+        has_value = value is not None and (not isinstance(value, str) or bool(value.strip()))
+        include = (
+            depth == 0
+            or role not in _CONTAINER_ROLES
+            or name is not None
+            or has_value
+            or any(action not in _PRESENTATION_ONLY_ACTIONS for action in actions)
+        )
+        if not include and role == "AXCell" and not secure:
+            settable = self._attribute_settable(reference, self._services.kAXValueAttribute)
+            return settable, settable
+        return include, None
+
+    def _element_content_fingerprint(
+        self,
+        reference: object,
+        raw_value: object,
+        *,
+        raw_labels: tuple[object, object, object, object] | None = None,
+        raw_actions: list[str] | None | _UnsetType = _UNSET,
+    ) -> str:
         # Hash full local text: truncation of the public tree must not hide a changed target.
-        content = [
-            self._copy_attribute(reference, attribute)
-            for attribute in (
-                self._services.kAXTitleAttribute,
-                self._services.kAXDescriptionAttribute,
-                self._services.kAXHelpAttribute,
-                self._services.kAXIdentifierAttribute,
-            )
-        ]
-        content.append(raw_value)
-        action_error, actions = self._services.AXUIElementCopyActionNames(reference, None)
-        if (
-            action_error == self._services.kAXErrorSuccess
-            and isinstance(actions, Sequence)
-            and not isinstance(actions, str)
-        ):
-            content.append(json.dumps(sorted(action for action in actions if isinstance(action, str))))
+        labels = self._raw_labels(reference) if raw_labels is None else raw_labels
+        fetched_actions = self._raw_action_names(reference) if isinstance(raw_actions, _UnsetType) else raw_actions
+        content: list[object] = [*labels, raw_value]
+        if fetched_actions is not None:
+            content.append(json.dumps(sorted(fetched_actions)))
         else:
             content.append(None)
         scalars = [value if isinstance(value, str) else _bounded_value(value) for value in content]
@@ -843,17 +900,13 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return window
 
-    def _element_name(self, reference: object) -> str | None:
-        for attribute in (
-            self._services.kAXTitleAttribute,
-            self._services.kAXDescriptionAttribute,
-            self._services.kAXHelpAttribute,
-            self._services.kAXIdentifierAttribute,
-        ):
-            value = _bounded_text(self._copy_attribute(reference, attribute))
-            if value is not None:
-                return value
-        return None
+    def _raw_labels(self, reference: object) -> tuple[object, object, object, object]:
+        return (
+            self._copy_attribute(reference, self._services.kAXTitleAttribute),
+            self._copy_attribute(reference, self._services.kAXDescriptionAttribute),
+            self._copy_attribute(reference, self._services.kAXHelpAttribute),
+            self._copy_attribute(reference, self._services.kAXIdentifierAttribute),
+        )
 
     def _element_rect(self, reference: object) -> DesktopRect | None:
         position = self._copy_attribute(reference, self._services.kAXPositionAttribute)
@@ -890,16 +943,11 @@ class MacAccessibilityBackend:
             return ()
         return tuple(children)
 
-    def _action_names(self, reference: object) -> tuple[str, ...]:
+    def _raw_action_names(self, reference: object) -> list[str] | None:
         error, actions = self._services.AXUIElementCopyActionNames(reference, None)
         if error != self._services.kAXErrorSuccess or not isinstance(actions, Sequence) or isinstance(actions, str):
-            return ()
-        names = [
-            name
-            for action in actions
-            if (name := _bounded_text(action)) is not None and name.startswith("AX") and name.isalnum()
-        ]
-        return tuple(sorted(names))[:8]
+            return None
+        return [action for action in actions if isinstance(action, str)]
 
     def _attribute_settable(self, reference: object, attribute: str) -> bool:
         error, settable = self._services.AXUIElementIsAttributeSettable(reference, attribute, None)
@@ -1180,6 +1228,46 @@ def _state_fingerprint(state: AccessibilityState) -> str:
     }
     encoded = json.dumps(structural, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _enqueue_children(
+    queue: deque[tuple[object, int, int | None, tuple[object, ...]]],
+    seen: set[object],
+    children: tuple[object, ...],
+    *,
+    depth: int,
+    parent_index: int | None,
+    ancestors: tuple[object, ...],
+    remaining: int,
+) -> bool:
+    for child in children:
+        if child in seen:
+            continue
+        if remaining <= 0:
+            return True
+        seen.add(child)
+        queue.append((child, depth, parent_index, ancestors))
+        remaining -= 1
+    return False
+
+
+def _first_bounded_text(values: tuple[object, ...]) -> str | None:
+    for value in values:
+        text = _bounded_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _public_action_names(raw_actions: list[str] | None) -> tuple[str, ...]:
+    if raw_actions is None:
+        return ()
+    names = [
+        name
+        for action in raw_actions
+        if (name := _bounded_text(action)) is not None and name.startswith("AX") and name.isalnum()
+    ]
+    return tuple(sorted(names))[:8]
 
 
 def _bounded_text(value: object) -> str | None:

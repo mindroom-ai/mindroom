@@ -33,7 +33,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.manual import request_compaction_before_next_reply
+from mindroom.history.manual import schedule_compaction_before_next_reply
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -1098,7 +1098,7 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
     identity = await _agent_turn(first)
-    await request_compaction_before_next_reply(
+    unavailable = await schedule_compaction_before_next_reply(
         scope=HistoryScope(kind="agent", scope_id=first.agent_name),
         agent_name=first.agent_name,
         session_id=_SESSION_ID,
@@ -1108,6 +1108,7 @@ async def _run_compaction_summary(root: Path) -> ScenarioOutput:
         active_model_name=None,
         room_id=_ROOM_ID,
     )
+    assert unavailable is None
     # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)

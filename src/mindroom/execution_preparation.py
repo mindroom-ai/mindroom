@@ -68,9 +68,13 @@ if TYPE_CHECKING:
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config
     from mindroom.history.request_size import RequestSizer
-    from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedHistorySettings
+    from mindroom.history.types import (
+        CompactionLifecycle,
+        HistoryPreparationInputs,
+        PreparedHistoryState,
+        ResolvedHistorySettings,
+    )
     from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext

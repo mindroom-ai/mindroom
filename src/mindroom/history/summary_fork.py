@@ -58,17 +58,6 @@ class SummaryFork:
     mid_turn: bool
 
 
-@dataclass(frozen=True, slots=True)
-class ScopeForkSource:
-    """Request frame metadata for building a turn-less whole-history scope compaction fork."""
-
-    sizer: RequestSizer
-    template: ModelRequest
-    system_messages: tuple[Message, ...]
-    context_window: int
-    reserve_tokens: int
-
-
 def _supports_extended_cache(identity: ModelIdentity | None) -> bool:
     if identity is None:
         return True
@@ -126,8 +115,12 @@ def clear_fork_frames() -> None:
 
 
 def build_scope_fork(
-    source: ScopeForkSource,
     *,
+    sizer: RequestSizer,
+    template: ModelRequest,
+    system_messages: Sequence[Message],
+    context_window: int,
+    reserve_tokens: int,
     scope: HistoryScope,
     summary: ScopeSummary | None,
     runs: Sequence[AnyRunRecord],
@@ -140,12 +133,12 @@ def build_scope_fork(
         num_history_messages=None,
         max_tool_calls_from_history=None,
     )
-    messages = (*source.system_messages, *request_layout(summary=summary, history=history))
+    messages = (*system_messages, *request_layout(summary=summary, history=history))
     return SummaryFork(
-        sizer=source.sizer,
-        request=replace(source.template, messages=messages),
-        context_window=source.context_window,
-        reserve_tokens=source.reserve_tokens,
+        sizer=sizer,
+        request=replace(template, messages=messages),
+        context_window=context_window,
+        reserve_tokens=reserve_tokens,
         mid_turn=False,
     )
 
@@ -203,12 +196,7 @@ def build_fork_compaction_prompt(summary_prompt: str, *, mid_turn: bool) -> str:
         "system-prompt rules, delegation/review/PR/logging procedures, lint/commit habits, workspace/memory files, "
         "tool definitions, `<mindroom_transient_context>`, `<mindroom_message_context>`, retrieved memory blocks, "
         "or approval/runtime notices into `## Constraints`, `## Next Steps`, or any other section. List only next "
-        "steps and approvals actually established in the conversation (distinguishing user decisions from pending "
-        "agent proposals).\n"
-        "- Preserve reusable operational details discovered during the conversation and tool outputs — exact IDs, "
-        "commit SHAs, revision/event IDs, file/log/socket paths, host/SSH/URL access recipes, working commands/flags, "
-        "concrete rationales, exact error messages/codes, and explicit before -> after transitions when a requirement "
-        "or plan was revised — stating each detail once without repeating it across sections.\n\n"
+        "steps and approvals actually established in the conversation.\n\n"
         "Mapping to the instructions below:\n"
         "- Any earlier `<compacted_history>...</compacted_history>` message above is `<previous_summary>`.\n"
         "- The conversation messages and tool activity after it (excluding this compaction directive) are `<new_conversation>`.\n"
@@ -305,7 +293,6 @@ def prepare_fork_request(
 
 
 __all__ = [
-    "ScopeForkSource",
     "SummaryFork",
     "WarmFrameKey",
     "build_fork_compaction_prompt",

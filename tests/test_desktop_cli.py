@@ -1296,3 +1296,20 @@ def test_desktop_run_holds_host_lock_and_refuses_when_already_locked(
     # Lock is released once `desktop run` exits.
     with desktop_host_lock(tmp_path):
         pass
+
+
+def test_desktop_run_accepts_jpeg_quality_20_and_rejects_19(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CLI --jpeg-quality honors 20..95 consistently with saved native configs."""
+    _stub_run_command(monkeypatch, tmp_path)
+    run_bridge = AsyncMock()
+    monkeypatch.setattr(desktop_cli, "_run_bridge", run_bridge)
+
+    ok = runner.invoke(desktop_app, [*_RUN_ARGS, "--jpeg-quality", "20"])
+    assert ok.exit_code == 0, ok.output
+    assert run_bridge.await_args.kwargs["config"].capture.jpeg_quality == 20
+
+    bad = runner.invoke(desktop_app, [*_RUN_ARGS, "--jpeg-quality", "19"])
+    assert bad.exit_code == 2

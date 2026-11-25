@@ -28,7 +28,7 @@ from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer
-from mindroom.history.runtime import HistoryPreparationInputs, compact_scope_now, prepare_scope_history
+from mindroom.history.runtime import compact_scope_now, prepare_scope_history
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction
 from mindroom.history.summary_call import (
@@ -37,7 +37,6 @@ from mindroom.history.summary_call import (
     request_compaction_summary,
 )
 from mindroom.history.summary_fork import (
-    ScopeForkSource,
     SummaryFork,
     build_scope_fork,
     clear_fork_frames,
@@ -48,7 +47,7 @@ from mindroom.history.summary_fork import (
     warm_cache_ttl_seconds,
 )
 from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary
-from mindroom.history.types import HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryPreparationInputs, HistoryScopeState, ScopeSummary
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
@@ -257,7 +256,6 @@ def _summarizer(
     timeout_s: float = 10.0,
     sid: str = "sess-matrix",
     fork: SummaryFork | None = None,
-    scope_fork_source: ScopeForkSource | None = None,
 ) -> Summarizer:
     fb = SummaryModel(fallback, "fallback", 50_000) if fallback else None
     return Summarizer(
@@ -270,7 +268,6 @@ def _summarizer(
         TEST_AGENT_SCOPE,
         on_usage,
         fork=fork,
-        scope_fork_source=scope_fork_source,
     )
 
 
@@ -603,9 +600,17 @@ def test_fork_frame_lru_isolation_sanitization_and_eviction(tmp_path: Path) -> N
 
 def test_build_scope_fork_constructs_turnless_whole_history_request() -> None:
     run = _completed_run("r1", messages=[_msg("user", "hello"), _msg("assistant", "world")])
-    source = ScopeForkSource(RequestSizer(ScriptedModel([]), "openai"), ModelRequest(messages=()), _SYS, 100_000, 4_096)
     summary = ScopeSummary(text="Earlier", updated_at=datetime.now(UTC))
-    fork = build_scope_fork(source, scope=TEST_AGENT_SCOPE, summary=summary, runs=[run])
+    fork = build_scope_fork(
+        sizer=RequestSizer(ScriptedModel([]), "openai"),
+        template=ModelRequest(messages=()),
+        system_messages=_SYS,
+        context_window=100_000,
+        reserve_tokens=4_096,
+        scope=TEST_AGENT_SCOPE,
+        summary=summary,
+        runs=[run],
+    )
     assert fork.mid_turn is False
     assert [m.role for m in fork.request.messages] == ["system", "user", "user", "assistant"]
     assert "Earlier" in str(fork.request.messages[1].content)
@@ -1461,8 +1466,17 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
 
     concurrent_fork.turns.append([Await(mutate_store), *summary_steps("stale fork summary")])
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    source = ScopeForkSource(RequestSizer(concurrent_fork, "openai"), template, _SYS, 100_000, 4_096)
-    summarizer = _summarizer(xml_primary, sid="sess-race", scope_fork_source=source)
+    fork = build_scope_fork(
+        sizer=RequestSizer(concurrent_fork, "openai"),
+        template=template,
+        system_messages=_SYS,
+        context_window=100_000,
+        reserve_tokens=4_096,
+        scope=TEST_AGENT_SCOPE,
+        summary=loaded.summary,
+        runs=loaded.runs,
+    )
+    summarizer = _summarizer(xml_primary, sid="sess-race", fork=fork)
 
     async def complete_outcome(outcome: Any) -> Any:  # noqa: ANN401
         return outcome

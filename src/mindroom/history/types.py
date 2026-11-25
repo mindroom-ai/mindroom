@@ -177,6 +177,14 @@ class ResolvedHistoryExecutionPlan:
 
 
 @dataclass(frozen=True)
+class HistoryPreparationInputs:
+    """The resolved history settings and execution plan of one history preparation."""
+
+    history_settings: ResolvedHistorySettings
+    execution_plan: ResolvedHistoryExecutionPlan
+
+
+@dataclass(frozen=True)
 class ResolvedReplayPlan:
     """Concrete persisted-replay plan for one live model call."""
 

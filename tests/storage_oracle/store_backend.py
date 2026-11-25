@@ -404,7 +404,7 @@ class StoreBackend(Driver):
 
     @override
     def request_force(self, session: ConversationSession) -> None:
-        # As ``request_compaction_before_next_reply`` does: the flag on the stored row.
+        # As ``schedule_compaction_before_next_reply`` does: the flag on the stored row.
         del session
         set_force_compaction(
             self.store,

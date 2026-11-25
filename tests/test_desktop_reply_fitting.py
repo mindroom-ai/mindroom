@@ -76,3 +76,30 @@ def test_leftmost_fitting_keeps_everything_when_the_whole_reply_fits() -> None:
     assert (
         leftmost_fitting(command, 0, len(entries), lambda dropped: {"folders": entries[: len(entries) - dropped]}) == 0
     )
+
+
+def test_fits_inline_and_leftmost_fitting_account_for_screenshot_metadata() -> None:
+    """Screenshot envelope bytes are counted when deciding whether a reply fits inline."""
+    command = replace(
+        _command("get_app_state", request_id=_longest_request_id("shot-")),
+        session_id=_LONGEST_SESSION_ID,
+    )
+    text = "a" * MAX_INLINE_RESPONSE_BYTES
+
+    def build(dropped: int) -> dict[str, object]:
+        return {"text": text[: len(text) - dropped]}
+
+    dropped_without = leftmost_fitting(command, 0, len(text), build)
+    dropped_with = leftmost_fitting(command, 0, len(text), build, screenshot=MEDIA)
+
+    assert dropped_with > dropped_without
+    assert fits_inline(command, build(dropped_with), screenshot=MEDIA)
+    assert not fits_inline(command, build(dropped_with - 1), screenshot=MEDIA)
+    assert (
+        success_response(
+            command,
+            result={**build(dropped_with), "metrics": _WIDEST_METRICS},
+            screenshot=MEDIA,
+        ).content_bytes()
+        <= MAX_INLINE_RESPONSE_BYTES
+    )

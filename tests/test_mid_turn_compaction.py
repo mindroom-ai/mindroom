@@ -1533,7 +1533,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     seed_session(storage, _session("session-1"))
     attempts: list[int] = []
     first_summary: list[str | None] = []
-    original_compact = mid_turn_compaction.compact_scope_mid_turn
+    original_compact = mid_turn_compaction.compact_running_turn
 
     async def counted_compaction(**kwargs: Any) -> object:  # noqa: ANN401
         attempts.append(0)
@@ -1549,7 +1549,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
             raise stop
         return await summary_calls(**kwargs)
 
-    monkeypatch.setattr(mid_turn_compaction, "compact_scope_mid_turn", counted_compaction)
+    monkeypatch.setattr(mid_turn_compaction, "compact_running_turn", counted_compaction)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second_chunk_of_second_attempt)
 
     agent = _scoped_agent(ToolLoopModel(tool_rounds=14), config, paths, storage)

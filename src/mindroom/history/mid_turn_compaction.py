@@ -19,16 +19,21 @@ from uuid import uuid4
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history.compaction import (
+    compact_running_turn,
+    load_summarizer,
+    scope_usage_recorder,
+    summarize_runs,
+)
 from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.replay import HistorySummaryBudgetError
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
-    compact_scope_mid_turn,
     resolve_entity_preparation_inputs,
-    summarize_run_locally,
+    run_scope_compaction_with_lifecycle,
 )
-from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
+from mindroom.history.storage import new_scope_session, read_fold_basis
 from mindroom.history.summary_fork import SummaryFork, holds_fold_basis, remember_fork_frame
 from mindroom.history.summary_message import (
     compaction_summary_message,
@@ -41,11 +46,8 @@ from mindroom.history.types import owner_scope
 from mindroom.llm.messages import is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.agent_storage import save_compaction_usage
-from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.token_counting.counts import count, fit_text, utf8_byte_bound
-from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, carry_request_usage
 
 if TYPE_CHECKING:
@@ -56,10 +58,12 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_size import RequestSizer
-    from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import (
         CompactionLifecycle,
+        CompactionLifecycleProgress,
+        CompactionOutcome,
+        HistoryPreparationInputs,
         HistoryScope,
         ResolvedHistorySettings,
         ResolvedReplayPlan,
@@ -328,15 +332,29 @@ async def _summarize(
         kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         if scope_fold is None:
             budget_limit = policy.limit if policy.limit is not None and kept_tokens < policy.limit else policy.fit_limit
-            summary_message = await _summarize_run_locally(
-                compaction,
-                policy,
-                inputs,
-                layout,
-                record,
-                live_request,
+            # Without a stored session to append a summary row to, replayed history is summarized with the turn's
+            # exchanges, each message as a snapshot of its own.
+            snapshots = [
+                *(_snapshot_run(record, [message], None) for message in layout.history),
+                *_snapshots(record, layout, inputs),
+            ]
+            summary, _ = await summarize_runs(
+                load_summarizer(
+                    inputs.execution_plan,
+                    inputs.history_settings,
+                    config=compaction.config,
+                    runtime_paths=compaction.runtime_paths,
+                    session_id=record.session_id or "",
+                    scope=compaction.scope,
+                    on_usage=_summary_usage_recorder(compaction, record),
+                    fork=_mid_turn_fork(policy, live_request),
+                ),
+                layout.previous_run_local_summary,
+                snapshots,
                 max_summary_tokens=None if budget_limit is None else max(0, budget_limit - kept_tokens),
+                model=compaction.model,
             )
+            summary_message = compaction_summary_message(summary, run_local=True)
             _finish(messages, layout, summary_message, record)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
             return _Fold(summary_message, await asyncio.to_thread(size_request, messages))
@@ -427,28 +445,62 @@ async def _compact_scope(
             compaction.turn_recorder.record_folded_tool_calls(folded_calls)
         _finish(messages, layout, summary_message, record)
 
-    outcome = await compact_scope_mid_turn(
-        storage=store,
-        session=session,
-        resolved_inputs=inputs,
-        basis=basis,
-        fold=fold,
-        snapshots=_snapshots(record, layout, inputs),
-        # The size that triggered this compaction, so the history budget sees what the request needs.
-        before_tokens=request_tokens,
-        config=compaction.config,
-        runtime_paths=compaction.runtime_paths,
+    plan = inputs.execution_plan
+    snapshots = _snapshots(record, layout, inputs)
+
+    async def compact(
+        _progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
+        complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
+    ) -> CompactionOutcome:
+        # One fold writes one row, so there is no per-chunk progress to report.
+        return await compact_running_turn(
+            storage=store,
+            session=session,
+            basis=basis,
+            fold=fold,
+            snapshots=snapshots,
+            summarizer=load_summarizer(
+                plan,
+                inputs.history_settings,
+                config=compaction.config,
+                runtime_paths=compaction.runtime_paths,
+                session_id=session.session_id,
+                scope=scope,
+                # A first turn's fold records its summary usage before any run of the conversation is stored.
+                on_usage=scope_usage_recorder(
+                    store,
+                    session.session_id,
+                    initial_session=new_scope_session(session_id=session.session_id, scope=scope),
+                ),
+                fork=fork,
+            ),
+            # The size that triggered this compaction, so the history budget sees what the request needs.
+            before_tokens=request_tokens,
+            replay_window_tokens=plan.replay_window_tokens,
+            threshold_tokens=plan.trigger_threshold_tokens,
+            available_history_budget=plan.limit_tokens,
+            max_summary_tokens=max_summary_tokens,
+            model=compaction.model,
+            on_commit=on_commit,
+            # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
+            rewritten_request_tokens=partial(size_request, messages),
+            complete=complete,
+        )
+
+    result = await run_scope_compaction_with_lifecycle(
+        mode="auto",
+        session_id=session.session_id,
+        scope=scope,
+        execution_plan=plan,
+        history_budget=plan.limit_tokens,
+        current_history_tokens=request_tokens,
+        runs_before=len(basis.runs) + 1,
         compaction_lifecycle=compaction.lifecycle,
-        max_summary_tokens=max_summary_tokens,
-        model=compaction.model,
-        on_commit=on_commit,
-        # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
-        rewritten_request_tokens=partial(size_request, messages),
-        fork=fork,
+        compact=compact,
     )
-    if outcome is None or not summary_messages:
+    if result.outcome is None or not summary_messages:
         return None
-    return _Fold(summary_messages[0], outcome.after_tokens)
+    return _Fold(summary_messages[0], result.outcome.after_tokens)
 
 
 def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
@@ -629,34 +681,6 @@ def _prompt_context(prompt: Message, budget_tokens: int) -> Message:
     return context
 
 
-async def _summarize_run_locally(
-    compaction: _MidTurnCompaction,
-    policy: _Policy,
-    inputs: HistoryPreparationInputs,
-    layout: _Layout,
-    record: AnyRunRecord,
-    live_request: ModelRequest,
-    *,
-    max_summary_tokens: int | None,
-) -> Message:
-    # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges,
-    # each message as a snapshot of its own.
-    history = [_snapshot_run(record, [message], None) for message in layout.history]
-    summary = await summarize_run_locally(
-        resolved_inputs=inputs,
-        previous_summary=layout.previous_run_local_summary,
-        snapshots=[*history, *_snapshots(record, layout, inputs)],
-        scope=compaction.scope,
-        config=compaction.config,
-        runtime_paths=compaction.runtime_paths,
-        on_usage=_summary_usage_recorder(compaction, record),
-        fork=_mid_turn_fork(policy, live_request),
-        max_summary_tokens=max_summary_tokens,
-        model=compaction.model,
-    )
-    return compaction_summary_message(summary, run_local=True)
-
-
 def _summary_usage_recorder(
     compaction: _MidTurnCompaction,
     record: AnyRunRecord,
@@ -665,33 +689,15 @@ def _summary_usage_recorder(
 
     The usage is recorded under the current request's requester, as a compaction before the reply records its own.
     """
-    requester_id = current_requester_id()
-    owner = get_helper_usage_owner()
-    if owner is not None:
-
-        async def record_for_owner(model: ModelIdentity, usage: MessageMetrics) -> None:
-            await run_session_storage_operation(
-                owner.storage_factory,
-                partial(
-                    save_compaction_usage,
-                    session_id=owner.session_id,
-                    requester_id=requester_id,
-                    model=model,
-                    usage=usage,
-                    initial_session=owner.initial_session,
-                ),
-            )
-
-        return record_for_owner
+    if (owner := get_helper_usage_owner()) is not None:
+        return scope_usage_recorder(owner.storage_factory, owner.session_id, initial_session=owner.initial_session)
     storage = compaction.storage.store if compaction.storage is not None else None
     if storage is None or not record.session_id:
         logger.warning("Mid-turn summary usage has no storage owner", run_id=record.run_id)
         return None
-    return partial(
-        record_summary_usage,
-        storage=storage,
-        session_id=record.session_id,
-        requester_id=requester_id,
+    return scope_usage_recorder(
+        storage,
+        record.session_id,
         # The run's own session row may not exist yet while its first turn is still running.
         initial_session=new_scope_session(session_id=record.session_id, scope=compaction.scope),
     )

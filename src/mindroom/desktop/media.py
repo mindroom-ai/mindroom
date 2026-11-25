@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import aiohttp
 import nio
 
 from mindroom.desktop.protocol import (
@@ -74,6 +75,9 @@ async def download_encrypted_media(
             response = await client.download(media.url)
     except TimeoutError as exc:
         msg = f"Matrix media download did not finish within {timeout_seconds:g} seconds."
+        raise DesktopMediaError(msg) from exc
+    except (aiohttp.ClientError, nio.LocalProtocolError) as exc:
+        msg = "Matrix media download failed."
         raise DesktopMediaError(msg) from exc
     if not isinstance(response, nio.DownloadResponse) or not isinstance(response.body, bytes):
         msg = f"Matrix media download failed: {response}"
