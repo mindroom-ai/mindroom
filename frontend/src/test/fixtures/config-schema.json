@@ -1178,7 +1178,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template (at most one agent per room)",
+          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template; direct room calls auto-join only when one calls-enabled agent owns the room",
           "title": "Agents",
           "type": "object",
           "x-mindroom": {

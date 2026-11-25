@@ -91,7 +91,7 @@ class CallsConfig(BaseModel):
         default_factory=dict,
         description=(
             "Call profile name by agent name, or by personal_agents template key for every user's agent from that "
-            "template (at most one agent per room)"
+            "template; direct room calls auto-join only when one calls-enabled agent owns the room"
         ),
         json_schema_extra=dashboard_hint(key_reference="personal_room_agent"),
     )

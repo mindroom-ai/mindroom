@@ -231,6 +231,25 @@ def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_pat
     )
 
 
+def test_multiple_configured_call_agents_fail_closed_without_mixing_invited_agents(tmp_path: Path) -> None:
+    """Multiple configured call agents fail closed immediately, naming only the configured agents."""
+    config = _call_config(tmp_path, general=True, other=True, third=True)
+    config.agents["general"].rooms = ["!agent-call:server"]
+    config.agents["other"].rooms = ["!agent-call:server"]
+
+    with pytest.raises(
+        ValueError,
+        match=r"^calls\.agents resolves multiple agents for live room !agent-call:server: general, other$",
+    ):
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths_for(config),
+            invited_rooms_by_agent={"third": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
+        )
+
+
 def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled(tmp_path: Path) -> None:
     """Disabling invite acceptance revokes persisted ad-hoc call-room ownership."""
     config = _call_config(tmp_path, general=False)

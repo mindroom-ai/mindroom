@@ -424,15 +424,15 @@ def test_authored_dump_keeps_calls_template_key(tmp_path: Path) -> None:
     assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice"}
 
 
-def test_calls_template_whose_agent_lists_rooms_is_rejected(tmp_path: Path) -> None:
-    """Every user's agent would join the same rooms, and a room takes only one calls-enabled agent."""
+def test_calls_template_whose_agent_lists_rooms_expands_cleanly(tmp_path: Path) -> None:
+    """Templates in calls.agents may list shared rooms; direct-call ownership stays fail-closed at runtime."""
     data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
     data["personal_agents"]["mind"]["agent"]["rooms"] = ["lobby"]
-    with pytest.raises(
-        ConfigRuntimeValidationError,
-        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
-    ):
-        _runtime_config(tmp_path, data)
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.calls.agents == {"mind_alice_smith": "voice", "mind_bob": "voice"}
+    assert config.agents["mind_alice_smith"].rooms == ["lobby"]
+    assert config.agents["mind_bob"].rooms == ["lobby"]
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice"}
 
 
 def test_explicit_call_profile_for_a_generated_agent_wins_and_is_saved(tmp_path: Path) -> None:
@@ -445,15 +445,15 @@ def test_explicit_call_profile_for_a_generated_agent_wins_and_is_saved(tmp_path:
     assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice", "mind_bob": "other"}
 
 
-def test_calls_template_whose_user_override_lists_rooms_is_rejected(tmp_path: Path) -> None:
-    """A per-user override must not put a calls-enabled template's agent into rooms either, onboarded or not."""
+def test_calls_template_whose_user_override_lists_rooms_expands_cleanly(tmp_path: Path) -> None:
+    """Per-user overrides on a calls-enabled template may list rooms, onboarded or not."""
     data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
     data["personal_agents"]["mind"]["users"] = {"@carol:example.org": {"rooms": ["lobby"]}}
-    with pytest.raises(
-        ConfigRuntimeValidationError,
-        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
-    ):
-        _runtime_config(tmp_path, data)
+    before = _runtime_config(tmp_path / "before", deepcopy(data))
+    assert before.calls.agents == {}
+    after = _runtime_config(tmp_path / "after", deepcopy(data), roster=(_entry("@carol:example.org"),))
+    assert after.calls.agents == {"mind_carol": "voice"}
+    assert after.agents["mind_carol"].rooms == ["lobby"]
 
 
 def test_unknown_template_call_profile_fails_before_onboarding(tmp_path: Path) -> None:
