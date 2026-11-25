@@ -42,6 +42,7 @@ __all__ = [
     "UsageRequestBreakdownRow",
     "UsageUserBreakdownRow",
     "UsageVoiceBreakdownRow",
+    "collect_admin_daily_usage_with_entities",
     "collect_admin_usage",
     "collect_private_usage",
     "collect_requester_daily_usage",
@@ -853,6 +854,47 @@ def collect_admin_usage(
         include_daily=include_daily,
         include_requests=include_requests,
         since=since,
+    )
+
+
+def collect_admin_daily_usage_with_entities(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    since: float | None = None,
+) -> tuple[tuple[UsageDailyBreakdownRow, ...], dict[str, tuple[UsageDailyBreakdownRow, ...]]]:
+    """Collect admin daily usage overall and per entity in one scan.
+
+    The overall daily rows equal ``collect_admin_usage(include_daily=True, since=since).daily_breakdown``,
+    and per-entity daily rows partition the same admitted runs by admin entity ID.
+    """
+    seen_runs: set[tuple[str, str, str]] = set()
+    unavailable_sources: set[str] = set()
+    daily_usage = _DailyUsageAccumulator()
+    entity_days: dict[str, _DailyUsageAccumulator] = {}
+    for discovered in discover_admin_usage_sources(config=config, runtime_paths=runtime_paths):
+        if isinstance(discovered, UsageStorageDiagnostic):
+            continue
+        for item in iter_usage_storage_rows(discovered, since=since):
+            if isinstance(item, UsageStorageDiagnostic) or (entity_id := _admin_entity_id(item)) is None:
+                continue
+            entries = _admitted_runs(
+                item,
+                scope="admin",
+                expected_agent=None,
+                expected_requester=None,
+                seen_runs=seen_runs,
+                unavailable_sources=unavailable_sources,
+            )
+            if not entries:
+                continue
+            entity_daily = entity_days.setdefault(entity_id, _DailyUsageAccumulator())
+            for run, totals, models in entries:
+                daily_usage.add_run(run, totals, models, source_path=item.source.path_label)
+                entity_daily.add_run(run, totals, models, source_path=item.source.path_label)
+    return (
+        daily_usage.rows(),
+        {entity_id: rows for entity_id, days in sorted(entity_days.items()) if (rows := days.rows())},
     )
 
 

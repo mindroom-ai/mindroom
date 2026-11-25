@@ -24,7 +24,11 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage, p
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage.stats import collect_admin_usage, collect_self_usage
+from mindroom.usage.stats import (
+    collect_admin_daily_usage_with_entities,
+    collect_admin_usage,
+    collect_self_usage,
+)
 from mindroom.usage.stats_storage import (
     UsageModelMetrics,
     UsageRequestMetrics,
@@ -1686,3 +1690,71 @@ def test_unavailable_source_is_content_free(tmp_path: Path, monkeypatch: pytest.
 
     assert payload["coverage"]["unavailable_sources"] == 1  # type: ignore[index]
     assert "secret" not in str(payload)
+
+
+def test_collect_admin_daily_usage_with_entities_matches_admin_usage_and_partitions_by_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day1 = datetime(2026, 11, 20, 10, 0, tzinfo=UTC).timestamp()
+    day2 = datetime(2026, 11, 21, 15, 0, tzinfo=UTC).timestamp()
+    code_source = _source(scope="shared_agent", agent_name="code")
+    other_source = _source(scope="shared_agent", agent_name="other")
+    team_source = _source(scope="team", agent_name=None)
+    diagnostic = UsageStorageDiagnostic(path_label="broken.db", status="busy", detail="locked")
+
+    _wire(
+        monkeypatch,
+        (code_source, other_source, team_source, diagnostic),
+        {
+            code_source.path_label: (
+                _row(
+                    code_source,
+                    _run(
+                        run_id="dup-1",
+                        total_tokens=100,
+                        model_provider="Anthropic",
+                        model="claude-haiku-4-5",
+                        created_at=day1,
+                    ),
+                    _run(
+                        run_id="dup-1",
+                        total_tokens=100,
+                        model_provider="Anthropic",
+                        model="claude-haiku-4-5",
+                        created_at=day1,
+                    ),
+                    _run(run_id="run-2", total_tokens=200, model_provider="OpenAI", model="gpt-5.4", created_at=day2),
+                    _baseline(_metrics(500)),
+                ),
+            ),
+            # Only an undated run -> omitted from daily_by_entity rather than leaving an empty tuple.
+            other_source.path_label: (_row(other_source, _run(run_id="undated", total_tokens=50, created_at=None)),),
+            team_source.path_label: (
+                _row(
+                    team_source,
+                    _run(run_id="team-1", total_tokens=300, model_provider="OpenAI", model="gpt-5.4", created_at=day2),
+                    entity_id="engineering",
+                ),
+            ),
+        },
+    )
+
+    config = _config()
+    paths = _paths(tmp_path)
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, since=day1)
+    daily, by_entity = collect_admin_daily_usage_with_entities(config=config, runtime_paths=paths, since=day1)
+
+    assert daily == report.daily_breakdown
+    assert set(by_entity) == {"code", "engineering"}
+    assert [row.date for row in by_entity["code"]] == ["2026-11-20", "2026-11-21"]
+    assert [row.totals.total_tokens for row in by_entity["code"]] == [100, 200]
+    assert [row.run_count for row in by_entity["code"]] == [1, 1]
+    assert [(row.date, row.totals.total_tokens, row.run_count) for row in by_entity["engineering"]] == [
+        ("2026-11-21", 300, 1),
+    ]
+    # Per-day entity sums equal the overall daily_breakdown on every date.
+    for overall in daily:
+        entity_rows = [row for rows in by_entity.values() for row in rows if row.date == overall.date]
+        assert sum(row.totals.total_tokens for row in entity_rows) == overall.totals.total_tokens
+        assert sum(row.run_count for row in entity_rows) == overall.run_count

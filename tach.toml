@@ -890,6 +890,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.history.request_size",
     "mindroom.providers.pipeline",
+    "mindroom.usage.provider_analytics",
 ]
 
 [[modules]]
@@ -10550,7 +10551,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = ["mindroom.usage.provider_limits"]
+visibility = ["mindroom.usage.provider_analytics"]
 
 [[modules]]
 path = "mindroom.usage.limit_store"
@@ -10577,11 +10578,19 @@ depends_on = [
 visibility = ["mindroom.usage.provider_limits"]
 
 [[modules]]
+path = "mindroom.usage.provider_analytics"
+depends_on = [
+    "mindroom.model_usage",
+    "mindroom.usage.legacy_usage_storage",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
 path = "mindroom.usage.provider_limits"
 depends_on = [
-    "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.limit_store",
     "mindroom.usage.provider_accounts",
+    "mindroom.usage.provider_analytics",
     "mindroom.usage.provider_probes",
 ]
 
