@@ -328,6 +328,19 @@ def _tool_traces_match(
     )
 
 
+def _copy_changed_tool_trace(
+    existing: list[ToolTraceEntry],
+    incoming: list[ToolTraceEntry],
+) -> list[ToolTraceEntry]:
+    """Return owned trace entries, reusing unchanged existing entries and copying changed or new ones."""
+    return [
+        existing[index]
+        if index < len(existing) and _tool_trace_identity(existing[index]) == _tool_trace_identity(entry)
+        else replace(entry)
+        for index, entry in enumerate(incoming)
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class _LiveStateKey:
     event_id: str
@@ -656,6 +669,11 @@ class StreamingResponse:
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
+    _matched_presentation_state: tuple[dict[str, object] | None, dict[str, object] | None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
     _last_committed_interactive_metadata: interactive.InteractiveMetadata | None = field(
@@ -773,10 +791,9 @@ class StreamingResponse:
 
     def replace_tool_trace(self, entries: list[ToolTraceEntry]) -> None:
         """Replace the tool trace with owned entry copies if anything changed."""
-        owned = [replace(entry) for entry in entries]
-        if _tool_traces_match(self.tool_trace, owned):
+        if _tool_traces_match(self.tool_trace, entries):
             return
-        self.tool_trace = owned
+        self.tool_trace = _copy_changed_tool_trace(self.tool_trace, entries)
         self._tool_trace_version += 1
 
     def set_tool_progress(self, tool_call_id: str, text: str) -> None:
@@ -879,13 +896,11 @@ class StreamingResponse:
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
         """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
         resumed_count = len(self.resumed_tool_trace)
-        merged = [
-            *self.tool_trace[:resumed_count],
-            *_merge_tool_trace(self.tool_trace[resumed_count:], [replace(entry) for entry in incoming]),
-        ]
-        if _tool_traces_match(self.tool_trace, merged):
+        existing = self.tool_trace if resumed_count == 0 else self.tool_trace[resumed_count:]
+        if len(incoming) < len(existing) or _tool_traces_match(existing, incoming):
             return
-        self.tool_trace = merged
+        merged = _copy_changed_tool_trace(existing, incoming)
+        self.tool_trace = merged if resumed_count == 0 else [*self.tool_trace[:resumed_count], *merged]
         self._tool_trace_version += 1
 
     def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
@@ -1487,8 +1502,18 @@ class StreamingResponse:
         text_changed = self.accumulated_text != self._last_delivered_text and _normalize_stream_accumulated_text(
             self.accumulated_text,
         ) != _normalize_stream_accumulated_text(self._last_delivered_text)
-        if text_changed or self.presentation_state != self._last_delivered_presentation_state:
+        if text_changed:
             return True
+        if self.presentation_state is not self._last_delivered_presentation_state:
+            matched = self._matched_presentation_state
+            if (
+                matched is None
+                or self.presentation_state is not matched[0]
+                or self._last_delivered_presentation_state is not matched[1]
+            ):
+                if self.presentation_state != self._last_delivered_presentation_state:
+                    return True
+                self._matched_presentation_state = (self.presentation_state, self._last_delivered_presentation_state)
         if self._tool_trace_version == self._last_delivered_tool_trace_version and len(self.tool_trace) == len(
             self._last_delivered_tool_trace,
         ):
@@ -1707,11 +1732,6 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.accumulated_text = self.resumed_text + new_chunk
         self.chars_since_last_update += len(new_chunk)
         self.last_delta_at = time.time()
-
-
-def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEntry]) -> list[ToolTraceEntry]:
-    """Merge a trace snapshot without dropping entries when stream styles are mixed: the longer one wins, ties incoming."""
-    return (incoming if len(incoming) >= len(existing) else existing).copy()
 
 
 def _merge_prior_delta_at(existing: float | None, incoming: float | None) -> float | None:

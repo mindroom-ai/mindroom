@@ -695,3 +695,88 @@ def test_uncommitted_presentation_fast_path_and_mutations(tmp_path: Path, monkey
         assert streaming.has_uncommitted_presentation()
         streaming.restore_last_delivered_state()
         assert not streaming.has_uncommitted_presentation()
+
+
+def test_tool_trace_snapshot_copies_only_changed_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Equal 200-entry snapshots do zero replace() copies, and 1-entry updates copy only that entry."""
+    streaming = _streaming(tmp_path)
+    caller_entries = [_entry(i, "started") for i in range(200)]
+    streaming.apply_tool_trace_snapshot(caller_entries)
+    owned_before = list(streaming.tool_trace)
+    replace_calls = _count(monkeypatch, streaming_module, "replace")
+
+    streaming.apply_tool_trace_snapshot(caller_entries)
+    assert replace_calls[0] == 0
+    assert all(current is previous for current, previous in zip(streaming.tool_trace, owned_before, strict=True))
+
+    caller_entries[123].type = "tool_call_completed"
+    caller_entries[123].result_preview = "updated"
+    streaming.apply_tool_trace_snapshot(caller_entries)
+    assert replace_calls[0] == 1
+    assert streaming.tool_trace[123] is not owned_before[123]
+    assert streaming.tool_trace[123] is not caller_entries[123]
+    assert streaming.tool_trace[123].result_preview == "updated"
+    assert all(streaming.tool_trace[i] is owned_before[i] for i in range(200) if i != 123)
+
+    owned_after_snapshot = list(streaming.tool_trace)
+    replace_calls[0] = 0
+    streaming.replace_tool_trace(caller_entries)
+    assert replace_calls[0] == 0
+    assert all(
+        current is previous for current, previous in zip(streaming.tool_trace, owned_after_snapshot, strict=True)
+    )
+
+    caller_entries[7].result_preview = "replaced-7"
+    streaming.replace_tool_trace(caller_entries)
+    assert replace_calls[0] == 1
+    assert streaming.tool_trace[7] is not caller_entries[7]
+    assert streaming.tool_trace[7].result_preview == "replaced-7"
+    assert all(streaming.tool_trace[i] is owned_after_snapshot[i] for i in range(200) if i != 7)
+
+
+def test_uncommitted_presentation_caches_matched_presentation_state(tmp_path: Path) -> None:
+    """Committed nested presentation_state dicts avoid repeated deep equality across idle ticks."""
+    eq_calls = 0
+
+    class _EqProbe:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def __hash__(self) -> int:
+            return hash(self.value)
+
+        def __eq__(self, other: object) -> bool:
+            nonlocal eq_calls
+            eq_calls += 1
+            return isinstance(other, _EqProbe) and self.value == other.value
+
+        def __deepcopy__(self, _memo: dict[int, object]) -> _EqProbe:
+            return _EqProbe(self.value)
+
+    streaming = _streaming(tmp_path)
+    streaming.presentation_state = {
+        "kind": "team",
+        "members": [{"id": "member_a", "content": _EqProbe("slot-a")}],
+    }
+    _commit(streaming)
+    eq_calls = 0
+
+    assert not streaming.has_uncommitted_presentation()
+    assert eq_calls == 1
+    for _ in range(20):
+        assert not streaming.has_uncommitted_presentation()
+    assert eq_calls == 1
+
+    streaming.presentation_state = {
+        "kind": "team",
+        "members": [{"id": "member_a", "content": _EqProbe("slot-a-v2")}],
+    }
+    assert streaming.has_uncommitted_presentation()
+    assert eq_calls == 2
+
+    streaming.restore_last_delivered_state()
+    assert not streaming.has_uncommitted_presentation()
+    assert eq_calls == 3
+    for _ in range(10):
+        assert not streaming.has_uncommitted_presentation()
+    assert eq_calls == 3
