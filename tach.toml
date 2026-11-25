@@ -506,6 +506,7 @@ visibility = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
+    "mindroom.approval.tool_owners",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
 ]
@@ -1447,10 +1448,13 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.tool_owners"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.approval.tool_approval",
     "mindroom.desktop.credentials",
     "mindroom.mcp.toolkit",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
@@ -1571,6 +1575,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.approval.inbound",
     "mindroom.approval.response",
+    "mindroom.approval.tool_owners",
     "mindroom.approval.transport",
     "mindroom.commands.auto_approve_commands",
     "mindroom.matrix_rtc.call_tools",
@@ -8553,6 +8558,8 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
+    "approval_policy_names",
+    "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "human_gate",
