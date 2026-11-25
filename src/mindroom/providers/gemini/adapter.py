@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import QUOTA_EXHAUSTED, InvalidRequest, ProviderError
-from mindroom.llm.provider import Capabilities, ModelIdentity
+from mindroom.llm.provider import GEMINI_PROMPT_CACHE_TTL_SECONDS, Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, TurnTimer, finished_turn
 from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
@@ -387,6 +387,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
             provider_default_sampling=model_config.id.casefold().endswith(
                 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
             ),
+            prompt_cache_ttl_seconds=GEMINI_PROMPT_CACHE_TTL_SECONDS,
         ),
         settings=settings,
     )

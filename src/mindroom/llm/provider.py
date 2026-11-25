@@ -46,7 +46,9 @@ class ModelIdentity:
     endpoint: str | None = None
 
 
+GEMINI_PROMPT_CACHE_TTL_SECONDS = 150.0
 STANDARD_PROMPT_CACHE_TTL_SECONDS = 240.0
+OPENAI_PROMPT_CACHE_TTL_SECONDS = 900.0
 EXTENDED_PROMPT_CACHE_TTL_SECONDS = 3300.0
 
 
@@ -540,6 +542,8 @@ def count_turn_usage(metrics: RunMetrics, turn: ModelTurn, default: ModelIdentit
 
 __all__ = [
     "EXTENDED_PROMPT_CACHE_TTL_SECONDS",
+    "GEMINI_PROMPT_CACHE_TTL_SECONDS",
+    "OPENAI_PROMPT_CACHE_TTL_SECONDS",
     "STANDARD_PROMPT_CACHE_TTL_SECONDS",
     "STRUCTURED_OUTPUT_TOOL",
     "Capabilities",

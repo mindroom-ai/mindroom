@@ -17,6 +17,8 @@ from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.provider import (
     EXTENDED_PROMPT_CACHE_TTL_SECONDS,
+    GEMINI_PROMPT_CACHE_TTL_SECONDS,
+    OPENAI_PROMPT_CACHE_TTL_SECONDS,
     STANDARD_PROMPT_CACHE_TTL_SECONDS,
     Capabilities,
     MediaKind,
@@ -411,20 +413,31 @@ def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings
     )
 
 
-def _chat_prompt_cache_ttl(route_key: str, model_id: str, settings: ChatSettings) -> float | None:
+def _prompt_cache_ttl(
+    route_key: str,
+    model_id: str,
+    settings: ChatSettings | ResponsesSettings,
+    *,
+    endpoint: str | None,
+) -> float | None:
     if not settings.cache_system_prompt:
         return None
-    control = (
-        openrouter_prompt_cache_control(
-            model_id,
-            cache_system_prompt=True,
-            extended_cache_time=settings.extended_cache_time,
-        )
-        if route_key == "openrouter"
-        else None
-    )
-    if control is not None and control.get("ttl") == "1h":
-        return EXTENDED_PROMPT_CACHE_TTL_SECONDS
+    if route_key == "openrouter" or (route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT):
+        if route_key == "openrouter" and isinstance(settings, ChatSettings):
+            control = openrouter_prompt_cache_control(
+                model_id,
+                cache_system_prompt=True,
+                extended_cache_time=settings.extended_cache_time,
+            )
+            if control is not None and control.get("ttl") == "1h":
+                return EXTENDED_PROMPT_CACHE_TTL_SECONDS
+        lower_id = model_id.strip().lower().removeprefix("~")
+        if lower_id.startswith("google/gemini"):
+            return GEMINI_PROMPT_CACHE_TTL_SECONDS
+        if lower_id.startswith("openai/"):
+            return OPENAI_PROMPT_CACHE_TTL_SECONDS
+    elif route_key == "codex" or (route_key == "openai" and endpoint == OPENAI_BASE_URL_DEFAULT):
+        return OPENAI_PROMPT_CACHE_TTL_SECONDS
     return STANDARD_PROMPT_CACHE_TTL_SECONDS
 
 
@@ -461,7 +474,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         omitted_media=route.omitted_media,
         url_media=frozenset({"image"}),
         provider_default_sampling=_provider_default_sampling(identity.id),
-        prompt_cache_ttl_seconds=_chat_prompt_cache_ttl(route_key, identity.id, settings),
+        prompt_cache_ttl_seconds=_prompt_cache_ttl(route_key, identity.id, settings, endpoint=identity.endpoint),
     )
     adapter = ChatAdapter(
         identity=identity,
@@ -571,7 +584,7 @@ def _build_responses(
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings, openrouter=openrouter),
         provider_default_sampling=_provider_default_sampling(model_id),
         replay_reset_scope=reset_scope,
-        prompt_cache_ttl_seconds=STANDARD_PROMPT_CACHE_TTL_SECONDS if settings.cache_system_prompt else None,
+        prompt_cache_ttl_seconds=_prompt_cache_ttl(route_key, model_id, settings, endpoint=endpoint),
     )
     wire = ResponsesWire(
         route=route_key,

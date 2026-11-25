@@ -77,6 +77,7 @@ from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_diges
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
+from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS, COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
@@ -458,11 +459,22 @@ async def test_request_compaction_summary_warns_on_usage_error_and_propagates_ti
         ("openai", "openrouter", "~anthropic/claude-sonnet-5", {}, None, 3300.0),
         ("openai", "openrouter", "anthropic/claude-sonnet-5", {"extended_cache_time": False}, None, 240.0),
         ("openai", "openrouter", "anthropic/claude-sonnet-5", {"cache_system_prompt": False}, None, None),
-        ("openai", "openrouter", "openai/gpt-5", {}, None, 240.0),
+        ("openai", "openrouter", "google/gemini-4-neon", {}, None, 150.0),
+        ("openai", "openrouter", "~google/gemini-4-neon", {}, None, 150.0),
+        ("openai", "openrouter", "google/gemini-4-neon", {"cache_system_prompt": False}, None, None),
+        ("gemini", "google", "gemini-2.5-pro", {}, None, 150.0),
+        ("openai", "openrouter", "openai/gpt-5", {}, None, 900.0),
+        ("openai", "openrouter", "~openai/gpt-5", {}, None, 900.0),
         ("openai", "openrouter", "openai/gpt-5", {"cache_system_prompt": False}, None, None),
-        ("openai", "deepseek", "deepseek-chat", {}, None, 240.0),
-        ("openai", "openai", "gpt-5", {}, "responses", 240.0),
+        ("openai", "openai", "gpt-5", {}, "chat_completions", 900.0),
+        ("openai", "openai", "gpt-5", {}, "responses", 900.0),
         ("openai", "openai", "gpt-5", {"cache_system_prompt": False}, "responses", None),
+        ("openai", "openai", "gpt-5", {"base_url": "http://localhost:8000/v1"}, "chat_completions", 240.0),
+        ("openai", "openai", "gpt-5", {"base_url": "http://localhost:8000/v1"}, "responses", 240.0),
+        ("openai", "codex", "gpt-5", {}, None, 900.0),
+        ("openai", "openai", "openai/gpt-5", {"base_url": OPENROUTER_BASE_URL_DEFAULT}, "responses", 900.0),
+        ("openai", "openai", "google/gemini-4-neon", {"base_url": OPENROUTER_BASE_URL_DEFAULT}, "responses", 150.0),
+        ("openai", "deepseek", "deepseek-chat", {}, None, 240.0),
         ("claude_code", "claude_code", "claude-sonnet-5", {}, None, None),
     ],
 )
@@ -485,6 +497,8 @@ def test_provider_capabilities_prompt_cache_ttl_seconds(
         if family == "anthropic":
             client = httpx2.AsyncClient(transport=httpx2_transport(lambda _req: sse_reply([])))
             built = provider_for(spec, tmp_path, client)
+        elif family == "gemini":
+            built = build_gemini_adapter(spec, tmp_path, lambda _req: pytest.fail("unexpected HTTP"))
         elif family == "openai":
             built = openai_family_adapter(spec, tmp_path, lambda _req: pytest.fail("unexpected HTTP"))
         else:
