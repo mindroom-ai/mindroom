@@ -202,6 +202,15 @@ def _response_typing_log_context(
     }
 
 
+def should_publish_active_run(request: ResponseRequest) -> bool:
+    """Return whether a reply request should publish live progress to ``io.mindroom.active_runs``."""
+    return (
+        request.response_envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+        and not request.quiet
+        and request.contact is None
+    )
+
+
 @asynccontextmanager
 async def response_typing_indicator(
     client: nio.AsyncClient,
@@ -224,7 +233,7 @@ async def response_typing_indicator(
 
     lease_cm = (
         active_runs.track(request.room_id, request.thread_id, active=False)
-        if active_runs is not None and request.contact is None
+        if active_runs is not None and should_publish_active_run(request)
         else nullcontext()
     )
     async with lease_cm as lease:

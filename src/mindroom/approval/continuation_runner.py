@@ -120,6 +120,7 @@ from mindroom.reply_turn.request import (
     merge_response_extra_content,
     reply_authorization_entity_names,
     response_typing_indicator,
+    should_publish_active_run,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -949,51 +950,59 @@ class ApprovalContinuationRunner:
     ) -> TurnEnding:
         """Run one claimed pause through the normal stoppable response lifecycle; return how it ended."""
         request = self.approval_response_request(claimed, target=target)
-        await self.locked.refresh_mid_turn_context_for_approval(request)
-        # The resume writes into the reply it continues from its first step.
-        progress = TurnProgress(delivery_started=True)
-        lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
-        post_effect_continuation = claimed
-        # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
-        owed = FinalDeliveryOutcome(ending=Owed())
-
-        async def continue_response(_message_id: str | None) -> FinalDeliveryOutcome:
-            nonlocal post_effect_continuation
-            try:
-                outcome, post_effect_continuation = await self._execute_claimed_approval(
-                    claimed,
-                    request=request,
-                    target=target,
-                    identity=lifecycle.identity,
-                )
-            except (asyncio.CancelledError, Exception):
-                delivery, _span_outcome = await run_coroutine_until_complete(self._read_final(claimed, recover=True))
-                if delivery is None:
-                    raise
-                if delivery.acknowledged_event_id is None:
-                    return owed
-                return await self._approval_outcome_from_delivery(delivery)
-            if (
-                not isinstance(outcome.ending, Completed | AwaitingApproval | Owed)
-                and (await self._read_final(claimed))[0]
-            ):
-                # A FINAL the resume froze before it failed is the approval's to finish once Matrix has it.
-                return owed
-            return outcome
-
-        await self.locked.run_and_settle_locked_response(
-            request,
-            target=target,
-            lifecycle=lifecycle,
-            progress=progress,
-            response_function=continue_response,
-            build_post_response_outcome=lambda final: self._approval_post_response_outcome(
-                post_effect_continuation,
-                target=target,
-                final=final,
-            ),
-            post_response_deps=lambda: self._approval_post_response_deps(claimed),
+        lease_cm = (
+            self.active_runs.track(request.room_id, request.thread_id)
+            if self.active_runs is not None and should_publish_active_run(request)
+            else nullcontext()
         )
+        async with lease_cm:
+            await self.locked.refresh_mid_turn_context_for_approval(request)
+            # The resume writes into the reply it continues from its first step.
+            progress = TurnProgress(delivery_started=True)
+            lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
+            post_effect_continuation = claimed
+            # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
+            owed = FinalDeliveryOutcome(ending=Owed())
+
+            async def continue_response(_message_id: str | None) -> FinalDeliveryOutcome:
+                nonlocal post_effect_continuation
+                try:
+                    outcome, post_effect_continuation = await self._execute_claimed_approval(
+                        claimed,
+                        request=request,
+                        target=target,
+                        identity=lifecycle.identity,
+                    )
+                except (asyncio.CancelledError, Exception):
+                    delivery, _span_outcome = await run_coroutine_until_complete(
+                        self._read_final(claimed, recover=True),
+                    )
+                    if delivery is None:
+                        raise
+                    if delivery.acknowledged_event_id is None:
+                        return owed
+                    return await self._approval_outcome_from_delivery(delivery)
+                if (
+                    not isinstance(outcome.ending, Completed | AwaitingApproval | Owed)
+                    and (await self._read_final(claimed))[0]
+                ):
+                    # A FINAL the resume froze before it failed is the approval's to finish once Matrix has it.
+                    return owed
+                return outcome
+
+            await self.locked.run_and_settle_locked_response(
+                request,
+                target=target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=continue_response,
+                build_post_response_outcome=lambda final: self._approval_post_response_outcome(
+                    post_effect_continuation,
+                    target=target,
+                    final=final,
+                ),
+                post_response_deps=lambda: self._approval_post_response_deps(claimed),
+            )
         ending = progress.ending
         assert ending is not None, "a settled resume has its ending"
         match ending:

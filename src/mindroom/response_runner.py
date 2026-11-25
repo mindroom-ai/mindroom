@@ -119,6 +119,7 @@ from mindroom.reply_turn.request import (
     merge_response_extra_content,
     requester_remains_authorized,
     response_typing_indicator,
+    should_publish_active_run,
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
@@ -341,6 +342,10 @@ def _participation_for_request(
             agent_name=request.response_envelope.agent_name,
         )
     return gate
+
+
+def _noop_activate_run(_participation: ParticipationGate | None) -> None:
+    pass
 
 
 def _approve_continued_reply(participation: ParticipationGate | None, request: ResponseRequest) -> None:
@@ -1597,6 +1602,26 @@ class ResponseRunner:
             locked_operation=lambda: self._finalize_without_running_locked(request, response_kind=response_kind),
         )
 
+    @asynccontextmanager
+    async def _track_turn_active_run(
+        self,
+        request: ResponseRequest,
+    ) -> AsyncIterator[Callable[[ParticipationGate | None], None]]:
+        """Bind one turn-level active-run lease that activates idempotently once visible progress starts."""
+        if self.active_runs is None or not should_publish_active_run(request):
+            yield _noop_activate_run
+            return
+        async with (
+            self.active_runs.track(request.room_id, request.thread_id, active=False) as lease,
+            self.active_runs.deferred_activation(lease) as activate_lease,
+        ):
+
+            def activate_if_visible(participation: ParticipationGate | None) -> None:
+                if participation is None or participation.approved:
+                    activate_lease()
+
+            yield activate_if_visible
+
     async def _run_locked_turn(
         self,
         request: ResponseRequest,
@@ -1610,23 +1635,29 @@ class ResponseRunner:
         decision. A preparation failure before that decision ends the turn quietly, as a failed check. What differs
         between the two kinds is decided in ``_prepare_agent_turn`` and ``_prepare_team_turn``.
         """
-        try:
-            prepared = await self._prepare_locked_turn(request, team=team, participation=participation)
-        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
-            raise
-        except Exception as error:
-            if (
-                participation is None
-                or participation.decision is not None
-                or any(notice.stopped_reply for notice in request.notices)
-            ):
+        async with self._track_turn_active_run(request) as activate_run:
+            try:
+                prepared = await self._prepare_locked_turn(
+                    request,
+                    team=team,
+                    participation=participation,
+                    activate_run=activate_run,
+                )
+            except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
                 raise
-            participation.decline("preparation_failed")
-            return await self._end_unprepared_turn(request, error, participation)
-        if not isinstance(prepared, _LockedTurn):
-            return prepared
-        await self._generate_and_settle(prepared)
-        return Owned()
+            except Exception as error:
+                if (
+                    participation is None
+                    or participation.decision is not None
+                    or any(notice.stopped_reply for notice in request.notices)
+                ):
+                    raise
+                participation.decline("preparation_failed")
+                return await self._end_unprepared_turn(request, error, participation)
+            if not isinstance(prepared, _LockedTurn):
+                return prepared
+            await self._generate_and_settle(prepared)
+            return Owned()
 
     def _runs_nothing(self, request: ResponseRequest) -> Suppression | None:
         """Return why a locked turn ends unanswered without running: an empty prompt, or a contact no longer active.
@@ -1668,6 +1699,7 @@ class ResponseRunner:
         *,
         team: _TeamResponseRequest | None,
         participation: ParticipationGate | None,
+        activate_run: Callable[[ParticipationGate | None], None] = _noop_activate_run,
     ) -> _LockedTurn | SourceFate:
         """Admit and prepare one turn: what its generation and settlement read, or what became of its sources.
 
@@ -1740,6 +1772,7 @@ class ResponseRunner:
             )
             placeholder_model_name = team_models.team_model_name if team_models is not None else None
         self._set_span_reply_model(placeholder_model_name)
+        activate_run(participation)
         placeholder_event_id = await self._send_placeholder(
             request,
             history_scope=history_scope,
