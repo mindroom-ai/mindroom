@@ -31,7 +31,7 @@ from mindroom.agents import build_agent_toolkit
 from mindroom.browser import fetch_guard as browser_fetch_guard
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager, scoped_credentials_path
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
     _PROFILE_SESSIONS,
@@ -4138,3 +4138,63 @@ async def test_desktop_target_resolves_paired_credentials_with_precedence_and_wo
     await with_static.browser(action="tabs")
     fallback_target, _ = request.await_args.args
     assert fallback_target == PinnedMatrixDevice("@static:example.org", "STATICDEV", "static-key")
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_corrupt_paired_credentials_fails_closed_without_static_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt/unreadable scoped Desktop pairing file fails closed and never falls back to a static pin."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    credentials_manager = get_runtime_credentials_manager(paths)
+    worker_target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="routed_agent",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="routed_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+    scoped_path = scoped_credentials_path(
+        "desktop",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    scoped_path.parent.mkdir(parents=True, exist_ok=True)
+    scoped_path.write_text("{corrupt-json", encoding="utf-8")
+
+    runtime_context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="routed_agent",
+        client=object(),
+    )
+    request = AsyncMock()
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: runtime_context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+
+    browser = BrowserTools(
+        paths,
+        default_target="desktop",
+        device_user_id="@static:example.org",
+        device_id="STATICDEV",
+        device_ed25519="static-key",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(ValueError, match="could not be read"):
+        await browser.browser(action="tabs")
+
+    request.assert_not_awaited()

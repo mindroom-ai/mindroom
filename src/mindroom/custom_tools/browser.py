@@ -76,7 +76,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 _DEFAULT_PROFILE = "mindroom"
@@ -1118,17 +1117,12 @@ class BrowserTools(Toolkit):
 
     def _resolve_desktop_target(
         self,
-        context: ToolRuntimeContext,
-        *,
-        credential_scope: tuple[str, str] | None = None,
+        credential_scope: tuple[str, str] | None,
     ) -> PinnedMatrixDevice:
-        scope = (
-            credential_scope if credential_scope is not None else desktop_credential_scope(context, self._worker_target)
-        )
-        if self._credentials_manager is not None and scope is not None:
+        if self._credentials_manager is not None and credential_scope is not None:
             configuration = desktop_configuration_for_scope(
                 self._credentials_manager,
-                scope,
+                credential_scope,
                 default_timeout_seconds=self._timeout_seconds,
             )
             if configuration.status is DesktopConfigurationStatus.READY and configuration.target is not None:
@@ -1173,7 +1167,7 @@ class BrowserTools(Toolkit):
         credential_scope = desktop_credential_scope(context, self._worker_target)
         assert credential_scope is not None
         requester_id, agent_name = credential_scope
-        target = self._resolve_desktop_target(context, credential_scope=credential_scope)
+        target = self._resolve_desktop_target(credential_scope)
         # URL validation resolves requester-chosen hostnames, which must not block the event loop.
         parameters = await run_browser_tool_url_check(
             _desktop_browser_parameters,

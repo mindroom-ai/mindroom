@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsUnreadableError, get_runtime_credentials_manager
 from mindroom.desktop.configuration import (
+    DesktopConfigurationState,
     DesktopConfigurationStatus,
     desktop_configuration_state,
     desktop_disconnect_error,
@@ -204,7 +205,15 @@ def _setup_response(scope: DesktopCommandScope, *, explicit_agent: bool = False)
 
 
 def _status_response(scope: DesktopCommandScope) -> str:
-    state = desktop_configuration_state(_load_desktop_credentials(scope))
+    try:
+        credentials = _load_desktop_credentials(scope)
+    except CredentialsUnreadableError:
+        state = DesktopConfigurationState(
+            status=DesktopConfigurationStatus.INVALID,
+            error="Stored Desktop credentials could not be read.",
+        )
+    else:
+        state = desktop_configuration_state(credentials)
     if state.status is DesktopConfigurationStatus.READY:
         return f"✅ Desktop is configured for you and agent `{scope.agent_name}`."
     if state.status is DesktopConfigurationStatus.INVALID:

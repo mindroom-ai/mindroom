@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
+from mindroom.credentials.manager import CredentialsManager, CredentialsUnreadableError
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -443,11 +443,17 @@ def desktop_configuration_for_scope(
     if credentials_manager is None or credential_scope is None:
         return desktop_configuration_state({"timeout_seconds": default_timeout_seconds})
     requester_id, agent_name = credential_scope
-    credentials = load_desktop_credentials(
-        credentials_manager,
-        requester_id=requester_id,
-        agent_name=agent_name,
-    )
+    try:
+        credentials = load_desktop_credentials(
+            credentials_manager,
+            requester_id=requester_id,
+            agent_name=agent_name,
+        )
+    except CredentialsUnreadableError:
+        return DesktopConfigurationState(
+            status=DesktopConfigurationStatus.INVALID,
+            error="Stored Desktop credentials could not be read.",
+        )
     values = dict(credentials or {})
     values.setdefault("timeout_seconds", default_timeout_seconds)
     return desktop_configuration_state(values)
@@ -488,10 +494,11 @@ async def _tool_result_from_response(
             timeout_seconds=timeout_seconds,
         )
     except DesktopMediaError:
+        partial_payload = _result_without_screenshot_dependent_state_id(response.result)
         if action == "get_app_state":
             return _partial_result(
                 action,
-                result=response.result,
+                result=partial_payload,
                 message=(
                     "Accessibility state was returned, but its app screenshot could not be decrypted; "
                     "request get_app_state again before acting."
@@ -499,12 +506,17 @@ async def _tool_result_from_response(
             )
         if action not in DESKTOP_CONTROL_ACTIONS:
             raise
+        follow_up = (
+            "Request get_app_state again before acting."
+            if partial_payload is not response.result
+            else "Inspect its fresh accessibility state first."
+        )
         return _partial_result(
             action,
-            result=response.result,
+            result=partial_payload,
             message=(
                 "The desktop action completed, but its follow-up screenshot could not be decrypted; "
-                "do not repeat the action automatically. Inspect its fresh accessibility state first."
+                f"do not repeat the action automatically. {follow_up}"
             ),
         )
     if return_attachment:
@@ -1033,12 +1045,17 @@ async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *,
             timeout_seconds=timeout_seconds,
         )
     except DesktopMediaError:
+        partial_shown = _result_without_screenshot_dependent_state_id(shown)
+        guidance = (
+            "Query request_status again later or request get_app_state before acting; do not repeat the action."
+            if partial_shown is not shown
+            else "Query request_status again later; do not repeat the action."
+        )
         return _partial_result(
             "request_status",
-            result=sanitized_result,
+            result=sanitized(partial_shown),
             message=(
-                "The recorded reply was found, but its screenshot could not be downloaded or decrypted. "
-                "Query request_status again later; do not repeat the action."
+                f"The recorded reply was found, but its screenshot could not be downloaded or decrypted. {guidance}"
             ),
         )
     return ToolValue(
@@ -1061,6 +1078,21 @@ async def _with_full_output(
     media = EncryptedDesktopMedia.from_content(raw_media, kind="output_attachment")
     output = await download_encrypted_media(client, media, timeout_seconds=timeout_seconds)
     return {**shown, "output": output.decode()}
+
+
+def _result_without_screenshot_dependent_state_id(result: dict[str, object]) -> dict[str, object]:
+    """Strip state_id when missing screenshot pixels would leave fallback actions blind."""
+    state = result.get("state")
+    if not isinstance(state, dict) or "state_id" not in state:
+        return result
+    observation = result.get("observation")
+    screenshot_mode = isinstance(observation, dict) and observation.get("mode") == "screenshot"
+    if screenshot_mode or not state.get("elements") or state.get("truncated") or state.get("stability") != "stable":
+        return {
+            **result,
+            "state": {key: value for key, value in state.items() if key != "state_id"},
+        }
+    return result
 
 
 def _without_attachment(result: dict[str, object]) -> dict[str, object]:

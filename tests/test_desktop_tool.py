@@ -16,12 +16,20 @@ from mindroom.agents import create_agent
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
-from mindroom.custom_tools.desktop import DesktopTools
+from mindroom.credentials.manager import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    scoped_credentials_path,
+)
+from mindroom.custom_tools.desktop import DesktopTools, desktop_configuration_for_scope
 from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
-from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
+from mindroom.desktop.credentials import (
+    delete_desktop_credentials,
+    has_ready_self_service_desktop,
+    save_desktop_credentials,
+)
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
 from mindroom.event_journal import ApprovalCall
@@ -635,12 +643,18 @@ async def test_state_with_undecryptable_screenshot_remains_partial(monkeypatch: 
         agent_name="computer",
         client=object(),
     )
+    stable_state = {
+        "state_id": "state-1",
+        "elements": [{"index": 0, "role": "button", "title": "Save", "ref": "ref-0"}],
+        "truncated": False,
+        "stability": "stable",
+    }
     request = AsyncMock(
         return_value=DesktopResponse(
             request_id="request-1",
             session_id="session-1",
             ok=True,
-            result={"state": {"state_id": "state-1"}},
+            result={"observation": {"mode": "both"}, "state": stable_state},
             screenshot=MEDIA,
         ),
     )
@@ -659,7 +673,7 @@ async def test_state_with_undecryptable_screenshot_remains_partial(monkeypatch: 
 
     payload = json.loads(result.content)
     assert payload["status"] == "partial"
-    assert payload["result"]["state"] == {"state_id": "state-1"}
+    assert payload["result"]["state"] == stable_state
 
 
 @pytest.mark.asyncio
@@ -1649,3 +1663,250 @@ async def test_screenshot_observation_defaults_to_screenshot_and_allows_explicit
 
     await tool.desktop("get_app_state", app="com.example.Editor")
     assert request.await_args_list[2].args[1].parameters == {"app": "com.example.Editor"}
+
+
+@pytest.mark.asyncio
+async def test_unreadable_scoped_desktop_credentials_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable/corrupt scoped pairing file maps to INVALID instead of SETUP_REQUIRED."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    worker_target = _desktop_target(requester_id="@alice:example.org")
+    scoped_path = scoped_credentials_path(
+        "desktop",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    scoped_path.parent.mkdir(parents=True, exist_ok=True)
+    scoped_path.write_text("{corrupt-json", encoding="utf-8")
+
+    state = desktop_configuration_for_scope(
+        credentials_manager,
+        ("@alice:example.org", "computer"),
+        default_timeout_seconds=30.0,
+    )
+    assert state.status is DesktopConfigurationStatus.INVALID
+    assert "could not be read" in (state.error or "")
+
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-4o"}},
+            "defaults": {"desktop_pairing": "self_service"},
+            "agents": {"computer": {"display_name": "Computer", "role": "Use desktop", "tools": ["desktop"]}},
+        },
+        runtime_paths,
+    )
+    assert has_ready_self_service_desktop(config, runtime_paths, "computer", "@alice:example.org") is False
+
+    request = AsyncMock()
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.get_tool_runtime_context",
+        lambda: SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object()),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = DesktopTools(credentials_manager=credentials_manager, worker_target=worker_target)
+
+    result = await tool.desktop("status")
+    payload = json.loads(result.content)
+    assert payload["status"] == "setup_required"
+    assert "Desktop configuration is invalid" in payload["message"]
+    assert "could not be read" in payload["message"]
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observation", "state"),
+    [
+        (
+            {"mode": "screenshot"},
+            {
+                "state_id": "state-shot",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "truncated": False,
+                "stability": "stable",
+            },
+        ),
+        (
+            {"mode": "both"},
+            {
+                "state_id": "state-empty",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "elements": [],
+                "truncated": False,
+                "stability": "stable",
+            },
+        ),
+        (
+            {"mode": "both"},
+            {
+                "state_id": "state-truncated",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "elements": [{"index": 0, "role": "button", "title": "Save", "ref": "ref-0"}],
+                "truncated": True,
+                "stability": "stable",
+            },
+        ),
+        (
+            {"mode": "both"},
+            {
+                "state_id": "state-unstable",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "elements": [{"index": 0, "role": "button", "title": "Save", "ref": "ref-0"}],
+                "truncated": False,
+                "stability": "unstable",
+            },
+        ),
+    ],
+)
+async def test_direct_screenshot_failure_withholds_state_id_when_fallback_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    observation: dict[str, object],
+    state: dict[str, object],
+) -> None:
+    """Direct partial receipts withhold state_id whenever missing screenshot pixels would make fallback blind."""
+    _route_desktop_requests(
+        monkeypatch,
+        DesktopResponse(
+            "r-get",
+            "s",
+            True,
+            result={"observation": observation, "state": state},
+            screenshot=MEDIA,
+        ),
+        DesktopResponse(
+            "r-click",
+            "s",
+            True,
+            result={"action": "click", "action_completed": True, "observation": observation, "state": state},
+            screenshot=MEDIA,
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.download_encrypted_screenshot",
+        AsyncMock(side_effect=DesktopMediaError("Decryption failed.")),
+    )
+    tool = _configured_tool(monkeypatch)
+
+    get_result = await tool.desktop("get_app_state", app="com.example.Editor")
+    get_payload = json.loads(get_result.content)
+    assert get_payload["status"] == "partial"
+    assert "state_id" not in get_payload["result"]["state"]
+    assert get_payload["result"]["state"]["app"] == {"id": "com.example.Editor", "name": "Editor"}
+    assert "get_app_state" in get_payload["message"]
+    assert not get_result.images
+
+    click_result = await tool.desktop("click", app="com.example.Editor", state_id="prior-state", x=10, y=20)
+    click_payload = json.loads(click_result.content)
+    assert click_payload["status"] == "partial"
+    assert click_payload["result"]["action_completed"] is True
+    assert "state_id" not in click_payload["result"]["state"]
+    assert click_payload["result"]["state"]["app"] == {"id": "com.example.Editor", "name": "Editor"}
+    assert "do not repeat" in click_payload["message"]
+    assert "get_app_state" in click_payload["message"]
+    assert not click_result.images
+
+
+@pytest.mark.asyncio
+async def test_request_status_screenshot_failure_withholds_only_screenshot_dependent_state_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """request_status strips state_id when screenshot fallback was needed, but preserves complete stable trees."""
+    secret_media = EncryptedDesktopMedia(
+        url="mxc://example.org/secret-shot",
+        key="secret-aes-key-material",
+        iv="secret-iv-value",
+        sha256="secret-sha256-hash",
+        mime_type="image/jpeg",
+        size=11,
+    )
+    screenshot_only_recorded = DesktopResponse(
+        "original-1",
+        "s",
+        True,
+        result={
+            "action": "click",
+            "action_completed": True,
+            "observation": {"mode": "screenshot"},
+            "state": {
+                "state_id": "state-blind",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "truncated": False,
+                "stability": "stable",
+            },
+        },
+        screenshot=secret_media,
+    )
+    stable_tree_recorded = DesktopResponse(
+        "original-2",
+        "s",
+        True,
+        result={
+            "action": "click",
+            "action_completed": True,
+            "observation": {"mode": "both"},
+            "state": {
+                "state_id": "state-usable",
+                "app": {"id": "com.example.Editor", "name": "Editor"},
+                "elements": [{"index": 0, "role": "button", "title": "Save", "ref": "ref-0"}],
+                "truncated": False,
+                "stability": "stable",
+            },
+        },
+        screenshot=secret_media,
+    )
+    _route_desktop_requests(
+        monkeypatch,
+        DesktopResponse(
+            "query-1",
+            "s",
+            True,
+            result={
+                "request_id": "original-1",
+                "state": "completed",
+                "response": screenshot_only_recorded.to_content(),
+            },
+        ),
+        DesktopResponse(
+            "query-2",
+            "s",
+            True,
+            result={
+                "request_id": "original-2",
+                "state": "completed",
+                "response": stable_tree_recorded.to_content(),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.download_encrypted_screenshot",
+        AsyncMock(side_effect=DesktopMediaError("Decryption failed.")),
+    )
+    tool = _configured_tool(monkeypatch)
+
+    blind_result = await tool.desktop("request_status", request_id="original-1")
+    blind_payload = json.loads(blind_result.content)
+    assert blind_payload["status"] == "partial"
+    recovered_blind = blind_payload["result"]["response"]["result"]
+    assert recovered_blind["action_completed"] is True
+    assert "state_id" not in recovered_blind["state"]
+    assert recovered_blind["state"]["app"] == {"id": "com.example.Editor", "name": "Editor"}
+    assert "screenshot" not in blind_payload["result"]["response"]
+    assert secret_media.key not in blind_result.content
+    assert "get_app_state" in blind_payload["message"]
+    assert "do not repeat" in blind_payload["message"]
+    assert not blind_result.images
+
+    usable_result = await tool.desktop("request_status", request_id="original-2")
+    usable_payload = json.loads(usable_result.content)
+    assert usable_payload["status"] == "partial"
+    recovered_usable = usable_payload["result"]["response"]["result"]
+    assert recovered_usable["state"]["state_id"] == "state-usable"
+    assert "screenshot" not in usable_payload["result"]["response"]
+    assert secret_media.key not in usable_result.content
+    assert not usable_result.images
