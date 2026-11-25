@@ -32,7 +32,7 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     "- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead."
 )
 MATRIX_TOOL_FOLDING_FORMAT = (
-    "- MindRoom Chat may collapse earlier text and tool calls up through your last tool call once your reply finishes; "
+    "- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; "
     "write a self-contained final answer after your last tool call."
 )
 
