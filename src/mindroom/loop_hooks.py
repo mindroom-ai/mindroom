@@ -37,6 +37,7 @@ from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.memory import stamp_entrypoint_snapshot
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
+from mindroom.tool_jobs.consumption import acknowledge_saved_run
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
 from mindroom.tool_jobs.notices import job_notice_hook
 
@@ -213,7 +214,7 @@ def _loop_hooks(
             turn_recorder=turn.turn_recorder,
         ),
     )
-    checkpoint = checkpoint_hooks(turn.storage) if turn.checkpoints else None
+    checkpoint = checkpoint_hooks(turn.storage, on_saved=acknowledge_saved_run) if turn.checkpoints else None
     if checkpoint is not None:
         before_request.append(checkpoint.before_request)
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")

@@ -625,7 +625,12 @@ async def _collect_a_job_then_restart(
         )
         acknowledge = runtime.acknowledge_waits
         if not acknowledged:
-            monkeypatch.setattr(runtime, "acknowledge_waits", AsyncMock(return_value=()))
+            # Fail the write rather than returning () so mid-turn checkpoint ack retains the claim for finalize() to release.
+            monkeypatch.setattr(
+                runtime,
+                "acknowledge_waits",
+                AsyncMock(side_effect=OSError("crashed before acknowledgement")),
+            )
         await _run_job_turn(monkeypatch, bot, crashed, _collect("collect-1"), _stall("s1"), cut_short=True)
         assert [ended.job_id for ended in await runtime.ended_jobs(key)] == ([] if acknowledged else [job_id])
         monkeypatch.setattr(runtime, "acknowledge_waits", acknowledge)

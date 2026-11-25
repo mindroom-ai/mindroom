@@ -642,6 +642,7 @@ def persist_to(
     *,
     replays: Callable[[AnyRunRecord], bool] | None = None,
     usage_kind: IndependentUsageKind | None = None,
+    on_saved: Callable[[AnyRunRecord], Awaitable[None]] | None = None,
 ) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
@@ -653,20 +654,23 @@ def persist_to(
     back, in the record's own transaction, when it differs from ``session.stored_session_state``, which every write of
     the field records, so a turn whose runs or checkpoints change the state and restore it stores it restored.
     The save mirrors itself in ``session.runs`` in the lane, where the session's saves run one at a time; it completes
-    even when the caller is cancelled, as the lane's operations do.
+    even when the caller is cancelled, as the lane's operations do. ``on_saved``, when given, runs after each record
+    whose turn row is written.
     """
 
     async def persist(record: AnyRunRecord) -> None:
         data, kind, usage = _stored_dict(record), run_kind(record), run_usage_snapshot(record, kind=usage_kind)
         turn = replays is None or replays(record)
 
-        def save(opened: ConversationStore, state: dict[str, Any]) -> None:
+        def save(opened: ConversationStore, state: dict[str, Any]) -> SaveOutcome | None:
             if turn:
-                opened._save(session, data, kind, usage=usage, state=state)
-            else:
-                opened._save_usage(session, data, usage, state=state)
+                return opened._save(session, data, kind, usage=usage, state=state)
+            opened._save_usage(session, data, usage, state=state)
+            return None
 
-        await write_with_session_state(store, session, save)
+        outcome = await write_with_session_state(store, session, save)
+        if outcome == "written" and on_saved is not None:
+            await on_saved(record)
 
     return persist
 

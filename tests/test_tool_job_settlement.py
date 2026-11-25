@@ -9,14 +9,21 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.model_loop import LoopState
+from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.config.main import Config
 from mindroom.event_journal import ToolJobStore
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.history.run_checkpoint import checkpoint_hooks
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.run_storage import RunStorage, TerminalRecord, persist_into
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_jobs.consumption import ConsumptionOwner
+from mindroom.tool_jobs.consumption import ConsumptionOwner, acknowledge_saved_run, consumption_context
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobClaim, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
@@ -403,6 +410,8 @@ async def _claim_and_register(
     *,
     run_id: str,
     call_id: str,
+    team: bool = False,
+    returned_inline: bool = False,
     claim_override: JobClaim | None = None,
 ) -> JobClaim:
     waited = await runtime.wait(job_id, owner=job_owner(), depth=0, timeout=0)
@@ -412,9 +421,9 @@ async def _claim_and_register(
         waited.job,
         waited.claim if claim_override is None else claim_override,
         run_id=run_id,
-        team=False,
+        team=team,
         call_id=call_id,
-        returned_inline=False,
+        returned_inline=returned_inline,
     )
     return waited.claim
 
@@ -536,5 +545,264 @@ async def test_finalize_consumption_isolates_invalid_claims_and_storage_failures
             "stale",
             "bad-run-job",
         }
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_saved_run_matches_only_exact_finished_non_history_calls(tmp_path: Path) -> None:
+    """Mid-turn acknowledgement ignores from_history messages and leaves unrelated or paused claims pending."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = ConsumptionOwner()
+    try:
+        for job_id in ("matched-tool", "matched-msg", "from-history", "wrong-team", "other-run", "paused"):
+            await _start_completed_job(runtime, job_id)
+        await _claim_and_register(runtime, owner, "matched-tool", run_id="run-1", call_id="call-tool")
+        await _claim_and_register(runtime, owner, "matched-msg", run_id="run-1", call_id="call-msg")
+        await _claim_and_register(runtime, owner, "from-history", run_id="run-1", call_id="call-history")
+        await _claim_and_register(runtime, owner, "wrong-team", run_id="run-1", team=True, call_id="call-tool")
+        await _claim_and_register(runtime, owner, "other-run", run_id="run-2", call_id="call-tool")
+        await _claim_and_register(runtime, owner, "paused", run_id="run-1", call_id="call-paused")
+
+        saved_run = RunRecord(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.cancelled,
+            tools=[
+                ToolExecution(tool_call_id="call-tool", tool_name="job", result="ok"),
+                ToolExecution(
+                    tool_call_id="call-paused",
+                    tool_name="job",
+                    requires_confirmation=True,
+                    result="waiting",
+                ),
+            ],
+            messages=[
+                Message(role="tool", tool_call_id="call-msg", content="done"),
+                Message(role="tool", tool_call_id="call-history", content="old", from_history=True),
+            ],
+        )
+        with consumption_context(owner):
+            await acknowledge_saved_run(saved_run)
+
+        persisted = await saved_jobs(tmp_path)
+        for job_id in ("matched-tool", "matched-msg"):
+            assert (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert persisted[job_id].consumed
+        for job_id in ("from-history", "wrong-team", "other-run", "paused"):
+            assert not (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert not persisted[job_id].consumed
+        assert {claim.job.job_id for claim in owner._claims} == {"from-history", "wrong-team", "other-run", "paused"}
+        await owner.finalize()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_non_written_saves_do_not_acknowledge_claims(tmp_path: Path) -> None:
+    """Removed, final, and usage-only saves never invoke on_saved or acknowledge job claims."""
+    runtime = await tool_job_runtime(tmp_path)
+    store = create_agent_state_storage("leader", tmp_path)
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="leader")
+    _save_finished_run(store, "run-final", "call-1")
+    with store.transaction(write=True) as connection:
+        connection.execute(
+            f'INSERT INTO "{store.names.log_removed}" (run_id, session_id) VALUES (?, ?)',  # noqa: S608
+            ("run-removed", "session-1"),
+        )
+    owner = ConsumptionOwner()
+    called: list[str] = []
+
+    async def on_saved(record: RunRecord | TeamRunRecord) -> None:
+        called.append(record.run_id)
+        await acknowledge_saved_run(record)
+
+    try:
+        for job_id, run_id in (("job-final", "run-final"), ("job-removed", "run-removed"), ("job-usage", "run-usage")):
+            await _start_completed_job(runtime, job_id)
+            await _claim_and_register(runtime, owner, job_id, run_id=run_id, call_id="call-1")
+
+        hooks = checkpoint_hooks(RunStorage(store=store, session=session, scope=None), on_saved=on_saved)
+        assert hooks is not None
+        persist_usage_only = persist_to(store, session, replays=lambda _record: False, on_saved=on_saved)
+        persist_checked = persist_to(store, session, on_saved=on_saved)
+
+        with consumption_context(owner):
+            for run_id in ("run-final", "run-removed"):
+                record = RunRecord(
+                    run_id=run_id,
+                    session_id="session-1",
+                    status=RunStatus.running,
+                    tools=[ToolExecution(tool_call_id="call-1", tool_name="job", result="ok")],
+                )
+                state = LoopState(
+                    messages=[],
+                    offered=PreparedTools(functions={}),
+                    tools=(),
+                    run=RunContext(run_id=run_id, session=session),
+                    record=record,
+                    request_index=1,
+                    request_template=ModelRequest(messages=()),
+                )
+                await hooks.before_request(state)
+                await persist_checked(record)
+            await persist_usage_only(
+                RunRecord(
+                    run_id="run-usage",
+                    session_id="session-1",
+                    status=RunStatus.completed,
+                    tools=[ToolExecution(tool_call_id="call-1", tool_name="job", result="ok")],
+                ),
+            )
+
+        assert called == []
+        persisted = await saved_jobs(tmp_path)
+        for job_id in ("job-final", "job-removed", "job-usage"):
+            assert not (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert not persisted[job_id].consumed
+        await owner.finalize()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_saved_run_retries_transient_errors_and_drops_per_claim_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient journal errors keep claims and inline holds for retry; per-claim errors drop without releasing."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = ConsumptionOwner()
+    try:
+        for job_id in ("transient-inline", "valid-ok", "other-waiter"):
+            await _start_completed_job(runtime, job_id)
+        await _claim_and_register(
+            runtime,
+            owner,
+            "transient-inline",
+            run_id="run-1",
+            call_id="call-1",
+            returned_inline=True,
+        )
+        run1 = RunRecord(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.cancelled,
+            tools=[ToolExecution(tool_call_id="call-1", tool_name="tool", result="ok")],
+        )
+
+        def fail_save(_job: dict[str, object], _payload: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        with monkeypatch.context() as patch, capture_logs() as fail_logs:
+            intercept_job_saves(patch, before=fail_save)
+            await owner.acknowledge_saved_run(run1)
+        assert {e["job_id"] for e in fail_logs if e["event"] == "Tool result persistence was not confirmed"} == {
+            "transient-inline",
+        }
+        assert not (await lookup(runtime, "transient-inline", owner=job_owner(), depth=0)).consumed
+        assert len(owner._claims) == 1
+        assert "transient-inline" not in {job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)}
+        assert (await runtime.wait("transient-inline", owner=job_owner(), depth=0, timeout=0)).claim is None
+
+        await owner.acknowledge_saved_run(run1)
+        persisted = await saved_jobs(tmp_path)
+        assert persisted["transient-inline"].consumed
+        assert persisted["transient-inline"].returned_inline
+        assert owner._claims == []
+
+        await _claim_and_register(runtime, owner, "valid-ok", run_id="run-2", call_id="call-2")
+        other_claim = await _claim_and_register(
+            runtime,
+            owner,
+            "other-waiter",
+            run_id="run-2",
+            call_id="call-2",
+            claim_override=JobClaim("wrong"),
+        )
+        run2 = RunRecord(
+            run_id="run-2",
+            session_id="session-1",
+            status=RunStatus.cancelled,
+            tools=[ToolExecution(tool_call_id="call-2", tool_name="job", result="ok")],
+        )
+        with capture_logs() as error_logs:
+            await owner.acknowledge_saved_run(run2)
+        assert {e["job_id"] for e in error_logs if e["event"] == "Tool result persistence was not confirmed"} == {
+            "other-waiter",
+        }
+        assert (await saved_jobs(tmp_path))["valid-ok"].consumed
+        assert not (await saved_jobs(tmp_path))["other-waiter"].consumed
+        assert owner._claims == []
+        # Another waiter's real claim on "other-waiter" stayed intact.
+        assert (await runtime.wait("other-waiter", owner=job_owner(), depth=0, timeout=0)).claim is None
+        await runtime.acknowledge_wait("other-waiter", other_claim)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_team_member_save_via_persist_into_acknowledges_member_before_leader(tmp_path: Path) -> None:
+    """Persisting a finished team member acknowledges its claims immediately while keeping the leader's pending."""
+    runtime = await tool_job_runtime(tmp_path)
+    store = create_agent_state_storage("squad", tmp_path)
+    session = ConversationSession(session_id="session-1", kind="team", owner_id="squad")
+    storage = RunStorage(store=store, session=session, scope=None)
+    terminal = TerminalRecord(TeamRunRecord)
+    persist = persist_into(terminal, storage, on_saved=acknowledge_saved_run)
+    owner = ConsumptionOwner()
+    try:
+        for job_id in ("member-job", "leader-job"):
+            await _start_completed_job(runtime, job_id)
+        await _claim_and_register(
+            runtime,
+            owner,
+            "member-job",
+            run_id="member-1",
+            team=False,
+            call_id="member-call",
+            returned_inline=True,
+        )
+        await _claim_and_register(
+            runtime,
+            owner,
+            "leader-job",
+            run_id="leader-1",
+            team=True,
+            call_id="leader-call",
+        )
+        with consumption_context(owner):
+            await persist(
+                RunRecord(
+                    run_id="member-1",
+                    parent_run_id="leader-1",
+                    session_id="session-1",
+                    agent_id="worker",
+                    status=RunStatus.completed,
+                    tools=[ToolExecution(tool_call_id="member-call", tool_name="tool", result="done")],
+                ),
+            )
+            mid_persisted = await saved_jobs(tmp_path)
+            assert mid_persisted["member-job"].consumed
+            assert mid_persisted["member-job"].returned_inline
+            assert not mid_persisted["leader-job"].consumed
+            assert [claim.job.job_id for claim in owner._claims] == ["leader-job"]
+            assert terminal.record is None
+
+            await persist(
+                TeamRunRecord(
+                    run_id="leader-1",
+                    session_id="session-1",
+                    team_id="squad",
+                    status=RunStatus.completed,
+                    tools=[ToolExecution(tool_call_id="leader-call", tool_name="job", result="waited")],
+                ),
+            )
+        final_persisted = await saved_jobs(tmp_path)
+        assert final_persisted["leader-job"].consumed
+        assert owner._claims == []
+        assert terminal.record is not None
+        assert terminal.record.run_id == "leader-1"
     finally:
         await runtime.shutdown()
