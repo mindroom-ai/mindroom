@@ -1124,3 +1124,16 @@ def test_node_previews_extracts_bounded_text_shell_and_json_and_skips_state_and_
     assert "example-private-value" not in rows["n4"]["preview"]
     assert rows["n4"]["preview"] == '{"name":"PASSWORD","value":"***redacted***"}'
     assert store.node_previews(_RUN_A, max_chars=0) == {}
+
+
+def test_octet_length_fallback_registers_on_older_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On SQLite < 3.43, connections register a Python octet_length fallback that handles None, bytes, and UTF-8."""
+    assert store_module._octet_length(None) is None
+    assert store_module._octet_length(b"abc") == 3
+    assert store_module._octet_length("検査") == 6
+    assert store_module._octet_length("\ud800") == 3
+
+    monkeypatch.setattr(store_module, "_OCTET_LENGTH_VERSION", (99, 0, 0))
+    store, _ = _store_with_node(tmp_path)
+    store.settle_node(_RUN_A, "@0", 1, 0, state=WorkflowNodeState.COMPLETED, result="fallback ok")
+    assert store.node_previews(_RUN_A) == {"@0": "fallback ok"}

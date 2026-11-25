@@ -48,6 +48,7 @@ class Graph:
     edges: list[_Row]
     log: list[str]
     messages: list[_Row] = field(default_factory=list)
+    omitted_messages: int = 0
 
 
 def node_label(kind: str, args: Mapping[str, object], name: object = None) -> str:
@@ -127,6 +128,7 @@ def graph_rows(
     *,
     inside: Mapping[str, Mapping[str, int]] | None = None,
     messages: Sequence[_Row] = (),
+    omitted_messages: int = 0,
     previews: Mapping[str, str] | None = None,
 ) -> Graph:
     """Return the rows of the current view of a run: its phases, groups, calls, message edges and newest log lines.
@@ -214,6 +216,7 @@ def graph_rows(
         ],
         log=[line[:_TEXT_CHARS] for line in log[-LOG_LINES:]],
         messages=list(messages[-MESSAGE_LINES:]),
+        omitted_messages=omitted_messages + max(0, len(messages) - MESSAGE_LINES),
     )
 
 
@@ -239,6 +242,7 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
     """
     calls = sorted(graph.nodes, key=_order)
     edges = sorted(graph.edges, key=lambda edge: -edge["count"])
+    extra_omitted_messages = max(0, len(graph.messages) - MESSAGE_LINES)
     messages = list(graph.messages[-MESSAGE_LINES:])
     depths: dict[str, int] = {}
     for group in graph.groups:
@@ -255,7 +259,7 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
         )
         omitted |= {
             "edges": len(edges) - shown_edges,
-            "messages": len(messages) - shown_messages,
+            "messages": graph.omitted_messages + extra_omitted_messages + (len(messages) - shown_messages),
             "groups": len(graph.groups) - len(groups),
             "phases": 0 if phases else len(graph.phases),
             "log": 0 if log else len(graph.log),

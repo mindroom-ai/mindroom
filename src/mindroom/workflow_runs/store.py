@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _BUSY_TIMEOUT_SECONDS = 10
+# The first SQLite release with a built-in ``octet_length``.
+_OCTET_LENGTH_VERSION = (3, 43, 0)
 _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
 _MAX_PREVIEW_JSON_BYTES = 16 * 1024
@@ -633,6 +635,8 @@ class WorkflowRunStore:
         connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=_BUSY_TIMEOUT_SECONDS)
         try:
             connection.row_factory = sqlite3.Row
+            if sqlite3.sqlite_version_info < _OCTET_LENGTH_VERSION:
+                connection.create_function("octet_length", 1, _octet_length, deterministic=True)
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("PRAGMA foreign_keys = ON")
             yield connection
@@ -928,7 +932,17 @@ _LIGHT_COLUMNS = ", ".join(
 )
 
 
-def _redact_if_json_text(text: str) -> str:
+def _octet_length(value: object) -> int | None:
+    """Return a stored value's size in bytes, as SQLite 3.43's ``octet_length`` does."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return len(value)
+    return len(str(value).encode("utf-8", errors="surrogatepass"))
+
+
+def redact_json_text(text: str) -> str:
+    """If *text* parses as a JSON object or array, redact structured secret fields before re-serializing."""
     stripped = text.strip()
     if stripped and stripped[0] in "{[":
         with suppress(json.JSONDecodeError):
@@ -945,9 +959,9 @@ def _format_node_preview(blob: bytes | str, max_chars: int) -> str | None:
     if obj is None:
         return None
     if isinstance(obj, str):
-        text = _redact_if_json_text(obj)
+        text = redact_json_text(obj)
     elif isinstance(obj, dict) and isinstance(obj.get("output"), str):
-        text = _redact_if_json_text(obj["output"])
+        text = redact_json_text(obj["output"])
     elif isinstance(obj, dict | list):
         text = json.dumps(redact_sensitive_data(obj), ensure_ascii=False, separators=(",", ":"))
     else:

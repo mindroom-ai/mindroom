@@ -40,7 +40,7 @@ from mindroom.workflow_runs.models import (
     UNSETTLED_NODE_STATES,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.peers import message_edges, visible_messages
+from mindroom.workflow_runs.peers import message_edges, visible_messages_with_omitted
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
 if TYPE_CHECKING:
@@ -292,13 +292,15 @@ class RunViews:
             )
             for child in store.child_runs(run_id)
         }
+        messages, omitted_messages = visible_messages_with_omitted(store, run_id, nodes, limit=MESSAGE_LINES)
         graph = graph_rows(
             nodes,
             used,
             message_edges(store, run_id, nodes),
             store.log(run_id, LOG_LINES, attempt=run.attempt),
             inside=inside,
-            messages=visible_messages(store, run_id, nodes, limit=MESSAGE_LINES),
+            messages=messages,
+            omitted_messages=omitted_messages,
             previews=store.node_previews(run_id),
         )
         return run, nodes, usage, graph

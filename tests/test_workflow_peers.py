@@ -1707,11 +1707,28 @@ async def test_visible_messages_resolves_targets_redacts_and_caps_limit(stack: W
         to="beta",
         text="huge https://user:giantsecret-" + "b" * 70_000 + "@example.test/api",
     )
-    tail_msgs = peers.visible_messages(stack.store, stack.run_id, nodes, limit=2)
-    assert [(m["seq"], "splitsecret" in m["text"], "giantsecret" in m["text"]) for m in tail_msgs] == [
+    peers.send(
+        stack.store,
+        stack.run_id,
+        op_id="m6",
+        sender=alpha_ref,
+        to="beta",
+        text='{"name": "PASSWORD", "value": "example-private-value"}',
+    )
+    tail_msgs, tail_omitted = peers.visible_messages_with_omitted(stack.store, stack.run_id, nodes, limit=3)
+    assert tail_omitted == 3
+    assert [(m["seq"], "splitsecret" in m["text"], "giantsecret" in m["text"]) for m in tail_msgs[:2]] == [
         (4, False, False),
         (5, False, False),
     ]
+    assert "example-private-value" not in tail_msgs[2]["text"]
+    assert tail_msgs[2]["text"] == '{"name":"PASSWORD","value":"***redacted***"}'
+
+    # 52 eligible messages with limit=50 reports omitted=2 end-to-end through graph_rows + fit_snapshot.
+    for extra in range(46):
+        peers.send(stack.store, stack.run_id, op_id=f"pad-{extra}", sender=alpha_ref, to="beta", text=f"m{extra}")
+    window_msgs, window_omitted = peers.visible_messages_with_omitted(stack.store, stack.run_id, nodes, limit=50)
+    assert (len(window_msgs), window_omitted) == (50, 2)
 
     gate.set()
     for index, name in enumerate(("alpha", "beta", "gamma")):

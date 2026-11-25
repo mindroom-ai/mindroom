@@ -478,38 +478,45 @@ def test_node_previews_apply_only_to_completed_work_nodes_and_are_redacted() -> 
 
 
 def test_messages_keep_newest_under_tight_frame_cap_and_count_omitted() -> None:
-    """Under tight frame caps, fit_snapshot keeps the newest messages in order and counts the omitted ones."""
+    """fit_snapshot counts both >MESSAGE_LINES window trimming and tight-frame truncation in omitted.messages."""
     messages = [_msg(index, "文" * 180 + f" #{index}") for index in range(60)]
     graph = graph_rows([], {}, [], [], messages=messages)
-    assert graph.messages == messages[-MESSAGE_LINES:]
+    assert (graph.messages, graph.omitted_messages) == (messages[-MESSAGE_LINES:], 10)
+
+    # 52 eligible messages (50 shown + 2 omitted by window) reports omitted.messages == 2 when all 50 fit.
+    _, windowed = _fitted([], messages=[_msg(index) for index in range(MESSAGE_LINES + 2)])
+    assert (len(windowed["messages"]), windowed["omitted"]["messages"]) == (MESSAGE_LINES, 2)
 
     nodes = _nodes(completed=10)
     meta = graph_meta(_RUN, nodes, _USAGE, large=False)
-    full = graph_rows(nodes, {}, [], [], messages=messages[-MESSAGE_LINES:])
-    # Tight cap that fits all nodes plus a subset of messages, leaving some messages omitted.
+    full = graph_rows(nodes, {}, [], [], messages=messages[-MESSAGE_LINES:], omitted_messages=10)
+    # Tight cap that fits all nodes plus a subset of messages, leaving both window- and size-omitted messages counted.
     tight_bytes = 6_000
     snapshot = fit_snapshot(full, fits=lambda candidate: len(str(candidate).encode()) <= tight_bytes)
 
     assert len(snapshot["nodes"]) == 10
     assert 0 < len(snapshot["messages"]) < MESSAGE_LINES
-    assert snapshot["omitted"]["messages"] + len(snapshot["messages"]) == MESSAGE_LINES
+    assert snapshot["omitted"]["messages"] + len(snapshot["messages"]) == 60
     assert snapshot["messages"] == full.messages[-len(snapshot["messages"]) :]
     assert meta["counts"]["completed"] == 10
 
 
 def test_delta_tracks_messages_append_sliding_window_and_replace() -> None:
-    """Message deltas append new messages across normal growth and sliding windows, and REPLACE on removal or edit."""
+    """Message deltas append new messages across normal growth and sliding windows, and REPLACE on omitted/edit changes."""
     msgs = [_msg(index) for index in range(MESSAGE_LINES + 5)]
     _, before = _fitted([], messages=msgs[:2])
     _, after = _fitted([], messages=msgs[:4])
     assert graph_delta(before, after) == {"messages_append": msgs[2:4]}
     assert graph_delta(after, after) is None
 
-    # Sliding window across MESSAGE_LINES appends only the newly arrived messages.
-    _, win_before = _fitted([], messages=msgs[: MESSAGE_LINES + 2])
-    _, win_after = _fitted([], messages=msgs)
-    assert len(win_before["messages"]) == MESSAGE_LINES
-    assert graph_delta(win_before, win_after) == {"messages_append": msgs[MESSAGE_LINES + 2 :]}
+    # Sliding window at MESSAGE_LINES with unchanged omitted count appends only the newly arrived messages.
+    _, win_before = _fitted([], messages=msgs[:MESSAGE_LINES])
+    win_after = {**win_before, "messages": msgs[3 : MESSAGE_LINES + 3]}
+    assert graph_delta(win_before, win_after) == {"messages_append": msgs[MESSAGE_LINES : MESSAGE_LINES + 3]}
+    # Growing omitted.messages (52 -> 55) forces REPLACE so the client receives the updated omitted count.
+    _, omitted_52 = _fitted([], messages=msgs[: MESSAGE_LINES + 2])
+    _, omitted_55 = _fitted([], messages=msgs)
+    assert graph_delta(omitted_52, omitted_55) is REPLACE
 
     # Removal, clearing, or editing an existing message forces REPLACE.
     _, shorter = _fitted([], messages=msgs[:1])

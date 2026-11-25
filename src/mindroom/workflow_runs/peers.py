@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode
-from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError
+from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError, redact_json_text
 
 if TYPE_CHECKING:
     import sqlite3
@@ -376,25 +376,31 @@ def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[Workflow
     return [(s, r, c) for (s, r), c in sorted(counts.items())]
 
 
-def visible_messages(
+_VISIBLE_FROM = (
+    "FROM workflow_messages m "
+    "JOIN workflow_nodes n "
+    "  ON n.run_id = m.run_id AND n.key = m.sender_key AND n.stale = 0 AND n.generation = m.sender_generation "
+    "WHERE m.run_id = ? AND m.withdrawn = 0"
+)
+
+
+def visible_messages_with_omitted(
     store: WorkflowRunStore,
     run_id: str,
     nodes: Iterable[WorkflowNode],
     *,
     limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Return the newest *limit* redacted peer message previews for current-generation senders, oldest first."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Return `(messages, omitted)` for the newest *limit* redacted current-generation peer messages, oldest first."""
+    count_q = f"SELECT COUNT(*) {_VISIBLE_FROM}"
     if limit <= 0:
-        return []
+        with store.read_connection() as conn:
+            return [], int(conn.execute(count_q, (run_id,)).fetchone()[0])
     ids, gens, sess_of, by_name = _message_index(nodes)
     q = (
         "SELECT m.seq, m.sender_key, m.sender_generation, m.sender_name, m.recipient_name, m.recipient_keys_json, "
         "CASE WHEN octet_length(m.text) <= ? THEN m.text ELSE substr(m.text, 1, ?) END AS text, "
-        "octet_length(m.text) > ? AS truncated_text, m.created_at "
-        "FROM workflow_messages m "
-        "JOIN workflow_nodes n "
-        "  ON n.run_id = m.run_id AND n.key = m.sender_key AND n.stale = 0 AND n.generation = m.sender_generation "
-        "WHERE m.run_id = ? AND m.withdrawn = 0 "
+        f"octet_length(m.text) > ? AS truncated_text, m.created_at {_VISIBLE_FROM} "
         "ORDER BY m.seq DESC LIMIT ?"
     )
     with store.read_connection() as conn:
@@ -402,6 +408,7 @@ def visible_messages(
             q,
             (_MAX_FULL_PREVIEW_BYTES, _PREVIEW_READ_CHARS, _MAX_FULL_PREVIEW_BYTES, run_id, limit),
         ).fetchall()
+        omitted = max(0, int(conn.execute(count_q, (run_id,)).fetchone()[0]) - len(rows)) if len(rows) == limit else 0
     out: list[dict[str, Any]] = []
     for r in reversed(rows):
         sender_key = r["sender_key"]
@@ -416,11 +423,22 @@ def visible_messages(
                 "from_name": redact_sensitive_text(r["sender_name"], max_length=_NAME_CHARS),
                 "to": targets[0] if len(targets) == 1 else None,
                 "to_name": redact_sensitive_text(r["recipient_name"], max_length=_NAME_CHARS),
-                "text": redact_sensitive_text(raw_text, max_length=_TEXT_CHARS),
+                "text": redact_sensitive_text(redact_json_text(raw_text), max_length=_TEXT_CHARS),
                 "sent_at": int(datetime.fromisoformat(r["created_at"]).timestamp()),
             },
         )
-    return out
+    return out, omitted
+
+
+def visible_messages(
+    store: WorkflowRunStore,
+    run_id: str,
+    nodes: Iterable[WorkflowNode],
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return the newest *limit* redacted peer message previews for current-generation senders, oldest first."""
+    return visible_messages_with_omitted(store, run_id, nodes, limit=limit)[0]
 
 
 def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
