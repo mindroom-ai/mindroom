@@ -20,6 +20,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage import usage_reader
 from mindroom.session_storage.agent_storage import (
     create_agent_state_storage,
     create_state_storage,
@@ -29,7 +30,7 @@ from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, q
 from mindroom.session_storage.store import begun, connect_conversation_database
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
-from mindroom.usage import stats_storage
+from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -46,8 +47,6 @@ from tests.session_storage.agno_layout import recorded_owner
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    from mindroom.session_storage.usage_reader import UnreadableLayout
 
 # Writes inside a transaction until its change reaches the file, then dies, leaving a hot journal beside the database.
 _DIE_MID_WRITE = """
@@ -350,8 +349,12 @@ def test_reader_since_skips_sessions_without_recent_usage(tmp_path: Path) -> Non
     assert len([row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]) == 2
 
 
-def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_path: Path) -> None:
-    """One corrupt usage row must not hide the rest of the store from a dated read."""
+@pytest.mark.parametrize("malformed_payload", ["{not json", None], ids=["invalid-json", "null"])
+def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(
+    tmp_path: Path,
+    malformed_payload: str | None,
+) -> None:
+    """One corrupt or null usage row must not hide the rest of the store from a dated read."""
     database = tmp_path / "code.db"
     _create_database(
         database,
@@ -361,7 +364,7 @@ def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_pat
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
-            ("session-1", "broken", "{not json"),
+            ("session-1", "broken", malformed_payload),
         )
 
     rows = list(iter_usage_storage_rows(source, since=datetime(2026, 9, 30, tzinfo=UTC).timestamp()))
@@ -620,34 +623,113 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
     assert database.read_bytes() == before
 
 
-def test_a_read_is_one_snapshot_from_its_layout_check_to_its_last_session(
+def _seed_usage_rows(database: Path, *, session_id: str, rows: list[tuple[str, float]]) -> None:
+    with closing(connect_conversation_database(database, timeout=1.0)) as writer, begun(writer, write=True):
+        writer.execute("INSERT OR IGNORE INTO code_sessions (session_id, created_at) VALUES (?, 1)", (session_id,))
+        writer.executemany(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
+            [
+                (session_id, run_id, json.dumps({**_run(), "run_id": run_id, "created_at": created_at}))
+                for run_id, created_at in rows
+            ],
+        )
+
+
+def _intercept_usage_chunks_and_commit_after_first(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    usage_table: str,
+) -> tuple[list[tuple[int, int]], list[bool]]:
+    """Record ``(scanned_rows, matched_rows)`` per usage chunk and commit a second DELETE-mode write after chunk 1."""
+    chunks: list[tuple[int, int]] = []
+    committed: list[bool] = []
+    fetch_chunk = usage_reader._fetch_chunk
+
+    def fetch_then_write(
+        connection: sqlite3.Connection,
+        query: str,
+        parameters: tuple[object, ...],
+    ) -> list[tuple[object, ...]]:
+        batch = fetch_chunk(connection, query, parameters)
+        if usage_table in query:
+            chunks.append((len(batch), sum(1 for row in batch if row[3])))
+            if len(chunks) == 1:
+                with (
+                    closing(connect_conversation_database(database, timeout=0.05)) as writer,
+                    begun(writer, write=True),
+                ):
+                    assert writer.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+                    writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('session-mid', 2)")
+                committed.append(True)
+        return batch
+
+    monkeypatch.setattr(usage_reader, "_fetch_chunk", fetch_then_write)
+    return chunks, committed
+
+
+def test_a_writer_commits_between_usage_chunks_without_lock_contention(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A writer that commits after the read checked the layout waits for the read, which never sees its change."""
-    database = tmp_path / "code.db"
-    _create_database(database)
-    source = _source(database)
-    writes: list[str] = []
-    check_layout = stats_storage.unreadable_layout
-
-    def check_then_write(connection: sqlite3.Connection, names: TableNames) -> UnreadableLayout | None:
-        problem = check_layout(connection, names)
-        with closing(sqlite3.connect(database, timeout=0.05)) as writer:
-            try:
-                with writer:
-                    writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('session-2', 1)")
-                writes.append("committed")
-            except sqlite3.OperationalError as error:
-                writes.append(str(error))
-        return problem
-
-    monkeypatch.setattr(stats_storage, "unreadable_layout", check_then_write)
+    """A writer in DELETE journal mode commits between usage chunks while a scan is in progress."""
+    storage = create_agent_state_storage("code", tmp_path)
+    total_rows = usage_reader.USAGE_CHUNK_SIZE + 5
+    _seed_usage_rows(
+        storage.path,
+        session_id="session-1",
+        rows=[(f"run-{i}", 1_723_837_600.0 + i) for i in range(total_rows)],
+    )
+    source = _source(storage.path)
+    usage_chunks, committed = _intercept_usage_chunks_and_commit_after_first(
+        monkeypatch,
+        storage.path,
+        source.names.usage,
+    )
 
     result = list(iter_usage_storage_rows(source))
 
-    assert [row.row_key for row in result if isinstance(row, UsageSessionRow)] == ["session-1"]
-    assert writes == ["database is locked"]
+    assert usage_chunks == [(usage_reader.USAGE_CHUNK_SIZE, usage_reader.USAGE_CHUNK_SIZE), (5, 5)]
+    assert committed == [True]
+    (row,) = result
+    assert isinstance(row, UsageSessionRow)
+    assert row.row_key == "session-1"
+    assert len(row.runs) == total_rows
+    with closing(sqlite3.connect(storage.path)) as connection:
+        assert connection.execute(
+            "SELECT session_id FROM code_sessions WHERE session_id = 'session-mid'",
+        ).fetchall() == [("session-mid",)]
+
+
+def test_dated_read_pages_raw_rows_and_lets_writers_commit_across_non_matching_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dated read bounds raw scanned rows per chunk even when early chunks match nothing."""
+    storage = create_agent_state_storage("code", tmp_path)
+    old_ts = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
+    since_ts = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    recent_ts = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    old_count = usage_reader.USAGE_CHUNK_SIZE * 2 + 10
+    _seed_usage_rows(
+        storage.path,
+        session_id="session-1",
+        rows=[*[(f"old-{i}", old_ts) for i in range(old_count)], ("recent", recent_ts)],
+    )
+    source = _source(storage.path)
+    usage_chunks, committed = _intercept_usage_chunks_and_commit_after_first(
+        monkeypatch,
+        storage.path,
+        source.names.usage,
+    )
+
+    result = list(iter_usage_storage_rows(source, since=since_ts))
+
+    assert usage_chunks == [(usage_reader.USAGE_CHUNK_SIZE, 0), (usage_reader.USAGE_CHUNK_SIZE, 0), (11, 1)]
+    assert committed == [True]
+    (row,) = result
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["recent"]
+    assert row.runs_available is True
 
 
 def test_a_caller_holding_a_row_does_not_keep_writers_waiting(tmp_path: Path) -> None:
@@ -759,6 +841,167 @@ def test_a_table_missing_a_column_the_read_needs_is_reported(
     result = list(iter_usage_storage_rows(source))
 
     assert result == [UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail)]
+
+
+@pytest.mark.parametrize(
+    ("table", "columns", "insert_sql", "detail"),
+    [
+        (
+            "code_sessions",
+            "rowid TEXT, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (rowid, session_id) VALUES ('not-an-int', 'session-1')",
+            "session schema unsupported",
+        ),
+        (
+            "code_sessions",
+            "rowid INTEGER, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (rowid, session_id) VALUES (1, 'session-1'), (1, 'session-2')",
+            "session schema unsupported",
+        ),
+        (
+            "code_sessions",
+            "rowid TEXT GENERATED ALWAYS AS ('x') VIRTUAL, session_id TEXT PRIMARY KEY, user_id TEXT",
+            "INSERT INTO code_sessions (session_id) VALUES ('session-1')",
+            "session schema unsupported",
+        ),
+        (
+            "code_sessions_usage",
+            "rowid TEXT, id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
+            "INSERT INTO code_sessions_usage (rowid, id, session_id, run_id, usage_data) VALUES ('x', 1, 'session-1', 'r1', '{}')",
+            "usage schema unsupported",
+        ),
+        (
+            "code_sessions_usage",
+            "OID INTEGER, id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
+            "INSERT INTO code_sessions_usage (OID, id, session_id, run_id, usage_data) VALUES (1, 1, 'session-1', 'r1', '{}'), (1, 2, 'session-1', 'r2', '{}')",
+            "usage schema unsupported",
+        ),
+    ],
+    ids=[
+        "sessions-text-rowid",
+        "sessions-duplicate-int-rowid",
+        "sessions-generated-rowid",
+        "usage-text-rowid",
+        "usage-oid-alias",
+    ],
+)
+def test_shadowed_rowid_column_is_reported_as_unsupported_schema(
+    tmp_path: Path,
+    table: str,
+    columns: str,
+    insert_sql: str,
+    detail: str,
+) -> None:
+    """Tables declaring a shadowed rowid alias fail with unsupported_schema instead of crashing or skipping rows."""
+    database = tmp_path / "code.db"
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name, definition in {**_READ_TABLES, table: columns}.items():
+            connection.execute(f'CREATE TABLE "{name}" ({definition})')
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 8, 'agent', 'code')")
+        if table != "code_sessions":
+            connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute(insert_sql)
+
+    assert list(iter_usage_storage_rows(source)) == [
+        UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail),
+    ]
+
+
+def test_admin_usage_keeps_healthy_agent_beside_shadowed_rowid_database(tmp_path: Path) -> None:
+    """A worker-created shadowed rowid table reports a diagnostic without aborting healthy sources."""
+    config = Config(
+        agents={"broken": AgentConfig(display_name="Broken"), "healthy": AgentConfig(display_name="Healthy")},
+    )
+    runtime_paths = _paths(tmp_path)
+    root = runtime_paths.config_dir / "sessions"
+    broken_db = root / "agents" / "broken" / "sessions" / "broken.db"
+    broken_db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(broken_db)) as connection, connection:
+        connection.execute("CREATE TABLE broken_sessions (rowid TEXT, session_id TEXT PRIMARY KEY, user_id TEXT)")
+        connection.execute(
+            "CREATE TABLE broken_sessions_log_meta (id INTEGER PRIMARY KEY, version INTEGER, owner_kind TEXT, owner_id TEXT)",
+        )
+        connection.execute("INSERT INTO broken_sessions_log_meta VALUES (1, 8, 'agent', 'broken')")
+        connection.execute("INSERT INTO broken_sessions (rowid, session_id) VALUES ('bad', 'session-1')")
+
+    healthy_storage = create_agent_state_storage("healthy", root / "agents" / "healthy")
+    persist_runs(
+        healthy_storage,
+        ConversationSession(kind="agent", session_id="session-1", owner_id="healthy"),
+        RunRecord(
+            run_id="run-1",
+            user_id="@alice:example.test",
+            created_at=1_723_837_600,
+            status=RunStatus.completed,
+            metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
+        ),
+    )
+
+    report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
+
+    assert report.totals.total_tokens == 20
+    assert [(row.key, row.totals.total_tokens) for row in report.breakdown] == [("healthy", 20)]
+    assert (report.coverage.scanned_sources, report.coverage.unavailable_sources) == (2, 1)
+
+
+@pytest.mark.parametrize(
+    ("table", "detail"),
+    [
+        ("code_sessions", "session schema unsupported"),
+        ("code_sessions_usage", "usage schema unsupported"),
+    ],
+    ids=["sessions", "usage"],
+)
+def test_without_rowid_table_is_reported_as_unsupported_schema(
+    tmp_path: Path,
+    table: str,
+    detail: str,
+) -> None:
+    """WITHOUT ROWID tables report unsupported_schema rather than failing later with database unavailable."""
+    database = tmp_path / "code.db"
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name, definition in _READ_TABLES.items():
+            suffix = " WITHOUT ROWID" if name == table else ""
+            connection.execute(f'CREATE TABLE "{name}" ({definition}){suffix}')
+        connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 8, 'agent', 'code')")
+
+    assert list(iter_usage_storage_rows(source)) == [
+        UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail),
+    ]
+
+
+def test_dated_read_ignores_out_of_range_session_with_invalid_utf8_user_id(tmp_path: Path) -> None:
+    """A dated read ignores invalid UTF-8 in out-of-range session user_id and unmatched usage session_id."""
+    storage = create_agent_state_storage("code", tmp_path)
+    old_ts = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
+    since_ts = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    recent_ts = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    _seed_usage_rows(storage.path, session_id="old-session", rows=[("old-run", old_ts)])
+    _seed_usage_rows(storage.path, session_id="recent-session", rows=[("recent-run", recent_ts)])
+    with closing(connect_conversation_database(storage.path, timeout=1.0)) as writer, begun(writer, write=True):
+        writer.execute("UPDATE code_sessions SET user_id = CAST(X'80' AS TEXT) WHERE session_id = 'old-session'")
+        writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES (CAST(X'80' AS TEXT), 1)")
+        writer.execute(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (CAST(X'80' AS TEXT), ?, ?)",
+            ("old-bad-sid-run", json.dumps({**_run(), "run_id": "old-bad-sid-run", "created_at": old_ts})),
+        )
+        writer.execute("UPDATE code_sessions SET user_id = '@alice:example.test' WHERE session_id = 'recent-session'")
+        assert writer.execute(
+            "SELECT typeof(user_id), hex(CAST(user_id AS BLOB)) FROM code_sessions WHERE session_id = 'old-session'",
+        ).fetchone() == ("text", "80")
+        assert writer.execute(
+            "SELECT typeof(session_id), hex(CAST(session_id AS BLOB)) FROM code_sessions_usage WHERE run_id = 'old-bad-sid-run'",
+        ).fetchone() == ("text", "80")
+
+    (row,) = iter_usage_storage_rows(_source(storage.path), since=since_ts)
+
+    assert isinstance(row, UsageSessionRow)
+    assert row.row_key == "recent-session"
+    assert row.requester_id == "@alice:example.test"
+    assert [run.run_id for run in row.runs] == ["recent-run"]
 
 
 @pytest.mark.parametrize("since", [None, 0.0], ids=["undated", "dated"])
