@@ -1537,7 +1537,7 @@ def test_unsupported_models_use_portable_tool_search(
 
 @pytest.mark.asyncio
 async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) -> None:
-    """The deferred catalog keeps the browser's pointer to the Computer panel when both tools are deferred."""
+    """The deferred catalog exposes both browser and chat_ui Computer/Members panel discovery without coupling."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"browser": {"defer": True}},
@@ -1548,9 +1548,10 @@ async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Pa
     agent = _code_agent(config, tmp_path)
 
     catalog = next(block for block in agent.prompt.instructions if block.startswith("## Deferred Tools\n"))
-    assert "chat_ui.open_panel(panel='computer')" in catalog
-    assert "Computer panel" in catalog
+    assert "chat_ui.open_panel" not in catalog
+    assert "Computer/Members panels" in catalog
     assert (await _search(agent, "browser"))["matches"][0]["toolkit"] == "browser"
+    assert any(match["toolkit"] == "chat_ui" for match in (await _search(agent, "computer"))["matches"])
 
 
 class _CrmTools(Toolkit):

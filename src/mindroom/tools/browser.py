@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     name="browser",
     display_name="Browser",
     description=(
-        "Browse websites, fill forms, and take screenshots (Computer panel via chat_ui.open_panel(panel='computer'))."
+        "Control MindRoom's browser: browse websites, fill forms, and take screenshots "
+        "(use desktop for the user's local browser)"
     ),
     category=ToolCategory.RESEARCH,
     file_access=ToolFileAccess.AGENT,

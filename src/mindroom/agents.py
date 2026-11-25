@@ -780,13 +780,14 @@ def _file_access_environment_lines(
             f"{', '.join(pending_shared_directory_invitations)}.",
         )
     if file_access == "workspace":
+        confinement = "by file_access" if show_file_access else "to the agent workspace"
         if unconfined_tool_names:
             lines.append(
-                f"- Not confined by file_access (only a worker isolates them): {_format_tool_list(unconfined_tool_names)}.",
+                f"- Not confined {confinement} (only a worker isolates them): {_format_tool_list(unconfined_tool_names)}.",
             )
         if primary_only_unconfined_tool_names:
             lines.append(
-                "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
+                f"- Not confined {confinement} and unable to run in a worker (trusted primary runtime only): "
                 f"{_format_tool_list(primary_only_unconfined_tool_names)}.",
             )
     return lines

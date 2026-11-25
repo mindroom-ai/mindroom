@@ -411,7 +411,8 @@ def test_minimal_mode_deferred_worker_routed_shell_placement(
     local_role = minimal_context_documents(local_build)["role"]
     assert "- All tools run in the primary MindRoom runtime." not in local_role
     assert "- File access for path tools:" not in local_role
-    assert "- Not confined by file_access (only a worker isolates them): `shell`." in local_role
+    assert "by file_access" not in local_role
+    assert "- Not confined to the agent workspace (only a worker isolates them): `shell`." in local_role
 
 
 def test_skills_deduplication_diagnostics_overrides_and_cache_stability(

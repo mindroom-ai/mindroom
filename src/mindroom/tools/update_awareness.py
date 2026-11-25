@@ -15,7 +15,10 @@ if TYPE_CHECKING:
     name="update_awareness",
     file_access=ToolFileAccess.NONE,
     display_name="MindRoom Update Awareness",
-    description="Add daily-cached installed and latest MindRoom release information to the agent system prompt",
+    description=(
+        "Check MindRoom's installed and latest PyPI versions on demand, "
+        "adding prompt notice when an update is available or uncertain"
+    ),
     category=ToolCategory.INFORMATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

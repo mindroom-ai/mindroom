@@ -399,9 +399,9 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
     assert "<conversation>" not in role
     assert "## Matrix Reply Targeting" not in role
     assert (
-        "MindRoom only dispatches messages to you via explicit Matrix mentions (not plain-text display names), "
-        "routing, thread continuation, or enabled automations; if an earlier message went unanswered, "
-        "you may not have been dispatched for it."
+        "MindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, "
+        "thread continuation, or enabled automations); plain-text display names are not Matrix mentions. "
+        "If asked why an earlier message went unanswered, note you may not have been dispatched for it."
     ) in role
 
 

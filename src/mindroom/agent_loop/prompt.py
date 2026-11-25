@@ -23,7 +23,7 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     f"{MARKDOWN_OUTPUT_FORMAT}\n"
     "- Single newlines break lines; `<details><summary>...</summary>...</details>` needs blank lines around inner "
     "Markdown; `<span data-mx-spoiler>...</span>` for spoilers (not `||spoiler||`).\n"
-    "- Math: `$inline$` (no inner spaces) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n"
+    "- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n"
     "- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, "
     "`[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional "
     "`?via=server`).\n"
@@ -31,7 +31,7 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     "(link instead)."
 )
 MATRIX_TOOL_FOLDING_FORMAT = (
-    "- MindRoom Chat collapses text and tool calls up through your last tool call once your reply finishes; "
+    "- MindRoom Chat may collapse earlier text and tool calls up through your last tool call once your reply finishes; "
     "write a self-contained final answer after your last tool call."
 )
 

@@ -155,7 +155,8 @@ async def test_omitted_worker_tools_honors_environment(
     if expected == ("local:shell", "local:calculator"):
         assert "Worker-routed tools:" not in agent.prompt.role
         assert "- All tools run in the primary MindRoom runtime." not in agent.prompt.role
-        assert "- Not confined by file_access (only a worker isolates them): `shell`." in agent.prompt.role
+        assert "by file_access" not in agent.prompt.role
+        assert "- Not confined to the agent workspace (only a worker isolates them): `shell`." in agent.prompt.role
 
 
 @pytest.mark.asyncio

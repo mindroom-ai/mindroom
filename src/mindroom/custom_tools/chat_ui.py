@@ -88,7 +88,7 @@ _CANVAS_STATE_SCAN_LIMIT = 50
 _CHAT_UI_INSTRUCTIONS = (
     "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. "
     "Side panels share one slot (opening one replaces the current panel). "
-    "UI calls only send a request: success means it was sent, not that the user saw it."
+    "Display calls only send a UI request (success means sent, not seen)."
 )
 
 

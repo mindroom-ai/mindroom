@@ -91,7 +91,7 @@ Model: {{model_provider}} (`{{model_id}}`).
 
 {_MATRIX_CONVERSATION_GUIDE}
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
-MindRoom only dispatches messages to you via explicit Matrix mentions (not plain-text display names), routing, thread continuation, or enabled automations; if an earlier message went unanswered, you may not have been dispatched for it.
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
@@ -167,7 +167,7 @@ DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use `tool_search(query)` (or `tool_search()` to list all) to load schemas, then `call_tool(name, arguments)`. Search before concluding a capability is unavailable."""
+Use `tool_search(query)` to load matching schemas (or `tool_search()` to list names), then `call_tool(name, arguments)`. Search before concluding a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.

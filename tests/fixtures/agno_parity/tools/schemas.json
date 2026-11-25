@@ -4089,8 +4089,8 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). UI calls only send a request: success means it was sent, not that the user saw it.",
-    "guidance": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). UI calls only send a request: success means it was sent, not that the user saw it.",
+    "instructions": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). Display calls only send a UI request (success means sent, not seen).",
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). Display calls only send a UI request (success means sent, not seen).",
     "functions": [
       {
         "name": "open_settings",
