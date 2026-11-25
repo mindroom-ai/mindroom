@@ -135,7 +135,7 @@ INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options
 ```"""
 
 SKILLS_TOOL_USAGE_PROMPT = (
-    "Load skills via `get_skill_instructions(skill_name)` (skill names are not callable tools); "
+    "Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); "
     "do not read global `SKILL.md` files directly."
 )
 

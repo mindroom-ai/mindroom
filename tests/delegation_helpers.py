@@ -20,6 +20,7 @@ from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
@@ -225,9 +226,24 @@ def system_prompts(model: ScriptedModel) -> list[str]:
     ]
 
 
+_RUNTIME_SECTION_MARKERS = (
+    "\n\n<your_role>",
+    f"\n\n{MATRIX_MARKDOWN_OUTPUT_FORMAT}",
+    f"\n\n{MARKDOWN_OUTPUT_FORMAT}",
+    "\n\nYou are inside a workflow run.",
+    "\n<mindroom_session_context>",
+)
+
+
+def strip_runtime_prompt_sections(prompt: str) -> str:
+    """Return ``prompt`` before the runtime sections that follow an authored subagent's prompt."""
+    cuts = [idx for marker in _RUNTIME_SECTION_MARKERS if (idx := prompt.find(marker)) != -1]
+    return prompt[: min(cuts)] if cuts else prompt
+
+
 def authored_prompts(model: ScriptedModel) -> list[str]:
     """Return each request's system message before the runtime sections that follow an authored subagent's prompt."""
-    return [prompt.split("\n\n<your_role>", 1)[0] for prompt in system_prompts(model)]
+    return [strip_runtime_prompt_sections(prompt) for prompt in system_prompts(model)]
 
 
 def offered_tools(model: ScriptedModel) -> list[list[str]]:

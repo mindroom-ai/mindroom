@@ -24,7 +24,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import register_test_tool
-from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, strip_runtime_prompt_sections
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
@@ -94,7 +94,7 @@ class _ChildModel(ScriptedModel):
     @property
     def authored_prompts(self) -> list[str]:
         """Each request's system message before the runtime sections that follow an authored subagent's prompt."""
-        return [prompt.split("\n\n<your_role>", 1)[0] for prompt in self.system_prompts]
+        return [strip_runtime_prompt_sections(prompt) for prompt in self.system_prompts]
 
     @property
     def offered(self) -> list[list[str]]:
