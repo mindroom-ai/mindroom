@@ -578,12 +578,7 @@ class TestMemoryFacade:
             "agent",
             prompt_template=MEMORY_CONTEXT_PROMPT_TEMPLATE,
         )
-        expected = (
-            "[Automatically extracted agent memories - may not be relevant to current context]\n"
-            "Previous agent memories that might be related:\n"
-            "- First memory\n"
-            "- Second memory"
-        )
+        expected = "[Recalled agent memories — may not be relevant]\n- First memory\n- Second memory"
         assert context == expected
 
     def test_format_memories_as_context_empty(self) -> None:
@@ -606,9 +601,7 @@ class TestMemoryFacade:
             )
 
         assert prompt_parts.session_preamble == ""
-        assert "[Automatically extracted agent memories - may not be relevant to current context]" in (
-            prompt_parts.transient_turn_context
-        )
+        assert "[Recalled agent memories — may not be relevant]" in (prompt_parts.transient_turn_context)
         assert "I previously calculated 2+2=4" in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio

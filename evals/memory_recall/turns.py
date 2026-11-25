@@ -20,13 +20,16 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Iterator, Sequence
     from pathlib import Path
 
-_BLOCK_MARKER = "Automatically extracted"
+_BLOCK_MARKERS = ("Automatically extracted", "[Recalled ")
 _CURRENT_MESSAGE = "Current message:"
 _TRANSIENT_OPEN = "<mindroom_transient_context>"
 _TRANSIENT_CLOSE = "</mindroom_transient_context>"
 _MESSAGE_CONTEXT = "<mindroom_message_context>"
-# The line MEMORY_CONTEXT_PROMPT_TEMPLATE puts before the hits, for any memory label ("agent file", "agent", ...).
-_HITS_HEADER = re.compile(r"^Previous .+ memories that might be related:\n", re.MULTILINE)
+# The line MEMORY_CONTEXT_PROMPT_TEMPLATE puts before the hits (current or legacy), for any memory label.
+_HITS_HEADER = re.compile(
+    r"^(?:Previous .+ memories that might be related:|\[Recalled .+ memories — may not be relevant\])\n",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -123,7 +126,8 @@ def _block_index(messages: list[dict[str, Any]]) -> int | None:
     """Return the index of the last user message carrying the memory block."""
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
-        if message.get("role") == "user" and _BLOCK_MARKER in _text(message.get("content")):
+        text = _text(message.get("content"))
+        if message.get("role") == "user" and any(marker in text for marker in _BLOCK_MARKERS):
             return index
     return None
 

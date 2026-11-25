@@ -167,8 +167,8 @@ def test_openai_compatible_context_hides_desktop(tmp_path: Path) -> None:
 def _install_update_awareness_status(monkeypatch: pytest.MonkeyPatch) -> str:
     status = update_awareness._MindRoomReleaseStatus(
         current_version="1.0.0",
-        latest_version="1.0.0",
-        update_available=False,
+        latest_version="2.0.0",
+        update_available=True,
         release_check_succeeded=True,
     )
     monkeypatch.setattr(update_awareness, "_mindroom_release_status", lambda _runtime_paths: status)
@@ -1233,11 +1233,9 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     agent = _code_agent(config, tmp_path)
     prompt = _build_prompt(agent)
 
-    assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
+    assert "chat_ui only affects MindRoom Chat" in prompt
     for name in builtin_tool_registry().entries["chat_ui"].function_names:
-        assert (f"\n- {name}(" in prompt) is (name not in excluded)
-    assert "open_panel(panel='computer') shows the Computer panel" in prompt
-    assert "open_panel(panel='members') shows the Members panel" in prompt
+        assert f"\n- {name}(" not in prompt
     # With show_canvas beside open_panel, the agent learns that a real website needs the Computer panel, not a canvas.
     assert ("a canvas cannot." in prompt) is ("show_canvas" not in excluded)
 
@@ -1352,7 +1350,7 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
     assert "a canvas cannot." not in instructions
-    assert f"- {available}(" in _build_prompt(agent)
+    assert "chat_ui only affects MindRoom Chat" in _build_prompt(agent)
 
 
 @pytest.mark.parametrize("narrowed_by", ["function_filter", "persona", "approval"])
@@ -1360,12 +1358,18 @@ def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offere
     tmp_path: Path,
     narrowed_by: str,
 ) -> None:
-    """The persona list, the function filter, and approval hiding narrow the chat_ui map as include_tools does."""
+    """The persona list, the function filter, and approval hiding drop dynamic hints for omitted functions."""
     raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = ["chat_ui"]  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"chat_ui": {"enable_show_canvas": True, "enable_canvas_libraries": True}},
+    ]
     if narrowed_by == "approval":
         raw["tool_approval"] = {
-            "rules": [{"match": "open_panel", "action": "require_approval"}],
+            "rules": [
+                {"match": "open_panel", "action": "require_approval"},
+                {"match": "show_canvas", "action": "require_approval"},
+                {"match": "read_canvas_state", "action": "require_approval"},
+            ],
         }
     config = _validated_config(tmp_path, raw)
     narrowing: dict[str, Any] = {
@@ -1386,8 +1390,9 @@ def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offere
 
     assert [function.name for function in chat_ui.functions] == ["open_settings"]
     for text in (_build_prompt(agent), chat_ui.guidance or ""):
-        assert "- open_settings(" in text
-        assert "open_panel(" not in text
+        assert "chat_ui only affects MindRoom Chat" in text
+        assert "a canvas cannot." not in text
+        assert "https://cdn.jsdelivr.net/npm/" not in text
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
@@ -1532,7 +1537,7 @@ def test_unsupported_models_use_portable_tool_search(
 
 @pytest.mark.asyncio
 async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) -> None:
-    """The deferred catalog keeps the browser's pointer to the Computer panel when both tools are deferred."""
+    """The deferred catalog exposes both browser and chat_ui Computer/Members panel discovery without coupling."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"browser": {"defer": True}},
@@ -1543,9 +1548,10 @@ async def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Pa
     agent = _code_agent(config, tmp_path)
 
     catalog = next(block for block in agent.prompt.instructions if block.startswith("## Deferred Tools\n"))
-    assert "chat_ui.open_panel(panel='computer')" in catalog
-    assert "Computer panel" in catalog
+    assert "chat_ui.open_panel" not in catalog
+    assert "Computer/Members panels" in catalog
     assert (await _search(agent, "browser"))["matches"][0]["toolkit"] == "browser"
+    assert any(match["toolkit"] == "chat_ui" for match in (await _search(agent, "computer"))["matches"])
 
 
 class _CrmTools(Toolkit):

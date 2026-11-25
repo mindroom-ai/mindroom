@@ -152,3 +152,34 @@ def test_tool_adds_release_awareness_to_system_prompt(tmp_path: Path) -> None:
         "release_check_succeeded": True,
         "update_available": True,
     }
+
+
+def test_tool_omits_instructions_when_known_up_to_date(tmp_path: Path) -> None:
+    """When PyPI confirms this runtime is up to date, omit system-prompt instructions while keeping the tool."""
+    status = _MindRoomReleaseStatus(
+        current_version="2.0.0",
+        latest_version="2.0.0",
+        update_available=False,
+        release_check_succeeded=True,
+    )
+    with patch("mindroom.custom_tools.update_awareness._mindroom_release_status", return_value=status):
+        toolkit = UpdateAwarenessTools(runtime_paths=_runtime_paths(tmp_path))
+
+    assert adapt_toolkit(toolkit).instructions is None
+    assert json.loads(toolkit.get_mindroom_update_status())["update_available"] is False
+
+
+def test_tool_keeps_instructions_when_release_check_failed(tmp_path: Path) -> None:
+    """When PyPI lookup failed, keep the instructions warning not to claim the runtime is up to date."""
+    status = _MindRoomReleaseStatus(
+        current_version="2.0.0",
+        latest_version=None,
+        update_available=None,
+        release_check_succeeded=False,
+    )
+    with patch("mindroom.custom_tools.update_awareness._mindroom_release_status", return_value=status):
+        toolkit = UpdateAwarenessTools(runtime_paths=_runtime_paths(tmp_path))
+
+    instructions = adapt_toolkit(toolkit).instructions
+    assert instructions is not None
+    assert "Today's PyPI check failed" in instructions

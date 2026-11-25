@@ -31,7 +31,7 @@ from mindroom.delegation.audit import (
     start_child_record,
 )
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
-from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
+from mindroom.delegation.personas import caller_toolkit_names
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import (
@@ -84,7 +84,7 @@ logger = get_logger(__name__)
 
 MAX_DELEGATION_DEPTH = 3
 
-type _DelegationGrant = Literal["delegate", "dynamic_workflow", "workflow"]
+type _DelegationGrant = Literal["delegate", "workflow"]
 
 
 @dataclass
@@ -124,6 +124,12 @@ class ChildRunObservation:
         """Return the terminal record of the child's current run, None while that run has handed over none."""
         response = self.response
         return response if response is not None and response.run_id == self.child.run_id else None
+
+    def fail_current(self, reason: str) -> None:
+        """Promote the child's current observed record to ``RunStatus.error`` when its turn envelope failed it."""
+        record = self.current_record()
+        if record is not None and record.status is not RunStatus.error:
+            self.response = replace(record, status=RunStatus.error, error=reason)
 
 
 _CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
@@ -561,9 +567,7 @@ async def observe_child_event(event: RunEvent) -> None:
 
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:
     """Name the caller permission that authorizes this child: its delegate allowlist, or the workflow tool it runs under."""
-    if child.workflow_run_id is not None:
-        return "workflow"
-    return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
+    return "workflow" if child.workflow_run_id is not None else "delegate"
 
 
 def reload_stopped_child_result(child: DelegationChild, response: RunRecord) -> str | None:
@@ -587,10 +591,9 @@ def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant
         return False
     if grant == "delegate":
         return agent_name in caller.delegate_to
-    # The workflow tools are built in, so the built-in tools decide whether the caller is offered one. Which agents
+    # The workflow tool is built in, so the built-in tools decide whether the caller is offered it. Which agents
     # a `workflow` run may run depends on its room, which only `workflow_runs_agent` is asked with.
-    offered = grant in caller_toolkit_names(caller_name, config, builtin_tool_registry(), delegation_depth=0)
-    return offered and (grant == "workflow" or agent_name == caller_name)
+    return grant in caller_toolkit_names(caller_name, config, builtin_tool_registry(), delegation_depth=0)
 
 
 def workflow_runs_agent(caller_name: str, agent_name: str, config: Config, joined: bool | None) -> bool | None:
@@ -669,8 +672,6 @@ def _target_refusal(
     """Return why this caller cannot start this target at all, before any requester check."""
     if not task.strip():
         return "Cannot delegate an empty task. Please provide a task description."
-    if grant == "dynamic_workflow":
-        return None if agent_name == caller_name else self_only_refusal(agent_name)
     caller = config.agents.get(caller_name)
     allowed_targets = caller.delegate_to if caller is not None else []
     if agent_name in allowed_targets or grant == "workflow":
@@ -850,7 +851,7 @@ def workflow_call_prompt(child: DelegationChild) -> str | None:
     context = get_tool_runtime_context()
     if child.workflow_run_id is None or context is None or context.orchestrator is None:
         return None
-    return context.orchestrator.workflow_engine.agent_dispatch.node_prompt(
+    return context.orchestrator.workflow_engine.node_prompt(
         child.workflow_run_id,
         child.workflow_node_key,
         child.workflow_generation,

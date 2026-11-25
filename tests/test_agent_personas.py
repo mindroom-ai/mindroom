@@ -20,7 +20,12 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona, persona_tool_policy
+from mindroom.delegation.personas import (
+    PersonaError,
+    caller_toolkit_names,
+    persona_tool_policy,
+)
+from mindroom.delegation.personas import _inline_persona as inline_persona
 from mindroom.delegation.state import SubagentPersona
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription

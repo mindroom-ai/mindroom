@@ -216,7 +216,6 @@ class MatrixVoiceMessageTools(Toolkit):
             recipient_user_id=None,
             room_mode=thread_id is None,
             new_thread=False,
-            message_extras=None,
             read_limit=1,
         )
 

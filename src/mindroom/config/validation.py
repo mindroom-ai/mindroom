@@ -78,7 +78,7 @@ def _validate_credential_service_name(value: str) -> str:
 CredentialServiceName = Annotated[str, AfterValidator(_validate_credential_service_name)]
 
 
-def _validate_timezone_name(value: str) -> str:
+def validate_timezone_name(value: str) -> str:
     """Return ``value`` when it names an IANA timezone, such as ``Europe/Amsterdam``."""
     try:
         ZoneInfo(value)
@@ -88,4 +88,4 @@ def _validate_timezone_name(value: str) -> str:
     return value
 
 
-TimezoneName = Annotated[str, AfterValidator(_validate_timezone_name)]
+TimezoneName = Annotated[str, AfterValidator(validate_timezone_name)]

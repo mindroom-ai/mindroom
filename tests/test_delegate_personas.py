@@ -15,7 +15,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
-from mindroom.delegation.personas import follow_up_refusal, inline_persona
+from mindroom.delegation.personas import _inline_persona as inline_persona
+from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target

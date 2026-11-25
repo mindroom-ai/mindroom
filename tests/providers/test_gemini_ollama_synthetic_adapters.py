@@ -484,7 +484,7 @@ async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_
     adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
 
     attempts = []
-    for overrides in (RequestOverrides(), RequestOverrides(caller_retries=True)):
+    for overrides in (RequestOverrides(), RequestOverrides(transient_retries="caller")):
         sent.clear()
         with pytest.raises(ProviderUnavailable):
             await anext(adapter.stream(_request(overrides=overrides)))
@@ -998,10 +998,11 @@ async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> N
     [("MAX_TOKENS", "output_limit"), ("SAFETY", "content_filter"), ("OTHER", "incomplete")],
 )
 async def test_gemini_stop_reasons(finish: str, stop: str, tmp_path: Path) -> None:
-    """Gemini finish reasons map to the normalized stop reasons."""
+    """Gemini finish reasons map to the normalized stop reasons and populate raw_stop_reason."""
     _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "x"}, finish=finish)))
 
-    assert _completed(events).stop_reason == stop
+    completed = _completed(events)
+    assert (completed.stop_reason, completed.raw_stop_reason) == (stop, finish)
 
 
 @pytest.mark.asyncio
@@ -2166,21 +2167,32 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("chunks", "stop"),
+    ("chunks", "stop", "raw_stop"),
     [
-        ([_ollama_done(content="Hi")], "end"),
-        ([_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}])], "tool_use"),
-        ([_ollama_done("load")], "incomplete"),
+        ([_ollama_done(content="Hi")], "end", None),
+        (
+            [_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}])],
+            "tool_use",
+            None,
+        ),
+        ([_ollama_done("length")], "output_limit", "length"),
+        ([_ollama_done("load")], "incomplete", "load"),
         # Servers from before done_reason existed, and some Ollama-compatible ones, end a normal reply without one.
-        ([{key: value for key, value in _ollama_done(content="Hi").items() if key != "done_reason"}], "end"),
+        ([{key: value for key, value in _ollama_done(content="Hi").items() if key != "done_reason"}], "end", None),
     ],
-    ids=["stop", "stop-with-tool-calls", "load", "no-done-reason"],
+    ids=["stop", "stop-with-tool-calls", "length", "load", "no-done-reason"],
 )
-async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str, tmp_path: Path) -> None:
-    """Done reasons map to stop reasons, and the done chunk reports the usage."""
+async def test_ollama_stop_reasons(
+    chunks: list[dict[str, Any]],
+    stop: str,
+    raw_stop: str | None,
+    tmp_path: Path,
+) -> None:
+    """Done reasons map to stop reasons, abnormal stops keep raw_stop_reason, and done chunks report usage."""
     _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, ollama_ndjson(*chunks))
 
-    assert _completed(events).stop_reason == stop
+    completed = _completed(events)
+    assert (completed.stop_reason, completed.raw_stop_reason) == (stop, raw_stop)
     assert any(isinstance(event, UsageReported) for event in events)
 
 

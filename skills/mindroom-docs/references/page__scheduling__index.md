@@ -1,7 +1,7 @@
 # Scheduling
 
-Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
-Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
+Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks.
+Ask an agent with the `scheduler` tool to create or edit schedules, and inspect or cancel them with the `scheduler` tool, chat commands, or the dashboard.
 
 <video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-light="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-dark="https://github.com/user-attachments/assets/01a8d67f-f1ed-4c6a-b2df-a1681149722e">
   <source src="https://github.com/user-attachments/assets/99f7e664-131d-4831-9c7e-64a2d95b2b6b" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -10,67 +10,8 @@ Create schedules with the `!schedule` chat command or let an agent create them w
 
 ## Commands
 
-Use `!help schedule` for inline help on the scheduling commands.
-
-### `!schedule`
-
-Schedule a one-time or recurring task.
-
-```
-!schedule <natural-language-request>
-```
-
-```
-!schedule in 5 minutes Check the deployment
-!schedule tomorrow at 3pm Send the weekly report
-!schedule Every hour, @shell check server status
-!schedule Daily at 9am, @finance market report
-!schedule Weekly on Friday, @analyst prepare weekly summary
-```
-
-Include `@agent_name` or `@team_name` to choose who answers each run.
-MindRoom checks that mentioned agents and teams are available in the room before it creates the task.
-
-A task runs where it was created: in the room timeline for a room-level schedule, or in the current thread for a threaded schedule.
-The task text never runs as a chat command, even when it starts with `!`; agents receive it as an ordinary message.
-
-Conditional requests such as `if` or `when` become recurring polling schedules, not event subscriptions.
-The condition is part of the task message, so the responder checks it on each run.
-Include an explicit polling cadence for predictable behavior.
-
-```
-!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
-!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
-```
-
-Add phrases to the request to change how each run behaves:
-
-| Phrase | Effect |
-| --- | --- |
-| `with no history`, `without context`, `context-free` | Each run sees no prior messages; see [History limits](#history-limits) |
-| `with only the last 5 messages of context` | Each run sees only recent messages |
-| `silently`, `quietly` | Hide the trigger and post only findings; see [Silent delivery](#silent-delivery) |
-
-### `!edit_schedule`
-
-Replace an existing task's timing and content.
-
-```
-!edit_schedule <task-id> <new-task-description>
-```
-
-MindRoom re-parses the description to update timing and content.
-Omitted settings stay unchanged, including the history limit, silent mode, and model.
-A task cannot switch between one-time and recurring; cancel it and create a new one instead.
-A request that would change nothing about the task is refused, and the task stays as it was.
-
-```
-!edit_schedule task42 keep the same schedule but restore full history
-!edit_schedule task42 every weekday at 8am check build status with no history
-!edit_schedule task42 keep the same schedule but make it silent
-```
-
-**Aliases:** `!editschedule`, `!edit-schedule`
+Use `/help schedule` (or `!help schedule`) for inline help on scheduling.
+Create and edit schedules by asking an agent with the [`scheduler`](#scheduler) tool; use chat commands to list or cancel them directly.
 
 ### `!list_schedules`
 
@@ -104,7 +45,7 @@ Only a pending task can be cancelled; a one-time task that already ran, and a ta
   <source src="https://github.com/user-attachments/assets/4423fd02-b6c9-4cf5-bf10-ae50149ebd2e" type="video/mp4">
 </video>
 
-The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
+The `scheduler` tool lets an agent create, edit, list, and cancel scheduled tasks with structured parameters.
 It is included in `defaults.tools` by default, needs no setup, and has no tool-specific configuration fields.
 It only works from a live room or thread; elsewhere it returns `Scheduler tool is unavailable in this context.`
 
@@ -115,47 +56,57 @@ agents:
       - scheduler
 ```
 
-| Function | Arguments |
+| Function | Notes |
 | --- | --- |
-| `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
-| `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `schedule(message, new_thread, execute_at=None, delay_seconds=None, cron=None, description=None, timezone=None, history_limit=None, silent=False, model=None)` | Provide `new_thread` and exactly one of `execute_at`, `delay_seconds`, or `cron` |
+| `edit_schedule(task_id, message=None, description=None, execute_at=None, delay_seconds=None, cron=None, timezone=None, history_limit=None, clear_history_limit=False, silent=None, model=None)` | Patch semantics: omitted arguments keep current values; schedule type (`once` vs `cron`) cannot change |
 | `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
 | `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
-| `list_schedules()` | |
-| `cancel_schedule(task_id)` | |
+| `list_schedules()` | Lists pending tasks in the current room or thread |
+| `cancel_schedule(task_id)` | Cancels one pending task by ID |
 
+- `message` is the exact trigger message posted when the schedule fires; include `@agent_name` or `@team_name` to choose who answers each run, and MindRoom verifies that every mentioned responder is allowed in the room.
+  The task text never runs as a chat command, even when it starts with `!` or `/`.
 - `new_thread=False` posts each run in the current room or thread.
   `new_thread=True` posts each run as a new room-level message, and the responder answers in a new thread under it with a fresh session.
-- `history_limit` caps how many recent messages each run sees: `0` for none, a positive integer for that many, unset for full history.
-- `silent=True` turns on [silent delivery](#silent-delivery); unset infers the mode from the request text.
-- `model` picks a model alias for each run; see [Model selection](#model-selection).
+- Timing requires exactly one of `execute_at` (ISO 8601 datetime with a time component, such as `2026-11-25T09:00:00-08:00` or naive wall time in `timezone`), `delay_seconds` (positive integer seconds, such as `900` for 15 minutes), or `cron` (5-field `minute hour day month weekday` evaluated in `timezone`).
+  Naive `execute_at` values that fall in a nonexistent spring-forward DST gap or an ambiguous fall-back DST fold are refused until an explicit UTC offset is provided.
+- `description` sets a short label for listings and defaults to the trimmed `message`.
+- `timezone` accepts an IANA timezone name and defaults to the scheduling agent's configured timezone.
+- `history_limit` caps how many recent messages each run sees: `0` for none, a positive integer for that many, unset for unlimited history; on edits, pass `clear_history_limit=True` to remove an existing limit.
+- `silent=True` turns on [silent delivery](#silent-delivery); defaults to `False`.
+- `model` picks a model alias (or `name@level`) for each run; see [Model selection](#model-selection).
 
 ```python
-schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
-schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
-schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
+schedule(message="@ops check the deployment", new_thread=False, delay_seconds=900)
+schedule(message="@ops check the deployment", new_thread=False, execute_at="2026-11-25T09:00:00-08:00")
+schedule(message="Post the on-call handoff summary", new_thread=True, cron="0 8 * * 1-5", timezone="America/Los_Angeles")
+schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+schedule(message="Check the inbox for urgent mail and report only if found", new_thread=False, cron="*/5 * * * *", history_limit=0, silent=True)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
+edit_schedule("a1b2c3d4", execute_at="2026-11-25T10:00:00-08:00", history_limit=5, silent=False)
 cancel_schedule("a1b2c3d4")
 ```
 
 ## History Limits
 
 Scheduled runs normally use the responder's configured conversation history.
-Use `with no history`, `without context`, or `context-free` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
-Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each run to recent context.
-In an edit, say `restore full history` or `use unlimited history` to remove a limit.
-Agents set the same limit with the tool's `history_limit` argument.
+Set `history_limit=0` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
+Set a positive integer `history_limit` to cap each run to recent messages, and pass `clear_history_limit=True` to `edit_schedule` to restore unlimited history.
 
 ## Silent Delivery
 
 Schedules are visible by default.
-Add `silently` or `quietly` to a request when the trigger and routine no-report results should stay out of the room timeline.
+Pass `silent=True` to `schedule()` (or `edit_schedule()`) when the trigger and routine no-report results should stay out of the room timeline.
 
-```
-!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
-!schedule Daily at 9am, silently check whether the backup failed and report failures
+```python
+schedule(
+    message="Check the inbox for urgent messages and report only when one arrives",
+    new_thread=False,
+    cron="*/5 * * * *",
+    history_limit=0,
+    silent=True,
+)
 ```
 
 A silent schedule does not show its trigger in the room.
@@ -167,7 +118,7 @@ When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-a
 A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
 After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
-Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
+Pass `silent=True` or `silent=False` to `edit_schedule()` or toggle silent delivery in the dashboard to change the mode.
 
 Silent delivery only hides messages from the room; the task text still travels through Matrix and is subject to homeserver retention.
 
@@ -182,15 +133,14 @@ Workspace knowledge indexing skips these receipts.
 Pass `model` to `schedule()` to run each scheduled response with a model alias from `models:` in `config.yaml`, for example a cheaper model for simple recurring checks.
 
 ```python
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
-edit_schedule("task42", "keep the same schedule and task", model="cheap")
-edit_schedule("task42", "keep the same schedule and task", model="")
+schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+edit_schedule("task42", model="cheap")
+edit_schedule("task42", model="")
 ```
 
 The model applies to the whole scheduled response, including a team's coordinator and members.
 It takes precedence over room and thread model settings without changing them for later messages.
 Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
-Parsing the scheduling request itself always uses the default model.
 
 ## Pre-Approved Tool Calls
 
@@ -226,7 +176,6 @@ Recurring schedules cannot pre-approve calls.
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
 An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
-A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -238,19 +187,18 @@ agents:
     timezone: Europe/Amsterdam
 ```
 
-A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
-The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
-Schedules created before agents had their own timezone keep following the top-level setting.
-
-Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
-Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
+A schedule keeps the timezone it was created in (defaulting to the creating agent's timezone unless `timezone` is passed explicitly), and later listings and edits use that timezone too.
+New recurring schedules evaluate their 5-field `cron` expression directly in that IANA timezone, so their local clock time stays consistent across daylight-saving transitions.
+A recurring local-time cron scheduled during a fall-back repeated hour (for example `01:30`) fires on both occurrences, matching `croniter`.
+The dashboard's Schedules page shows each recurring schedule's cron timezone (or `UTC (legacy)` for older UTC-based cron tasks) alongside its description, such as `At 09:00 (Europe/Amsterdam)`.
+Existing recurring schedules created before local-time crons keep running in UTC until edited with a new `cron` expression via `edit_schedule`.
 
 ## Permissions and Automatic Cancellation
 
 Schedules belong to the room, not to their creator.
 Any authorized participant in the room can edit or cancel any of its schedules by task ID, and listing inside a thread only filters the view.
 Each run acts as the schedule's creator, as if the creator had sent the message, so it uses that person's access, per-user credentials, and private-agent workspace.
-Editing a schedule with `!edit_schedule` or the `scheduler` tool makes the editor its new creator.
+Editing a schedule with the `scheduler` tool makes the editor its new creator.
 
 MindRoom cancels a schedule automatically once neither its creator nor any of the creator's [bridge aliases](https://docs.mindroom.chat/authorization/#bridge-aliases) is joined to the room.
 Bot accounts and managed identities do not count.

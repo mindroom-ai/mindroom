@@ -54,8 +54,6 @@ Configuration loading fails with one of these errors when references are wrong:
 
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
-- `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
-- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -235,9 +233,11 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that [one of its rooms lists](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
+An agent auto-joins a direct room call when it is the sole calls-enabled agent for that room — whether through its configured `rooms`, a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that [one of its rooms lists](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
+Multiple calls-enabled agents can share a room; when more than one is configured for the room (or when none is configured there and more than one is present through personal rooms, invites, or listed rooms), none of them auto-joins direct calls in that room.
+A sole configured calls-enabled agent wins over personal rooms, invites, and listed rooms.
+In shared rooms, MindRoom Chat still lets you pick any voice-capable agent from the room or thread header to call in a private 1:1 call room, and other Matrix clients can call an agent in a 1:1 room with that agent.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.

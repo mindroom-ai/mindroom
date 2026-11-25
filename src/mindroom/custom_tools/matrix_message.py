@@ -25,7 +25,6 @@ from mindroom.custom_tools.matrix_message_idempotency import (
     claim_matrix_message_send,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.matrix.message_extras import MatrixMessageExtra, parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.authoring import Toolkit
 
@@ -131,7 +130,6 @@ class MatrixMessageTools(Toolkit):
         new_thread: bool = False,
         event_id: str | None = None,
         attachments: list[str] | None = None,
-        message_extras: list[MatrixMessageExtra] | None = None,
         limit: int | None = None,
         idempotency_key: str | None = None,
     ) -> str:
@@ -143,7 +141,7 @@ class MatrixMessageTools(Toolkit):
 
         Send text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.
 
-        edit/react require event_id; react uses message as emoji (default 👍). message_extras adds optional collapsible sections to send/edit. Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.
+        edit/react require event_id; react uses message as emoji (default 👍). Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.
 
         Args:
             action: send, read, edit, or react.
@@ -154,7 +152,6 @@ class MatrixMessageTools(Toolkit):
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
             attachments: Ordered att_* IDs or workspace file paths; send only, maximum 5.
-            message_extras: Collapsible sections with title/content; optional content_type and collapsed.
             limit: Messages to read, 1-50; default 20.
             idempotency_key: Nonblank key (max 256 characters) for durable text-only send retries.
                 Same requester, agent, room, and key replay the first prepared message and target.
@@ -188,14 +185,6 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", message="Use either new_thread=True or thread_id, not both.")
         if event_id is not None and action not in {"edit", "react"}:
             return self._payload("error", message="event_id is only supported for edit and react.")
-        parsed_extras = None
-        if message_extras:
-            if action not in {"send", "edit"}:
-                return self._payload("error", message="message_extras is only supported for send and edit.")
-            try:
-                parsed_extras = parse_message_extra_sections(message_extras)
-            except ValueError as exc:
-                return self._payload("error", message=str(exc))
         resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
@@ -221,7 +210,6 @@ class MatrixMessageTools(Toolkit):
             new_thread=new_thread,
             event_id=event_id,
             attachments=references,
-            message_extras=parsed_extras,
             limit=limit,
         )
         if idempotency_key is None:
@@ -244,7 +232,6 @@ class MatrixMessageTools(Toolkit):
         new_thread: bool,
         event_id: str | None,
         attachments: list[str],
-        message_extras: list[MatrixMessageExtra] | None,
         limit: int | None,
         send_claim: MatrixMessageSendClaim | None = None,
     ) -> str:
@@ -315,7 +302,6 @@ class MatrixMessageTools(Toolkit):
             recipient_user_id=recipient_user_id,
             room_mode=(room_mode or thread_id == "room") and not new_thread,
             new_thread=new_thread or (recipient is not None and not room_mode and effective_thread_id is None),
-            message_extras=message_extras,
             send_claim=send_claim,
             recipient_name=recipient,
             read_limit=max(1, min(limit if limit is not None else self._DEFAULT_READ_LIMIT, self._MAX_READ_LIMIT)),

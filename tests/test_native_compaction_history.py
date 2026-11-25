@@ -20,7 +20,7 @@ from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
-    _ScopeCompactionLifecycleResult,
+    ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
@@ -67,8 +67,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
-    from mindroom.history.types import NativeHistory, PreparedHistoryState
+    from mindroom.history.runtime import PreparedScopeHistory
+    from mindroom.history.types import HistoryPreparationInputs, NativeHistory, PreparedHistoryState
     from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
     from mindroom.llm.runs import RunRecord
     from mindroom.providers.openai.responses import ResponsesAdapter
@@ -357,7 +357,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
-    monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
+    monkeypatch.setattr("mindroom.history.runtime.run_scope_compaction_with_lifecycle", text_compact)
     prepared = await _prepare(
         model,
         config,
@@ -559,8 +559,8 @@ async def test_native_activation_respects_history_policy(
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     # A manual request must reach the portable text owner, which returns no outcome here.
-    text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
-    monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
+    text_compact = AsyncMock(return_value=ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
+    monkeypatch.setattr("mindroom.history.runtime.run_scope_compaction_with_lifecycle", text_compact)
 
     prepared = await _prepare(
         model,

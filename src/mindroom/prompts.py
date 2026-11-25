@@ -14,6 +14,7 @@ __all__ = [
     "BACKGROUND_JOBS_CONTINUED_NOTICE",
     "BACKGROUND_JOBS_ENDED_NOTICE",
     "BACKGROUND_JOBS_FOLLOW_UP_PROMPT",
+    "BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
     "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
@@ -68,57 +69,54 @@ __all__ = [
     "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
-    "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     "WORKSPACE_SKILL_AUTHORING_PROMPT",
 ]
 
 
 # How Matrix conversation history reaches a model, which agents and team leaders share.
-_MATRIX_CONVERSATION_GUIDE = 'In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender\'s full Matrix ID and their stable identity. The optional `display_name` attribute is the sender\'s current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message\'s local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.'
-_MATRIX_MENTION_GUIDE = "When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill."
+_MATRIX_CONVERSATION_GUIDE = (
+    "Other senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: "
+    "`from` is the sender's stable Matrix ID (`display_name` can change; newest wins), "
+    "`ts` is local send time, and `event_id` targets reactions/edits. "
+    "Your own prior replies are normal assistant messages. "
+    "Grouped `<messages>` or `<queued_messages>` are one turn — reply once."
+)
+_MATRIX_MENTION_GUIDE = "Mention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart."
 
 # The agent's identity in a Matrix chatroom.
 AGENT_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
-You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.
-You are powered by the {{model_provider}} model: {{model_id}}.
-When working in teams with other agents, you should identify yourself as {{display_name}} and leverage your specific expertise.
+You are {{display_name}} (Matrix ID: {{matrix_id}}), a MindRoom agent in a Matrix chatroom.
+Model: {{model_provider}} (`{{model_id}}`).
 
 {_MATRIX_CONVERSATION_GUIDE}
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
-
-## Matrix Reply Targeting
-MindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.
-If a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.
-Multiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.
-
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
 TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
-You are {{display_name}}, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.
+You are {{display_name}}, a MindRoom team in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.
 {{team_purpose}}
 {_MATRIX_CONVERSATION_GUIDE}
 {_MATRIX_MENTION_GUIDE}
 """
 
 OPENAI_COMPAT_HISTORY_GUIDANCE = (
-    "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. "
-    "Always use the sender or role labels exactly as provided in the prompt.\n"
+    "In OpenAI-compatible API contexts, prior turns can appear as plain `role: body` lines; "
+    "keep sender and role labels as provided.\n"
 )
 
 OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent exposed through the OpenAI-compatible API as model `{agent_name}`.
-You are powered by the {model_provider} model: {model_id}.
-{openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
-
+Model: {model_provider} (`{model_id}`).
+{openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks.
 """
 
 # The agent's identity in a headless run, which answers one prompt from another program, with no conversation history.
 HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent `{agent_name}`, answering a prompt from another program.
-You are powered by the {model_provider} model: {model_id}.
-Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
-
+Model: {model_provider} (`{model_id}`).
+Follow your assigned role and any leader-assigned subtasks.
 """
 
 # The team leader's identity in the OpenAI-compatible API, which has no Matrix chatroom, history format, or mentions.
@@ -127,89 +125,35 @@ You are {display_name}, the MindRoom team exposed through the OpenAI-compatible 
 {team_purpose}{openai_compat_history_guidance}"""
 
 
-INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
-
-IMPORTANT: This is just an example. You can customize the question and options as needed.
-
+INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):
 ```interactive
-{
-    "question": "How would you like me to proceed?",
-    "options": [
-        {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
-        {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
-    ]
-}
-```
+{"question": "How to proceed?", "options": [
+  {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
+  {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
+]}
+```"""
 
-IMPORTANT:
-- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word "interactive").
-- The JSON block will be automatically replaced with a formatted question showing the options with emojis.
-- Don't write things like "here are the options:" before the JSON block - the formatted question will appear instead.
-- Write your response as if the formatted question will be shown directly to the user.
-- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!
-
-The JSON block above will be automatically converted to this formatted display:
-
-How would you like me to proceed?
-
-1. 🚀 Fast and automated
-2. 🐢 Careful and manual
-
-React with an emoji or type the number to respond.
-
-The user can respond by:
-- Clicking the emoji reaction
-- Typing the number (1, 2, etc.)
-
-Keep it simple: max 5 options with clear, concise labels, and give each option a different emoji.
-"""
-
-SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools:
-- get_skill_instructions(...)
-- get_skill_reference(...)
-- get_skill_script(...)
-Do not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
-"""
-
-WORKSPACE_SKILL_AUTHORING_PROMPT = """If you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.
-A skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.
-`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:
-
----
-name: my-skill
-description: One-line summary of when to use this skill
----
-
-# My Skill
-Step-by-step instructions...
-
-Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
-A workspace skill you create or edit becomes available on your next run, without any config change.
-"""
-
-HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.
-Do not reference tool calls in your messages (for example, don't say "let me search for that" or "I'll check the file").
-Simply present your findings naturally, as if you already knew the information.
-"""
-
-OUTPUT_REDIRECT_PROMPT = (
-    "To save a tool's full supported output, such as large output, to a file in your workspace instead of returning "
-    "it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or "
-    "shell tools. "
-    "In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, "
-    "`~` and `$HOME` point there too."
+SKILLS_TOOL_USAGE_PROMPT = (
+    "Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); "
+    "do not read global `SKILL.md` files directly."
 )
 
-DATETIME_CONTEXT_TEMPLATE = """## Current Date and Time
-Today is {date_str}.
-Timezone: {timezone_str} ({timezone_abbrev})
+WORKSPACE_SKILL_AUTHORING_PROMPT = (
+    "Create or edit workspace skills at `skills/<skill-name>/SKILL.md` (YAML frontmatter `name` and `description`; "
+    "never write bundled, plugin, or user skill dirs); they load on the next run."
+)
 
-"""
+HIDDEN_TOOL_CALLS_PROMPT = (
+    "Your tool calls are hidden from the user; report results directly without narrating tool calls "
+    '(e.g. "let me check").'
+)
+
+OUTPUT_REDIRECT_PROMPT = ""
+
+DATETIME_CONTEXT_TEMPLATE = "Current date: {date_str} ({timezone_str}, {timezone_abbrev})."
 
 PERSONALITY_CONTEXT_SECTION_HEADING = (
-    "## Personality Context\n"
-    "Each section below is headed by the path of the file it was read from, inlined here automatically every turn. "
-    "Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted."
+    "## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated."
 )
 # It holds no count that changes as the file grows, so lines added past the cut leave the prompt byte-identical.
 PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
@@ -219,12 +163,10 @@ PRELOAD_FILE_CUT_MARKER_TEMPLATE = (
 )
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
-These toolkits are available, but the definitions of their functions are not included:
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list the deferred functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
-Search before concluding that a capability is unavailable."""
+Use `tool_search(query)` to load matching schemas (or `tool_search()` to list names), then `call_tool(name, arguments)`. Search before concluding a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.
@@ -280,6 +222,11 @@ BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     'turn\'s background jobs context lists them. Call job(action="collect") once to read their results, then tell the '
     "user what happened, as a reply to the request that started them."
 )
+BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT = (
+    "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs a silent scheduled run started earlier in this conversation "
+    'have ended; this turn\'s background jobs context lists them. Call job(action="collect") once to read their '
+    "results; report findings or failures if any, otherwise follow the silent delivery instructions."
+)
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "
     "Their content was not inspected. Do not claim to have seen, heard, or read the removed media. "
@@ -324,17 +271,13 @@ Examples:
 
 Return the mode and a one-sentence reason why."""
 
-MEMORY_CONTEXT_PROMPT_TEMPLATE = """[Automatically extracted {context_type} memories - may not be relevant to current context]
-Previous {context_type} memories that might be related:
-{memory_lines}"""
+MEMORY_CONTEXT_PROMPT_TEMPLATE = "[Recalled {context_type} memories — may not be relevant]\n{memory_lines}"
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
-    "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
-    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
-    "or when a marker says content was omitted."
+    "[File memory: `{memory_path}` — preloaded every turn; do not re-read what is shown here "
+    "unless editing or checking for newer/truncated content]"
 )
 FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
-    "This conversation keeps the copy it last loaded, so entries added from other conversations since then "
-    "may be missing; open the file to look for them."
+    "Kept from this conversation's last load; open the file to see edits from other conversations."
 )
 PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens (limit {trigger_tokens}). Each reaches your prompt only up to its first {max_file_chars} characters; files over that limit: {over_limit_files}.
 Files: {file_sizes}.
@@ -605,8 +548,11 @@ Rules:
 - Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
 - Incorporate relevant new information from <new_conversation>.
 - Keep retained wording stable when practical, but condense it when needed.
-- Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
+- State each detail once without repeating it across sections.
+- Preserve load-bearing operational and technical details discovered in the conversation and tool outputs — file/log/socket paths, host/SSH/URL access recipes, working commands/flags, function/class names, commit SHAs, Matrix/revision/event IDs, model names, config keys, numeric thresholds, ports, concrete rationales, and exact error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
+- Preserve explicit before -> after transitions when a requirement, setting, or plan was revised, and clearly distinguish established user decisions and approvals from pending agent proposals.
+- Do not copy generic standing instructions, style/workflow rules, or reference runbooks loaded via skills or tool outputs into `## Constraints` or `## Next Steps` unless a rule was specifically applied, constrained, or overridden for this task.
 - In Next Steps, put the work the user is still waiting for, such as an unanswered question or an unsent result or report, before the agent's own bookkeeping (notes, logs, snapshots), keeping any steps that work depends on ahead of it.
 - Do not invent facts.
 - If a section has no content, write `None.`
@@ -618,61 +564,6 @@ Write a plain-text summary in exactly this markdown structure:
 ## Decisions
 ## Next Steps
 ## Critical Context
-"""
-
-WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into a structured workflow.
-
-Current time (UTC): {current_time}
-Current time in the user's timezone ({user_timezone}): {current_time_local}
-Request: "{request}"
-{existing_task_context}
-Your task is to:
-1. Determine if this is a one-time task or recurring (cron)
-2. Extract the schedule/timing
-3. Create a message that mentions the appropriate agents or teams
-4. Set is_conditional=true only when the request is event-based or conditional
-5. Resolve history_limit using the conversation context rules below
-6. Resolve silent using the schedule visibility rules below
-
-Available agents and teams: {agent_list}
-
-IMPORTANT: Event-based and conditional requests:
-When the request depends on an external event or condition rather than a fixed time:
-1. Convert to an appropriate recurring (cron) schedule for polling
-2. Include BOTH the condition check AND the action in the message
-3. Choose polling frequency based on urgency and type
-4. Set is_conditional to true
-
-Conversation context (history_limit):
-- history_limit is the number of recent thread messages the responding agent sees each time the task fires
-- "with no history", "without context", or "context-free" -> history_limit=0
-- "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
-- On edits, "restore full history" or "use unlimited history" -> history_limit=null
-- On edits, keep the current history_limit unchanged when the request says nothing about context or history
-- For new schedules, leave history_limit unset (null) when the request says nothing about context or history
-- Remove context phrases like "with no history" from the message itself
-
-Schedule visibility (silent):
-- For new schedules, default silent=false when the request says nothing about visibility
-- Explicit quiet or silent wording sets silent=true
-- Explicit visible wording sets silent=false
-- On edits, preserve the current silent value when the request omits visibility
-
-Important rules:
-- Set is_conditional=false for normal time-based schedules
-- For conditional/event-based requests, ALWAYS include the check condition in the message
-- Mention relevant agents or teams with @ only when needed
-- Interpret times in the request as {user_timezone} wall-clock times unless the request names an explicit timezone
-- Convert the interpreted time to UTC for the schedule (execute_at and cron_schedule are in UTC), but DO NOT include times in the message
-- Remove time phrases like "in 15 seconds" from the message itself
-- If schedule_type is "once", you MUST provide execute_at as a UTC datetime with an explicit UTC offset (e.g. 2026-01-15T17:30:00Z)
-- If schedule_type is "cron", you MUST provide cron_schedule
-
-Examples of event/condition phrasing to include in the message (do not include times in these examples):
-- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.
-- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.
-- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.
-- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
 """
 
 VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE = """You are a voice transcription normalizer for a Matrix chat bot system.
@@ -759,15 +650,10 @@ Avoid childish, sticker-like, or overly decorative designs.
 Make each room instantly recognizable at small sizes."""
 
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
-DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
+DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """Available subagents (`run_subagent` / `continue_subagent`):
 {agent_descriptions}
 
-Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
-Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
-In Matrix, a child tool that requires approval runs only once the user approves it.
-Other runtimes retain their approval restrictions.
-Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
-Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
+Max 3 nested subagent levels (follow-ups do not add depth)."""
 
 
 # What a subagent is sent when the runtime continues the turn a restart cut short, after that turn's own messages.
@@ -775,12 +661,11 @@ SUBAGENT_RESTART_CONTINUATION_PROMPT = (
     "[RUNTIME NOTE, NOT A USER MESSAGE] A restart interrupted your previous turn. Continue the task from where it "
     "stopped. Do not repeat tool calls with side effects that already finished."
 )
-DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
-A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
-Waiting neither restarts the child nor grants tool approval.
-To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
-Direct API calls and nested delegation wait within their existing execution owner.
-The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation."""
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = (
+    "Background subagent jobs: child tool approval pauses only the child's job (waiting neither restarts it nor "
+    "approves tools); cancel an active job before `continue_subagent` to redirect it. "
+    "Job ID = one turn; Subagent ID = reusable session."
+)
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(
@@ -861,9 +746,6 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation", "tag_vocabulary"}),
         "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE": frozenset(
             {"agent_list", "team_list", "transcription"},
-        ),
-        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
-            {"current_time", "current_time_local", "user_timezone", "request", "agent_list", "existing_task_context"},
         ),
     },
 )

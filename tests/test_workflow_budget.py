@@ -17,6 +17,7 @@ from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.limits import WorkflowLimits, run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
@@ -142,7 +143,8 @@ async def test_call_whose_start_was_under_way_when_the_limit_was_reached_does_no
 ) -> None:
     """A queued call that got its place just before the limit was reached starts nothing and ends the run if idle."""
     gate = await _over_the_limit(stack)
-    places = stack.engine.live.places[stack.run_id]
+    places = stack.engine._runs[stack.run_id].places
+    assert places is not None
     started = False
 
     async def start() -> None:
@@ -150,7 +152,7 @@ async def test_call_whose_start_was_under_way_when_the_limit_was_reached_does_no
         started = True
 
     places.working.add("@2")
-    await stack.engine.live.start_queued(stack.run_id, "@2", start)
+    await stack.engine.start_queued(stack.run_id, "@2", start)
 
     assert (started, "@2" in places.working, len(stack.models["watcher"].requests)) == (False, False, 2)
     gate.set()
@@ -227,7 +229,8 @@ async def test_further_turn_that_a_call_finds_due_stops_at_the_limit(stack: Work
     ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
     await stack.submit("@0", "agent", ask)
     await stack.until(lambda: len(model.requests) == 1)
-    for waiting in stack.engine.live.tasks.pop(stack.run_id):
+    for waiting in list(stack.engine._runs[stack.run_id].tasks):
+        stack.engine._runs[stack.run_id].tasks.discard(waiting)
         waiting.cancel()
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
     assert await stack.maintain() == [stack.run_id]
@@ -568,7 +571,7 @@ async def test_resuming_nested_launch_with_boolean_instead_of_int_starts_new_chi
     assert active.run_id != old_child.run_id
 
     stack.run_id = active.run_id
-    info = await stack.engine.calls.run_info(stack.attempt)
+    info = await nodes_module.run_info(stack.engine, stack.attempt)
     assert info["args"] == {"enabled": True}
     assert info["args"]["enabled"] is True
     await stack.finish_attempt(result="checked args")

@@ -1,6 +1,6 @@
 """One-shot helper model calls: one request without the caller's tools, optionally read into a structured-output schema.
 
-Routing, team-mode selection, schedule parsing, thread summaries, room topics, knowledge-graph extraction, memory
+Routing, team-mode selection, thread summaries, room topics, knowledge-graph extraction, memory
 flushes, and voice normalization each send one request like this.
 Provider errors propagate as ``mindroom.llm.errors`` exceptions instead of becoming an errored run.
 """
@@ -16,8 +16,8 @@ from pydantic import BaseModel
 
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured, structured_answer_text
-from mindroom.llm.messages import Message, read_model_provenance, usage_sums_attempts
-from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
+from mindroom.llm.messages import Message, ModelProvenance, read_model_provenance, usage_sums_attempts
+from mindroom.llm.provider import ModelRequest, RequestOverrides, complete, count_turn_usage
 from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.logging_config import get_logger
 
@@ -70,23 +70,26 @@ async def complete_prompt[T: BaseModel](
             overrides=overrides,
         ),
     )
-    identity = provider.identity
+    reply = turn.message
+    provenance = read_model_provenance(reply.provider_data)
+    capabilities = turn.capabilities or provider.capabilities
     metrics = RunMetrics(duration=perf_counter() - started)
-    metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
-    text = turn.content if schema is None else structured_answer_text(turn, provider.capabilities)
-    lenient = provider.capabilities.structured_output == "json_mode"
+    answered = count_turn_usage(metrics, turn, provider.identity)
+    text = turn.content if schema is None else structured_answer_text(turn, capabilities)
+    lenient = capabilities.structured_output == "json_mode"
     parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
-    reply = turn.message
     requests: tuple[RequestUsage, ...] = ()
     if not usage_sums_attempts(reply.provider_data):
-        model = read_model_provenance(reply.provider_data)
-        requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=model),)
+        answering_provenance = provenance or (
+            ModelProvenance(model_id=answered.id, provider=answered.provider) if turn.identity is not None else None
+        )
+        requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=answering_provenance),)
     usage = HelperUsage(
         run_id=run_id or str(uuid4()),
-        model=identity.id,
-        provider=identity.provider,
+        model=answered.id,
+        provider=answered.provider,
         metrics=metrics,
         requests=requests,
     )

@@ -37,7 +37,7 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
 
 
-def canonical_room_reference(room_ref: str, runtime_paths: RuntimePaths) -> str:
+def _canonical_room_reference(room_ref: str, runtime_paths: RuntimePaths) -> str:
     """Return a configured room reference's room ID in MindRoom's record, else the room key its alias names, else itself."""
     resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
     if resolved != room_ref:
@@ -50,7 +50,7 @@ def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bo
 
     A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
     """
-    room = canonical_room_reference(room_ref, runtime_paths)
+    room = _canonical_room_reference(room_ref, runtime_paths)
     return room.startswith("!") or room in config.managed_room_keys()
 
 
@@ -75,20 +75,19 @@ def configured_call_agent_name_for_room(
         room_aliases=room_aliases,
     )
     call_agents = set(routable_names).intersection(config.calls.agents)
-    if len(call_agents) == 1:
-        return next(iter(call_agents))
-    for agent_name in config.calls.agents:
-        invited = should_persist_invited_rooms(config, agent_name) and room_id in invited_rooms_by_agent.get(
-            agent_name,
-            (),
-        )
-        if invited or room_id in personal_rooms_by_agent.get(agent_name, ()):
-            call_agents.add(agent_name)
-    call_agents = sorted(call_agents)
-    if len(call_agents) > 1:
-        msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(call_agents)}"
+    if not call_agents:
+        for agent_name in config.calls.agents:
+            invited = should_persist_invited_rooms(config, agent_name) and room_id in invited_rooms_by_agent.get(
+                agent_name,
+                (),
+            )
+            if invited or room_id in personal_rooms_by_agent.get(agent_name, ()):
+                call_agents.add(agent_name)
+    resolved = sorted(call_agents)
+    if len(resolved) > 1:
+        msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(resolved)}"
         raise ValueError(msg)
-    return call_agents[0] if call_agents else None
+    return resolved[0] if resolved else None
 
 
 def configured_bot_user_ids_for_room(

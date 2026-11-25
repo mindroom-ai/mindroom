@@ -232,7 +232,7 @@ async def test_a_refused_summary_still_records_its_usage(route: str, tmp_path: P
     """The refused response was billed, so its usage counts before the refusal reaches the compaction."""
     recorded: list[MessageMetrics] = []
 
-    async def on_usage(usage: MessageMetrics) -> None:
+    async def on_usage(_identity: object, usage: MessageMetrics) -> None:
         recorded.append(usage)
 
     model = _model(route, tmp_path, lambda _request: _response(output_tokens=7, stop_reason="refusal"))

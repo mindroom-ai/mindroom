@@ -14,10 +14,16 @@ from mindroom.matrix.event_types import (
     WORKFLOW_ANSWER_REJECTED_EVENT_TYPE,
     WORKFLOW_QUESTION_CONTENT_KEY,
 )
-from mindroom.workflow_runs.answers import answer_command, answer_question, handle_workflow_answer
-from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
-from mindroom.workflow_runs.notices import notice, send_notice
-from mindroom.workflow_runs.questions import question_id
+from mindroom.workflow_runs import interactions
+from mindroom.workflow_runs.answers import (
+    answer_command,
+    answer_question,
+    handle_workflow_answer,
+    notice,
+    question_id,
+    send_notice,
+)
+from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRun, WorkflowRunState
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.workflow_helpers import StackRoom, WorkflowStack, tool_args, workflow_stack
 
@@ -292,7 +298,7 @@ async def test_question_whose_card_was_not_posted_takes_no_answer(stack: Workflo
 
     assert await _answer(stack, card, option="Yes") == "no_longer_open"
     assert await answer_command(stack.engine, text="1", **here) == "No open question for you in this thread."
-    assert not await stack.engine.ask.answer(stack.run_id, "@0", node.generation, "Yes")
+    assert not await stack.engine.answer(stack.run_id, "@0", node.generation, "Yes")
 
     assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
 
@@ -461,3 +467,60 @@ async def test_question_that_cannot_be_posted_is_asked_again_by_the_script(stack
     await _ask(stack)
 
     assert len(_posts(stack)) == 1
+
+
+@pytest.mark.asyncio
+async def test_child_question_paths_do_not_reread_run_via_run_ended(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child-question admission and polling must check loaded run.state + is_stopping without extra get_run reads."""
+    await stack.submit("@0", "value", {"op": "now"})
+    parent = stack.store.get_node(stack.run_id, "@0")
+    assert parent is not None
+
+    # 1. Polling a posted child question should read the run once per poll iteration, not twice.
+    card = await _ask(stack, key="@1")
+    get_run_calls = 0
+    original_get_run = stack.store.get_run
+
+    def counted_get_run(run_id: str) -> WorkflowRun:
+        nonlocal get_run_calls
+        get_run_calls += 1
+        return original_get_run(run_id)
+
+    entered_wait = asyncio.Event()
+    original_wait = stack.engine.wait_for_change
+
+    async def tracked_wait(condition: asyncio.Condition, remaining: float | None = None) -> None:
+        entered_wait.set()
+        await original_wait(condition, remaining)
+
+    monkeypatch.setattr(stack.store, "get_run", counted_get_run)
+    monkeypatch.setattr(stack.engine, "wait_for_change", tracked_wait)
+    waiter = asyncio.create_task(interactions._wait_child_question(stack.engine, stack.run_id, "@1"))
+    await entered_wait.wait()
+    assert get_run_calls == 1
+    monkeypatch.setattr(stack.store, "get_run", original_get_run)
+    assert await _answer(stack, card, option="Yes") == "accepted"
+    assert await waiter == "Yes"
+
+    # 2. ask_child_question on a stopping run rejects with one get_run read.
+    get_run_calls = 0
+    monkeypatch.setattr(stack.store, "get_run", counted_get_run)
+    stack.engine._state(stack.run_id).stopping = True
+    try:
+        with pytest.raises(WorkflowRunStoreError, match="run ended"):
+            await interactions.ask_child_question(stack.engine, stack.run_id, parent, "Stopping?", None)
+        assert get_run_calls == 1
+    finally:
+        stack.engine._state(stack.run_id).stopping = False
+
+    # 3. ask_child_question on a terminal run rejects with one get_run read.
+    monkeypatch.setattr(stack.store, "get_run", original_get_run)
+    await stack.engine.cancel(stack.run_id, reason="Stopped.")
+    get_run_calls = 0
+    monkeypatch.setattr(stack.store, "get_run", counted_get_run)
+    with pytest.raises(WorkflowRunStoreError, match="run ended"):
+        await interactions.ask_child_question(stack.engine, stack.run_id, parent, "After end?", None)
+    assert get_run_calls == 1

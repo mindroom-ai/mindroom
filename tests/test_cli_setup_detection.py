@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from mindroom import constants as constants_module
 from mindroom.cli import config as config_cli
-from mindroom.cli import setup_detection, setup_wizard
+from mindroom.cli import setup_detection, setup_matrix, setup_wizard
 from mindroom.cli.interactive import Separator
 from mindroom.cli.main import app
 from mindroom.cli.setup_detection import (
@@ -491,6 +491,7 @@ class TestLiveApiKeyVerification:
         keys = iter(["sk-bad\u2019quote", "sk-good-key"])
         with (
             patch.object(setup_detection, "detect_single_provider", return_value=None),
+            patch.object(config_cli, "select", return_value="mindroom.chat"),
             patch.object(config_cli, "secret", side_effect=lambda _msg: next(keys)),
             patch.object(setup_detection.httpx, "get", return_value=httpx.Response(200)) as mock_get,
         ):
@@ -511,6 +512,7 @@ class TestLiveApiKeyVerification:
         keys2 = iter(["sk-bad-key", ""])
         with (
             patch.object(setup_detection, "detect_single_provider", return_value=None),
+            patch.object(config_cli, "select", return_value="mindroom.chat"),
             patch.object(config_cli, "secret", side_effect=lambda _msg: next(keys2)),
             patch.object(
                 setup_detection,
@@ -534,6 +536,7 @@ class TestLiveApiKeyVerification:
         rt = _runtime(tmp_path)
         with (
             patch.object(setup_detection, "detect_single_provider", return_value=None),
+            patch.object(config_cli, "select", return_value="mindroom.chat"),
             patch.object(config_cli, "secret", return_value="sk-offline-key"),
             patch.object(
                 setup_detection,
@@ -548,6 +551,7 @@ class TestLiveApiKeyVerification:
         rt_custom = _runtime(tmp_path / "custom", env={"OPENAI_BASE_URL": "https://proxy.example/v1"})
         with (
             patch.object(setup_detection, "detect_single_provider", return_value=None),
+            patch.object(config_cli, "select", return_value="mindroom.chat"),
             patch.object(config_cli, "secret", return_value="sk-proxy-key"),
             patch.object(setup_detection.httpx, "get", side_effect=AssertionError("must not send HTTP")),
         ):
@@ -596,8 +600,9 @@ class TestCombinedClaudeCodexSetup:
         ):
             config_cli.create_first_run_config(rt, provider=None, interactive=True)
 
-        assert select_calls[0][1][0] == "claude_code+codex"
-        assert select_calls[1] == ("Default model for Mind?", ["sonnet", "sol", "opus"])
+        assert select_calls[0][1] == ["mindroom.chat", "custom"]
+        assert select_calls[1][1][0] == "claude_code+codex"
+        assert select_calls[2] == ("Default model for Mind?", ["sonnet", "sol", "opus"])
 
         raw_cfg = yaml.safe_load(rt.config_path.read_text(encoding="utf-8"))
         assert set(raw_cfg["models"]) == {"default", *expected_extra_keys}
@@ -742,7 +747,11 @@ class TestInlineCliLogin:
         ready_claude = DetectedProvider("claude_code", True, "Claude Pro", cli_path=claude_cli)
         with (
             patch.object(setup_detection, "detect_available_providers", return_value=installed_claude),
-            patch.object(config_cli, "select", return_value="claude_code"),
+            patch.object(
+                config_cli,
+                "select",
+                side_effect=lambda msg, _c: "mindroom.chat" if "Matrix server" in msg else "claude_code",
+            ),
             patch.object(config_cli, "confirm", return_value=True),
             patch.object(setup_detection, "run_inline_cli_login", return_value=True) as mock_login,
             patch.object(setup_detection, "detect_single_provider", return_value=ready_claude) as mock_reprobe,
@@ -761,7 +770,11 @@ class TestInlineCliLogin:
         installed_codex = _snapshot(DetectedProvider("codex", False, "CLI installed", cli_path="/usr/local/bin/codex"))
         with (
             patch.object(setup_detection, "detect_available_providers", return_value=installed_codex),
-            patch.object(config_cli, "select", return_value="codex"),
+            patch.object(
+                config_cli,
+                "select",
+                side_effect=lambda msg, _c: "mindroom.chat" if "Matrix server" in msg else "codex",
+            ),
             patch.object(config_cli, "confirm", return_value=False),
             patch.object(setup_detection, "run_inline_cli_login") as mock_login_no,
         ):
@@ -794,6 +807,8 @@ class TestOllamaModelDiscoverySetup:
         seen_titles: list[str] = []
 
         def fake_select(message: str, choices: list[Any]) -> str:
+            if "Matrix server" in message:
+                return "mindroom.chat"
             if message == "Default local model?":
                 seen_titles.extend(c[1] for c in choices)
                 return "123:45"
@@ -826,7 +841,11 @@ class TestOllamaModelDiscoverySetup:
         snapshot = _snapshot(DetectedProvider("ollama", False, "running (no models pulled)"))
         with (
             patch.object(setup_detection, "detect_available_providers", return_value=snapshot),
-            patch.object(config_cli, "select", return_value="ollama"),
+            patch.object(
+                config_cli,
+                "select",
+                side_effect=lambda msg, _c: "mindroom.chat" if "Matrix server" in msg else "ollama",
+            ),
         ):
             config_cli.create_first_run_config(rt, provider=None, interactive=True)
 
@@ -838,6 +857,17 @@ class TestOllamaModelDiscoverySetup:
 class TestInteractiveConfigInit:
     """Tests for unified interactive, piped self-hosted, overwrite-ordering, and non-interactive `config init`."""
 
+    @pytest.fixture(autouse=True)
+    def _clean_matrix_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "MATRIX_HOMESERVER",
+            "MINDROOM_PROVISIONING_URL",
+            "MATRIX_REGISTRATION_TOKEN",
+            "MATRIX_REGISTRATION_SHARED_SECRET",
+            "MATRIX_REGISTRATION_SHARED_SECRET_FILE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
     @pytest.mark.parametrize("matrix_server", ["mindroom.chat", "self-hosted"])
     def test_interactive_config_init_runs_smart_wizard(
         self,
@@ -845,18 +875,29 @@ class TestInteractiveConfigInit:
         monkeypatch: pytest.MonkeyPatch,
         matrix_server: str,
     ) -> None:
-        """Interactive `config init` runs provider detection and prints truthful next steps for both Matrix presets."""
+        """Interactive `config init` runs Matrix setup (when self-hosted), provider detection, and truthful next steps."""
         target = tmp_path / "config.yaml"
         snapshot = _snapshot(
             DetectedProvider("claude_code", True, "Claude Pro", cli_path="/usr/bin/claude"),
             DetectedProvider("codex", True, "ChatGPT Plus", cli_path="/usr/bin/codex"),
         )
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
-        with patch.object(setup_detection, "detect_available_providers", return_value=snapshot):
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+        probe = setup_matrix._MatrixServerProbeResult(
+            homeserver="https://matrix.corp.example",
+            discovered_via_well_known=True,
+            reachable=True,
+            provisioning_detected=True,
+        )
+        answers = "corp.example\n\n\n" if matrix_server == "self-hosted" else "\n\n"
+        with (
+            patch.object(setup_detection, "detect_available_providers", return_value=snapshot),
+            patch.object(setup_matrix, "_probe_matrix_server", return_value=probe),
+        ):
             result = runner.invoke(
                 app,
                 ["config", "init", "--path", str(target), "--matrix-server", matrix_server],
-                input="\n\n",
+                input=answers,
             )
 
         assert result.exit_code == 0, result.output
@@ -866,7 +907,11 @@ class TestInteractiveConfigInit:
         assert loaded.router.model == "haiku"
         assert "Setup ready" in result.output
         assert "Run `claude auth login`" not in result.output
-        assert ("Set your Matrix homeserver" in result.output) is (matrix_server == "self-hosted")
+        assert "Set your Matrix homeserver" not in result.output
+        if matrix_server == "self-hosted":
+            env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+            assert "MATRIX_HOMESERVER=https://matrix.corp.example\n" in env_text
+            assert "MATRIX_SERVER_NAME=corp.example\n" in env_text
 
     def test_force_overwrite_ignores_key_from_dotenv_about_to_be_wiped(
         self,
@@ -878,6 +923,7 @@ class TestInteractiveConfigInit:
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-old-dotenv-key\n", encoding="utf-8")
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
         seen_snapshots: list[DetectionSnapshot] = []
 
         def detect_using_runtime(rt: constants_module.RuntimePaths, **_kwargs: object) -> DetectionSnapshot:
@@ -894,7 +940,7 @@ class TestInteractiveConfigInit:
             result = runner.invoke(
                 app,
                 ["config", "init", "--path", str(target), "--force"],
-                input="openai\nsk-fresh-key\n",
+                input="\nopenai\nsk-fresh-key\n",
             )
 
         assert result.exit_code == 0, result.output

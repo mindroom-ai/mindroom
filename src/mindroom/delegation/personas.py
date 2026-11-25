@@ -54,6 +54,23 @@ _MODES: tuple[AgentMode, ...] = ("standard", "minimal")
 _GENERATED_PERSONA_FUNCTIONS = SKILL_FUNCTION_NAMES | {KNOWLEDGE_SEARCH_TOOL_NAME}
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
+__all__ = [
+    "PersonaError",
+    "PersonaRequest",
+    "caller_knowledge_names",
+    "caller_skill_names",
+    "caller_toolkit_names",
+    "declared_function_names",
+    "follow_up_refusal",
+    "list_profiles",
+    "missing_persona_tool",
+    "persona_allows",
+    "persona_tool_policy",
+    "render_profile_listing",
+    "require_built_persona_tools",
+    "resolve_persona_request",
+]
+
 
 class PersonaError(ValueError):
     """A persona or profile that cannot be used; the message is user-facing."""
@@ -97,7 +114,7 @@ def _name_entries(value: object, argument: str, noun: str) -> tuple[str, ...] | 
     return tuple(dict.fromkeys(cast("str", entry).strip() for entry in value))
 
 
-def inline_persona(
+def _inline_persona(
     system_prompt: object,
     tools: object,
     skills: object,
@@ -147,7 +164,7 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
         msg = "the body after the frontmatter is the system prompt and must not be empty"
         raise PersonaError(msg)
     try:
-        persona = inline_persona(
+        persona = _inline_persona(
             body,
             frontmatter.get("tools"),
             frontmatter.get("skills"),
@@ -221,7 +238,7 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
+def _load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
@@ -343,7 +360,7 @@ def missing_persona_tool(
     return None
 
 
-def validate_persona_tools(
+def _validate_persona_tools(
     tools: tuple[str, ...] | None,
     available_toolkits: Mapping[str, tuple[str, ...] | None],
     cap: tuple[str, ...] | None,
@@ -401,7 +418,7 @@ def follow_up_refusal(
     )
 
 
-def self_only_refusal(agent_name: str) -> str:
+def _self_only_refusal(agent_name: str) -> str:
     """Explain that a caller may author only its own subagents."""
     return (
         f"Cannot author a subagent for '{agent_name}': "
@@ -456,30 +473,30 @@ def resolve_persona_request(  # noqa: PLR0911
             )
         return PersonaRequest(persona=None, model=model, agent_mode=mode)
     if agent_name != caller_name:
-        return self_only_refusal(agent_name)
+        return _self_only_refusal(agent_name)
     inline = (system_prompt, tools, skills, knowledge)
     if profile is not None and any(value is not None for value in inline):
         return "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge, not both."
     try:
         if profile is None:
-            persona = inline_persona(system_prompt, tools, skills, knowledge)
+            persona = _inline_persona(system_prompt, tools, skills, knowledge)
             if persona.tools is not None:
                 # Only tools this call names may say file or coding; a saved profile or snapshot is read as written.
                 persona = replace(persona, tools=canonical_tool_names(persona.tools))
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
-            loaded = load_profile(workspace_root(), profile)
+            loaded = _load_profile(workspace_root(), profile)
             persona, model = loaded.persona, model or loaded.model
             mode = "minimal" if minimal else loaded.mode or "standard"
         persona = _capped_persona(persona, available_toolkits(), available_skills, available_knowledge, cap)
-        require_minimal_shell(persona, mode)
+        _require_minimal_shell(persona, mode)
     except PersonaError as exc:
         return str(exc)
     return PersonaRequest(persona=persona, model=model, agent_mode=mode)
 
 
-def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
+def _require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
     """Refuse a minimal persona whose tool list drops shell, which minimal mode runs through."""
     tools = persona.tools
     if mode != "minimal" or tools is None:
@@ -506,7 +523,7 @@ def _capped_persona(
     depth inherits the cap's tools without ``delegate``; any other inherited tool the caller lost still refuses.
     """
     # Skills and knowledge resolve first, while persona.tools still says whether the author named tools.
-    persona = capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
+    persona = _capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
     persona = replace(
         persona,
         knowledge=_capped_names(
@@ -521,11 +538,11 @@ def _capped_persona(
         keep_delegate = "delegate" in available_toolkits
         tools = tuple(entry for entry in cap_tools if keep_delegate or entry.partition(".")[0] != "delegate")
         persona = replace(persona, tools=tools)
-    validate_persona_tools(persona.tools, available_toolkits, cap_tools)
+    _validate_persona_tools(persona.tools, available_toolkits, cap_tools)
     return persona
 
 
-def capped_persona_skills(
+def _capped_persona_skills(
     persona: SubagentPersona,
     available_skills: Callable[[], Sequence[str]],
     skill_cap: tuple[str, ...] | None,

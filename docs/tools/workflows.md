@@ -640,8 +640,7 @@ Its description is the first line of its module docstring, and an optional top-l
 
 ## Moving From Dynamic Workflows
 
-`workflow` replaces [`dynamic_workflow`](agent-orchestration.md#dynamic_workflow) with plain Python scripts, background execution, live graph frames, resume by replay, and saved workflows under `workflows/<name>.py`.
+`dynamic_workflow` is now a deprecated alias for `workflow` (any legacy `allowed_tools` option is ignored because a workflow inherits its caller's tools).
+The old Dynamic Workflows YAML engine has been removed; rewrite any YAML workflow you want to keep as a Python script with `def main(args):` under `workflows/<name>.py` and rename `dynamic_workflow` to `workflow` in your config.
 
-- Both `workflow` and `dynamic_workflow` can be enabled on the same agent during migration; their tool function names are disjoint.
-- Existing `dynamic_workflow` runs remain readable through `dynamic_workflow`.
-- No Dynamic Workflow YAML spec runs on the `workflow` engine; rewrite workflows you want to migrate as Python files with `def main(args):` in `workflows/<name>.py`.
+- Old Dynamic Workflow runs and revisions are no longer queryable, while previously published public report links remain usable if their artifacts still exist.

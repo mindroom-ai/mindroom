@@ -32,7 +32,6 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.thread_utils import history_mentioned_user_ids
@@ -60,7 +59,6 @@ _COPIED_CONTENT_KEYS = (
     "info",
     "filename",
     "geo_uri",
-    MINDROOM_MESSAGE_EXTRAS_KEY,
     "org.matrix.msc3245.voice",
     "org.matrix.msc1767.audio",
     TOOL_TRACE_CONTENT_KEY,

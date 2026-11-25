@@ -6,9 +6,9 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
-from mindroom.history.runtime import HistoryPreparationInputs
 from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import new_scope_session, set_force_compaction
+from mindroom.history.types import HistoryPreparationInputs
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -22,37 +22,6 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
-
-
-async def request_compaction_before_next_reply(
-    *,
-    scope: HistoryScope,
-    agent_name: str,
-    session_id: str,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    active_model_name: str | None,
-    room_id: str | None,
-) -> str:
-    """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
-
-    ``agent_name`` names the agent that asked, a team member when ``scope`` is its team's; only the log reads it.
-    Return the message the caller reports.
-    """
-    unavailable = await schedule_compaction_before_next_reply(
-        scope=scope,
-        agent_name=agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        active_model_name=active_model_name,
-        room_id=room_id,
-    )
-    if unavailable is not None:
-        return f"Error: Compaction is unavailable for this scope because {unavailable}."
-    return "Compaction will run before the next reply in this conversation scope."
 
 
 async def scope_has_session(
@@ -101,9 +70,10 @@ async def schedule_compaction_before_next_reply(
     thread_id: str | None = None,
     budget: TurnBudget | None = None,
 ) -> str | None:
-    """Schedule compaction as ``request_compaction_before_next_reply`` does; return why it is unavailable, else None.
+    """Schedule text compaction before the next reply in ``scope``; return why it is unavailable, else None.
 
-    ``thread_id`` lets the thread's saved model choice decide the model when no ``active_model_name`` is given.
+    ``agent_name`` names the agent that asked (for logging); ``thread_id`` lets the thread's saved model choice
+    decide the model when no ``active_model_name`` is given.
     """
     plan = resolve_manual_compaction_plan(scope, config, runtime_paths, room_id, thread_id, budget, active_model_name)
     if isinstance(plan, str):

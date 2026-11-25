@@ -11,9 +11,9 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import typer
 from rich.console import Console
@@ -25,7 +25,20 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.cli.help_format import PanelOrderedGroup, examples
-from mindroom.cli.interactive import confirm, secret, section, select, terminal_is_interactive
+from mindroom.cli.interactive import confirm, secret, section, select, terminal_is_interactive, text
+from mindroom.cli.setup_matrix import (
+    MatrixServerPreset as _MatrixServerPreset,
+)
+from mindroom.cli.setup_matrix import (
+    StarterMatrixSelection,
+    custom_matrix_env_updates,
+    ensure_kept_env_compatible,
+    hosted_matrix_selection,
+    is_self_hosted_placeholder,
+    render_matrix_env_block,
+    resolve_interactive_matrix_server,
+    unconfigured_self_hosted_matrix_selection,
+)
 from mindroom.cli.setup_wizard import (
     PROVIDER_CHOICES,
     StarterModelSelection,
@@ -100,8 +113,6 @@ CONFIG_PATH_OPTION: Path | None = typer.Option(
     help="Override auto-detection and use this config file path.",
 )
 
-_MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
-
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
@@ -125,7 +136,21 @@ def _wizard_io() -> WizardIO:
         select=select,
         confirm=confirm,
         secret=secret,
+        text=text,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigInitSelection:
+    """Resolved Matrix server, model provider, and `.env` overwrite decisions for `config init`."""
+
+    matrix: StarterMatrixSelection
+    models: StarterModelSelection
+    provider_api_key: str | None
+    replace_env_file: bool
+    detection_runtime: RuntimePaths
+    interactive_wizard: bool
+    interactive_provider_wizard: bool
 
 
 def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
@@ -200,11 +225,12 @@ def _ensure_mind_workspace(workspace_path: Path, *, config_path: Path, force: bo
 
 def _write_env_file(
     env_path: Path,
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     selected_preset: _ProviderPreset,
     *,
     storage_root: Path,
     replace_existing: bool,
+    preserve_matrix_settings: bool = False,
     provider_api_key: str | None = None,
     model_selection: StarterModelSelection | None = None,
     ollama_host: str | None = None,
@@ -213,7 +239,7 @@ def _write_env_file(
     if not env_path.exists() or replace_existing:
         existed = env_path.exists()
         content = _env_template(
-            matrix_server,
+            matrix_selection,
             selected_preset,
             storage_root,
             provider_api_key,
@@ -227,14 +253,36 @@ def _write_env_file(
         )
         return True
 
-    # `connect` can create .env before `config init`; mindroom.chat still
-    # needs hosted Matrix defaults, so preserve user-owned values and append
-    # only the missing hosted keys.
-    changed = matrix_server == "mindroom.chat" and _append_missing_env_defaults(
-        env_path,
-        _PUBLIC_HOSTED_ENV_DEFAULTS,
-        title="Hosted Matrix defaults for mindroom.chat",
-    )
+    # Cross-server kept `.env` files are refused earlier by `ensure_kept_env_compatible`,
+    # so keeping `.env` only runs on the same server (or an unconfigured `.env`): hosted
+    # selections replace any unconfigured self-hosted placeholder and append missing hosted
+    # defaults; custom servers upsert same-server keys while preserving skipped secrets and owner.
+    if preserve_matrix_settings:
+        changed = False
+    elif matrix_selection.is_hosted:
+        from dotenv import dotenv_values  # noqa: PLC0415
+
+        existing_env = dotenv_values(env_path, encoding="utf-8-sig")
+        replaced_placeholder = False
+        if is_self_hosted_placeholder(existing_env.get("MATRIX_HOMESERVER")):
+            upsert_env_values(env_path, {"MATRIX_HOMESERVER": constants.DEFAULT_MATRIX_HOMESERVER})
+            replaced_placeholder = True
+        changed = (
+            _append_missing_env_defaults(
+                env_path,
+                _PUBLIC_HOSTED_ENV_DEFAULTS,
+                title="Hosted Matrix defaults for mindroom.chat",
+            )
+            or replaced_placeholder
+        )
+    elif matrix_selection.configured:
+        from dotenv import dotenv_values  # noqa: PLC0415
+
+        existing_env = dotenv_values(env_path, encoding="utf-8-sig")
+        upsert_env_values(env_path, custom_matrix_env_updates(matrix_selection, existing_env=existing_env))
+        changed = True
+    else:
+        changed = False
     if changed:
         print_literal("[green]Env file updated:[/green] ", env_path)
     # `mindroom run` serves the dashboard on every interface by default, so a kept
@@ -300,10 +348,13 @@ def _should_replace_env_file(env_path: Path, *, force: bool, no_input: bool) -> 
     return typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
 
 
-def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
+def _config_init_env_hint(
+    matrix_selection: StarterMatrixSelection,
+    selected_preset: _ProviderPreset,
+) -> str:
     """Return the env setup hint shown after `mindroom config init`."""
     setup = _PROVIDER_PRESETS[selected_preset].setup
-    if matrix_server == "mindroom.chat":
+    if matrix_selection.configured:
         return setup.hosted if setup else "Set your API keys (Matrix homeserver is prefilled)"
     return setup.self_hosted if setup else "Set your API keys and Matrix homeserver"
 
@@ -312,7 +363,7 @@ def _print_config_init_next_steps(
     env_path: Path,
     *,
     env_changed: bool,
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     selected_preset: _ProviderPreset,
     model_selection: StarterModelSelection | None = None,
 ) -> None:
@@ -322,18 +373,20 @@ def _print_config_init_next_steps(
     console.print("\nNext steps:")
     if env_changed:
         if provider_ready:
-            if matrix_server == "self-hosted":
+            if not matrix_selection.configured:
                 print_literal("  [cyan]Edit[/cyan] ", env_path, "  Set your Matrix homeserver")
         else:
-            env_hint = _config_init_env_hint(matrix_server, selected_preset)
+            env_hint = _config_init_env_hint(matrix_selection, selected_preset)
             print_literal("  [cyan]Edit[/cyan] ", env_path, f"  {env_hint}")
     if not provider_ready and not uses_detected_ollama:
         _print_local_model_commands(selected_preset)
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
-    if matrix_server == "mindroom.chat":
+    if matrix_selection.is_hosted:
         console.print("  On first run, MindRoom prints a link to approve with your MindRoom Chat account.")
+    elif matrix_selection.uses_provisioning:
+        console.print("  On first run, MindRoom prints a link to approve with your Matrix account.")
 
 
 def _print_local_model_commands(selected_preset: _ProviderPreset) -> None:
@@ -427,7 +480,7 @@ def format_validation_errors(
     "init",
     rich_help_panel="Create and edit",
     epilog=examples(
-        ("mindroom config init", "For MindRoom Chat"),
+        ("mindroom config init", "Interactive setup wizard"),
         ("mindroom config init --provider anthropic", "With Anthropic models"),
         ("mindroom config init --matrix-server self-hosted", "For your own homeserver"),
         ("mindroom config init --print", "Print instead of writing"),
@@ -446,10 +499,11 @@ def config_init(
         "-f",
         help="Overwrite existing config without prompting.",
     ),
-    matrix_server: str = typer.Option(
-        "mindroom.chat",
+    matrix_server: str | None = typer.Option(
+        None,
         "--matrix-server",
         help=f"{_MATRIX_SERVER_HELP} Choices: {_MATRIX_SERVER_CHOICES_TEXT}.",
+        show_default="mindroom.chat",
     ),
     provider: str | None = typer.Option(
         None,
@@ -487,65 +541,153 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    selected_matrix_server, explicit_preset = _parse_config_init_flags(matrix_server, provider=provider)
-    can_prompt = explicit_preset is None and not print_config and not no_input
-    interactive_wizard = can_prompt and terminal_is_interactive()
-    replace_env_file = False
-    detection_runtime = runtime_paths
+    explicit_matrix_server, explicit_preset = _parse_config_init_flags(matrix_server, provider=provider)
+    preserve_existing_matrix_env = (
+        no_input
+        and keep_existing_config
+        and explicit_matrix_server is None
+        and env_path.exists()
+        and _kept_env_targets_custom_server(env_path)
+    )
     wizard_io = _wizard_io()
-    if interactive_wizard:
-        replace_env_file = _should_replace_env_file(env_path, force=force, no_input=no_input)
-        # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
-        detection_runtime = replace(runtime_paths, env_file_values={}) if replace_env_file else runtime_paths
+    try:
+        resolved = _resolve_config_init_selections(
+            runtime_paths,
+            explicit_matrix_server=explicit_matrix_server,
+            explicit_preset=explicit_preset,
+            force=force,
+            print_config=print_config,
+            no_input=no_input,
+            preserve_existing_matrix_env=preserve_existing_matrix_env,
+            io=wizard_io,
+        )
+    except ValueError as exc:
+        print_literal("[red]Error:[/red] ", exc)
+        raise typer.Exit(1) from None
+
+    if print_config:
+        content = _starter_config(
+            runtime_paths,
+            resolved.matrix,
+            resolved.models.primary_preset,
+            model_selection=resolved.models,
+        )
+        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
+        return
+
+    try:
+        env_changed = _write_starter_setup(
+            runtime_paths,
+            resolved.matrix,
+            resolved.models.primary_preset,
+            force=force,
+            replace_env_file=resolved.replace_env_file,
+            keep_existing_config=keep_existing_config,
+            preserve_matrix_settings=preserve_existing_matrix_env,
+            provider_api_key=resolved.provider_api_key,
+            model_selection=resolved.models,
+            ollama_host=((resolved.detection_runtime.env_value("OLLAMA_HOST") or "").strip() or None)
+            if resolved.interactive_provider_wizard
+            else None,
+            owner_runtime=replace(runtime_paths, env_file_values={}) if resolved.replace_env_file else runtime_paths,
+        )
+    except ValueError as exc:
+        print_literal("[red]Error:[/red] ", exc)
+        raise typer.Exit(1) from None
+
+    if resolved.interactive_wizard:
+        print_setup_summary(resolved.models, io=wizard_io, matrix_label=resolved.matrix.summary_label)
+    _print_config_init_next_steps(
+        env_path,
+        env_changed=env_changed,
+        matrix_selection=resolved.matrix,
+        selected_preset=resolved.models.primary_preset,
+        model_selection=resolved.models if resolved.interactive_provider_wizard else None,
+    )
+
+
+def _kept_env_targets_custom_server(env_path: Path) -> bool:
+    """Return whether an existing `.env` targets a non-hosted Matrix server."""
+    try:
+        ensure_kept_env_compatible(hosted_matrix_selection(), env_path)
+    except ValueError:
+        return True
+    return False
+
+
+def _resolve_config_init_selections(
+    runtime_paths: RuntimePaths,
+    *,
+    explicit_matrix_server: _MatrixServerPreset | None,
+    explicit_preset: _ProviderPreset | None,
+    force: bool,
+    print_config: bool,
+    no_input: bool,
+    preserve_existing_matrix_env: bool,
+    io: WizardIO,
+) -> _ConfigInitSelection:
+    """Resolve Matrix server, model provider, API key, and `.env` overwrite decision for `config init`."""
+    interactive_terminal = not print_config and not no_input and terminal_is_interactive()
+    can_prompt_provider = explicit_preset is None and not print_config and not no_input
+    interactive_provider_wizard = can_prompt_provider and interactive_terminal
+    prompt_matrix_server = interactive_terminal and (
+        explicit_matrix_server == "self-hosted" or (explicit_matrix_server is None and explicit_preset is None)
+    )
+    interactive_wizard = interactive_provider_wizard or prompt_matrix_server
+    replace_env_file = (
+        _should_replace_env_file(runtime_paths.env_path, force=force, no_input=no_input)
+        if interactive_wizard
+        else False
+    )
+    # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
+    detection_runtime = (
+        replace(runtime_paths, env_file_values={}) if interactive_wizard and replace_env_file else runtime_paths
+    )
+
+    if prompt_matrix_server:
+        console.print(section("Matrix server"))
+        matrix_selection = resolve_interactive_matrix_server(
+            detection_runtime,
+            io=io,
+            explicit_preset=explicit_matrix_server,
+        )
+    elif explicit_matrix_server == "self-hosted":
+        matrix_selection = unconfigured_self_hosted_matrix_selection()
+    else:
+        matrix_selection = hosted_matrix_selection()
+
+    if interactive_wizard and not replace_env_file and matrix_selection.configured:
+        ensure_kept_env_compatible(matrix_selection, runtime_paths.env_path)
+
+    if interactive_provider_wizard:
         console.print(section("Model provider"))
         selection, provider_api_key = resolve_interactive_setup(
             detection_runtime,
             explicit_preset=None,
             interactive=True,
             for_config_init=True,
-            io=wizard_io,
+            io=io,
         )
-    elif can_prompt and selected_matrix_server == "self-hosted":
-        selection = default_model_selection(prompt_provider_preset(select_fn=wizard_io.select))
+    elif can_prompt_provider and matrix_selection.preset == "self-hosted":
+        selection = default_model_selection(prompt_provider_preset(select_fn=io.select))
         provider_api_key = None
     else:
         selection = default_model_selection(explicit_preset or "openai")
         provider_api_key = None
 
-    if print_config:
-        content = _starter_config(
-            runtime_paths,
-            selected_matrix_server,
-            selection.primary_preset,
-            model_selection=selection,
-        )
-        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
-        return
+    if not print_config and not interactive_wizard:
+        replace_env_file = _should_replace_env_file(runtime_paths.env_path, force=force, no_input=no_input)
+        if not replace_env_file and not preserve_existing_matrix_env and matrix_selection.configured:
+            ensure_kept_env_compatible(matrix_selection, runtime_paths.env_path)
 
-    if not interactive_wizard:
-        replace_env_file = _should_replace_env_file(env_path, force=force, no_input=no_input)
-
-    env_changed = _write_starter_setup(
-        runtime_paths,
-        selected_matrix_server,
-        selection.primary_preset,
-        force=force,
-        replace_env_file=replace_env_file,
-        keep_existing_config=keep_existing_config,
+    return _ConfigInitSelection(
+        matrix=matrix_selection,
+        models=selection,
         provider_api_key=provider_api_key,
-        model_selection=selection,
-        ollama_host=((detection_runtime.env_value("OLLAMA_HOST") or "").strip() or None)
-        if interactive_wizard
-        else None,
-    )
-    if interactive_wizard:
-        print_setup_summary(selection, io=wizard_io)
-    _print_config_init_next_steps(
-        env_path,
-        env_changed=env_changed,
-        matrix_server=selected_matrix_server,
-        selected_preset=selection.primary_preset,
-        model_selection=selection if interactive_wizard else None,
+        replace_env_file=replace_env_file,
+        detection_runtime=detection_runtime,
+        interactive_wizard=interactive_wizard,
+        interactive_provider_wizard=interactive_provider_wizard,
     )
 
 
@@ -555,9 +697,10 @@ def create_first_run_config(
     provider: str | None,
     interactive: bool,
 ) -> None:
-    """Write the hosted starter config that `mindroom run` found missing, asking a terminal for what is still open.
+    """Write the starter config that `mindroom run` found missing, asking a terminal for what is still open.
 
-    Without a terminal nothing is asked, so `provider` is required and a missing key is skipped.
+    Without a terminal nothing is asked, so `provider` is required, Matrix defaults to `mindroom.chat`, and a missing
+    key is skipped.
     """
     if provider is None:
         explicit_preset = None
@@ -565,14 +708,23 @@ def create_first_run_config(
         msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
         raise ValueError(msg)
     wizard_io = _wizard_io()
-    print_literal(
-        "\n[bold]Welcome to MindRoom![/bold] Let's create your config at ",
-        runtime_paths.config_path,
-        " for MindRoom Chat (mindroom.chat).",
-    )
-    console.print(
-        "[dim]Own Matrix server? Press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.[/dim]",
-    )
+    if interactive:
+        print_literal(
+            "\n[bold]Welcome to MindRoom![/bold] Let's create your config at ",
+            runtime_paths.config_path,
+            ".",
+        )
+        console.print(section("Matrix server"))
+        matrix_selection = resolve_interactive_matrix_server(runtime_paths, io=wizard_io)
+    else:
+        print_literal(
+            "\n[bold]Welcome to MindRoom![/bold] Let's create your config at ",
+            runtime_paths.config_path,
+            " for MindRoom Chat (mindroom.chat).",
+        )
+        matrix_selection = hosted_matrix_selection()
+    ensure_kept_env_compatible(matrix_selection, runtime_paths.env_path)
+
     console.print(section("Model provider"))
     selection, provider_api_key = resolve_interactive_setup(
         runtime_paths,
@@ -582,7 +734,7 @@ def create_first_run_config(
     )
     _write_starter_setup(
         runtime_paths,
-        "mindroom.chat",
+        matrix_selection,
         selection.primary_preset,
         force=False,
         replace_env_file=False,
@@ -590,7 +742,7 @@ def create_first_run_config(
         model_selection=selection,
         ollama_host=((runtime_paths.env_value("OLLAMA_HOST") or "").strip() or None) if interactive else None,
     )
-    print_setup_summary(selection, io=wizard_io)
+    print_setup_summary(selection, io=wizard_io, matrix_label=matrix_selection.summary_label)
     if not selection.ready and (setup := _PROVIDER_PRESETS[selection.primary_preset].setup) is not None:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
         print_literal("  ", setup.first_run.format(env_path=runtime_paths.env_path))
@@ -600,18 +752,24 @@ def create_first_run_config(
 
 def _starter_config(
     runtime_paths: RuntimePaths,
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     selected_preset: _ProviderPreset,
     *,
     model_selection: StarterModelSelection | None = None,
+    owner_runtime: RuntimePaths | None = None,
 ) -> str:
-    """Return the rendered starter config, with owner placeholders filled from the runtime's paired owner."""
-    content = _full_template(selected_preset, matrix_server=matrix_server, model_selection=model_selection)
+    """Return the rendered starter config, with owner placeholders filled from the configured or paired owner."""
+    content = _full_template(
+        selected_preset,
+        matrix_selection=matrix_selection,
+        model_selection=model_selection,
+    )
 
-    # `connect` can run before `config init`, when no config exists to patch.
-    # In that order, connect persists the owner MXID in .env so init can render
-    # owner access defaults without leaving pairing placeholders behind.
-    if owner_user_id := _config_init_owner_user_id(runtime_paths):
+    # `connect` can run before `config init`, and same-server re-init keeping `.env`
+    # preserves a saved owner when the owner prompt is skipped. Cross-server kept `.env`
+    # merges are refused earlier, and overwriting `.env` clears `owner_runtime.env_file_values`.
+    owner_user_id = matrix_selection.owner_user_id or _config_init_owner_user_id(owner_runtime or runtime_paths)
+    if owner_user_id:
         from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
 
         content = replace_owner_placeholders_in_text(content, owner_user_id)
@@ -620,15 +778,17 @@ def _starter_config(
 
 def _write_starter_setup(
     runtime_paths: RuntimePaths,
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     selected_preset: _ProviderPreset,
     *,
     force: bool,
     replace_env_file: bool,
     keep_existing_config: bool = False,
+    preserve_matrix_settings: bool = False,
     provider_api_key: str | None = None,
     model_selection: StarterModelSelection | None = None,
     ollama_host: str | None = None,
+    owner_runtime: RuntimePaths | None = None,
 ) -> bool:
     """Write `.env`, the starter config, Mind workspace, and agent docs; return whether `.env` changed.
 
@@ -636,13 +796,20 @@ def _write_starter_setup(
     """
     target = runtime_paths.config_path
     storage_root = runtime_paths.storage_root
-    content = _starter_config(runtime_paths, matrix_server, selected_preset, model_selection=model_selection)
+    content = _starter_config(
+        runtime_paths,
+        matrix_selection,
+        selected_preset,
+        model_selection=model_selection,
+        owner_runtime=owner_runtime,
+    )
     env_changed = _write_env_file(
         runtime_paths.env_path,
-        matrix_server,
+        matrix_selection,
         selected_preset,
         storage_root=storage_root,
         replace_existing=replace_env_file,
+        preserve_matrix_settings=preserve_matrix_settings,
         provider_api_key=provider_api_key,
         model_selection=model_selection,
         ollama_host=ollama_host,
@@ -1002,15 +1169,17 @@ def find_missing_env_variables(config: Config, runtime_paths: RuntimePaths) -> l
 
 
 def _parse_config_init_flags(
-    matrix_server: str,
+    matrix_server: str | None,
     *,
     provider: str | None,
-) -> tuple[_MatrixServerPreset, _ProviderPreset | None]:
-    """Validate and normalize `--matrix-server` and optional `--provider` flags for config init."""
-    selected_matrix_server = _normalize_matrix_server_preset(matrix_server)
-    if selected_matrix_server is None:
-        console.print(f"[red]Invalid --matrix-server value.[/red] Use: {_MATRIX_SERVER_CHOICES_TEXT}.")
-        raise typer.Exit(1)
+) -> tuple[_MatrixServerPreset | None, _ProviderPreset | None]:
+    """Validate and normalize optional `--matrix-server` and `--provider` flags for config init."""
+    selected_matrix_server: _MatrixServerPreset | None = None
+    if matrix_server is not None:
+        selected_matrix_server = _normalize_matrix_server_preset(matrix_server)
+        if selected_matrix_server is None:
+            console.print(f"[red]Invalid --matrix-server value.[/red] Use: {_MATRIX_SERVER_CHOICES_TEXT}.")
+            raise typer.Exit(1)
     provider_preset = normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
         console.print(f"[red]Invalid --provider value.[/red] Use: {_PROVIDER_CHOICES_TEXT}.")
@@ -1096,7 +1265,7 @@ def _commented_model_options_template_block(provider_preset: _ProviderPreset | N
 def _full_template(
     provider_preset: _ProviderPreset,
     *,
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     model_selection: StarterModelSelection | None = None,
 ) -> str:
     """Return a provider-aware starter config.
@@ -1111,7 +1280,7 @@ def _full_template(
     router_model = helper_model or "default"
     thread_summary_model_block = f"\n  thread_summary_model: {helper_model}" if helper_model else ""
 
-    if matrix_server == "mindroom.chat":
+    if matrix_selection.uses_provisioning:
         mindroom_user_block = ""
     else:
         mindroom_user_block = textwrap.dedent("""\
@@ -1122,6 +1291,15 @@ def _full_template(
               username: mindroom_user
               display_name: MindRoomUser
         """)
+
+    if matrix_selection.is_hosted:
+        admin_comment = "# MindRoom Chat pairing writes the paired owner's Matrix user ID here."
+    elif matrix_selection.uses_provisioning:
+        admin_comment = "# Pairing writes the paired owner's Matrix user ID here."
+    elif matrix_selection.owner_user_id:
+        admin_comment = "# Owner Matrix user ID."
+    else:
+        admin_comment = '# Replace with your Matrix user ID (e.g. "@alice:example.com").'
 
     return f"""\
 # MindRoom Configuration
@@ -1233,7 +1411,7 @@ router:
   model: {router_model}
 {mindroom_user_block}
 administrators:
-  # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+  {admin_comment}
   - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 room_defaults:
   join_policy: invite
@@ -1304,7 +1482,7 @@ defaults:
 
 
 def _env_template(
-    matrix_server: _MatrixServerPreset,
+    matrix_selection: StarterMatrixSelection,
     provider_preset: _ProviderPreset,
     storage_root: Path,
     provider_api_key: str | None = None,
@@ -1317,24 +1495,7 @@ def _env_template(
     Generates a random dashboard API key.
     """
     api_key = _new_dashboard_api_key()
-    if matrix_server == "mindroom.chat":
-        matrix_homeserver = constants.DEFAULT_MATRIX_HOMESERVER
-        extra_matrix = (
-            "# Matrix server_name override (needed when federation hostname differs)\n"
-            "MATRIX_SERVER_NAME=mindroom.chat\n\n"
-            "# Hosted provisioning API; lets `mindroom run` pair with your MindRoom Chat account\n"
-            f"MINDROOM_PROVISIONING_URL={constants.DEFAULT_MATRIX_HOMESERVER}\n\n"
-            "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
-            "MINDROOM_NAMESPACE=\n\n"
-            "# Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat; pairing replaces it.\n"
-            "# Setting any token skips pairing. Keep real values secret; do not commit them.\n"
-            "MATRIX_REGISTRATION_TOKEN="
-        )
-    else:
-        matrix_homeserver = "https://matrix.example.com"
-        extra_matrix = (
-            "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN="
-        )
+    matrix_block = render_matrix_env_block(matrix_selection)
 
     provider_lines_text = _provider_env_template(
         provider_preset,
@@ -1348,10 +1509,7 @@ def _env_template(
     )
 
     return f"""\
-# Matrix homeserver (must allow open registration for agent accounts)
-MATRIX_HOMESERVER={matrix_homeserver}
-# MATRIX_SSL_VERIFY=false
-{extra_matrix.rstrip()}
+{matrix_block}
 
 {storage_root_block}{provider_lines_text}
 

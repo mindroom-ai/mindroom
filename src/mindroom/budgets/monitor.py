@@ -95,6 +95,20 @@ def _scan_fingerprint(config: Config, runtime_paths: RuntimePaths) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def _is_budget_fallback_ref(config: Config, ref: str, fallback_model: str) -> bool:
+    """Return whether ``ref`` matches ``budgets.fallback_model``, respecting an explicit ``@level``."""
+    if fallback_model in (ref, split_model_reference(ref)[0]):
+        return True
+    base, level = split_model_reference(ref)
+    model_cfg = config.models.get(base)
+    return (
+        level is None
+        and model_cfg is not None
+        and model_cfg.reasoning is not None
+        and fallback_model == f"{base}@{model_cfg.reasoning.default}"
+    )
+
+
 def budget_model(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -115,8 +129,7 @@ def budget_model(
         return model_name
     # A fallback that names no level is that model at any level, so a reference to one keeps the level it names.
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
-    is_fallback = budgets.fallback_model in (model_name, split_model_reference(model_name)[0])
-    if is_fallback or not _is_priced(config, model_name):
+    if _is_budget_fallback_ref(config, model_name, budgets.fallback_model) or not _is_priced(config, model_name):
         return model_name
     canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
     if canonical_requester_id is None:

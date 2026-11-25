@@ -1,6 +1,10 @@
-"""Scheduler tool that reuses the same backend as `!schedule`."""
+"""Scheduler tool for creating, editing, listing, and cancelling scheduled tasks."""
 
 from __future__ import annotations
+
+from typing import Annotated
+
+from pydantic import Strict
 
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
@@ -14,7 +18,6 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )
 
@@ -49,35 +52,32 @@ class SchedulerTools(Toolkit):
 
     async def schedule(
         self,
-        request: str,
+        message: str,
         new_thread: bool,
-        history_limit: int | None = None,
-        silent: bool | None = None,
+        execute_at: str | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
+        cron: str | None = None,
+        description: str | None = None,
+        timezone: str | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
+        silent: bool = False,
         model: str | None = None,
     ) -> str:
-        """Schedule a task using natural language.
+        """Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).
 
-        This uses the exact same scheduling backend as the `/schedule` command.
+        Supports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.
 
         Args:
-            request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
-            new_thread: Required delivery choice. Use `False` to post in the current
-                room/thread scope. Use `True` to start a fresh thread per fire: each
-                fire posts a room-level root and the responding agent answers in a
-                new thread under it with a fresh session. When `silent=True`, the
-                trigger stays hidden instead, and any finding or failure is posted
-                as a room-level root rather than beneath the hidden trigger.
-            history_limit: Max recent thread messages included as context each time
-                the task fires. Use 0 for no history (recommended for recurring
-                polling tasks), or leave unset for full history.
-            silent: Keep the trigger hidden and omit a final response when it is empty,
-                whitespace-only, or exactly `NO_REPLY`. Findings, failures, and
-                independently sent tool messages remain visible. Leave unset to infer
-                the mode from the scheduling request.
-            model: Configured model alias for each scheduled run (including team
-                members), e.g. "cheap", or `name@level` for one of its reasoning
-                levels, e.g. "sol@high". Leave unset to use normal agent, room, and
-                thread model selection. This does not change the conversation model.
+            message: Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders.
+            new_thread: `False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root.
+            execute_at: Future ISO 8601 datetime with time (e.g. "2026-11-25T09:00:00-08:00", "...Z", or naive in `timezone`; pass offset during DST).
+            delay_seconds: One-time delay in seconds (>= 1; e.g. 900 = 15m).
+            cron: 5-field cron (`min hour day month weekday`, e.g. "0 9 * * 1-5") in `timezone` (DST-safe).
+            description: Short listing label (defaults to trimmed `message`).
+            timezone: IANA timezone (e.g. "America/Los_Angeles"); defaults to agent timezone.
+            history_limit: Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited).
+            silent: Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`.
+            model: Per-run model alias (including team members, e.g. "cheap" or "sol@high"); unset = default. Does not change conversation model.
 
         Returns:
             The scheduling result message.
@@ -85,16 +85,17 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await schedule_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
-            full_text=request,
+            context=context,
+            message=message,
             new_thread=new_thread,
+            execute_at=execute_at,
+            delay_seconds=delay_seconds,
+            cron=cron,
+            description=description,
+            timezone=timezone,
             history_limit=history_limit,
             silent=silent,
             model=model,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def schedule_tool_call(
@@ -104,22 +105,15 @@ class SchedulerTools(Toolkit):
         execute_at: str,
         description: str,
     ) -> str:
-        """Schedule one of your approval-gated tool calls that the requester approves now.
+        """Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).
 
-        Use this when a gated action, such as sending an external message, must run at
-        a set time while the requester may be away. MindRoom stores the call and posts an
-        approval card in this thread showing it and the send time. When the task fires,
-        you are asked to call `run_scheduled_call` with its task ID, which runs the stored
-        call once without another approval. Tell the requester to approve the card; do
-        not claim the call ran until `run_scheduled_call` reports its result.
+        Posts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.
 
         Args:
-            tool_name: One of your tool functions, e.g. "post_slack_message".
-            arguments_json: The call's arguments as a JSON object string.
-            execute_at: When to run, as ISO 8601 with a UTC offset,
-                e.g. "2026-10-04T09:00:00-04:00".
-            description: Short description of the scheduled action; if the requester
-                approves any arguments, it tells you what the call should do when it runs.
+            tool_name: Your tool function name (e.g. "post_slack_message").
+            arguments_json: Arguments as a JSON object string.
+            execute_at: ISO 8601 timestamp with UTC offset (e.g. "2026-10-04T09:00:00-04:00").
+            description: Short action summary (guides execution if any arguments are approved).
 
         Returns:
             The scheduling result message.
@@ -128,17 +122,12 @@ class SchedulerTools(Toolkit):
         context = _scheduling_context()
         live, arguments = prepare_scheduled_call(tool_name, arguments_json)
         return await schedule_approved_tool_call(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            scheduled_by=context.requester_id,
-            agent_name=context.agent_name,
+            context=context,
             call=live,
             tool_name=tool_name,
             arguments=arguments,
             execute_at=execute_at,
             description=description,
-            source_event_id=context.reply_to_event_id,
         )
 
     async def run_scheduled_call(
@@ -146,17 +135,13 @@ class SchedulerTools(Toolkit):
         task_id: str,
         arguments_json: str | None = None,
     ) -> object:
-        """Run the call a scheduled task stored, once, with the requester's approval.
+        """Run a scheduled pre-approved tool call once without re-approval when prompted.
 
-        Call this when a scheduled task asks you to. It runs the stored call without
-        another approval card and returns the tool's result. If the requester approved
-        any arguments, you may pass arguments_json to replace the stored arguments for
-        the same tool; otherwise omit it.
+        Pass `arguments_json` only if the requester approved any arguments; otherwise omit it.
 
         Args:
-            task_id: The scheduled task's ID from its message.
-            arguments_json: Optional replacement arguments as a JSON object string,
-                only when the requester approved any arguments.
+            task_id: Task ID from the scheduled prompt.
+            arguments_json: Replacement JSON object string (only when any arguments were approved).
 
         Returns:
             The tool's result, or why the call did not run.
@@ -167,27 +152,31 @@ class SchedulerTools(Toolkit):
     async def edit_schedule(
         self,
         task_id: str,
-        request: str,
-        history_limit: int | None = None,
+        message: str | None = None,
+        description: str | None = None,
+        execute_at: str | None = None,
+        delay_seconds: Annotated[int | None, Strict()] = None,
+        cron: str | None = None,
+        timezone: str | None = None,
+        history_limit: Annotated[int | None, Strict()] = None,
+        clear_history_limit: bool = False,
         silent: bool | None = None,
         model: str | None = None,
     ) -> str:
-        """Edit an existing scheduled task by replacing its timing and content.
+        """Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).
 
         Args:
-            task_id: The ID of the task to edit (from list_schedules).
-            request: The new scheduling request, e.g. "tomorrow at 9am check deployment"
-            history_limit: Max recent thread messages included as context each time
-                the task fires. Use 0 for no history. Leave unset to keep the task's
-                existing history limit. To restore full history, say so in request.
-            silent: Whether to update quiet delivery. Silent tasks hide their trigger
-                and omit empty, whitespace-only, or exact `NO_REPLY` finals while
-                keeping findings, failures, and independently sent tool messages
-                visible. Leave unset to preserve the existing mode.
-            model: Configured model alias for each run, including team members,
-                or `name@level` for one of its reasoning levels. Leave unset to
-                preserve the existing choice. Use an empty string to restore
-                normal agent, room, and thread model selection.
+            task_id: Task ID from `list_schedules`.
+            message: New trigger message.
+            description: New listing label.
+            execute_at: New one-time ISO 8601 datetime with time.
+            delay_seconds: New one-time delay in seconds (>= 1).
+            cron: New 5-field cron in `timezone`.
+            timezone: New IANA timezone (legacy UTC cron also requires `cron` in the target timezone).
+            history_limit: New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`).
+            clear_history_limit: Set `True` to remove the history limit (unlimited).
+            silent: Update quiet delivery mode.
+            model: Per-run model alias or `name@level`; `""` restores default.
 
         Returns:
             The edit result message.
@@ -195,12 +184,16 @@ class SchedulerTools(Toolkit):
         """
         context = _scheduling_context()
         return await edit_scheduled_task(
-            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
-            room_id=context.room_id,
+            context=context,
             task_id=task_id,
-            full_text=request,
-            scheduled_by=context.requester_id,
+            message=message,
+            description=description,
+            execute_at=execute_at,
+            delay_seconds=delay_seconds,
+            cron=cron,
+            timezone=timezone,
             history_limit=history_limit,
+            clear_history_limit=clear_history_limit,
             silent=silent,
             model=model,
         )
@@ -225,7 +218,7 @@ class SchedulerTools(Toolkit):
         """Cancel a scheduled task.
 
         Args:
-            task_id: The ID of the task to cancel (from list_schedules).
+            task_id: Task ID from `list_schedules`.
 
         Returns:
             The cancellation result message.

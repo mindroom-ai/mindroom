@@ -23,6 +23,7 @@ from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.manager import ScriptRunLimits
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.reasons import RUNTIME_RESTARTED
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import (
     DispatchHandle,
@@ -109,7 +110,7 @@ def _claim(stack: WorkflowStack) -> None:
 
 def _settled(stack: WorkflowStack, node: WorkflowNode) -> tuple[WorkflowNodeState, object, str | None]:
     """Settle *node* from its handle; return the state, the saved result and the saved error kind."""
-    state = stack.engine.dispatch.settle_from_handle(node, stack.store.get_run(stack.run_id).epoch)
+    state = nodes_module.settle_from_handle(stack.engine, node, stack.store.get_run(stack.run_id).epoch)
     saved = stack.store.get_node(stack.run_id, node.key)
     assert saved is not None
     assert saved.state is state
@@ -136,7 +137,7 @@ async def test_request_that_arrives_before_the_run_names_its_attempt_is_served(t
 
         async def launch_then_ask(*args: object, **options: object) -> ScriptRunRecord:
             attempt = await launch(*args, **options)  # type: ignore[arg-type]
-            early.append(asyncio.create_task(stack.engine.calls.run_info(attempt)))
+            early.append(asyncio.create_task(nodes_module.run_info(stack.engine, attempt)))
             await asyncio.sleep(0)
             return attempt
 
@@ -170,7 +171,7 @@ async def test_redelivered_request_in_the_same_attempt_returns_the_same_node_and
 ) -> None:
     """A lost response never repeats work, not even failed work."""
     first = await stack.submit("@0", "tool", tool_args("counter", "fail"))
-    failed = await stack.engine.calls.node_receipt(stack.attempt, first.id, wait=SETTLE_TIMEOUT_SECONDS)
+    failed = await nodes_module.node_receipt(stack.engine, stack.attempt, first.id, wait=SETTLE_TIMEOUT_SECONDS)
     again = await stack.submit("@0", "tool", tool_args("counter", "fail"))
 
     assert (failed.state, failed.error and failed.error["kind"]) == ("indeterminate", "indeterminate")
@@ -230,7 +231,7 @@ async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_r
     size = 8 * 1024 * 1024 + 1
     receipt = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     while receipt.state == "running":
-        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+        receipt = await nodes_module.node_receipt(stack.engine, stack.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
 
     assert (receipt.state, receipt.result, receipt.result_ref) == ("completed", None, f"results/{receipt.id}")
     async with stack.http() as client:
@@ -326,9 +327,9 @@ async def test_attempt_the_run_no_longer_names_is_refused(stack: WorkflowStack) 
     set_run(stack.store, stack.run_id, state=WorkflowRunState.STARTING)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _APPEND, {}))
+        await nodes_module.submit_node(stack.engine, old, NodeRequest("@0", "tool", _APPEND, {}))
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls.finish(old, result="late", error=None)
+        await nodes_module.finish(stack.engine, old, result="late", error=None)
 
     assert stack.counting_tool.calls == 0
 
@@ -340,8 +341,8 @@ async def test_engine_remembers_an_attempt_only_until_it_has_ended(stack: Workfl
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
 
-    assert first not in stack.engine.live.launched
-    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
+    assert first not in stack.engine.launched
+    assert list(stack.engine.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio
@@ -357,16 +358,18 @@ async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_r
     assert (await stack.submit("@0", "tool", _APPEND)).cached
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls._admit(let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
+        await nodes_module.admit(stack.engine, let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
     # And the engine keeps nothing for the attempt that the run left behind.
-    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
+    assert list(stack.engine.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio
 async def test_read_that_waited_for_a_call_while_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
     """A read is held until its call has ended, which the end of its attempt does too: then it is no longer served."""
     old, node = stack.attempt, _dispatched_node(stack)
-    read = asyncio.create_task(stack.engine.calls.node_receipt(old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS))
+    read = asyncio.create_task(
+        nodes_module.node_receipt(stack.engine, old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS),
+    )
     await asyncio.sleep(0.05)
 
     await stack.end_attempt(ScriptRunState.FAILED)
@@ -587,7 +590,7 @@ async def test_finish_then_exit_completes_run_and_wakes_waiters(stack: WorkflowS
     """The report is stored when the script posts it, and the run completes when its process has exited."""
     waiter = asyncio.create_task(stack.engine.wait(stack.run_id))
 
-    await stack.engine.calls.finish(stack.attempt, result={"n": 2}, error=None)
+    await nodes_module.finish(stack.engine, stack.attempt, result={"n": 2}, error=None)
     await asyncio.sleep(0)
     assert not waiter.done()
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
@@ -612,7 +615,12 @@ async def test_failed_exit_keeps_the_reported_error_or_the_end_of_the_output(tmp
     """A traceback the script posted is the run's error; a process that died without one leaves its last output."""
     with workflow_stack(tmp_path) as stack:
         await stack.start()
-        await stack.engine.calls.finish(stack.attempt, result=None, error="Traceback: the tide table was empty.")
+        await nodes_module.finish(
+            stack.engine,
+            stack.attempt,
+            result=None,
+            error="Traceback: the tide table was empty.",
+        )
         await stack.end_attempt(ScriptRunState.FAILED)
         reported = await stack.engine.wait(stack.run_id)
 
@@ -705,7 +713,7 @@ async def test_launch_that_finds_its_run_ended_stops_the_attempt_it_started(
 @pytest.mark.parametrize("maintenance_first", [False, True])
 async def test_accepted_cancel_wins_over_a_stored_report(stack: WorkflowStack, maintenance_first: bool) -> None:
     """Cancel and the maintenance pass use one rule, so a report stored just before the cancel cannot complete the run."""
-    await stack.engine.calls.finish(stack.attempt, result="done", error=None)
+    await nodes_module.finish(stack.engine, stack.attempt, result="done", error=None)
     if maintenance_first:
         await stack.scripts.revoke(stack.attempt.run_id, reason="Stopped by the user.")
         await stack.scripts.reconcile_durable(run_id=stack.attempt.run_id)
@@ -724,7 +732,7 @@ async def test_accepted_cancel_wins_over_a_stored_report(stack: WorkflowStack, m
 @pytest.mark.asyncio
 async def test_cancel_after_the_script_ended_keeps_what_the_script_reported(stack: WorkflowStack) -> None:
     """A cancel that arrives after the process ended was never accepted, so the run ends as its report says."""
-    await stack.engine.calls.finish(stack.attempt, result="done", error=None)
+    await nodes_module.finish(stack.engine, stack.attempt, result="done", error=None)
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
 
     run = await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
@@ -735,7 +743,7 @@ async def test_cancel_after_the_script_ended_keeps_what_the_script_reported(stac
 @pytest.mark.asyncio
 async def test_failed_exit_after_a_success_report_fails_the_run(stack: WorkflowStack) -> None:
     """A process that died after reporting success did not end well, and the run says how it died."""
-    await stack.engine.calls.finish(stack.attempt, result="done", error=None)
+    await nodes_module.finish(stack.engine, stack.attempt, result="done", error=None)
 
     await stack.end_attempt(ScriptRunState.FAILED, output="Segmentation fault")
 
@@ -750,7 +758,7 @@ async def test_report_after_the_run_ended_is_not_stored(stack: WorkflowStack) ->
     cancelled = await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.calls.finish(attempt, result="done", error=None)
+        await nodes_module.finish(stack.engine, attempt, result="done", error=None)
 
     assert stack.store.get_run(stack.run_id) == cancelled
 
@@ -779,7 +787,7 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
 
         monkeypatch.setattr(stack.script_store, "get_run", locked)
         reported = await stack.start()
-        await stack.engine.calls.finish(stack.attempt, result="done", error=None)
+        await nodes_module.finish(stack.engine, stack.attempt, result="done", error=None)
         await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
 
         await lifecycle.start()
@@ -872,7 +880,7 @@ async def test_store_writes_wait_for_the_database_lock_off_the_event_loop(stack:
     ticker = asyncio.create_task(tick())
     try:
         await asyncio.gather(
-            stack.engine.calls.append_log(stack.attempt, "The tide is in."),
+            nodes_module.append_log(stack.engine, stack.attempt, "The tide is in."),
             *(stack.submit("@0", "tool", _APPEND) for _ in range(2)),
         )
         ticks_while_waiting = ticks
@@ -951,14 +959,14 @@ async def test_run_does_not_end_while_a_call_is_being_admitted(
 async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
     """A request authenticated just before its run ended adds no node: the attempt is told that its run moved on."""
     attempt = stack.attempt
-    first = await stack.engine.calls.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
+    first = await nodes_module.submit_node(stack.engine, attempt, NodeRequest("@0", "tool", _APPEND, {}))
     # Until the node has settled, not only until its effect shows: a cancel in between ends it indeterminate.
     await stack.until(lambda: stack.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
     await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
     for key in ("@0", "@1"):
         with pytest.raises(SupersededAttemptError):
-            await stack.engine.calls.submit_node(attempt, NodeRequest(key, "tool", _APPEND, {}))
+            await nodes_module.submit_node(stack.engine, attempt, NodeRequest(key, "tool", _APPEND, {}))
 
     assert (first.id, stack.counting_tool.calls) == ("n1", 1)
     assert [node.key for node in stack.status(stack.run_id)[1]] == ["@0"]

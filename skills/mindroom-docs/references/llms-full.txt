@@ -498,10 +498,12 @@ uvx mindroom run
 
 When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu.
+1. Choose a Matrix server.
+   Press Enter for MindRoom Chat (`mindroom.chat`), or select `Custom Matrix server` to connect to your own homeserver by domain or URL (`.well-known` discovery and local pairing are detected automatically, or you can enter a registration token, shared secret, separate provisioning URL, and owner Matrix user ID).
+2. Pick a model provider from the menu.
    Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
    When nothing is detected, the default menu starts with OpenAI.
-2. Finish provider setup when needed:
+3. Finish provider setup when needed:
    - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
      MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
      MindRoom does not ask when the key is already set in your environment.
@@ -509,14 +511,15 @@ When no config exists and MindRoom runs in a terminal, it checks for local login
    - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
    - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
-MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` for the selected Matrix server (hosted `MATRIX_HOMESERVER=https://mindroom.chat` by default) and a starter `Mind` agent in a `Personal` room.
 
 ### 2. Approve pairing
 
-MindRoom prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+If you selected MindRoom Chat (`mindroom.chat`) or a custom server with local provisioning enabled, MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your Matrix account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
 After approval, MindRoom prints the approving account and asks `Is this your account?` before saving anything.
 Pair codes expire after 10 minutes, and `mindroom run` prints a new one when that happens.
+If you selected a custom server with direct registration (token, shared secret, or open registration), MindRoom skips pairing and registers agents directly.
 See [connect](https://docs.mindroom.chat/deployment/hosted-matrix/#connect) for pairing details, the credentials it saves, and how to revoke a pairing.
 
 ### 3. Choose how MindRoom keeps running
@@ -647,7 +650,7 @@ Prerequisites:
 ### Configuration
 
 Generate a starter with `mindroom config init --matrix-server self-hosted`, or write `config.yaml` yourself.
-A generated config contains `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholders; replace each with your quoted Matrix user ID, such as `"@alice:matrix.example.com"`, because only hosted pairing fills them in.
+If you generate the config non-interactively or skip the owner user ID prompt during interactive setup, replace each `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholder with your quoted Matrix user ID, such as `"@alice:matrix.example.com"` (servers with local pairing fill them in automatically on approval).
 See [Configuration](https://docs.mindroom.chat/configuration/#configuration-file) for where MindRoom looks for `config.yaml`.
 
 A minimal hand-written `config.yaml`:
@@ -774,9 +777,9 @@ On phones, side panels cover the conversation instead of sitting beside it, and 
 
 The composer enables Markdown by default (toggle **Markdown Formatting** in **Settings** > **Chats**) and offers a **Formatting** toolbar for headings, bold, italic, underline, strikethrough, inline code, spoilers, block quotes, code blocks, and lists.
 In the composer, you can write `**bold**`, `*italic*` or `_italic_`, `~~strikethrough~~`, `` `inline code` ``, fenced code blocks (```` ```lang ````), `||spoiler||`, links, headings, quotes, lists, tables, `$inline$` math (no spaces just inside `$`), and `$$display$$` math on its own line.
-Received replies also render `<details><summary>...</summary>...</details>` collapsibles, `<span data-mx-spoiler>...</span>` spoilers (the backend Markdown renderer leaves `||spoiler||` literal), syntax-highlighted code blocks (with copy, line-wrap, and expand/collapse controls), scrollable tables, and KaTeX math.
+Received replies also render `<details><summary>...</summary>...</details>` collapsibles, `<span data-mx-spoiler>...</span>` spoilers (the backend Markdown renderer leaves `||spoiler||` literal), syntax-highlighted code blocks (with copy, line-wrap, and expand/collapse controls), Mermaid fences (```` ```mermaid ````), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), scrollable tables, and KaTeX math.
 In messages, `<https://matrix.to/#/!room_id>` renders as an in-app room pill, `<https://matrix.to/#/!room_id/$event_id>` opens the target thread or message in-app as an auto-labeled pill, and `[title](https://matrix.to/#/!room_id/$event_id)` keeps its custom link label.
-Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external `https://` image URLs are not rendered in chat Markdown.
+External `https://` image URLs are not rendered in chat Markdown.
 
 Drag and drop files into the composer or select **Attach files** to send images, videos, audio, and files.
 Pasting text large enough to exceed Matrix's event size budget automatically converts the paste into a text file attachment so long logs or snippets send cleanly.
@@ -2097,7 +2100,7 @@ List these only if you trust everyone whose messages the agent hears.
 
 MindRoom holds a silent turn to a few lines of its own:
 
-- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `workflow` (and its deprecated alias `dynamic_workflow`), `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
 - The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
 - No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
 - A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
@@ -2239,6 +2242,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/) and [reply costs](https://docs.mindroom.chat/usage/#reply-cost): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 | `reasoning` | No | `null` | Reasoning levels the model offers: `levels` (non-empty, no repeats) and `default` (one of `levels`), each one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning Levels](#reasoning-levels)) |
+| `fallbacks` | No | `[]` | Other model names under `models:`, in order, to answer with when this model's provider cannot serve a request; no repeats, no self-reference, no cycles (see [Fallback Models](#fallback-models)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
 It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
@@ -2916,9 +2920,9 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, a conflict (409), or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
 Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
-A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
-A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
+A request that still fails ends the turn, if no eligible fallback answers, with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
+A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; if no eligible fallback answers, it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and if no eligible fallback answers the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
 
 ## Stalled Streams
 
@@ -2949,6 +2953,34 @@ models:
     id: openai/gpt-6.2-astra
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
+
+## Fallback Models
+
+`fallbacks` lets a reply continue on another model, with any provider, when its own model's provider cannot serve it right now:
+
+```yaml
+models:
+  opus:
+    provider: claude_code
+    id: claude-opus-5-5
+    fallbacks: [sol, bedrock-opus]  # tried in this order
+  sol:
+    provider: codex
+    id: gpt-6.2-sol
+  bedrock-opus:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-5-5
+```
+
+A request moves to the next model when its provider reports a reached quota, credit, or usage limit (such as a Claude subscription or Codex plan limit), stays rate limited or unavailable after its automatic retries, or has no working sign-in or key.
+It never moves on an invalid request, a conversation larger than the context window, a safeguard refusal, or a reply the user stopped, since another model would fail the same way.
+A request switches models only before it has streamed any text or tool call, so nothing is written or run twice; a failure after that ends the reply as it would without fallbacks.
+A fallback that has `fallbacks` of its own tries them right after itself, and when every model fails the reply reports the last model's error.
+When a provider says when its limit resets, as Codex and Claude subscriptions do, MindRoom tries that model last until then.
+A reply at `name@level` runs each fallback at that level when the fallback lists it, and at the fallback's default level otherwise.
+A fallback whose `context_window` is too small for the conversation is skipped, so give fallbacks at least the first model's window.
+A finished reply answered by a fallback shows the answering model, names the model it stood in for as `fallback_from` in its run metadata, and counts usage and cost under the model that billed them.
+For a user at their [budget cap](https://docs.mindroom.chat/budgets/#over-budget-replies), fallback chains skip priced models other than `budgets.fallback_model`.
 
 ## Reasoning Levels
 
@@ -3819,7 +3851,8 @@ The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch
 ### Manual compaction
 
 Add the `compact_context` tool to an agent's `tools` to let it request compaction itself.
-The request runs before the next reply in the same conversation and always uses text compaction.
+When called inside a running turn, it triggers immediate mid-turn compaction before the next model request of that turn (for a team member, before the team leader's next request in the team scope) and always uses text compaction, even when automatic compaction is disabled.
+When called outside a running turn, it falls back to scheduling compaction before the next reply in the same conversation.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
 From chat, use `/compact` (or `!compact`) to compact now without another message.
@@ -5055,7 +5088,7 @@ Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loa
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
 An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
-Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
+Such agents (unless `skill_manage` is offered) are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 Being able to write workspace skills does not make an agent create them.
@@ -5208,8 +5241,8 @@ Review log lines carry `kind: skill_learning`, so you can filter logs for them.
 
 # Scheduling
 
-Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
-Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
+Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks.
+Ask an agent with the `scheduler` tool to create or edit schedules, and inspect or cancel them with the `scheduler` tool, chat commands, or the dashboard.
 
 <video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-light="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-dark="https://github.com/user-attachments/assets/01a8d67f-f1ed-4c6a-b2df-a1681149722e">
   <source src="https://github.com/user-attachments/assets/99f7e664-131d-4831-9c7e-64a2d95b2b6b" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -5218,67 +5251,8 @@ Create schedules with the `!schedule` chat command or let an agent create them w
 
 ## Commands
 
-Use `!help schedule` for inline help on the scheduling commands.
-
-### `!schedule`
-
-Schedule a one-time or recurring task.
-
-```
-!schedule <natural-language-request>
-```
-
-```
-!schedule in 5 minutes Check the deployment
-!schedule tomorrow at 3pm Send the weekly report
-!schedule Every hour, @shell check server status
-!schedule Daily at 9am, @finance market report
-!schedule Weekly on Friday, @analyst prepare weekly summary
-```
-
-Include `@agent_name` or `@team_name` to choose who answers each run.
-MindRoom checks that mentioned agents and teams are available in the room before it creates the task.
-
-A task runs where it was created: in the room timeline for a room-level schedule, or in the current thread for a threaded schedule.
-The task text never runs as a chat command, even when it starts with `!`; agents receive it as an ordinary message.
-
-Conditional requests such as `if` or `when` become recurring polling schedules, not event subscriptions.
-The condition is part of the task message, so the responder checks it on each run.
-Include an explicit polling cadence for predictable behavior.
-
-```
-!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
-!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
-```
-
-Add phrases to the request to change how each run behaves:
-
-| Phrase | Effect |
-| --- | --- |
-| `with no history`, `without context`, `context-free` | Each run sees no prior messages; see [History limits](#history-limits) |
-| `with only the last 5 messages of context` | Each run sees only recent messages |
-| `silently`, `quietly` | Hide the trigger and post only findings; see [Silent delivery](#silent-delivery) |
-
-### `!edit_schedule`
-
-Replace an existing task's timing and content.
-
-```
-!edit_schedule <task-id> <new-task-description>
-```
-
-MindRoom re-parses the description to update timing and content.
-Omitted settings stay unchanged, including the history limit, silent mode, and model.
-A task cannot switch between one-time and recurring; cancel it and create a new one instead.
-A request that would change nothing about the task is refused, and the task stays as it was.
-
-```
-!edit_schedule task42 keep the same schedule but restore full history
-!edit_schedule task42 every weekday at 8am check build status with no history
-!edit_schedule task42 keep the same schedule but make it silent
-```
-
-**Aliases:** `!editschedule`, `!edit-schedule`
+Use `/help schedule` (or `!help schedule`) for inline help on scheduling.
+Create and edit schedules by asking an agent with the [`scheduler`](#scheduler) tool; use chat commands to list or cancel them directly.
 
 ### `!list_schedules`
 
@@ -5312,7 +5286,7 @@ Only a pending task can be cancelled; a one-time task that already ran, and a ta
   <source src="https://github.com/user-attachments/assets/4423fd02-b6c9-4cf5-bf10-ae50149ebd2e" type="video/mp4">
 </video>
 
-The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
+The `scheduler` tool lets an agent create, edit, list, and cancel scheduled tasks with structured parameters.
 It is included in `defaults.tools` by default, needs no setup, and has no tool-specific configuration fields.
 It only works from a live room or thread; elsewhere it returns `Scheduler tool is unavailable in this context.`
 
@@ -5323,47 +5297,57 @@ agents:
       - scheduler
 ```
 
-| Function | Arguments |
+| Function | Notes |
 | --- | --- |
-| `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
-| `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `schedule(message, new_thread, execute_at=None, delay_seconds=None, cron=None, description=None, timezone=None, history_limit=None, silent=False, model=None)` | Provide `new_thread` and exactly one of `execute_at`, `delay_seconds`, or `cron` |
+| `edit_schedule(task_id, message=None, description=None, execute_at=None, delay_seconds=None, cron=None, timezone=None, history_limit=None, clear_history_limit=False, silent=None, model=None)` | Patch semantics: omitted arguments keep current values; schedule type (`once` vs `cron`) cannot change |
 | `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
 | `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
-| `list_schedules()` | |
-| `cancel_schedule(task_id)` | |
+| `list_schedules()` | Lists pending tasks in the current room or thread |
+| `cancel_schedule(task_id)` | Cancels one pending task by ID |
 
+- `message` is the exact trigger message posted when the schedule fires; include `@agent_name` or `@team_name` to choose who answers each run, and MindRoom verifies that every mentioned responder is allowed in the room.
+  The task text never runs as a chat command, even when it starts with `!` or `/`.
 - `new_thread=False` posts each run in the current room or thread.
   `new_thread=True` posts each run as a new room-level message, and the responder answers in a new thread under it with a fresh session.
-- `history_limit` caps how many recent messages each run sees: `0` for none, a positive integer for that many, unset for full history.
-- `silent=True` turns on [silent delivery](#silent-delivery); unset infers the mode from the request text.
-- `model` picks a model alias for each run; see [Model selection](#model-selection).
+- Timing requires exactly one of `execute_at` (ISO 8601 datetime with a time component, such as `2026-11-25T09:00:00-08:00` or naive wall time in `timezone`), `delay_seconds` (positive integer seconds, such as `900` for 15 minutes), or `cron` (5-field `minute hour day month weekday` evaluated in `timezone`).
+  Naive `execute_at` values that fall in a nonexistent spring-forward DST gap or an ambiguous fall-back DST fold are refused until an explicit UTC offset is provided.
+- `description` sets a short label for listings and defaults to the trimmed `message`.
+- `timezone` accepts an IANA timezone name and defaults to the scheduling agent's configured timezone.
+- `history_limit` caps how many recent messages each run sees: `0` for none, a positive integer for that many, unset for unlimited history; on edits, pass `clear_history_limit=True` to remove an existing limit.
+- `silent=True` turns on [silent delivery](#silent-delivery); defaults to `False`.
+- `model` picks a model alias (or `name@level`) for each run; see [Model selection](#model-selection).
 
 ```python
-schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
-schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
-schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
+schedule(message="@ops check the deployment", new_thread=False, delay_seconds=900)
+schedule(message="@ops check the deployment", new_thread=False, execute_at="2026-11-25T09:00:00-08:00")
+schedule(message="Post the on-call handoff summary", new_thread=True, cron="0 8 * * 1-5", timezone="America/Los_Angeles")
+schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+schedule(message="Check the inbox for urgent mail and report only if found", new_thread=False, cron="*/5 * * * *", history_limit=0, silent=True)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
+edit_schedule("a1b2c3d4", execute_at="2026-11-25T10:00:00-08:00", history_limit=5, silent=False)
 cancel_schedule("a1b2c3d4")
 ```
 
 ## History Limits
 
 Scheduled runs normally use the responder's configured conversation history.
-Use `with no history`, `without context`, or `context-free` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
-Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each run to recent context.
-In an edit, say `restore full history` or `use unlimited history` to remove a limit.
-Agents set the same limit with the tool's `history_limit` argument.
+Set `history_limit=0` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
+Set a positive integer `history_limit` to cap each run to recent messages, and pass `clear_history_limit=True` to `edit_schedule` to restore unlimited history.
 
 ## Silent Delivery
 
 Schedules are visible by default.
-Add `silently` or `quietly` to a request when the trigger and routine no-report results should stay out of the room timeline.
+Pass `silent=True` to `schedule()` (or `edit_schedule()`) when the trigger and routine no-report results should stay out of the room timeline.
 
-```
-!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
-!schedule Daily at 9am, silently check whether the backup failed and report failures
+```python
+schedule(
+    message="Check the inbox for urgent messages and report only when one arrives",
+    new_thread=False,
+    cron="*/5 * * * *",
+    history_limit=0,
+    silent=True,
+)
 ```
 
 A silent schedule does not show its trigger in the room.
@@ -5375,7 +5359,7 @@ When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-a
 A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
 After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
-Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
+Pass `silent=True` or `silent=False` to `edit_schedule()` or toggle silent delivery in the dashboard to change the mode.
 
 Silent delivery only hides messages from the room; the task text still travels through Matrix and is subject to homeserver retention.
 
@@ -5390,15 +5374,14 @@ Workspace knowledge indexing skips these receipts.
 Pass `model` to `schedule()` to run each scheduled response with a model alias from `models:` in `config.yaml`, for example a cheaper model for simple recurring checks.
 
 ```python
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
-edit_schedule("task42", "keep the same schedule and task", model="cheap")
-edit_schedule("task42", "keep the same schedule and task", model="")
+schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+edit_schedule("task42", model="cheap")
+edit_schedule("task42", model="")
 ```
 
 The model applies to the whole scheduled response, including a team's coordinator and members.
 It takes precedence over room and thread model settings without changing them for later messages.
 Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
-Parsing the scheduling request itself always uses the default model.
 
 ## Pre-Approved Tool Calls
 
@@ -5434,7 +5417,6 @@ Recurring schedules cannot pre-approve calls.
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
 An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
-A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -5446,19 +5428,18 @@ agents:
     timezone: Europe/Amsterdam
 ```
 
-A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
-The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
-Schedules created before agents had their own timezone keep following the top-level setting.
-
-Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
-Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
+A schedule keeps the timezone it was created in (defaulting to the creating agent's timezone unless `timezone` is passed explicitly), and later listings and edits use that timezone too.
+New recurring schedules evaluate their 5-field `cron` expression directly in that IANA timezone, so their local clock time stays consistent across daylight-saving transitions.
+A recurring local-time cron scheduled during a fall-back repeated hour (for example `01:30`) fires on both occurrences, matching `croniter`.
+The dashboard's Schedules page shows each recurring schedule's cron timezone (or `UTC (legacy)` for older UTC-based cron tasks) alongside its description, such as `At 09:00 (Europe/Amsterdam)`.
+Existing recurring schedules created before local-time crons keep running in UTC until edited with a new `cron` expression via `edit_schedule`.
 
 ## Permissions and Automatic Cancellation
 
 Schedules belong to the room, not to their creator.
 Any authorized participant in the room can edit or cancel any of its schedules by task ID, and listing inside a thread only filters the view.
 Each run acts as the schedule's creator, as if the creator had sent the message, so it uses that person's access, per-user credentials, and private-agent workspace.
-Editing a schedule with `!edit_schedule` or the `scheduler` tool makes the editor its new creator.
+Editing a schedule with the `scheduler` tool makes the editor its new creator.
 
 MindRoom cancels a schedule automatically once neither its creator nor any of the creator's [bridge aliases](https://docs.mindroom.chat/authorization/#bridge-aliases) is joined to the room.
 Bot accounts and managed identities do not count.
@@ -5637,7 +5618,7 @@ Its model usage counts as ordinary replies, and extracting what it read counts a
 # Chat Commands
 
 Chat commands are messages starting with `/` that you type in any Matrix room where MindRoom agents or teams are present.
-Every command also works with `!` instead of `/` (`!help`, `!schedule ...`), everywhere, including clients such as Element that intercept unknown `/` commands before they are sent.
+Every command also works with `!` instead of `/` (`!help`, `!list_schedules`, etc.), everywhere, including clients such as Element that intercept unknown `/` commands before they are sent.
 Use them to get help, manage schedules, switch models or modes, manage room encryption, and, when enabled, change configuration from chat.
 This page lists every command and fully covers `/help`, `/hi`, and `/config`; the other commands are documented on the linked pages.
 
@@ -5647,10 +5628,8 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 |---------|-------------|---------|
 | `/help [topic]` | Get help on commands or a specific topic | [`/help`](#help) |
 | `/hi` | Show the welcome message again | [`/hi`](#hi) |
-| `/schedule <task>` | Schedule a task or reminder | [Scheduling](https://docs.mindroom.chat/scheduling/#schedule) |
 | `/list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
 | `/cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
-| `/edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
 | `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/answer [id] <answer>` | Answer a question a workflow run asked you in this thread, with an option's number or text; the ID is needed only when several questions are open | [Questions](https://docs.mindroom.chat/tools/workflows/#questions) |
@@ -5701,7 +5680,7 @@ Any other command sent by an agent for you is refused with `❌ Agents cannot ru
 /help config
 ```
 
-**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 
@@ -5789,7 +5768,7 @@ They reach only accounts on the agents' homeserver; people on other homeservers 
 MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
 A reply that is stopped or ends with an error keeps the text of its last edit, so up to `update_interval` seconds of text MindRoom Chat showed live can disappear above the note.
 A homeserver relays them when its `/_matrix/client/versions` lists `io.mindroom.ephemeral_opt_in`, which the fork does unless its `mindroom_ephemeral_events_enabled` option is off; with any other homeserver every client sees the progressive edits below.
-MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](https://docs.mindroom.chat/tools/agent-orchestration/#running-subagents) and Dynamic Workflow participant with its text and tool calls as they happen, then how it ended.
+MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](https://docs.mindroom.chat/tools/agent-orchestration/#running-subagents) and [workflow](https://docs.mindroom.chat/tools/workflows/) agent with its text and tool calls as they happen, then how it ended.
 Tool call details appear there only when the reply that started the subagent shows its tool calls.
 It needs a homeserver that relays live updates, and is empty when they are off or the conversation is not in a Matrix room.
 The graph of a [workflow run](https://docs.mindroom.chat/tools/workflows/#the-run-in-the-room) is sent the same way, as `io.mindroom.workflow` frames from the run's agent, within the same budget as that agent's sub-agent frames in the room.
@@ -6118,8 +6097,6 @@ Configuration loading fails with one of these errors when references are wrong:
 
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
-- `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
-- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -6299,9 +6276,11 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that [one of its rooms lists](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
+An agent auto-joins a direct room call when it is the sole calls-enabled agent for that room — whether through its configured `rooms`, a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that [one of its rooms lists](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
+Multiple calls-enabled agents can share a room; when more than one is configured for the room (or when none is configured there and more than one is present through personal rooms, invites, or listed rooms), none of them auto-joins direct calls in that room.
+A sole configured calls-enabled agent wins over personal rooms, invites, and listed rooms.
+In shared rooms, MindRoom Chat still lets you pick any voice-capable agent from the room or thread header to call in a private 1:1 call room, and other Matrix clients can call an agent in a 1:1 room with that agent.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
@@ -7598,13 +7577,12 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
-| `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
 | `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `listening` | Silent turns of a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
+| `routing`, `room_topic`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.
@@ -7888,9 +7866,10 @@ A reply that already started finishes on its model, so the reply that reaches th
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 When `fallback_model` names no [reasoning level](https://docs.mindroom.chat/configuration/models/#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
-This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
+This covers agent and team replies including every team member, delegated agents, workflow agent runs, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
+For a capped user, model `fallbacks` chains also drop priced models other than `fallback_model`.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
@@ -8532,7 +8511,7 @@ calls:
 Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
 The saved config keeps `mind`, not the generated agent names.
 A generated agent that `calls.agents` also names directly keeps the profile given there.
-Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
+Templates and `users` overrides may also list `rooms`; direct room calls still follow the [sole-call-agent rule](https://docs.mindroom.chat/voice-calls/#when-an-agent-joins-a-call), so a room shared by multiple calls-enabled agents does not auto-join direct calls.
 
 ## Onboarding Behavior
 
@@ -8817,7 +8796,7 @@ Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent
 | `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
-It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `workflow` (and its deprecated alias `dynamic_workflow`), `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
@@ -8882,7 +8861,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 - It offers only the contact's tools plus `matrix_message`, and no skills, knowledge bases, or interactive questions.
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
 - Its tool calls finish inside the turn and never become [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
-- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
+- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments into a contact room.
 - Other tools that post into rooms refuse the contact room.
 - MindRoom itself saves nothing from it: it writes no memory and starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/), the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), or [exploration](https://docs.mindroom.chat/scheduling/#exploration).
 
@@ -8945,7 +8924,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
 | `contacts are not enabled for <agent>, so the contact room cannot be set up` | An agent of the request lost `contacts` after it was asked; accept again once an administrator adds `contacts` back |
-| `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
+| `Error: contact rooms accept text only` | Attachments cannot go into a contact room |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
 | `Not sent: The message could not be checked; try again later.` | The judge failed, timed out, or abstained |
@@ -9218,7 +9197,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, report publishing, config tools, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -10007,7 +9986,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `memory`, `self_config`, `skill_manage`, `slack`, and `workflow` toolkits are never available to scripts, even when the agent has them.
 - Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
@@ -10868,11 +10847,10 @@ Its description is the first line of its module docstring, and an optional top-l
 
 ## Moving From Dynamic Workflows
 
-`workflow` replaces [`dynamic_workflow`](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) with plain Python scripts, background execution, live graph frames, resume by replay, and saved workflows under `workflows/<name>.py`.
+`dynamic_workflow` is now a deprecated alias for `workflow` (any legacy `allowed_tools` option is ignored because a workflow inherits its caller's tools).
+The old Dynamic Workflows YAML engine has been removed; rewrite any YAML workflow you want to keep as a Python script with `def main(args):` under `workflows/<name>.py` and rename `dynamic_workflow` to `workflow` in your config.
 
-- Both `workflow` and `dynamic_workflow` can be enabled on the same agent during migration; their tool function names are disjoint.
-- Existing `dynamic_workflow` runs remain readable through `dynamic_workflow`.
-- No Dynamic Workflow YAML spec runs on the `workflow` engine; rewrite workflows you want to migrate as Python files with `def main(args):` in `workflows/<name>.py`.
+- Old Dynamic Workflow runs and revisions are no longer queryable, while previously published public report links remain usable if their artifacts still exist.
 
 # Worker Computer
 
@@ -11490,7 +11468,7 @@ Control actions require a control lease or full control:
 - `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
   App-switching, quit, launch, and address-bar shortcuts are rejected because they could reach apps outside the allowlist.
 
-Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; the default is `both`.
+Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; `action="screenshot"` defaults to `observation="screenshot"` and other app actions default to `both`.
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
@@ -12582,7 +12560,7 @@ tool_approval:
 | `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
 | `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
 | `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
-| `google_docs_batch_update(document_id, requests)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. |
+| `google_docs_batch_update(document_id, requests, required_revision_id=None)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` to reject the whole batch if the document changed since that read. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -14579,7 +14557,6 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `new_thread` | `bool` | `False` | Start a separate thread; send only, cannot be combined with `thread_id`. |
 | `event_id` | `str \| None` | `None` | Target message ID; required for edit and react. |
 | `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, at most five. |
-| `message_extras` | `list[object] \| None` | `None` | [Collapsible sections](#collapsible-sections) for send/edit. |
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
@@ -14587,6 +14564,7 @@ The tool also takes the standard [`mindroom_output_path`](https://docs.mindroom.
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.
+[Interactive prompts](https://docs.mindroom.chat/interactive/) cannot be sent or edited through this tool and return `Interactive prompts are only supported in normal agent responses.`; put them in the agent's normal reply instead.
 `read` returns recent messages with their event IDs, and thread reads also list which messages can be edited.
 Room-timeline reads skip encrypted messages the agent cannot decrypt, and `limit` counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
 Each agent, room, and requester may make 12 calls per 30 seconds, and each attached file counts as one more call.
@@ -14606,28 +14584,6 @@ When a thread-mode agent sends outside an existing thread, text and files are gr
 
 Results include `attachment_event_ids`, `resolved_attachment_ids`, and `newly_registered_attachment_ids`.
 If delivery fails partway, the error result still lists the files that arrived, and when a file fails before a recipient is addressed, the task text is not sent.
-
-## Collapsible sections
-
-`message_extras` adds collapsible sections below the main text of a `send` or `edit`:
-
-```json
-{
-  "title": "Details",
-  "content": "Additional information",
-  "content_type": "text/markdown",
-  "collapsed": true
-}
-```
-
-`title` and `content` are required strings.
-`content_type` defaults to `text/markdown` and also accepts `text/plain` or `text/html`.
-`collapsed` defaults to `true`.
-A call accepts up to eight sections, with titles of at most 120 characters and content of at most 16,384 characters per section.
-Sections require a non-empty main message.
-HTML allows basic formatting only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links may use `http`, `https`, and `mailto`.
-
-[Interactive prompts](https://docs.mindroom.chat/interactive/) cannot be sent or edited through this tool and return `Interactive prompts are only supported in normal agent responses.`; put them in the agent's normal reply instead.
 
 ## Safe send retries
 
@@ -16805,12 +16761,12 @@ agents:
 
 # Agent Orchestration
 
-These built-in tools let an agent hand tasks to other agents, build and run reusable Dynamic Workflows, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
+These built-in tools let an agent hand tasks to other agents, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
 
 ## Tools On This Page
 
 - [`delegate`](#delegate) - Run a configured agent as a fresh subagent and wait for its answer.
-- [`dynamic_workflow`](#dynamic_workflow) - Create, update, run, and inspect saved Dynamic Workflows.
+- [`dynamic_workflow`](#dynamic_workflow) - Deprecated alias for [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
 - [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
@@ -16944,7 +16900,7 @@ Common errors:
 - `Cannot delegate: the maximum delegation depth was reached.` - the chain of subagents is already 3 deep.
 - `Subagent ID prefix "<prefix>" matches several subagents in this conversation: <id1>, <id2>. Pass the full ID.` - the prefix matched more than one of this caller's subagents in the conversation.
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
-- `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
+- `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a legacy Dynamic Workflow snapshot stored before that engine was removed.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
 
 ### Dedicated Workers
@@ -17142,9 +17098,9 @@ A job with no useful output, or a cancelled one, still needs acknowledging.
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
-Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
-The agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
+Cancelled jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects them like any other. A silent schedule's ended jobs get a silent follow-up (still isolated from ordinary replies and capped at 20 without posting a visible pause notice), so the schedule stays silent unless there is something to report.
+Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them (a silent schedule's wait for its next silent run instead).
+For non-silent jobs, the agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; outside contact rooms it mentions a human requester so they are notified, and starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -17211,152 +17167,24 @@ The configured large-output policy can save long text to a file before that limi
 
 ## [`dynamic_workflow`]
 
-`dynamic_workflow` is deprecated in favour of [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
-
-`dynamic_workflow` lets an agent save a reusable multi-step workflow, publish new revisions, run it, and inspect run records.
-Add it to the `tools:` of each agent that should create and run workflows.
-
-```yaml
-agents:
-  coordinator:
-    display_name: Coordinator
-    role: Build and run reusable Dynamic Workflows
-    model: sonnet
-    tools:
-      - dynamic_workflow
-```
-
-The tool exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`, each returning JSON with a `status` field.
-`validate_workflow()` reports every validation error in a spec without saving it.
-Workflows belong to the calling agent.
-`update_workflow(workflow_id, patch, reason)` merges `patch` into the current spec: nested objects merge, but a list such as `workflow` or `participants` replaces the old list, so pass the complete list when changing one entry.
-Each `update_workflow()` publishes a new immutable revision, and each run uses the revision active when it starts.
-Saved workflows and run records live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
-A run completes inside the tool call and writes `report.md`, `report.html`, and `step_outputs.json`, which the run payload lists.
-Only the user who requested a run can read its record, publish it, or open its private report.
-When `MINDROOM_PUBLIC_URL` is set, run payloads include a private report URL under `/reports/private/...` that opens for that user in the dashboard.
-Use [`report_publishing`](#report_publishing) to share a completed run's report through a public link.
-
-### Spec Shape
-
-Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: workflow`.
-The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
-`description` is text or `null`.
-
-- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
-- **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
-  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
-    A [`mode: minimal`](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) participant's `shell` must run without approval, [pre-approved](#allowing-participant-tools) like any participant tool; leave `mode` unset for a participant that needs no tools.
-    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
-    It searches no knowledge bases, even when its profile lists `knowledge`.
-    Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
-    A participant used by several steps continues one session.
-    Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
-    A model with [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels) that is named without a level keeps the level that was its default when the run started.
-    Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
-  - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
-    It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
-- **`workflow`**: Up to 64 steps, each with a unique `id` and a `type`, run one at a time in order.
-  - `agent_step` sends its rendered `prompt` to the named `participant`.
-  - `transform_step` renders a `template` without calling a model.
-  - `report_step` renders Markdown from `body_template` or copies a prior step via `from_step`, with an optional `title`.
-  - Templates can reference `{input.<field>}` and earlier steps as `{steps.<step-id>}`.
-- **`outputs`**: Entries with `id`, `type`, and `from_step`, where `type` is `text`, `markdown`, `json`, or `html_report`.
-- **`permissions`**: Run limits and grants.
-  - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
-  - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
-  - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
-  - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit or `toolkit.function` a participant may name, inline or in its profile.
-    A `models` entry `name@level` admits only that model at that level, which a participant naming plain `name` runs at only while `level` is its default; an alias or model ID admits every level.
-  - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
-
-```python
-create_workflow(
-    spec={
-        "schema_version": 1,
-        "id": "brief-report",
-        "name": "Brief Report",
-        "description": "Create a short HTML report from one topic.",
-        "kind": "workflow",
-        "inputs": {
-            "type": "object",
-            "required": ["topic"],
-            "properties": {"topic": {"type": "string"}},
-        },
-        "participants": [
-            {
-                "id": "writer",
-                "kind": "subagent",
-                "system_prompt": "You write concise, well-cited research reports.",
-                "model": "claude-sonnet-5-5",
-                "tools": ["duckduckgo", "website"],
-            },
-        ],
-        "workflow": [
-            {
-                "id": "write",
-                "type": "agent_step",
-                "participant": "writer",
-                "prompt": "Research the web and write a concise cited report about {input.topic}.",
-            },
-        ],
-        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
-        "permissions": {
-            "max_runtime_seconds": 1800,
-            "max_concurrent_agents": 4,
-            "max_total_agents": 8,
-            "models": ["claude-sonnet-5-5"],
-            "tools": ["duckduckgo", "website"],
-            "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
-        },
-    },
-    reason="initial report workflow",
-)
-run_workflow("brief-report", {"topic": "Agno factories"})
-list_workflows()
-get_workflow_run("brief-report", "run_...")
-```
-
-### Allowing participant tools
-
-Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved.
-`validate_workflow()`, `create_workflow()`, and `update_workflow()` refuse a participant tool that is not pre-approved, and a run fails before any participant starts if a pre-approval was removed after the workflow was saved.
-Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
-Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
-
-```yaml
-agents:
-  builder:
-    display_name: Workflow Builder
-    tools:
-      - duckduckgo
-      - website
-      - dynamic_workflow:
-          allowed_tools: [duckduckgo, website]
-```
-
-Operator-authored [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first and the first match wins.
-A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
-A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly is refused the same way.
-The same holds for a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval for that participant.
-`allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
-Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
-A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.
+`dynamic_workflow` is a deprecated alias for [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
+The old Dynamic Workflows YAML engine has been removed; existing configs that still list `dynamic_workflow` automatically load `workflow` and log a one-line deprecation warning.
+Any legacy `allowed_tools` setting under `dynamic_workflow` is ignored because a `workflow` run inherits its caller's tools.
+Rename `dynamic_workflow` to `workflow` in `config.yaml` and write Python workflows under `workflows/<name>.py`.
 
 ## [`report_publishing`]
 
-`report_publishing` lets an agent publish a completed Dynamic Workflow report or a workspace static site through a revocable public link.
-Add it to the agent's `tools:`; it is often enabled next to `dynamic_workflow`.
+`report_publishing` lets an agent publish a completed [`workflow`](https://docs.mindroom.chat/tools/workflows/) run result or a workspace static site through a revocable public link.
+Add it to the agent's `tools:`; it is often enabled next to `workflow`.
 
 ```yaml
 agents:
   coordinator:
     display_name: Coordinator
-    role: Build workflows and publish report links
+    role: Run workflows and publish report links
     model: sonnet
     tools:
-      - dynamic_workflow
+      - workflow
       - report_publishing
 ```
 
@@ -17368,7 +17196,7 @@ To have a person approve each publication, add a [tool approval](https://docs.mi
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
-- **`dynamic_workflow_run`**: `source` takes `workflow_id` and `run_id`, and the run must be completed.
+- **`workflow_run`**: `source` takes `run_id` of a completed workflow run with a non-null result and an optional `title` (defaulting to the run's title or `Workflow Run <run_id>`). The run's result (string or JSON value) is rendered to a self-contained escaped HTML page.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
@@ -17380,8 +17208,8 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 
 ```python
 publish_report(
-    source_type="dynamic_workflow_run",
-    source={"workflow_id": "brief-report", "run_id": "run_..."},
+    source_type="workflow_run",
+    source={"run_id": "wf-...", "title": "Brief Report"},
     confirm_public=True,
 )
 publish_report(
@@ -17529,7 +17357,7 @@ Which functions an agent gets depends on what it is:
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
 `create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
-Scripts and workflow participants cannot call it, and it cannot be deferred.
+Background scripts cannot call it, and it cannot be deferred.
 
 ```python
 create_agent(
@@ -19461,7 +19289,7 @@ Do not report or "fix" these; they are deliberate.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
-- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
+- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a workflow `agent()` call, runs as its caller with the caller's tools, credentials, workspace, and approval rules; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, start time, and the subagent ID and run ID of a subagent job or the tool call ID of a tool job, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the owner account also publishes, while the API is on and the origin is usable, its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, also in an encrypted room.
   An agent or team publishes its configured `role` in the same state whenever it is set, also with the API off.
@@ -20176,7 +20004,7 @@ A call then needs approval when its own rules ask for it or when the `judged_as`
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
 Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
 When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
-In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
+In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script, a call asks whenever `judge` returns a call that no rule auto-approves or lets through.
 
 ### Dependencies
 
@@ -26778,7 +26606,7 @@ With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open t
 
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
-With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal, the OAuth callback, success, and reset pages, and [private Dynamic Workflow reports](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) keep their own access checks.
+With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
@@ -27017,7 +26845,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
 The client chart serves `/.well-known/matrix/client` only with MatrixRTC, bug reports, or a [server emoji room](https://docs.mindroom.chat/custom-emoji/) enabled; otherwise send it to Tuwunel as well.
-Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published reports](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing).
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
@@ -27603,7 +27431,7 @@ Calls past the budget fail with a tool error, and this event is logged once when
 
 | Field | Meaning |
 |-------|---------|
-| `entity` | Agent or team name; dynamic workflow `subagent` participants appear under the calling agent's name and `room_agent` participants under their own |
+| `entity` | Agent or team name |
 | `budget` | The run's tool-call budget |
 | `model_requests` | Model requests the run made before it was stopped |
 
@@ -27856,7 +27684,7 @@ Nothing saved for the old tools is translated, so before upgrading, change what 
 - A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` are removed and, where they were off, become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; remove `all`, and set `enable_delete_file: true` only if `all` had turned deletion on and you still want it; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
 - [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
 - Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you delete them, saving any you still want under `filesystem`; settings of the earlier `file` toolkit saved under `filesystem` stop it the same way.
-- A contact's tools, a `dynamic_workflow` `allowed_tools` entry, a saved workflow, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
+- A contact's tools, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
 - A `script` `allowed_tools` list that names `file` or `coding` makes every script launch fail until it names `filesystem`.
 - A background tool job that an agent started with `file` or `coding` does not resume after the upgrade, so let running jobs finish first.
 - Upgrade workers and the sandbox runner together with the primary.
@@ -28017,6 +27845,15 @@ If the device store is missing, restore the deployment's matching storage backup
 A hard logout, a deleted server device, a changed returned identity, corrupt storage, or an unknown storage format requires operator recovery.
 Clearing the journal or the crypto directory is not a supported repair, because a Nio 1.0 device session is bound to its journal.
 Preserve the failed deployment's state while recovering it, because pending input and attempted deliveries may still need reconciliation.
+
+### Rolling back
+
+Changing only the image back to an older release is unsafe once the new release has opened persistent storage, because older releases can write to upgraded crypto stores and do not reliably reject the newer records.
+Before upgrading, stop all primary, worker, script, and background writers and take one coordinated backup of configuration, credentials, workspaces, memories, the event journal, every Matrix device store and trust sidecar, continuity files, and session storage, including separately mounted session and state volumes.
+Verify that this backup can be restored before proceeding.
+To roll back, stop all writers and keep ingress closed, set the failed upgraded state aside, and restore the complete backup before starting the previous release.
+Restore the journal and device stores together, because each is upgraded separately and a device session is bound to its journal.
+Keep the set-aside upgraded state, because user work and tool actions after the upgrade may not exist in the restored backup.
 
 ## Private storage migration
 
@@ -28255,7 +28092,7 @@ Every command also prints its options with `--help`.
 
 Start MindRoom with your configuration.
 
-On first run in a terminal, `mindroom run` creates the hosted starter config, pairs with MindRoom Chat, and offers to install the [login service](#service).
+On first run in a terminal, `mindroom run` creates a starter config (defaulting to MindRoom Chat, or connecting to your own Matrix server), pairs when using hosted or local provisioning, and offers to install the [login service](#service).
 See [Getting Started](https://docs.mindroom.chat/getting-started/) for the setup questions and for unattended setup with `--provider` and `--service`.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
 On a hosted install, the dashboard becomes available after pairing is approved.
@@ -28278,11 +28115,12 @@ On a hosted install, the dashboard becomes available after pairing is approved.
 
  Set up on first run, pair, and start MindRoom.
 
- When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for
- the model provider in a terminal or taking it from --provider.
- An install on MindRoom Chat that is not paired yet pairs this machine with your account,
- and a first run in a terminal offers to keep running in the background at login (see
- --service).
+ When no config exists, MindRoom creates a starter config, asking for the Matrix server
+ (defaulting to MindRoom Chat) and model provider in a terminal, or using mindroom.chat
+ and --provider without one.
+ An install using hosted or local provisioning that is not paired yet pairs this machine
+ with your account, and a first run in a terminal offers to keep running in the
+ background at login (see --service).
  MindRoom then creates the agent accounts and rooms from config.yaml, keeps room
  memberships in sync, and starts the dashboard and API (disable with --no-api).
 
@@ -28407,12 +28245,12 @@ Create, view, edit, and validate `config.yaml`.
 ### config init
 
 Create a starter `config.yaml` and `.env` with the personal Mind agent, starter models, file-based memory, and sensible defaults.
-For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so use `config init` to choose presets up front, use a self-hosted homeserver, or create files without starting.
+`mindroom run` runs this setup interactively on first run when no config exists, so use `config init` to choose presets up front or create files without starting.
 
 | Option | Effect |
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
-| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
+| `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). Omitting it in an interactive terminal (without `--provider`, `--no-input`, or `--print`) prompts you to choose between `mindroom.chat` and a custom Matrix server; passing `--matrix-server self-hosted` interactively prompts for your homeserver URL, server name, and registration or pairing settings. |
 | `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |
@@ -29146,7 +28984,7 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 │                                                             agents, in pixels; defaults to   │
 │                                                             the saved setup (1568 unless     │
 │                                                             changed).                        │
-│ --jpeg-quality                INTEGER RANGE [40<=x<=95]     JPEG quality of screenshots sent │
+│ --jpeg-quality                INTEGER RANGE [20<=x<=95]     JPEG quality of screenshots sent │
 │                                                             to agents; defaults to the saved │
 │                                                             setup (80 unless changed).       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

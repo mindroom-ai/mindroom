@@ -13,6 +13,7 @@ from mindroom.embeddings.errors import classified_embedder_error, is_embedder_au
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
+    MemoryNotFoundError,
     add_agent_memory,
     delete_agent_memory,
     get_agent_memory,
@@ -95,14 +96,19 @@ def _degraded_search_text(outcome: MemorySearchOutcome, config: Config) -> str:
 def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> str:
     """Log a failure and return what the model may see of it, without credentials.
 
-    A classified embedder failure becomes its fixed detail. Any other failure keeps its text with credentials
-    redacted, because a failed memory LLM call carries the provider's error body, which can quote the rejected key.
+    A classified embedder failure becomes its fixed detail, and a missing memory ID logs a warning without a
+    traceback. Any non-embedder failure keeps its text with credentials redacted, because a failed memory LLM call
+    carries the provider's error body, which can quote the rejected key.
     """
     if (detail := classified_embedder_error(exc)) is not None:
         logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
         return detail
+    detail = redact_sensitive_text(failure_text(exc))
+    if isinstance(exc, MemoryNotFoundError):
+        logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
+        return detail
     logger.exception(f"Failed to {action} memory via tool", error_type=type(exc).__name__, **context)
-    return redact_sensitive_text(failure_text(exc))
+    return detail
 
 
 class MemoryTools(Toolkit):
@@ -133,14 +139,10 @@ class MemoryTools(Toolkit):
         )
 
     async def add_memory(self, content: str) -> str:
-        """Store a specific fact or piece of information in your memory.
-
-        Use this when explicitly asked to remember something, or when you
-        encounter important information worth retaining for future conversations.
-        To correct something already stored, use update_memory on that entry instead of adding a new one.
+        """Persist a fact or note for future conversations. To correct an existing entry, use update_memory instead.
 
         Args:
-            content: The fact or information to memorize.
+            content: Fact or note to store.
 
         Returns:
             Confirmation message, followed by similar existing memories when there are any.
@@ -189,19 +191,13 @@ class MemoryTools(Toolkit):
         return outcome.results
 
     async def search_memories(self, query: str, limit: int = 5) -> str:
-        """Search your memories for information relevant to a query.
+        """Search stored facts, notes, or context.
 
-        Use this when you need to recall previously stored facts, notes, or context.
-        For file memory, semantic search uses configured Markdown paths
-        (default: memory/**/*.md). Keyword mode searches MEMORY.md and memory/**/*.md.
-        When semantic search is unavailable, it falls back to keyword search
-        over that same fixed corpus.
-        Persisted memory IDs and file:* IDs can be passed to get_memory, update_memory, or delete_memory.
-        semantic:* IDs are read-only locators.
+        File memory uses configured Markdown paths (default: memory/**/*.md) and falls back to keyword search over MEMORY.md and memory/**/*.md. Persisted and file:* IDs work with get_memory, update_memory, or delete_memory; semantic:* IDs are read-only locators.
 
         Args:
-            query: What to search for in your memories.
-            limit: Maximum number of results to return (default 5).
+            query: Search query.
+            limit: Max results (default 5).
 
         Returns:
             Formatted list of matching memories and their IDs, or a message if none found.
@@ -226,12 +222,10 @@ class MemoryTools(Toolkit):
             return f"Failed to search memories: {detail}"
 
     async def list_memories(self, limit: int = 50) -> str:
-        """List all your stored memories.
-
-        Use this when asked to show, list, or dump all memories.
+        """List stored memories.
 
         Args:
-            limit: Maximum number of memories to return (default 50).
+            limit: Max memories to return (default 50).
 
         Returns:
             Formatted list of all memories, or a message if none exist.
@@ -258,12 +252,10 @@ class MemoryTools(Toolkit):
             return f"Failed to list memories: {detail}"
 
     async def get_memory(self, memory_id: str) -> str:
-        """Retrieve a single memory by its ID.
-
-        Use this to inspect the full details of a specific memory.
+        """Fetch one memory by ID.
 
         Args:
-            memory_id: The ID of the memory to retrieve (shown in search/list results as [id=...]).
+            memory_id: Memory ID from search/list (`[id=...]`).
 
         Returns:
             The memory content, or an error message if not found.
@@ -285,13 +277,11 @@ class MemoryTools(Toolkit):
             return f"Failed to get memory: {detail}"
 
     async def update_memory(self, memory_id: str, new_content: str) -> str:
-        """Update the content of a specific memory by its ID.
-
-        Use this to correct or refine a previously stored memory.
+        """Replace a stored memory's content by ID (use for corrections/refinements).
 
         Args:
-            memory_id: The ID of the memory to update (shown in search/list results as [id=...]).
-            new_content: The new content to replace the existing memory with.
+            memory_id: Memory ID from search/list.
+            new_content: Replacement content.
 
         Returns:
             Confirmation message.
@@ -313,13 +303,10 @@ class MemoryTools(Toolkit):
             return f"Updated memory [id={memory_id}]: {new_content}"
 
     async def delete_memory(self, memory_id: str) -> str:
-        """Delete a single memory by its ID.
-
-        Use this to remove a specific outdated or incorrect memory
-        without affecting other memories.
+        """Delete one memory by ID.
 
         Args:
-            memory_id: The ID of the memory to delete (shown in search/list results as [id=...]).
+            memory_id: Memory ID from search/list.
 
         Returns:
             Confirmation message.

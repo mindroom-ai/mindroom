@@ -52,11 +52,13 @@ from mindroom.tool_jobs.follow_ups import (
     _follow_up_streak,
     follow_up_envelope,
     follow_up_event,
+    follow_up_key,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import JobNotices, _turn_start_job_note, job_notice_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, ResponseAction, TurnPolicy
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
@@ -161,6 +163,7 @@ async def _ended(
     tool_name: str | None = None,
     kind: str = "tool",
     adapter: dict[str, object] | None = None,
+    source_kind: str = MESSAGE_SOURCE_KIND,
 ) -> None:
     """Start a job that ends with ``outcome`` at once, as the turn ``source_event_id`` started it."""
 
@@ -178,6 +181,7 @@ async def _ended(
         operation=operation,
         source_event_id=source_event_id,
         reply_id=reply_id,
+        source_kind=source_kind,
     )
     await wait_for_status(runtime, job_id, outcome.status)
 
@@ -253,29 +257,63 @@ async def test_no_cancel_starts_a_follow_up(tmp_path: Path, route: str) -> None:
         await runtime.shutdown()
 
 
-async def test_a_silent_schedules_jobs_get_no_follow_up(tmp_path: Path) -> None:
-    """Work a silent schedule started waits for its next silent run instead of posting a message."""
+async def test_a_silent_schedules_jobs_get_a_silent_follow_up(tmp_path: Path) -> None:
+    """Work a silent schedule started gets a silent follow-up that does not yield to a waiting human message."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = replace(_runner_key(bot), silent=True)
+    owner = _runner_owner(key)
+    runtime = await _runner_runtime(bot, tmp_path)
+    admitting = _admitting_bot()
+    admitting.journal_principal.return_value = bot.journal_principal()
+    coordinator = job_coordinator(tmp_path, runtime, admitting)
+    try:
+        await _ended(
+            runtime,
+            "job_a",
+            BackgroundOutcome("completed", "a"),
+            owner=owner,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+        )
+        await coordinator._admit_follow_ups(runtime)
+        admitting.admit_job_follow_up.assert_awaited_once()
+        admitted_key, follow_up_id = admitting.admit_job_follow_up.await_args.args
+        assert admitted_key == key
+        assert follow_up_id != _follow_up_event_id(replace(key, silent=False), await runtime.ended_jobs(key), 1)
+        event = await _follow_up(bot.journal_principal(), key, follow_up_id)
+        assert follow_up_key(event, key.recipient) == key
+        # Replay of pre-change journal rows without ``silent`` defaults to non-silent.
+        legacy = replace(event, source={"requester_id": key.requester_id})
+        assert follow_up_key(legacy, key.recipient) == replace(key, silent=False)
+        request = runner._job_follow_up_request(key, follow_up_id)
+        assert request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        assert request.response_envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP
+        assert request.quiet
+        assert request.prompt == bot.config.get_prompt("BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT")
+        _wait_for_next_turn(runner, key, requester_id=key.requester_id)
+        assert await runner._follow_up_due(request)
+    finally:
+        await runtime.shutdown()
+
+
+async def test_silent_follow_ups_stop_at_the_limit_without_posting_a_held_notice(tmp_path: Path) -> None:
+    """Silent follow-ups share the streak cap but never post a visible pause notice."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
-
-    async def done() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "a")
-
+    key = replace(_key(job_owner()), silent=True)
     try:
-        await start_job(
-            runtime,
-            "job_a",
-            tool_name="tool",
-            depth=0,
-            adapter={},
-            owner=job_owner(),
-            operation=done,
-            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
-        )
-        await wait_for_status(runtime, "job_a", "completed")
-        await coordinator._admit_follow_ups(runtime)
-        bot.admit_job_follow_up.assert_not_awaited()
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(
+                runtime,
+                "capped_silent",
+                BackgroundOutcome("completed", "a"),
+                source_event_id=_follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            )
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_not_awaited()
+            send.assert_not_awaited()
     finally:
         await runtime.shutdown()
 

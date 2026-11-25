@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.compaction import Summarizer
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _NATIVE = NativeCompactionReplay(route="test-route", threshold=2000)
@@ -65,13 +66,15 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         },
     )
 
-    async def summarize(**_kwargs: object) -> str:
+    install_model_providers(monkeypatch, {"summary": summary_model()})
+
+    async def summarize(summarizer: Summarizer, *_args: object, **_kwargs: object) -> tuple[str, Summarizer]:
         if summary_fails:
             msg = "summary model unavailable"
             raise RuntimeError(msg)
-        return "SUMMARY"
+        return "SUMMARY", summarizer
 
-    monkeypatch.setattr(mid_turn_compaction, "summarize_run_locally", summarize)
+    monkeypatch.setattr(mid_turn_compaction, "summarize_runs", summarize)
     model = ScriptedModel([calls(tool_call("probe", "call_1")), answer("done")])
     hook = mid_turn_compaction_hook(
         config=config,
@@ -129,10 +132,7 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
     """
     config, runtime_paths = _small_window_config(tmp_path)
 
-    async def summarize(**_kwargs: object) -> str:
-        return "SUMMARY"
-
-    monkeypatch.setattr(mid_turn_compaction, "summarize_run_locally", summarize)
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
     model = ScriptedModel(
         [calls(tool_call("probe", "call_1")), answer("paused"), calls(tool_call("probe", "call_2")), answer("done")],
     )
@@ -271,14 +271,15 @@ async def test_tools_the_request_defers_stay_out_of_its_size(
 ) -> None:
     """A definition the request leaves to tool search costs nothing until a search loads it, so it never compacts."""
     config, runtime_paths = _small_window_config(tmp_path)
+    install_model_providers(monkeypatch, {"summary": summary_model()})
     summaries: list[object] = []
 
-    async def summarize(**kwargs: object) -> str:
-        summaries.append(kwargs)
+    async def summarize(*args: object, **kwargs: object) -> tuple[str, Summarizer]:
+        summaries.append((args, kwargs))
         msg = "summary model unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(mid_turn_compaction, "summarize_run_locally", summarize)
+    monkeypatch.setattr(mid_turn_compaction, "summarize_runs", summarize)
     model = ScriptedModel([calls(tool_call("small_probe", "call_1")), answer("done")])
 
     async def offer_big_tool(state: LoopState) -> RequestDecision:

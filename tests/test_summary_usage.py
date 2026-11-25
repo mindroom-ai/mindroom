@@ -6,20 +6,24 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.history.compaction import _summarize_chunk, compact_scope_history, scope_usage_recorder
 from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.history.types import HistoryScopeState
+from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_system.runtime_context import (
@@ -42,6 +46,8 @@ from tests.history_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.llm.provider import ModelIdentity
 
 
 def _summary_model(*replies: Reply) -> ScriptedSummaryModel:
@@ -266,7 +272,7 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_storage_timeout_cannot_issue_another_paid_summary(tmp_path: Path) -> None:
-    """A storage timeout must stay outside the model's shrink-and-retry policy."""
+    """A usage-save failure logs a warning and keeps the paid summary without retrying the model."""
     run = _completed_run("original")
     _config, _paths, _storage, scope, _context = _forced_compaction_context(
         tmp_path,
@@ -286,8 +292,8 @@ async def test_usage_storage_timeout_cannot_issue_another_paid_summary(tmp_path:
             for content in ("Complete summary.", "Unnecessary second summary.")
         ],
     )
-    with pytest.raises(RuntimeError, match="Could not persist") as error:
-        await _summarize_chunk(
+    with capture_logs() as logs:
+        result = await _summarize_chunk(
             _summarizer(
                 model,
                 100_000,
@@ -301,8 +307,76 @@ async def test_usage_storage_timeout_cannot_issue_another_paid_summary(tmp_path:
             None,
             [run],
         )
-    assert isinstance(error.value.__cause__, sqlite3.OperationalError)
+
+    assert result.summary == "Complete summary."
     assert len(model.requests) == 1
+    assert any(
+        entry.get("event") == "compaction_summary_usage_save_failed"
+        and entry.get("error_type") == "OperationalError"
+        and entry.get("log_level") == "warning"
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_safeguard_refusal_propagates_when_usage_save_fails() -> None:
+    """A usage-save failure warns without swallowing a safeguard refusal."""
+    refusal = ModelSafeguardRefusal(
+        provider="test-provider",
+        usage=MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
+    )
+
+    async def locked_usage_storage(_identity: object, _usage: MessageMetrics) -> None:
+        msg = "database is locked"
+        raise sqlite3.OperationalError(msg)
+
+    with capture_logs() as logs, pytest.raises(ModelSafeguardRefusal):
+        await generate_compaction_summary(
+            model=_summary_model(refusal),
+            summary_input="Input.",
+            summary_prompt="Summarize.",
+            timeout_seconds=10,
+            on_usage=locked_usage_storage,
+        )
+
+    assert any(
+        entry.get("event") == "compaction_summary_usage_save_failed"
+        and entry.get("error_type") == "OperationalError"
+        and entry.get("log_level") == "warning"
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_summary_usage_serializes_through_database_lane(tmp_path: Path) -> None:
+    """Compaction usage writes wait in the conversation database's FIFO lane instead of competing for its lock."""
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=_session("session"))
+    assert isinstance(storage, ConversationStore)
+    in_lane = threading.Event()
+    release_lane = threading.Event()
+    model = _summary_model()
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22))
+
+    def hold_lane(_store: ConversationStore) -> None:
+        in_lane.set()
+        assert release_lane.wait(timeout=5)
+
+    holder = asyncio.create_task(run_session_storage_operation(lambda: storage, hold_lane))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(in_lane.wait), timeout=2)
+        usage_task = asyncio.create_task(
+            record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None),
+        )
+        done, _pending = await asyncio.wait({usage_task}, timeout=0.05)
+        assert not done, "record_summary_usage must serialize behind active work in the database lane"
+        release_lane.set()
+        await asyncio.wait_for(asyncio.gather(holder, usage_task), timeout=5)
+    finally:
+        release_lane.set()
+        await asyncio.gather(holder, return_exceptions=True)
+
+    report = collect_admin_usage(config=config, runtime_paths=paths)
+    assert report.totals.total_tokens == 22
 
 
 @pytest.mark.asyncio
@@ -325,10 +399,10 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
         ],
     )
 
-    async def record(usage: MessageMetrics) -> None:
+    async def record(identity: ModelIdentity, usage: MessageMetrics) -> None:
         recording.set()
         try:
-            await record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None)
+            await record_summary_usage(identity, usage, storage=storage, session_id="session", requester_id=None)
         finally:
             recorded.set()
 
@@ -383,8 +457,8 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
     )
     model = _summary_model([Await(ignore_cancellation), *summary_steps(late_summary)])
 
-    async def record(usage: MessageMetrics) -> None:
-        await record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None)
+    async def record(identity: ModelIdentity, usage: MessageMetrics) -> None:
+        await record_summary_usage(identity, usage, storage=storage, session_id="session", requester_id=None)
         recorded.set()
 
     with pytest.raises(_CompactionSummaryTimeoutError):

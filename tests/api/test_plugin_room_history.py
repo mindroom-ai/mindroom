@@ -14,9 +14,9 @@ import pytest
 from fastapi import Depends
 from fastapi.testclient import TestClient
 
+from mindroom import plugin_http
 from mindroom.api.client_sessions import client_session_store
 from mindroom.matrix import history_visibility
-from mindroom.orchestration import plugin_http_runtime
 from mindroom.plugin_http import RoomHistory, RoomReader, require_room_reader
 from tests.api.test_plugin_room_readers import (
     ALICE,
@@ -258,7 +258,7 @@ async def test_a_failed_history_read_answers_503(
     outcome: str,
 ) -> None:
     """A state or event read that answers an error, raises, or outlasts the lookup timeout is 503, never a start."""
-    monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(plugin_http, "_ROOM_READ_TIMEOUT_SECONDS", 0.01)
     client = _client("joined", _chain(BOB, *BOB_INVITED_JOINED_RENAMED))
     reader = await _reader(client, BOB)
     if outcome == "never answers":

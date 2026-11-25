@@ -18,14 +18,12 @@ import re
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-import nio
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
@@ -35,10 +33,9 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
-from mindroom.dynamic_workflows.spec import RoomAgentParticipant
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.history.manual import schedule_compaction_before_next_reply
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
@@ -57,7 +54,6 @@ from mindroom.response_turn import TurnSinks
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.scheduling.tasks import ScheduledWorkflow, _parse_workflow_schedule
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -766,19 +762,6 @@ async def _team_mode(config: Config, runtime_paths: RuntimePaths) -> None:
     assert mode == TeamMode.COORDINATE, mode
 
 
-async def _schedule_parse(config: Config, runtime_paths: RuntimePaths) -> None:
-    responders = entity_ids(config, runtime_paths)
-    workflow = await _parse_workflow_schedule(
-        "Every weekday at 9am, ask @assistant for the travel policy changes.",
-        config,
-        runtime_paths,
-        [responders["assistant"], responders["researcher"]],
-        current_time=datetime(2026, 9, 21, 14, 14, tzinfo=UTC),
-        timezone="UTC",
-    )
-    assert isinstance(workflow, ScheduledWorkflow), workflow
-
-
 async def _summarize(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -957,58 +940,6 @@ async def _run_voice_cascaded(root: Path) -> ScenarioOutput:
     )
 
 
-def _workflow_config() -> dict[str, Any]:
-    return {
-        "agents": {
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Answer questions about the team handbook.",
-                "tools": ["dynamic_workflow"],
-            },
-            "researcher": {
-                "display_name": "Researcher",
-                "role": "Research topics in depth.",
-                "instructions": ["Name your sources."],
-                "tools": ["calculator"],
-                # A room-agent participant must answer this requester in this room.
-                "access": {"users": [_REQUESTER_ID]},
-            },
-        },
-        "memory": {"backend": "none"},
-        "models": {"default": _ANTHROPIC},
-        "timezone": "UTC",
-    }
-
-
-async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
-    authored = _workflow_config()
-    config, runtime_paths = _bound_config(root, authored)
-    registry = entity_identity_registry(config, runtime_paths)
-    room = nio.MatrixRoom(room_id=_ROOM_ID, own_user_id=registry.current_id("assistant").full_id)
-    for agent_name in ("assistant", "researcher"):
-        room.add_member(registry.current_id(agent_name).full_id, config.agents[agent_name].display_name, None)
-    room.members_synced = True
-    context = replace(_tool_runtime(config, runtime_paths, "assistant"), room=room)
-    participant = {"id": "writer_a", "kind": "room_agent", "agent": "researcher"}
-    prompt = "Summarize the travel policy."
-    output = await _execute_room_agent_participant(
-        context,
-        RoomAgentParticipant.model_validate(participant),
-        prompt,
-        run_key="travel-report:run_1",
-    )
-    assert output == "ok", output
-    return ScenarioOutput(
-        {
-            "config": authored,
-            "participant": participant,
-            "prompt": prompt,
-            "run_key": "travel-report:run_1",
-            "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
-        },
-    )
-
-
 def _skill_learning_config() -> dict[str, Any]:
     return {
         "agents": {
@@ -1135,14 +1066,12 @@ _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversatio
 
 
 def answer_compaction(call: ModelCall) -> OwnedMessage:
-    """Call compact_context on the first turn, summarize on the summary request, and answer the rest.
+    """Summarize on the summary request and answer the conversation turns.
 
     The summary request is the only one that offers no tools.
     """
     if not call.tools:
         return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
-    if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
-        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
     return answer_ok(call)
 
 
@@ -1150,7 +1079,7 @@ _COMPACTION_FOLLOW_UP = "What is the travel policy?"
 
 
 def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
-    """Return the turn that calls compact_context and the next reply in the scope, which compacts first."""
+    """Return the first turn and the follow-up reply in the scope, which compacts after manual scheduling."""
     authored = _assistant_config(model={**_ANTHROPIC, "context_window": 200000}, tools=["compact_context"])
     config, runtime_paths = _bound_config(root, authored)
     scenario_input = {"config": authored, "turns": [_turn_input(_COMPACT_PROMPT), _turn_input(_COMPACTION_FOLLOW_UP)]}
@@ -1168,7 +1097,18 @@ def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
 
 async def _run_compaction_summary(root: Path) -> ScenarioOutput:
     first, follow_up = _compaction_turns(root)
-    await _agent_turn(first)
+    identity = await _agent_turn(first)
+    unavailable = await schedule_compaction_before_next_reply(
+        scope=HistoryScope(kind="agent", scope_id=first.agent_name),
+        agent_name=first.agent_name,
+        session_id=_SESSION_ID,
+        runtime_paths=first.runtime_paths,
+        config=first.config,
+        execution_identity=identity,
+        active_model_name=None,
+        room_id=_ROOM_ID,
+    )
+    assert unavailable is None
     # The next reply in the scope compacts its history first, with a summary request.
     await _agent_turn(follow_up)
     return ScenarioOutput(first.input)
@@ -1338,10 +1278,6 @@ SCENARIOS: dict[str, Scenario] = {
         "Cascaded voice call: the Live model's system prompt and one transcript answered by the call's reused agent.",
         _run_voice_cascaded,
     ),
-    "dynamic_workflow_room_agent": Scenario(
-        "Dynamic workflow room-agent participant: a restricted agent without runtime capabilities runs one step.",
-        _run_dynamic_workflow,
-    ),
     "skill_review_fork": Scenario(
         "Skill review forking a response's final request: the response's request, then the review's request with "
         "the same messages, the review prompt appended, and the agent's tools.",
@@ -1359,14 +1295,6 @@ SCENARIOS: dict[str, Scenario] = {
         "mindroom.teams.formation.select_ad_hoc_team_mode",
         _team_mode,
         '{"mode": "coordinate", "reasoning": "Separate sub-tasks."}',
-    ),
-    **_structured_helper(
-        "schedule_parse",
-        "mindroom.scheduling.tasks._parse_workflow_schedule",
-        _schedule_parse,
-        '{"schedule_type": "cron", "cron_schedule": {"minute": "0", "hour": "9", "day": "*", "month": "*", '
-        '"weekday": "1-5"}, "message": "@assistant What changed in the travel policy?", '
-        '"description": "Weekday travel policy check"}',
     ),
     **_structured_helper(
         "thread_summary",
@@ -1410,8 +1338,8 @@ SCENARIOS: dict[str, Scenario] = {
         turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
-        "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then "
-        "replies with the summary in place of the compacted run.",
+        "History compaction: manual compaction is scheduled after a turn, so the next reply first sends the summary "
+        "request, then replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
         turn=lambda root: _compaction_turns(root)[0],

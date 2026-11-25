@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.message_target import MessageTarget
@@ -14,10 +14,10 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.event_journal import JournalEvent
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 # How many follow-ups run in a row in a conversation without a human message; after that, results wait for one.
 _FOLLOW_UP_LIMIT = 20
@@ -36,7 +36,8 @@ def _follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], str
     The name ends with ``streak``, how many follow-ups in a row it is, so a job its turn starts can count it from the
     job's own source after the follow-up settled.
     """
-    conversation = "\n".join((key.recipient, key.room_id, key.thread_id or "", key.requester_id))
+    parts = (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
+    conversation = "\n".join((*parts, "silent") if key.silent else parts)
     jobs_digest = _digest(",".join(sorted(job.job_id for job in jobs)))
     return f"{_FOLLOW_UP_ID_PREFIX}{_digest(conversation)}:{jobs_digest}:{streak}"
 
@@ -54,6 +55,9 @@ def follow_up_event(
     now_ms: int,
 ) -> InboundEvent:
     """Return a follow-up's journal source, which is not a Matrix event."""
+    source: dict[str, object] = {"requester_id": key.requester_id}
+    if key.silent:
+        source["silent"] = True
     return InboundEvent(
         event_id=follow_up_id,
         room_id=key.room_id,
@@ -62,7 +66,7 @@ def follow_up_event(
         event_class=EventClass.ACTIONABLE,
         sender=sender_id,
         origin_server_ts=now_ms,
-        source={"requester_id": key.requester_id},
+        source=source,
     )
 
 
@@ -73,7 +77,7 @@ def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey:
         room_id=event.room_id,
         thread_id=event.thread_id,
         requester_id=str(event.source["requester_id"]),
-        silent=False,
+        silent=event.source.get("silent") is True,
     )
 
 
@@ -109,7 +113,7 @@ def follow_up_envelope(
             sender_kind=SenderKind.MANAGED_ENTITY,
             requester_kind=SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER,
             intent=TurnIntent.JOB_FOLLOW_UP,
-            source_kind=MESSAGE_SOURCE_KIND,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else MESSAGE_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,
         ),
     )
@@ -123,6 +127,60 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     """
     return tuple(
         job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
+    )
+
+
+async def _has_working_jobs_for_conversation(
+    runtime: ToolJobRuntime,
+    key: ConversationKey,
+    *,
+    current_follow_up_id: str | None = None,
+    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None,
+) -> bool:
+    """Return whether the conversation stays in Working due to active or pending follow-up jobs.
+
+    Returns False immediately when any matching conversation job awaits human approval so the
+    conversation surfaces in Needs You. Returns True when any other non-terminal depth-0 job
+    is active, or when unconsumed ended jobs will trigger a new follow-up turn.
+    """
+    state = await runtime.conversation_working_state(key)
+    if state.awaiting_approval:
+        return False
+    if state.has_active:
+        return True
+    pending = follow_up_jobs(state.ended_jobs)
+    if not pending:
+        return False
+    follow_up_id = next_follow_up_id(key, pending)
+    if follow_up_id == current_follow_up_id:
+        return False
+    return not (is_follow_up_settled is not None and await is_follow_up_settled(follow_up_id))
+
+
+async def has_working_jobs_for_reply(
+    runtime: ToolJobRuntime | None,
+    *,
+    agent_name: str,
+    target: MessageTarget,
+    envelope: MessageEnvelope,
+    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None,
+) -> bool:
+    """Return whether a reply's conversation stays in Working due to active or pending follow-up jobs."""
+    if runtime is None:
+        return False
+    key = ConversationKey(
+        recipient=agent_name,
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id=envelope.requester_id,
+        silent=envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+    )
+    current_follow_up_id = envelope.source_event_id if envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP else None
+    return await _has_working_jobs_for_conversation(
+        runtime,
+        key,
+        current_follow_up_id=current_follow_up_id,
+        is_follow_up_settled=is_follow_up_settled,
     )
 
 

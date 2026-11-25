@@ -88,3 +88,54 @@ def test_interleaved_observations_remain_usable_until_bounded_eviction() -> None
     cache.remember(replace(STATE, state_id="last"), COMMAND)
     with pytest.raises(DesktopProtocolError, match="expired"):
         cache.resolve(COMMAND)
+
+
+def test_controller_key_isolates_identical_caller_and_session() -> None:
+    """Two pinned controllers with the same requester, agent, and session cannot cross-resolve state."""
+    cache = DesktopObservations()
+    cache.remember(STATE, COMMAND, controller_key="ctrl-a")
+    assert cache.resolve(COMMAND, controller_key="ctrl-a") == COMMAND
+    with pytest.raises(DesktopProtocolError, match="scope"):
+        cache.resolve(COMMAND, controller_key="ctrl-b")
+
+
+def test_resolve_rejects_bare_element_index_outside_observed_elements() -> None:
+    """Bare element_index cannot target dropped, omitted, out-of-range, or boolean indexes."""
+    cache = DesktopObservations()
+    cache.remember(STATE, COMMAND)
+    assert cache.resolve(COMMAND) == COMMAND
+    for bad_index in (1, -1, True, False, "0"):
+        bad = replace(COMMAND, parameters={**COMMAND.parameters, "element_index": bad_index})
+        with pytest.raises(DesktopProtocolError, match="index"):
+            cache.resolve(bad)
+
+    screenshot_state = replace(STATE, state_id="shot-only", elements=())
+    cache.remember(screenshot_state, COMMAND)
+    bare = replace(COMMAND, parameters={"app": "com.example.Editor", "state_id": "shot-only", "element_index": 0})
+    with pytest.raises(DesktopProtocolError, match="index"):
+        cache.resolve(bare)
+
+
+@pytest.mark.parametrize(
+    "state_updates",
+    [
+        {"truncated": True, "stability": "truncated"},
+        {"truncated": False, "stability": "unstable"},
+    ],
+)
+def test_resolve_rejects_fallback_input_on_incomplete_or_unstable_observations(
+    state_updates: dict[str, object],
+) -> None:
+    """Coordinate and untargeted keyboard fallbacks require a stable complete observation."""
+    cache = DesktopObservations()
+    degraded = replace(STATE, **state_updates)
+    cache.remember(degraded, COMMAND)
+    fallback = replace(
+        COMMAND,
+        action="click",
+        parameters={"app": "com.example.Editor", "state_id": "snapshot-1", "x": 100, "y": 100, "button": "left"},
+    )
+    with pytest.raises(DesktopProtocolError, match="stable complete observation"):
+        cache.resolve(fallback)
+    # Retained semantic element actions remain valid on truncated states.
+    assert cache.resolve(COMMAND) == COMMAND

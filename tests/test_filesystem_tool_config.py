@@ -17,8 +17,7 @@ from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import resolve_runtime_paths
 from mindroom.contacts.store import ContactSide
 from mindroom.custom_tools.script import ScriptTools
-from mindroom.delegation.personas import inline_persona
-from mindroom.dynamic_workflows.spec import SubagentParticipant
+from mindroom.delegation.personas import _inline_persona as inline_persona
 from mindroom.workers.protocol import ExecuteRequest, LeaseRequest
 
 if TYPE_CHECKING:
@@ -207,8 +206,6 @@ def test_stored_selectors_and_grants_under_an_old_name_are_kept_as_written() -> 
     """What re-reads a saved choice keeps its spelling, so an old name matches no toolkit until it is written anew."""
     assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["coding", "file"]
     assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["file", "shell"]
-    participant = SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["coding", "file"]})
-    assert participant.tools == ["coding", "file"]
     assert inline_persona("You review.", ["coding", "file.read_file"], None, None).tools == ("coding", "file.read_file")
     assert ScriptTools(allowed_tools=["file", " coding "]).limits.allowed_tools == ("file", "coding")
 

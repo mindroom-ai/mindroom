@@ -13,6 +13,7 @@ from mindroom.delegation.state import child_execution_identity
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.workflow_runs.interactions import ask_child_question, peer_send, wait_for_messages
 from mindroom.workflow_runs.peers import NodeRef, get_state, list_peers, peer_op_id, set_state, valid_wait_seconds
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
@@ -101,7 +102,7 @@ class WorkflowPeerTools(Toolkit):
     async def send_peer_message(self, to: str, text: str) -> str:
         """Send a message to a peer by name, '*' (all unfinished peers), or 'script' (up to 1 MiB)."""
         engine, run_id, _, ref, op_id = self._bound("send_peer_message", {"to": to, "text": text})
-        return json.dumps(await engine.ask.peer_send(run_id, op_id=op_id, sender=ref, to=to, text=text))
+        return json.dumps(await peer_send(engine, run_id, op_id=op_id, sender=ref, to=to, text=text))
 
     async def read_peer_messages(self, wait_seconds: float = 0) -> str:
         """Return only unread messages since your last read (advancing the cursor) as `{"messages": [{"from", "text", "sent_at"}], "note"?: ...}`.
@@ -113,7 +114,7 @@ class WorkflowPeerTools(Toolkit):
         engine, run_id, node, ref, op_id = self._bound("read_peer_messages", {"wait_seconds": wait_seconds})
         names = (node.name, "*") if node.name else ("*",)
         return json.dumps(
-            await engine.ask.wait_for_messages(run_id, ref, wait, op_id=op_id, names=names),
+            await wait_for_messages(engine, run_id, ref, wait, op_id=op_id, names=names),
         )
 
     async def list_peers(self) -> str:
@@ -136,4 +137,4 @@ class WorkflowPeerTools(Toolkit):
     async def ask_user(self, question: str, options: list[str] | None = None) -> str:
         """Ask the workflow requester a question in the thread and wait for their answer."""
         engine, run_id, node, *_ = self._bound()
-        return await engine.ask.ask_child_question(run_id, node, question, options)
+        return await ask_child_question(engine, run_id, node, question, options)

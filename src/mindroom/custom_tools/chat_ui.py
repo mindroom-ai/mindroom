@@ -84,39 +84,11 @@ _CANVAS_PAGE_MAX_BYTES = 4 * 1024 * 1024
 # Chat shares a canvas's state as this event, a reference to the canvas, so one relations call finds the newest.
 _CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
 _CANVAS_STATE_SCAN_LIMIT = 50
-# Added to the agent's instructions. The map lists only the functions the agent has (see
-# ChatUITools.instructions), so include_tools or exclude_tools never advertise a missing function.
+# Cross-function Chat UI rules; per-function details live on the function docstrings.
 _CHAT_UI_INSTRUCTIONS = (
-    "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and "
-    "none of them touches the user's own computer or browser. Side panels share one place on the screen, so "
-    "opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the "
-    "conversation: success means it was sent, not that the user saw it."
+    "chat_ui only affects MindRoom Chat (never the user's own computer or browser). "
+    "Side panels share one slot (opening one replaces the current panel)."
 )
-_FUNCTION_INSTRUCTIONS: dict[str, str] = {
-    "open_panel": (
-        "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
-        "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
-        "over, for example to log in. "
-        "open_panel(panel='members') shows the Members panel: the people and agents in this room."
-    ),
-    "show_canvas": (
-        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
-        "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
-        "the user choose or fill something in; their answer comes back as their next message. Prefer "
-        "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
-        "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
-        "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
-        "stays open beside it. A new canvas is posted as a separate message; in normal replies it appears "
-        "below your reply text, so refer to it as below (or by title on quiet turns)."
-    ),
-    "read_canvas_state": (
-        "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
-        "share_state=True, such as a checklist, without them sending anything."
-    ),
-    "open_settings": (
-        "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
-    ),
-}
 
 
 # Added only when the agent has both show_canvas and open_panel.
@@ -206,9 +178,9 @@ class ChatUITools(Toolkit):
         return self.instructions_for(self.functions)
 
     def instructions_for(self, function_names: Collection[str]) -> str:
-        """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
+        """Return cross-function Chat UI rules and enabled dynamic hints for ``function_names``."""
         enabled = set(function_names)
-        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        lines: list[str] = []
         if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
         # Remote assets include the library source, and the libraries hint says no other source works.
@@ -216,6 +188,8 @@ class ChatUITools(Toolkit):
             lines.append(_CANVAS_REMOTE_ASSETS_HINT)
         elif "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
+        if not lines:
+            return _CHAT_UI_INSTRUCTIONS
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @staticmethod
@@ -427,27 +401,12 @@ class ChatUITools(Toolkit):
         )
 
     async def open_panel(self, panel: _SidePanel = "members") -> str:
-        """Show the user a side panel in MindRoom Chat: 'computer' or 'members'.
+        """Show a MindRoom Chat side panel: 'computer' or 'members'.
 
-        panel='computer' opens the Computer panel: a live view of your own worker
-        browser, the one browser_control drives with target='host'. The user starts
-        out watching. They can take control, for example to log in; while they have
-        it your browser calls are blocked, and when they hand it back you get a
-        message. Opening the panel does not navigate to a URL, send a prompt to
-        ChatGPT, or take control, and it never opens or controls the user's own
-        browser. Your first worker browser call in a conversation (browser_control
-        with target='host', or any browser_mcp function) already shows the user this
-        panel; call open_panel(panel='computer') only to show it again in a later
-        reply, for example when the user should log in or after they closed it. One
-        reply shows the panel once.
-
-        panel='members' opens the Members panel, listing the people and agents in
-        this room.
-
-        Success means the UI request was sent, not that the client opened a panel.
+        'computer' shows a live view of your worker browser (`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.
 
         Args:
-            panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
+            panel: 'computer' (worker browser) or 'members' (default; room members).
 
         """
         if panel == "computer":
@@ -471,108 +430,28 @@ class ChatUITools(Toolkit):
         width: int | None = None,
         libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
+        """Show an interactive HTML canvas you wrote, inline in the conversation or in the side panel.
 
-        Use a canvas when seeing or clicking beats reading or typing. The page cannot
-        load any website, so it cannot show the user a real website. Pass the page as
-        ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
-        ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
-        supported. Only show pages you wrote: a canvas appears as yours and whatever
-        the user types into it could leave the page.
+        When to use: use when seeing/clicking beats text. Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a quick choice, just ask in reply. Cannot load real websites. Pass `html` or workspace-relative `path` (e.g. `slides/deck.html`), up to 4 MB. Show only pages you wrote (appears as yours; typed data could leave the page).
 
-        Prefer ``inline=True``, which shows the page in the conversation at reply
-        width (about 700px on desktop, 360px on phones), for anything the user should
-        see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
-        multi-step questions. Use the panel for what stays open beside the
-        conversation: dashboards, slides, long documents, pages the user returns to.
-        A new canvas is posted as a separate message; in normal replies it appears
-        below your reply text, so refer to it as below (or by title on quiet turns).
-        Inline, leave ``html`` and ``body`` without a background, card, title banner
-        or side padding; give charts fixed pixel heights; do not use ``vh`` units or
-        ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
-        of view, so give fields an ``id`` or ``name`` or call ``saveState``. For forms
-        use the themed mode, not ``raw`` or ``width``. Show the next step as a new
-        inline canvas or an update.
+        Inline vs Panel & Raw: prefer `inline=True` (~700px desktop / 360px phone) for in-flow items: charts, diagrams, mockups, pickers, short forms, multi-step flows. Use panel for persistent views (dashboards, slides, long docs). New canvases post separately and appear below your reply text (refer to them as below, or by title on quiet turns). Inline themed rules: no background, card, title banner, or side padding on `html`/`body`; fixed pixel heights for charts; no `vh` or `height:100%` on `html`/`body`; restarts when scrolled away (give fields `id`/`name` or use `saveState`); use themed mode (not `raw`/`width`) for forms; show next step as new inline canvas or update. For realistic website/app previews, use `inline=True`, `raw=True` (no Chat styles/vars), and target `width` (e.g. 1440/390, scaled to fit)—overrides inline rules, rendered up to 16:10 tall (568-1080px) where `vh` and scrolling work (panel uses panel width).
 
-        To preview a website or app as it will really look, use ``inline=True`` with
-        ``raw=True``: Chat adds no styles or theme variables, so browser defaults
-        apply until your CSS sets them. Set ``width`` to the viewport the design
-        targets, such as 1440 for desktop or 390 for a phone; the page renders at that
-        width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
-        layout rules: it shows in a browser window at most 16:10 of its width tall
-        (568 to 1080px), where ``vh`` units work as in a browser and taller content
-        scrolls. The panel shows raw pages too, at the panel's own width.
+        Theme & Sandbox: design like a responsive web app; prefer SVG/CSS over embedded images, summarize large data, skip unneeded interactivity. Fetch/XHR/WebSockets always blocked; external images/scripts/styles/fonts blocked unless instructions name an allowed source (embed images as `data:` URLs). For Chart.js/D3/Mermaid/KaTeX pass `libraries` (never a CDN). Cannot see user account/messages. Theme CSS vars: `--mr-bg`, `--mr-surface`, `--mr-surface-raised`, `--mr-border`, `--mr-text`, `--mr-text-muted`, `--mr-accent`, `--mr-accent-text`, `--mr-success`, `--mr-warning`, `--mr-danger`, `--mr-radius`, `--mr-font`; `window.mindroom.colorScheme` is `'light'` or `'dark'`.
 
-        Design it like a polished web app. Fetch, XHR, and WebSockets are always
-        blocked. External images, scripts, styles, and fonts are blocked too
-        unless your instructions name a source that works; embed images as data: URLs.
-        For Chart.js, D3, Mermaid, or KaTeX, pass ``libraries``, never a CDN address.
-        The panel resizes from narrow to full width, so use a responsive layout.
-        Chat exposes its current theme as CSS variables so the page matches light and
-        dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
-        --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
-        --mr-danger, --mr-radius, and --mr-font; window.mindroom.colorScheme is
-        'light' or 'dark' for choices the variables cannot make, such as chart colors.
-        The page cannot see the user's account or messages. Pages cost output tokens:
-        prefer SVG and CSS to embedded images, summarize large data instead of
-        inlining it, and leave out interactivity the page does not need.
+        Submitting & State: nothing reaches you until committed. Commit via `window.mindroom.submit(data, {label: "short summary"})` (< 512 KB JSON; decimals arrive as text) or `<form>` (`data-mindroom-label` sets label). Chat confirms with user, delivering `Canvas response (<canvas_event_id>, revision <event_id>): <label>` + JSON (older revision = earlier version). Runtime/blocked errors can be sent as `Canvas error (<canvas_event_id>, revision <event_id>):` + lines. Inputs/selects/textareas with stable `id`/`name` auto-persist across reloads/updates (except passwords, hidden, `autocomplete="off"`; change id if meaning changes; redraw on restored `input` events). For other state, call `window.mindroom.saveState(value)` on change (<= 256K chars JSON; larger throws); reloads read `window.mindroom.state` (`undefined` if unset; read defensively across versions). Local to device (100 most recent canvases) unless `share_state=True` (set at creation; Chat notifies user, stores room-readable copy for `read_canvas_state`—never store secrets in `saveState`).
 
-        Keep interactivity inside the page; nothing reaches you until the user
-        commits. To commit, call ``window.mindroom.submit(data, {label: "short
-        summary"})`` with JSON data under 512 KB, enough for a long edited text
-        (decimal numbers arrive as text), or
-        use a ``<form>`` (its fields are submitted automatically; its
-        ``data-mindroom-label`` attribute sets the label). Chat shows the user what
-        will be sent and asks them to confirm. The answer arrives as the user's next
-        message, formatted as
-        ``Canvas response (<canvas_event_id>, revision <event_id>): <label>``
-        followed by the JSON data. If that revision is not your latest update, the user
-        answered an earlier version of the page.
-
-        Inputs, selects, and textareas with an ``id`` or ``name`` keep their values
-        across reloads, your updates, and versions automatically (not passwords,
-        hidden inputs, or ``autocomplete="off"`` fields): give them stable ids, a new
-        id when a field's meaning changes, and redraw on their ``input`` events, which
-        Chat fires when it restores them. To keep anything else the user does in the
-        page, call
-        ``window.mindroom.saveState(value)`` on every change with up to 256K characters
-        of JSON (larger values throw); later loads of this canvas start with it in
-        ``window.mindroom.state``, which is ``undefined`` when nothing is saved. Read it
-        defensively: an earlier version of the page may have saved it. Saved state
-        stays on the user's device, only the 100 most recently saved canvases keep it,
-        and it reaches you only when the canvas shares it: with ``share_state=True``
-        (decided when the canvas is first shown; Chat tells the user), Chat keeps a
-        copy in the room, readable by its members, and ``read_canvas_state`` returns
-        it whenever you want, so a page like a checklist needs no send button; never
-        put secrets in ``saveState`` on such a page.
-
-        If the page throws an error or loads something Chat blocks, the user can send
-        you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
-        followed by one error per line.
-
-        To replace the page in place, for the next step of a flow or a new version of
-        a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. show_canvas reads a ``path`` as soon as it starts, and tool calls made
-        together run at the same time, so call it only after the call that writes the
-        file has finished (for a background job, wait for its result), never alongside
-        it, or the user gets the old page.
-        Without ``canvas_event_id``, show_canvas creates a separate canvas: use a new canvas for a
-        distinct artifact and an update for a new version of the same one. The user can
-        switch between this conversation's canvases from the room header. Success means
-        the request was sent, not that the user opened or answered it.
+        Updating: pass `canvas_event_id` to replace in place (omit for a separate canvas; users switch canvases from room header). `show_canvas` reads `path` immediately and parallel tool calls run concurrently—call it ONLY after file-writing calls/jobs finish, never alongside them, or the user sees stale HTML. Success means request sent, not opened/answered.
 
         Args:
-            title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
-            html: HTML with inline CSS and JavaScript. Give html or path.
-            path: Workspace-relative path of an HTML file you wrote, shown instead of html.
-            canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
-            share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
-            inline: Show the page in the conversation instead of the side panel;
-                decided when the canvas is first shown, updates keep it.
-            raw: Add no Chat styles or theme variables for this revision; updates must set it again.
-            width: Target viewport width in CSS pixels (integer 320-2560) for this revision;
-                updates must set it again, and the panel uses its own width.
-            libraries: For this revision; updates must set them again.
+            title: Short single-line title (omit on update to keep original).
+            html: Inline HTML/CSS/JS (pass `html` or `path`).
+            path: Workspace-relative HTML file path (instead of `html`).
+            canvas_event_id: Existing canvas event ID in this conversation to update in place.
+            share_state: Expose state to `read_canvas_state` (set on creation; preserved on update).
+            inline: Show inline instead of side panel (set on creation; preserved on update).
+            raw: Omit Chat styles/theme vars (per revision; re-pass on updates).
+            width: Target viewport width in CSS px (320-2560; per revision; panel uses its own width).
+            libraries: Bundled libraries for this revision (re-pass on updates).
 
         """
         validated = self._validated_context("show_canvas")
@@ -620,16 +499,10 @@ class ChatUITools(Toolkit):
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
 
     async def read_canvas_state(self, canvas_event_id: str) -> str:
-        """Read what the user last did in a canvas you showed with ``share_state=True``.
-
-        Returns the page's saved state (what it passed to ``window.mindroom.saveState``)
-        and its kept input values (by ``#id`` or name) as the user's Chat last shared
-        them, and when. Nothing is shared until the user changes something. The user
-        does not have to send anything, so call this whenever you need their current
-        choices, for example from a scheduled task.
+        """Read the latest state from a `share_state=True` canvas: `window.mindroom.saveState` value, kept inputs (by `#id`/name), and timestamp. Empty until the user changes something; call anytime (e.g. from scheduled tasks) without needing a submit.
 
         Args:
-            canvas_event_id: Event ID of a canvas from this conversation shown with share_state=True.
+            canvas_event_id: Event ID of a `share_state=True` canvas in this conversation.
 
         """
         action = "read_canvas_state"

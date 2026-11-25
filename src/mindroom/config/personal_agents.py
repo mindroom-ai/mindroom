@@ -391,17 +391,6 @@ def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str,
     if unknown := sorted({p for p in assigned.values() if not isinstance(profiles, dict) or p not in profiles}):
         msg = f"calls.agents references unknown profile(s): {', '.join(unknown)}"
         raise ValueError(msg)
-    for key in assigned:
-        users = templates[key].get("users")
-        overrides = (
-            [override for override in users.values() if isinstance(override, dict)] if isinstance(users, dict) else []
-        )
-        if any(agent.get("rooms") for agent in (templates[key]["agent"], *overrides)):
-            msg = (
-                f"calls.agents names personal_agents.{key}, whose agent lists rooms in the template or a user's "
-                "override; a room takes only one calls-enabled agent"
-            )
-            raise ValueError(msg)
     return assigned
 
 

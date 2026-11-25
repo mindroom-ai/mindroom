@@ -63,6 +63,15 @@ def test_secret_returns_empty_text_on_enter(keys: Callable[[str], None]) -> None
     assert interactive.secret("API key") == ""
 
 
+def test_text_returns_typed_text_and_default_on_enter(keys: Callable[[str], None]) -> None:
+    """Typed text wins over a default, and Enter alone returns the default."""
+    keys("acme.example" + _ENTER)
+    assert interactive.text("Server", default="http://localhost:8008") == "acme.example"
+
+    keys(_ENTER)
+    assert interactive.text("Server", default="http://localhost:8008") == "http://localhost:8008"
+
+
 @pytest.mark.parametrize(("typed", "expected"), [("n" + _ENTER, False), ("y" + _ENTER, True), (_ENTER, True)])
 def test_confirm_reads_yes_no_and_the_default(keys: Callable[[str], None], typed: str, expected: bool) -> None:
     """An answer is confirmed with Enter, as in a line prompt, and Enter alone takes the default."""
@@ -91,6 +100,7 @@ def test_confirm_answers_only_its_own_question(keys: Callable[[str], None]) -> N
     "ask",
     [
         lambda: interactive.select("Provider?", _CHOICES),
+        lambda: interactive.text("Server"),
         lambda: interactive.secret("API key"),
         lambda: interactive.confirm("Continue?", default=True),
     ],
@@ -105,8 +115,9 @@ def test_ctrl_c_aborts_like_a_line_prompt(keys: Callable[[str], None], ask: Call
 
 def test_piped_input_answers_line_prompts() -> None:
     """Arrow-key prompts would silently take the default from a pipe, so piped answers get line prompts."""
-    with CliRunner().isolation(input="ollama\nsk-test\nn\n"):
+    with CliRunner().isolation(input="ollama\nexample.com\nsk-test\nn\n"):
         assert interactive.select("Provider?", _CHOICES) == "ollama"
+        assert interactive.text("Server") == "example.com"
         assert interactive.secret("API key") == "sk-test"
         assert interactive.confirm("Continue?", default=True) is False
 
@@ -162,10 +173,11 @@ def test_every_prompt_discards_typeahead_before_asking(monkeypatch: pytest.Monke
     monkeypatch.setattr(typer, "confirm", ask)
 
     interactive.select("Provider?", _CHOICES)
+    interactive.text("Server")
     interactive.secret("API key")
     interactive.confirm("Continue?", default=True)
 
-    assert events == ["discard", "ask"] * 3
+    assert events == ["discard", "ask"] * 4
 
 
 def test_windows_drains_the_console_input_without_termios(monkeypatch: pytest.MonkeyPatch) -> None:

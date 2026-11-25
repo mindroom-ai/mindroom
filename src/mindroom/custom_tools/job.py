@@ -163,13 +163,9 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Only use background_after when the tool schema exposes it; excluded toolkits keep their native controls. "
-                "Calls made inside an already running job stay with that job and accept no background_after. "
-                'Use job(action="list") to rediscover jobs and their status after a new turn, '
-                'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to ask '
-                "one to stop; the next notice says how it ended. "
-                'When told background jobs ended, call job(action="collect") once to read and acknowledge all of them. '
-                "You can access the jobs you started; when you answer as a team, also the jobs your members started for it."
+                "Tools with `background_after` can continue as background jobs without cancelling: "
+                "omit/null waits until completion or a newer message you answer (or the tool's default cap), "
+                "0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
             ),
         )
 
@@ -208,12 +204,12 @@ class JobTools(Toolkit):
         offset: int = 0,
         wait_timeout: float | None = None,
     ) -> Any:  # noqa: ANN401 - Preserve the original tool result type.
-        """Discover, wait for, or cancel this caller's managed work.
+        """Discover, wait for, or cancel this caller's managed background jobs (and member jobs when answering as a team).
 
         Args:
-            action: Operation; list reports status, saved summaries, and the latest progress of running work, wait
-                retrieves the stored result or, when it times out, the job's progress, and collect returns and
-                acknowledges every ended job.
+            action: Operation; list reports status, saved summaries, and the latest progress of running work; wait
+                retrieves the stored result or, when it times out, the job's progress; cancel requests an asynchronous
+                stop (the next notice reports how it ended); collect returns and acknowledges every ended job.
             job_id: Job ID (or a unique prefix of at least 8 hex characters), required for wait and cancel.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.

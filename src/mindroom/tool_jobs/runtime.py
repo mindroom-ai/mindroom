@@ -75,6 +75,36 @@ _ENDED_JOB_RETENTION = timedelta(days=30)
 # reread by its exact ID reads it; it is deleted after this shorter margin instead.
 _INLINE_JOB_RETENTION = timedelta(days=1)
 logger = get_logger(__name__)
+
+__all__ = [
+    "TERMINAL_STATUSES",
+    "AcknowledgeWait",
+    "BackgroundJob",
+    "BackgroundOutcome",
+    "ConversationWorkingState",
+    "EncodedResultPayload",
+    "JobAccessError",
+    "JobClaim",
+    "JobGrant",
+    "JobRecoveryBlockedError",
+    "JobSpec",
+    "JobUnavailableError",
+    "ManagedJobToolkit",
+    "ToolJobRuntime",
+    "call_job_id",
+    "describe_job",
+    "format_job_handle",
+    "get_background_runtime",
+    "is_workflow_node_job",
+    "job_summary",
+    "register_background_runtime",
+    "saved_jobs",
+    "undelivered_workflow_jobs",
+    "waited_for_approval",
+    "waited_for_user",
+    "workflow_job_admission",
+    "workflow_job_standing",
+]
 # A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.
 type EncodedResultPayload = dict[str, Any]
 # An accepted job's execution, and the adapter cleanup that settles it after cancellation or interruption.
@@ -219,6 +249,15 @@ def _stopped_while_working(job: BackgroundJob) -> bool:
     return job.status == "running" or (
         job.status == "awaiting_approval" and (waited_for_approval(job) or waited_for_user(job))
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationWorkingState:
+    """One conversation's live approval, active-job, and unconsumed ended-job state."""
+
+    awaiting_approval: bool = False
+    has_active: bool = False
+    ended_jobs: tuple[BackgroundJob, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -870,6 +909,7 @@ class ToolJobRuntime:
         *,
         owner: ToolExecutionIdentity,
         depth: int,
+        source_kind: str | None = None,
     ) -> tuple[BackgroundJob, JobClaim | None]:
         """Start a prepared *spec* as *job_id* for *owner* at *depth*, passing the live adapter reference."""
         return await self.start(
@@ -878,6 +918,7 @@ class ToolJobRuntime:
             depth=depth,
             kind=spec.kind,
             toolkit_name=spec.toolkit_name,
+            source_kind=source_kind,
             adapter=spec.adapter,
             owner=owner,
             operation=spec.operation,
@@ -1419,6 +1460,35 @@ class ToolJobRuntime:
                 and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
+
+    async def conversation_working_state(self, key: ConversationKey) -> ConversationWorkingState:
+        """Inspect one conversation's approval, active-job, and unconsumed ended-job state.
+
+        Any matching job waiting on approval (including a workflow-node child) marks
+        ``awaiting_approval=True`` immediately so the conversation surfaces in Needs You.
+        Only non-workflow-node depth-0 jobs count toward active work or follow-ups.
+        """
+        async with self._lock:
+            if self._closed:
+                return ConversationWorkingState()
+            has_active = False
+            ended: list[BackgroundJob] = []
+            for entry in self._by_conversation.get(
+                (key.recipient, key.room_id, key.thread_id, key.requester_id),
+                {},
+            ).values():
+                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) != key.silent:
+                    continue
+                status = entry.job.status
+                if status == "awaiting_approval":
+                    return ConversationWorkingState(awaiting_approval=True)
+                if entry.job.depth != 0 or is_workflow_node_job(entry.job):
+                    continue
+                if status not in TERMINAL_STATUSES:
+                    has_active = True
+                elif not entry.job.consumed and entry.claim is None and self._grant(entry.job) == "allowed":
+                    ended.append(entry.job)
+            return ConversationWorkingState(has_active=has_active, ended_jobs=tuple(ended))
 
     async def expire_ended(
         self,

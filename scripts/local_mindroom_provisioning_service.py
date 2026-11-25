@@ -21,8 +21,9 @@ Authentication: browser users prove their identity with a Matrix OpenID token
 in the ``X-Matrix-OpenID-Token`` header. The chat client requests it from the
 user's homeserver (``/_matrix/client/v3/user/{userId}/openid/request_token``),
 and the service resolves it through its configured homeserver's
-``/_matrix/federation/v1/openid/userinfo`` endpoint, accepting only users on
-``MATRIX_SERVER_NAME``. An OpenID token grants no account access, so the
+``/_matrix/federation/v1/openid/userinfo`` endpoint, accepting only non-agent
+users on ``MATRIX_SERVER_NAME`` (managed ``mindroom_*`` agent accounts are
+rejected with 403). An OpenID token grants no account access, so the
 service never needs Matrix access tokens. It is still a short-lived bearer
 credential: until it expires, any OpenID relying party that validates tokens
 with the same homeserver (for example the MatrixRTC lk-jwt-service or an
@@ -105,6 +106,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -137,6 +139,7 @@ DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.sqlite3"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
+DEFAULT_FORWARDED_ALLOW_IPS = ("127.0.0.1", "::1")
 DEFAULT_APPROVE_URL = "https://chat.mindroom.chat/connect"
 OPENID_TOKEN_HEADER = "X-Matrix-OpenID-Token"  # noqa: S105
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
@@ -214,6 +217,14 @@ class ServiceConfig:
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: str | None = None
     approve_url: str = DEFAULT_APPROVE_URL
+    forwarded_allow_ips: tuple[str, ...] = DEFAULT_FORWARDED_ALLOW_IPS
+    required_room: str | None = None
+    matrix_homeserver_api_url: str | None = None
+
+    @property
+    def homeserver_api_url(self) -> str:
+        """Return the base URL used for server-to-homeserver Matrix HTTP calls."""
+        return (self.matrix_homeserver_api_url or self.matrix_homeserver).rstrip("/")
 
 
 @dataclass(slots=True)
@@ -457,18 +468,70 @@ def _read_secret(*, env_name: str, file_env_name: str) -> str | None:
     return value or None
 
 
+def _parse_forwarded_allow_ips(raw: str | None, *, env_name: str) -> tuple[str, ...]:
+    """Parse trusted reverse-proxy IPs/CIDRs; unset defaults to loopback and empty disables proxy headers."""
+    if raw is None:
+        return DEFAULT_FORWARDED_ALLOW_IPS
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    for entry in entries:
+        try:
+            # Match uvicorn's strict network parsing so malformed CIDRs fail at startup instead of turning into literals.
+            ipaddress.ip_network(entry) if "/" in entry else ipaddress.ip_address(entry)
+        except ValueError as exc:
+            msg = f"{env_name} contains invalid IP or CIDR: {entry!r}"
+            raise ValueError(msg) from exc
+    return tuple(entries)
+
+
+def _parse_http_url(raw: str, *, env_name: str) -> str:
+    """Validate an http(s) base URL and strip any trailing slash."""
+    value = raw.strip()
+    try:
+        parsed = httpx.URL(value)
+    except httpx.InvalidURL as exc:
+        msg = f"{env_name} must be a valid http(s) URL: {raw!r}"
+        raise ValueError(msg) from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.host:
+        msg = f"{env_name} must be an http(s) URL with a host: {raw!r}"
+        raise ValueError(msg)
+    return value.rstrip("/")
+
+
+def _parse_required_room(raw: str | None, *, matrix_server_name: str) -> str | None:
+    """Parse an optional required Matrix room ID (!...) or local room alias (#local:server)."""
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        msg = f"MINDROOM_PROVISIONING_REQUIRED_ROOM contains whitespace or control characters: {value!r}"
+        raise ValueError(msg)
+    if value.startswith("!") and len(value) > 1:
+        return value
+    if value.startswith("#"):
+        localpart, sep, server = value[1:].partition(":")
+        if sep == ":" and localpart and server == matrix_server_name:
+            return value
+    msg = f"MINDROOM_PROVISIONING_REQUIRED_ROOM must be a room ID or local alias on {matrix_server_name!r}: {value!r}"
+    raise ValueError(msg)
+
+
 def _load_service_config_from_env() -> ServiceConfig:
-    matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "https://mindroom.chat").strip().rstrip("/")
-    if not matrix_homeserver:
+    raw_matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "https://mindroom.chat").strip()
+    if not raw_matrix_homeserver:
         msg = "MATRIX_HOMESERVER must be set."
         raise ValueError(msg)
-    matrix_server_name = os.getenv("MATRIX_SERVER_NAME", "").strip()
-    if not matrix_server_name:
-        parsed = httpx.URL(matrix_homeserver)
-        if not parsed.host:
-            msg = f"Could not infer MATRIX_SERVER_NAME from MATRIX_HOMESERVER: {matrix_homeserver}"
-            raise ValueError(msg)
-        matrix_server_name = parsed.host
+    matrix_homeserver = _parse_http_url(raw_matrix_homeserver, env_name="MATRIX_HOMESERVER")
+    raw_homeserver_api_url = os.getenv("MINDROOM_PROVISIONING_HOMESERVER_API_URL", "").strip()
+    matrix_homeserver_api_url = (
+        _parse_http_url(raw_homeserver_api_url, env_name="MINDROOM_PROVISIONING_HOMESERVER_API_URL")
+        if raw_homeserver_api_url
+        else None
+    )
+    matrix_server_name = os.getenv("MATRIX_SERVER_NAME", "").strip() or httpx.URL(matrix_homeserver).host
+    required_room = _parse_required_room(
+        os.getenv("MINDROOM_PROVISIONING_REQUIRED_ROOM"),
+        matrix_server_name=matrix_server_name,
+    )
 
     registration_token = _read_secret(
         env_name="MATRIX_REGISTRATION_TOKEN",
@@ -507,6 +570,12 @@ def _load_service_config_from_env() -> ServiceConfig:
     approve_url = (
         os.getenv("MINDROOM_PROVISIONING_APPROVE_URL", DEFAULT_APPROVE_URL).strip().rstrip("/") or DEFAULT_APPROVE_URL
     )
+    raw_forwarded = os.getenv("MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS")
+    forwarded_env_name = "MINDROOM_PROVISIONING_FORWARDED_ALLOW_IPS"
+    if raw_forwarded is None:
+        raw_forwarded = os.getenv("FORWARDED_ALLOW_IPS")
+        forwarded_env_name = "FORWARDED_ALLOW_IPS"
+    forwarded_allow_ips = _parse_forwarded_allow_ips(raw_forwarded, env_name=forwarded_env_name)
 
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
@@ -522,6 +591,9 @@ def _load_service_config_from_env() -> ServiceConfig:
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         approve_url=approve_url,
+        forwarded_allow_ips=forwarded_allow_ips,
+        required_room=required_room,
+        matrix_homeserver_api_url=matrix_homeserver_api_url,
     )
 
 
@@ -857,41 +929,80 @@ def _record_last_seen_unlocked(state: ProvisioningState, connection: LocalConnec
         state.db.commit()
 
 
-async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
-    url = f"{config.matrix_homeserver}/_matrix/federation/v1/openid/userinfo"
+async def _resolve_required_room_id(client: httpx.AsyncClient, config: ServiceConfig) -> str | None:
+    if not config.required_room or not config.required_room.startswith("#"):
+        return config.required_room or None
+    alias_url = f"{config.homeserver_api_url}/_matrix/client/v3/directory/room/{quote(config.required_room, safe='')}"
     try:
-        async with httpx.AsyncClient(timeout=8, verify=config.matrix_ssl_verify) as client:
-            response = await client.get(url, params={"access_token": openid_token})
+        response = await client.get(alias_url)
     except httpx.HTTPError as exc:
-        # The token is in the request URL, which httpx errors may include, so report only the error type.
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not reach Matrix homeserver: {type(exc).__name__}",
-        ) from None
+        detail = f"Could not resolve required Matrix room: {type(exc).__name__}"
+        raise HTTPException(status_code=502, detail=detail) from None
 
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    room_id = body.get("room_id") if isinstance(body, dict) else None
+    if not response.is_success or not isinstance(room_id, str) or not room_id.startswith("!") or len(room_id) <= 1:
+        raise HTTPException(status_code=502, detail="Could not resolve required Matrix room")
+    return room_id
+
+
+def _parse_openid_userinfo_response(response: httpx.Response, *, has_required_room: bool) -> dict[str, Any]:
     try:
         payload = response.json()
     except ValueError:
         payload = None
     errcode = payload.get("errcode") if isinstance(payload, dict) else None
-    if response.status_code in {401, 403} or errcode == "M_UNKNOWN_TOKEN":
+    if response.status_code == 401 or errcode == "M_UNKNOWN_TOKEN":
+        raise HTTPException(status_code=401, detail="Invalid Matrix OpenID token")
+    if response.status_code == 403:
+        if has_required_room:
+            raise HTTPException(status_code=403, detail="Matrix account is not authorized for local provisioning")
         raise HTTPException(status_code=401, detail="Invalid Matrix OpenID token")
     if not response.is_success:
         raise HTTPException(status_code=502, detail="Matrix homeserver OpenID userinfo failed")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=502, detail="Matrix homeserver returned invalid OpenID userinfo response")
+    return payload
 
+
+async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
+    url = f"{config.homeserver_api_url}/_matrix/federation/v1/openid/userinfo"
+    async with httpx.AsyncClient(timeout=8, verify=config.matrix_ssl_verify) as client:
+        room_id = await _resolve_required_room_id(client, config)
+        params = {"access_token": openid_token}
+        if room_id is not None:
+            params["io.mindroom.room_id"] = room_id
+        try:
+            response = await client.get(url, params=params)
+        except httpx.HTTPError as exc:
+            # The token is in the request URL, which httpx errors may include, so report only the error type.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not reach Matrix homeserver: {type(exc).__name__}",
+            ) from None
+
+    payload = _parse_openid_userinfo_response(response, has_required_room=bool(config.required_room))
     user_id = payload.get("sub")
     if not isinstance(user_id, str) or not user_id.startswith("@"):
         raise HTTPException(status_code=401, detail="Matrix OpenID token has no valid user")
     localpart, _, server_name = user_id[1:].partition(":")
     if not localpart or server_name != config.matrix_server_name:
         raise HTTPException(status_code=401, detail="Matrix OpenID token belongs to another server")
+    if localpart.lower().startswith(MANAGED_AGENT_USERNAME_PREFIX):
+        raise HTTPException(
+            status_code=403,
+            detail="Managed agent accounts cannot authenticate to the provisioning service",
+        )
+    if config.required_room and payload.get("io.mindroom.room_joined") is not True:
+        raise HTTPException(status_code=502, detail="Matrix homeserver did not verify required room membership")
     return user_id
 
 
 async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
-    register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
+    register_url = f"{config.homeserver_api_url}/_matrix/client/v3/register"
     generated_password = None if payload.password else secrets.token_urlsafe(32)
     request_payload = {
         "username": payload.username,
@@ -921,7 +1032,7 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
 
         access_token = body.get("access_token") if isinstance(body, dict) else None
         if isinstance(access_token, str) and access_token:
-            profile_url = f"{config.matrix_homeserver}/_matrix/client/v3/profile/{quote(user_id, safe='')}/displayname"
+            profile_url = f"{config.homeserver_api_url}/_matrix/client/v3/profile/{quote(user_id, safe='')}/displayname"
             headers = {"Authorization": f"Bearer {access_token}"}
             profile_payload = {"displayname": payload.display_name}
             try:
@@ -1327,7 +1438,13 @@ def main() -> None:
     """Run the provisioning API with uvicorn."""
     config = _load_service_config_from_env()
     app = create_app(config)
-    uvicorn.run(app, host=config.listen_host, port=config.listen_port)
+    uvicorn.run(
+        app,
+        host=config.listen_host,
+        port=config.listen_port,
+        proxy_headers=bool(config.forwarded_allow_ips),
+        forwarded_allow_ips=list(config.forwarded_allow_ips),
+    )
 
 
 if __name__ == "__main__":

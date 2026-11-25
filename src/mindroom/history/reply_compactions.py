@@ -58,6 +58,7 @@ class ReplyCompactions:
     def __init__(self) -> None:
         self._entries: list[dict[str, object]] = []
         self._progress: _ReplyProgress | None = None
+        self.version: int = 0
 
     def bind(self, progress: _ReplyProgress) -> None:
         """Attach the delivery showing the reply, whose progress places each new compaction."""
@@ -90,6 +91,7 @@ class ReplyCompactions:
         if event.history_budget_tokens is not None:
             entry["history_budget_tokens"] = event.history_budget_tokens
         self._entries.append(entry)
+        self.version += 1
         return entry_id
 
     def update(self, entry_id: str, **fields: object) -> None:
@@ -103,6 +105,7 @@ class ReplyCompactions:
         entry.update({key: _capped(key, value) for key, value in fields.items() if value is not None})
         if entry["status"] != "running":
             entry.pop("runs_remaining", None)
+        self.version += 1
 
     def content(self) -> list[dict[str, object]] | None:
         """Return a copy of the newest entries for the reply's content and frames, or ``None`` when there are none."""

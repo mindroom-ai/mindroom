@@ -20,16 +20,26 @@ from mindroom.llm.errors import (
     ContextWindowExceeded,
     ModelSafeguardRefusal,
     ProviderError,
+    incomplete_stream_error,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
+from mindroom.llm.provider import (
+    ModelIdentity,
+    ModelRequest,
+    ModelTurn,
+    RequestOverrides,
+    StreamTracker,
+    TurnCompleted,
+    answering_identity,
+)
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.llm.provider import ModelProvider, ModelTurn
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.usage import MessageMetrics
 
 logger = get_logger(__name__)
@@ -39,7 +49,7 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # authored thinking setting keeps a model that thinks only when asked, such as Claude 4.x, from spending the
 # output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
 # own, so a shorter authored provider timeout still applies; the summary call's wall deadline bounds every request.
-_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+_SUMMARY_OVERRIDES = RequestOverrides(transient_retries="caller", prompt_cache=False, omit_thinking_setting=True)
 
 
 class _CompactionSummaryTimeoutError(TimeoutError):
@@ -54,12 +64,12 @@ class CompactionSummaryIncompleteError(RuntimeError):
     """Raised when a provider returns partial text without completing the summary."""
 
 
+class CompactionForkToolCallError(CompactionSummaryIncompleteError):
+    """Raised when a forked compaction call emits tool calls instead of summary text."""
+
+
 class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
-
-
-class _CompactionSummaryUsageError(RuntimeError):
-    """Usage persistence failed after a paid response; never retry the model for this."""
 
 
 _TYPED_SHRINKABLE_ERRORS = (
@@ -126,7 +136,7 @@ class SummaryRetryPolicy:
         every run; shrink targets clamp there so a granted shrink is issued only
         when it rebuilds to a strictly smaller request with summarizable content.
         """
-        if isinstance(error, _CompactionSummaryUsageError) or attempt >= self.max_attempts:
+        if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
             smaller_budget = min(
@@ -181,49 +191,75 @@ def _cancel_and_detach(response_task: asyncio.Task[ModelTurn], *, reason: str) -
     asyncio.get_running_loop().call_later(_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS, warn_if_still_running)
 
 
+def _summary_usage_entries(
+    tracker: StreamTracker,
+    *,
+    completed: TurnCompleted | None,
+    failure: Exception | None,
+) -> list[tuple[ModelIdentity, MessageMetrics]]:
+    """Return every billed ``(identity, metrics)`` entry for a summary request."""
+    entries = list(tracker.prior_usage)
+    if completed is not None:
+        entries.append((answering_identity(completed.message, tracker.identity), completed.message.metrics))
+    elif tracker.reported.received is not None and tracker.reported.received.reported:
+        entries.append((tracker.identity, tracker.reported.received))
+    elif isinstance(failure, ModelSafeguardRefusal):
+        entries.append(
+            (ModelIdentity(id=failure.model_id or tracker.identity.id, provider=failure.provider), failure.usage),
+        )
+    return [(identity, usage) for identity, usage in entries if usage.reported]
+
+
 async def _request_summary(
     model: ModelProvider,
     request: ModelRequest,
     provider_done: asyncio.Future[None],
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
 ) -> ModelTurn:
-    """Send the summary request, then persist the usage it reported, a refused response's included."""
+    """Send the summary request, then persist the usage it reported under each billed model."""
+    tracker = StreamTracker(model.identity)
+    completed: TurnCompleted | None = None
+    failure: Exception | None = None
     try:
-        turn: ModelTurn | ModelSafeguardRefusal = await complete(model, request)
-    except ModelSafeguardRefusal as refusal:
-        turn = refusal
+        events = model.stream(request)
+        async with closing_async_stream(events):
+            async for event in events:
+                tracker.observe(event)
+                if isinstance(event, TurnCompleted):
+                    completed = event
+    except Exception as error:
+        failure = error
     finally:
         provider_done.set_result(None)
-    if on_usage is not None and turn.usage.reported:
-        try:
-            await on_usage(turn.usage)
-        except Exception as error:
-            msg = "Could not persist compaction summary usage"
-            raise _CompactionSummaryUsageError(msg) from error
-    if isinstance(turn, ModelSafeguardRefusal):
-        raise turn
-    return turn
+    if failure is None and completed is None:
+        failure = incomplete_stream_error(provider=tracker.identity.provider)
+    if on_usage is not None:
+        for identity, usage in _summary_usage_entries(tracker, completed=completed, failure=failure):
+            try:
+                await on_usage(identity, usage)
+            except Exception as error:
+                logger.warning(
+                    "compaction_summary_usage_save_failed",
+                    error_type=type(error).__name__,
+                    exc_info=True,
+                )
+    if failure is not None:
+        raise failure
+    assert completed is not None
+    return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
-async def generate_compaction_summary(
+async def request_compaction_summary(
     *,
     model: ModelProvider,
-    summary_input: str,
-    summary_prompt: str,
+    request: ModelRequest,
     timeout_seconds: float,
-    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
-    keep_thinking_setting: bool = False,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+    reject_tool_calls: bool = False,
 ) -> str:
-    """Bound the provider request, then persist returned usage before validating the summary text it returns.
-
-    ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
-    """
+    """Bound one compaction summary request, persist returned usage, and validate the returned summary text."""
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    request = ModelRequest(
-        messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        overrides=replace(_SUMMARY_OVERRIDES, omit_thinking_setting=not keep_thinking_setting),
-    )
     response_task = asyncio.create_task(
         _request_summary(model, request, provider_done, on_usage),
         name="compaction_summary_request",
@@ -239,6 +275,9 @@ async def generate_compaction_summary(
         _cancel_and_detach(response_task, reason="outer_cancellation")
         raise
 
+    if reject_tool_calls and (turn.tool_calls or turn.stop_reason == "tool_use"):
+        msg = "compaction fork attempted a tool call; refusing to persist summary"
+        raise CompactionForkToolCallError(msg)
     normalized_text = _normalize_compaction_summary_text(turn.content)
     if not normalized_text:
         message = turn.message
@@ -256,6 +295,37 @@ async def generate_compaction_summary(
         msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
         raise CompactionSummaryIncompleteError(msg)
     return normalized_text
+
+
+async def generate_compaction_summary(
+    *,
+    model: ModelProvider,
+    summary_input: str,
+    summary_prompt: str,
+    timeout_seconds: float,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+    keep_thinking_setting: bool = False,
+    allow_transient_fallback: bool = False,
+) -> str:
+    """Bound the provider request, then persist returned usage before validating the summary text it returns.
+
+    ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
+    ``allow_transient_fallback`` lets a configured fallback chain take over on transient errors on the final retry.
+    """
+    request = ModelRequest(
+        messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
+        overrides=replace(
+            _SUMMARY_OVERRIDES,
+            omit_thinking_setting=not keep_thinking_setting,
+            transient_retries="fallback" if allow_transient_fallback else "caller",
+        ),
+    )
+    return await request_compaction_summary(
+        model=model,
+        request=request,
+        timeout_seconds=timeout_seconds,
+        on_usage=on_usage,
+    )
 
 
 def _normalize_compaction_summary_text(raw_text: str) -> str:

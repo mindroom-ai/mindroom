@@ -54,6 +54,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
+    ModelProvider,
     ModelRequest,
     NativeCompactionReplay,
     StreamEvent,
@@ -63,7 +64,12 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import (
+    CACHE_ROUTING_KEY,
+    REQUEST_IDENTITY_KEY,
+    cache_routing_digest,
+    request_prefixes,
+)
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
@@ -173,13 +179,19 @@ def checkpointed_answer(item: dict[str, object], basis: str) -> Message:
 
 
 def stamp_request_identity(answer: Message, model: ModelProvider, request: ModelRequest) -> None:
-    """Record on ``answer`` the identity of ``request``, the request ``model`` answered, as the model loop does.
+    """Record on ``answer`` the identity of ``request`` and any cache-routing digest, as the model loop does.
 
-    A request without an identity, such as one holding media at a URL, leaves ``answer`` unstamped.
+    A request without an identity, such as one holding media at a URL, leaves ``REQUEST_IDENTITY_KEY`` unstamped.
     """
+    base = answer.provider_data or {}
+    updated = base
     identity = request_prefixes(model, request)[-1]
     if identity is not None:
-        answer.provider_data = {**(answer.provider_data or {}), REQUEST_IDENTITY_KEY: identity}
+        updated = {**updated, REQUEST_IDENTITY_KEY: identity}
+    if (routing := cache_routing_digest(model.model_params)) is not None:
+        updated = {**updated, CACHE_ROUTING_KEY: routing}
+    if updated is not base:
+        answer.provider_data = updated
 
 
 def record_native_checkpoint(
@@ -749,16 +761,17 @@ class SummaryCalls:
     async def __call__(
         self,
         *,
-        model: object,  # noqa: ARG002
+        model: ModelProvider,
         summary_input: str,
         summary_prompt: str,  # noqa: ARG002
         timeout_seconds: float,  # noqa: ARG002
-        on_usage: Callable[[MessageMetrics], Any] | None = None,
+        on_usage: Callable[[ModelIdentity, MessageMetrics], Any] | None = None,
         keep_thinking_setting: bool = False,  # noqa: ARG002
+        allow_transient_fallback: bool = False,  # noqa: ARG002
     ) -> str:
         self.inputs.append(summary_input)
         if on_usage is not None:
-            await on_usage(MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3)))
+            await on_usage(model.identity, MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3)))
         if self.cancel:
             raise asyncio.CancelledError
         if self.fail:

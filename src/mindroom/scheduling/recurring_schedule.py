@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from pydantic import TypeAdapter, ValidationError
@@ -104,13 +105,27 @@ def _save(path: Path, checkpoint: _RecurringCheckpoint) -> None:
     )
 
 
+def next_cron_run_utc(cron: str, after_utc: datetime, cron_timezone: str) -> datetime:
+    """Return the next UTC occurrence of ``cron`` evaluated in ``cron_timezone`` strictly after ``after_utc``."""
+    local_after = after_utc.astimezone(ZoneInfo(cron_timezone))
+    return croniter(cron, local_after).get_next(datetime).astimezone(UTC)
+
+
+def _prev_cron_run_utc(cron: str, before_utc: datetime, cron_timezone: str) -> datetime:
+    """Return the previous UTC occurrence of ``cron`` evaluated in ``cron_timezone`` strictly before ``before_utc``."""
+    local_before = before_utc.astimezone(ZoneInfo(cron_timezone))
+    return croniter(cron, local_before).get_prev(datetime).astimezone(UTC)
+
+
 def _plan(
     path: Path,
     workflow_key: str,
     cron: str,
     now: datetime,
     grace_seconds: int,
+    cron_timezone: str = "UTC",
 ) -> RecurringOccurrence:
+    now_utc = now.astimezone(UTC)
     checkpoint = _CHECKPOINT_ADAPTER.validate_json(path.read_bytes()) if path.exists() else None
     if checkpoint is not None and checkpoint.next_run_at.tzinfo is None:
         msg = "Recurring checkpoint requires an aware next_run_at"
@@ -118,15 +133,16 @@ def _plan(
     if checkpoint is None or checkpoint.workflow_key != workflow_key:
         # First adoption and edits establish a future cursor. We cannot prove
         # whether the old runtime fired an earlier occurrence.
-        checkpoint = _RecurringCheckpoint(workflow_key, croniter(cron, now).get_next(datetime))
+        checkpoint = _RecurringCheckpoint(workflow_key, next_cron_run_utc(cron, now_utc, cron_timezone))
         _save(path, checkpoint)
-    elif checkpoint.prepared is None and checkpoint.next_run_at <= now:
+    elif checkpoint.prepared is None and checkpoint.next_run_at <= now_utc:
         # Coalesce downtime to its latest occurrence, including an exact cron boundary.
-        latest = croniter(cron, now + timedelta(microseconds=1)).get_prev(datetime)
-        if (now - latest).total_seconds() > grace_seconds:
+        # Compute +1us in UTC before converting to ZoneInfo(cron_timezone) so DST folds stay exact.
+        latest = _prev_cron_run_utc(cron, now_utc + timedelta(microseconds=1), cron_timezone)
+        if (now_utc - latest).total_seconds() > grace_seconds:
             checkpoint = replace(
                 checkpoint,
-                next_run_at=croniter(cron, now).get_next(datetime),
+                next_run_at=next_cron_run_utc(cron, now_utc, cron_timezone),
                 last_skipped_at=latest,
                 skip_reason="outside catch-up grace window",
             )
@@ -137,7 +153,7 @@ def _plan(
                 reason=checkpoint.skip_reason,
             )
         elif latest > checkpoint.next_run_at:
-            skipped_at = croniter(cron, latest).get_prev(datetime)
+            skipped_at = _prev_cron_run_utc(cron, latest, cron_timezone)
             checkpoint = replace(
                 checkpoint,
                 next_run_at=latest,
@@ -164,13 +180,14 @@ async def plan_recurring_occurrence(
     cron: str,
     now: datetime,
     grace_seconds: int,
+    cron_timezone: str = "UTC",
 ) -> RecurringOccurrence:
     """Load or advance a timer without losing a previously attempted trigger."""
     identity = json.dumps([homeserver, sender, room_id, task_id])
     name = hashlib.sha256(identity.encode()).hexdigest()
     path = runtime_paths.storage_root / "tracking" / "recurring_schedules" / f"{name}.json"
     workflow_key = hashlib.sha256(workflow_json.encode()).hexdigest()
-    return await _checkpoint_operation(partial(_plan, path, workflow_key, cron, now, grace_seconds))
+    return await _checkpoint_operation(partial(_plan, path, workflow_key, cron, now, grace_seconds, cron_timezone))
 
 
 async def prepare_recurring_delivery(
@@ -198,13 +215,19 @@ def recurring_delivery_content(occurrence: RecurringOccurrence, device_id: str |
     return prepared.content
 
 
-async def complete_recurring_occurrence(occurrence: RecurringOccurrence, cron: str, now: datetime) -> None:
+async def complete_recurring_occurrence(
+    occurrence: RecurringOccurrence,
+    cron: str,
+    now: datetime,
+    *,
+    cron_timezone: str = "UTC",
+) -> None:
     """Advance after delivery, hook suppression, or a terminal preparation failure."""
-    completed_at = max(now, occurrence.checkpoint.next_run_at)
-    latest = croniter(cron, completed_at + timedelta(microseconds=1)).get_prev(datetime)
+    completed_at = max(now.astimezone(UTC), occurrence.checkpoint.next_run_at.astimezone(UTC))
+    latest = _prev_cron_run_utc(cron, completed_at + timedelta(microseconds=1), cron_timezone)
     checkpoint = replace(
         occurrence.checkpoint,
-        next_run_at=croniter(cron, completed_at).get_next(datetime),
+        next_run_at=next_cron_run_utc(cron, completed_at, cron_timezone),
         prepared=None,
     )
     if latest > occurrence.checkpoint.next_run_at:

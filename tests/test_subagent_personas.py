@@ -17,15 +17,15 @@ from mindroom.delegation.personas import (
     _parse_profile,
     _PersonaProfile,
     declared_function_names,
-    inline_persona,
     list_profiles,
-    load_profile,
     persona_allows,
     persona_tool_policy,
     render_profile_listing,
     resolve_persona_request,
-    validate_persona_tools,
 )
+from mindroom.delegation.personas import _inline_persona as inline_persona
+from mindroom.delegation.personas import _load_profile as load_profile
+from mindroom.delegation.personas import _validate_persona_tools as validate_persona_tools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.tool_system.declarations import (
     ToolAuthoredOverrideValidator,

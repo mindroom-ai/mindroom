@@ -25,7 +25,7 @@ from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.media import rendered_label
 from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message, is_media_follow_up
-from mindroom.llm.provider import complete
+from mindroom.llm.provider import complete, count_turn_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
@@ -201,8 +201,7 @@ async def _reply_model_decision(
             replace(state.request(decision_messages), tool_choice="none"),
         )
         assert state.record.metrics is not None
-        identity = model.identity
-        state.record.metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
+        count_turn_usage(state.record.metrics, turn, model.identity)
         if turn.tool_calls or not isinstance(turn.message.content, str):
             return ParticipationDecision(action="error", reason="invalid_decision")
         return parse_decision(turn.message.content)

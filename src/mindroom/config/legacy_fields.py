@@ -189,11 +189,19 @@ RETIRED_DEFAULTS_FIELDS = frozenset({"max_preload_chars"})
 # Handling: Drop them before validation, so a config that still overrides them loads and the next dashboard save
 #   removes them.
 # Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_cut_markers.
+#
+# LEGACY_COMPAT: Retired natural-language workflow schedule parser prompt.
+# Legacy format: prompts.WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE overrode the LLM prompt used to parse `!schedule`
+#   and `scheduler` natural-language strings into `ScheduledWorkflow` JSON.
+# Last legacy release: v2026.11.574; replacement: unreleased; structured scheduler tool calls parse no model prompt.
+# Handling: Drop it before validation, so a config that still overrides it loads and the next dashboard save removes it.
+# Coverage: tests/test_agents.py::test_config_ignores_overrides_of_the_retired_schedule_parse_prompt.
 RETIRED_PROMPT_NAMES = frozenset(
     {
         "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     },
 )
 
@@ -337,40 +345,62 @@ def _effective_approval_decision(
     return (rule.action, rule.script, timeout_days)
 
 
+def _retired_approval_pair_error(
+    rules: Sequence[_ApprovalRule],
+    *,
+    old: str,
+    new: str,
+    default: str,
+    default_timeout_days: float,
+) -> str | None:
+    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
+    if first_new is not None and rules[first_new].match == new:
+        return None
+    first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+    old_decision = _effective_approval_decision(
+        rules[first_old] if first_old is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
+    new_decision = _effective_approval_decision(
+        rules[first_new] if first_new is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
+    if old_decision == new_decision:
+        return None
+    if first_old is not None:
+        return (
+            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+            f"{old} is now {new}, which now gets a different approval decision; "
+            f"rewrite the rules for {new}."
+        )
+    if first_new is not None:
+        return (
+            f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides {new}, "
+            f"changing tool_approval.default {default!r} that previously decided {old}; "
+            f"rewrite the rules for {new}."
+        )
+    return None
+
+
 def retired_trigger_approval_error(
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
-    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase("triggers", rule.match)), None)
-    if first_new is not None and rules[first_new].match == "triggers":
-        return None
-    new_decision = _effective_approval_decision(
-        rules[first_new] if first_new is not None else None,
-        default=default,
-        default_timeout_days=default_timeout_days,
-    )
-    for old in _RETIRED_TRIGGER_FUNCTIONS:
-        first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
-        old_decision = _effective_approval_decision(
-            rules[first_old] if first_old is not None else None,
-            default=default,
-            default_timeout_days=default_timeout_days,
-        )
-        if old_decision != new_decision:
-            if first_old is not None:
-                return (
-                    f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
-                    f"{old} is now triggers, which now gets a different approval decision; "
-                    "rewrite the rules for triggers."
-                )
-            if first_new is not None:
-                return (
-                    f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides triggers, "
-                    f"changing tool_approval.default {default!r} that previously decided {old}; "
-                    "rewrite the rules for triggers."
-                )
+    for old, new in _RETIRED_TRIGGER_FUNCTIONS.items():
+        if (
+            error := _retired_approval_pair_error(
+                rules,
+                old=old,
+                new=new,
+                default=default,
+                default_timeout_days=default_timeout_days,
+            )
+        ) is not None:
+            return error
     return None
 
 
@@ -452,3 +482,75 @@ _RETIRED_MODEL_SETTINGS = {
 def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
     """Return the first retired ``extra_kwargs`` setting among ``keys``, and its guidance."""
     return next(((key, _RETIRED_MODEL_SETTINGS[key]) for key in keys if key in _RETIRED_MODEL_SETTINGS), None)
+
+
+# LEGACY_COMPAT: Retired `dynamic_workflow` toolkit alias and its `allowed_tools` override.
+# Legacy format: `defaults.tools` and `agents.<name>.tools` accepted `dynamic_workflow` (optionally with an
+#   `allowed_tools` override restricting participant tools under the deleted Dynamic Workflows engine).
+# Last legacy release: v2026.11.590; replacement: unreleased; aliases `dynamic_workflow` to `workflow` and deletes
+#   the old Dynamic Workflows engine.
+# Handling: Canonicalize `dynamic_workflow` to `workflow` via TOOL_ALIASES, strip `allowed_tools` from entries
+#   authored under the legacy alias, and log one concise deprecation warning per config load.
+# Coverage: tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_bare_agent_and_defaults_alias_with_warning,
+#   tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_strips_allowed_tools_and_warns,
+#   tests/test_dynamic_workflow_alias.py::test_dynamic_workflow_deduplicates_with_workflow.
+def strip_legacy_dynamic_workflow_overrides(
+    tool_name: str,
+    overrides: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Strip retired `allowed_tools` from entries authored as `dynamic_workflow`."""
+    if tool_name != "dynamic_workflow" or "allowed_tools" not in overrides:
+        return overrides, False
+    return {key: value for key, value in overrides.items() if key != "allowed_tools"}, True
+
+
+def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
+    """Return the one-line deprecation warning for configs that still name `dynamic_workflow`."""
+    if ignored_allowed_tools:
+        return (
+            "Tool 'dynamic_workflow' is deprecated and now aliases 'workflow' "
+            "(ignoring 'allowed_tools' because a workflow inherits its caller's tools); "
+            "rename it to 'workflow' in your config."
+        )
+    return "Tool 'dynamic_workflow' is deprecated and now aliases 'workflow'; rename it to 'workflow' in your config."
+
+
+# LEGACY_COMPAT: Retired function names of the deleted `dynamic_workflow` toolkit in `tool_approval.rules`.
+# Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
+#   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
+# Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
+#   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
+# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
+#   differs from its replacement's effective decision.
+# Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
+#   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
+_RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
+    "run_workflow": ("start_workflow", "resume_workflow"),
+    "create_workflow": ("save_workflow",),
+    "update_workflow": ("save_workflow",),
+    "get_workflow_run": ("get_workflow",),
+    "list_workflows": ("list_workflow_runs",),
+}
+
+
+def retired_dynamic_workflow_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide a `workflow` function differently from its retired name."""
+    for old, replacements in _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS.items():
+        for new in replacements:
+            if (
+                error := _retired_approval_pair_error(
+                    rules,
+                    old=old,
+                    new=new,
+                    default=default,
+                    default_timeout_days=default_timeout_days,
+                )
+            ) is not None:
+                return error
+    return None

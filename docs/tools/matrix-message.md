@@ -99,7 +99,6 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `new_thread` | `bool` | `False` | Start a separate thread; send only, cannot be combined with `thread_id`. |
 | `event_id` | `str \| None` | `None` | Target message ID; required for edit and react. |
 | `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, at most five. |
-| `message_extras` | `list[object] \| None` | `None` | [Collapsible sections](#collapsible-sections) for send/edit. |
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
@@ -107,6 +106,7 @@ The tool also takes the standard [`mindroom_output_path`](execution-and-coding.m
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.
+[Interactive prompts](../interactive.md) cannot be sent or edited through this tool and return `Interactive prompts are only supported in normal agent responses.`; put them in the agent's normal reply instead.
 `read` returns recent messages with their event IDs, and thread reads also list which messages can be edited.
 Room-timeline reads skip encrypted messages the agent cannot decrypt, and `limit` counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
 Each agent, room, and requester may make 12 calls per 30 seconds, and each attached file counts as one more call.
@@ -126,28 +126,6 @@ When a thread-mode agent sends outside an existing thread, text and files are gr
 
 Results include `attachment_event_ids`, `resolved_attachment_ids`, and `newly_registered_attachment_ids`.
 If delivery fails partway, the error result still lists the files that arrived, and when a file fails before a recipient is addressed, the task text is not sent.
-
-## Collapsible sections
-
-`message_extras` adds collapsible sections below the main text of a `send` or `edit`:
-
-```json
-{
-  "title": "Details",
-  "content": "Additional information",
-  "content_type": "text/markdown",
-  "collapsed": true
-}
-```
-
-`title` and `content` are required strings.
-`content_type` defaults to `text/markdown` and also accepts `text/plain` or `text/html`.
-`collapsed` defaults to `true`.
-A call accepts up to eight sections, with titles of at most 120 characters and content of at most 16,384 characters per section.
-Sections require a non-empty main message.
-HTML allows basic formatting only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links may use `http`, `https`, and `mailto`.
-
-[Interactive prompts](../interactive.md) cannot be sent or edited through this tool and return `Interactive prompts are only supported in normal agent responses.`; put them in the agent's normal reply instead.
 
 ## Safe send retries
 

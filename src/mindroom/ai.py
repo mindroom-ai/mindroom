@@ -24,6 +24,7 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     with_prior_usage,
 )
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.resolution import memory_backend as agent_memory_backend
@@ -41,6 +42,7 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.failure_text import failure_text
 from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
@@ -74,6 +76,7 @@ from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline.prompt_hold import prompt_hold_path
+from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -373,6 +376,7 @@ def agent_run_metadata_content(
         status=status,
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
+        answering_model_name=record.model_name if record is not None else None,
         metrics=record.metrics if record is not None else None,
         prior_usage=prior_usage,
         context_run=record,
@@ -583,7 +587,14 @@ async def _start_agent_run(
     driven = drive_delegation_stream(
         events,
         record_type=RunRecord,
-        continue_parent=_TurnRunContinuation(run_context, spec=spec, hooks=hooks, storage=storage, terminal=terminal),
+        continue_parent=_TurnRunContinuation(
+            run_context,
+            spec=spec,
+            hooks=hooks,
+            storage=storage,
+            terminal=terminal,
+            compaction_requests=run.compaction_requests,
+        ),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -613,6 +624,7 @@ class _TurnRunContinuation:
     hooks: LoopHooks
     storage: RunStorage
     terminal: TerminalRecord[RunRecord]
+    compaction_requests: set[HistoryScope] | None = None
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends as ``resume_from_session``'s does."""
@@ -629,6 +641,7 @@ class _TurnRunContinuation:
             hooks=self.hooks,
             persist=persist_into(self.terminal, self.storage),
             request_template=self.run_context.request_template,
+            compaction_requests=self.compaction_requests,
         )
 
 
@@ -1164,6 +1177,14 @@ async def run_delegated_child_response(
             sinks=sinks,
             resume=TurnResume(prior_usage=prior_usage or {}),
         )
+    if observation is not None:
+        if result.completed is not None and result.completed.status is RunStatus.error:
+            reason = (
+                EMPTY_RESPONSE_NOTICE if result.completed.is_empty else (result.text.strip() or EMPTY_RESPONSE_NOTICE)
+            )
+            observation.fail_current(reason)
+        elif result.failed is not None:
+            observation.fail_current(redact_sensitive_text(failure_text(result.failed.reply.error)))
     record = None if observation is None else observation.current_record()
     # A child a config reload stopped hands its caller what its settlement records, not its unfinished text.
     return (reload_stopped_child_result(child, record) if record is not None else None) or result.text

@@ -277,6 +277,7 @@ class _RunRecordCommon:
     error: str | None = None
     model: str | None = None
     model_provider: str | None = None
+    model_name: str | None = None
     messages: list[Message] = field(default_factory=list)
     tools: list[ToolExecution] | None = None
     # How many of ``tools`` are refused calls that do not count toward the run's tool-call limit: a call naming no
@@ -334,6 +335,7 @@ class _RunRecordCommon:
             "error": self.error,
             "model": self.model,
             "model_provider": self.model_provider,
+            "model_name": self.model_name,
         }
         result = {key: value for key, value in values.items() if value is not None}
         result["created_at"] = self.created_at
@@ -389,6 +391,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "error": data.get("error"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),
+        "model_name": data.get("model_name"),
         "messages": messages,
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
         "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),

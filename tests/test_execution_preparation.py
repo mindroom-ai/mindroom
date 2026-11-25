@@ -48,10 +48,11 @@ from mindroom.execution_preparation import (
 from mindroom.history.conversation_text import _own_thread_message_text
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.request_size import RequestFrame, request_sizer
-from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
+from mindroom.history.runtime import PreparedScopeHistory
 from mindroom.history.types import (
     CompactionDecision,
     HistoryPolicy,
+    HistoryPreparationInputs,
     PreparedHistoryState,
     ResolvedReplayPlan,
 )

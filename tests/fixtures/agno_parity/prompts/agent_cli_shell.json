@@ -48,11 +48,11 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Operator (Matrix ID: @mindroom_operator:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Operator and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `shell`, `calculator`, `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n- Not confined by file_access (only a worker isolates them): `shell`.\n\nOperate the build machine.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Explain each command before running it.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels, and give each option a different emoji.\n\n- Inside shell commands, `mindroom-agent` calls your other tools by name, so one script can combine many calls; run `mindroom-agent --help` for usage.",
+          "content": "<your_role>\n## Your Identity\nYou are Operator (Matrix ID: @mindroom_operator:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- Not confined to the agent workspace (only a worker isolates them): `shell`.\n\nOperate the build machine.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.\n\n- Explain each command before running it.\n\n- Create or edit workspace skills at `skills/<skill-name>/SKILL.md` (YAML frontmatter `name` and `description`; never write bundled, plugin, or user skill dirs); they load on the next run.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n- Inside shell commands, `mindroom-agent` calls your other tools by name, so one script can combine many calls; run `mindroom-agent --help` for usage.",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -89,7 +89,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -106,7 +106,7 @@
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to cancel (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -118,7 +118,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -150,7 +150,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -161,17 +161,79 @@
         },
         {
           "name": "edit_schedule",
-          "description": "Edit an existing scheduled task by replacing its timing and content.",
+          "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The ID of the task to edit (from list_schedules)."
+                "description": "Task ID from `list_schedules`."
               },
-              "request": {
-                "type": "string",
-                "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+              "message": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New trigger message."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New listing label."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time ISO 8601 datetime with time."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New one-time delay in seconds (>= 1)."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New 5-field cron in `timezone`."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
               },
               "history_limit": {
                 "anyOf": [
@@ -182,7 +244,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
+                "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
+              },
+              "clear_history_limit": {
+                "type": "boolean",
+                "description": "Set `True` to remove the history limit (unlimited)."
               },
               "silent": {
                 "anyOf": [
@@ -193,7 +259,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
+                "description": "Update quiet delivery mode."
               },
               "model": {
                 "anyOf": [
@@ -204,7 +270,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
+                "description": "Per-run model alias or `name@level`; `\"\"` restores default."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -216,12 +282,11 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
-              "task_id",
-              "request"
+              "task_id"
             ]
           }
         },
@@ -249,7 +314,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -278,7 +343,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -306,7 +371,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -330,7 +395,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": []
@@ -360,7 +425,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -371,13 +436,13 @@
         },
         {
           "name": "run_scheduled_call",
-          "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+          "description": "Run a scheduled pre-approved tool call once without re-approval when prompted.\nPass `arguments_json` only if the requester approved any arguments; otherwise omit it.",
           "parameters": {
             "type": "object",
             "properties": {
               "task_id": {
                 "type": "string",
-                "description": "The scheduled task's ID from its message."
+                "description": "Task ID from the scheduled prompt."
               },
               "arguments_json": {
                 "anyOf": [
@@ -388,7 +453,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+                "description": "Replacement JSON object string (only when any arguments were approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -400,7 +465,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -410,7 +475,7 @@
         },
         {
           "name": "run_shell_command",
-          "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout, then of stderr, are returned; on\nnon-zero exit, all of stderr is kept. By default the call waits at\nmost 120 seconds in the foreground. A call with ``timeout`` <= 120\nstops the command and the processes it started after ``timeout``\nseconds and returns its output so far. When a command is still running\nafter 120 seconds: a call that accepts ``background_after`` (with it\nunset) returns a job handle while the command runs on until\ncompletion, its ``timeout``, or job cancellation; any other call\n(including subagent calls) moves the command to the background,\nreturns its PID, live log path, and wait/stop commands, and stops it\nautomatically when ``timeout`` (if set) expires or when the turn ends.\nSet ``timeout`` on a command that might not end on its own, such as a\nwatcher or a test run that can hang. Start a server or anything else\nmeant to outlive the turn detached with ``nohup cmd > out.log 2>&1 &``.\nWait for something inside one command, such as\n``until <check>; do sleep 10; done`` with a ``timeout``, not with\nrepeated ``sleep`` calls: every call is a model turn.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a managed\ntop-level job still saves it on completion, whereas a command stopped\nor backgrounded in the current turn saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
+          "description": "Run a command via non-login Bash (prepared env; pass ``[\"bash\", \"-lc\", cmd]`` only if login startup is needed).\nReturns last ``tail`` lines of stdout then stderr (all stderr on non-zero exit). Waits up to 120s in foreground:\n``timeout`` <= 120 stops the process group inline and returns output so far; if still running at 120s, calls\nwith ``background_after`` (unset) return a job handle (runs until done, ``timeout``, or cancel), while other\ncalls (including subagents) background with PID/log/wait/stop commands and stop at ``timeout`` or turn end.\nSet ``timeout`` on commands that may hang; detach servers meant to outlive the turn via\n``nohup cmd > out.log 2>&1 &``; poll in one command (``until <check>; do sleep 10; done`` + ``timeout``)\ninstead of repeated ``sleep`` turns. With ``mindroom_output_path``, saves full output (up to byte limit)\nignoring ``tail`` (managed top-level jobs save on completion; stopped/in-turn-backgrounded calls save none).\n\nCWD is your agent workspace. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` instead of `~` (worker-routed execution maps `~` to the workspace; local execution maps it to the host home).\n\nWorking method: sample large inputs first (head/tail/grep/wc) rather than dumping them, but compute over full input. Filter on the extracted field value, not the whole line, and sanity-check samples. Never raw-concat text files (missing trailing newlines merge boundary tokens/records): process separately or insert a separator and test without trailing newlines (except byte-for-byte split chunks). For single-value edits, replace only that span preserving all other bytes/comments/spacing. Verify outputs back, grep for leftover old names after renames, run tests, and recheck suspicious results (e.g. zero counts).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -426,11 +491,11 @@
                     "type": "string"
                   }
                 ],
-                "description": "The command to run as a shell command string or a list of argv strings."
+                "description": "Shell command string or argv list of strings."
               },
               "tail": {
                 "type": "integer",
-                "description": "The number of lines to return from the output."
+                "description": "Output lines to return."
               },
               "timeout": {
                 "anyOf": [
@@ -441,7 +506,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Seconds after which the command and its process group are stopped.\nValues <= 120 stop the command inline; null or > 120 waits 120s in the\nforeground and then continues in the background (until completion,\n``timeout``, or turn/job end)."
+                "description": "Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -453,7 +518,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -464,17 +529,72 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
+          "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
           "parameters": {
             "type": "object",
             "properties": {
-              "request": {
+              "message": {
                 "type": "string",
-                "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
               },
               "new_thread": {
                 "type": "boolean",
-                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
+              },
+              "delay_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
+              },
+              "cron": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
+              },
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Short listing label (defaults to trimmed `message`)."
+              },
+              "timezone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
               },
               "history_limit": {
                 "anyOf": [
@@ -485,18 +605,11 @@
                     "type": "null"
                   }
                 ],
-                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
+                "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                "type": "boolean",
+                "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
               },
               "model": {
                 "anyOf": [
@@ -507,7 +620,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -519,36 +632,36 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
-              "request",
+              "message",
               "new_thread"
             ]
           }
         },
         {
           "name": "schedule_tool_call",
-          "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+          "description": "Pre-approve and schedule an approval-gated tool call to run later (e.g. while requester is away).\nPosts an approval card in this thread; when it fires, call `run_scheduled_call(task_id)` to run it once without re-approval. Tell the requester to approve the card; never claim it ran until `run_scheduled_call` reports its result.",
           "parameters": {
             "type": "object",
             "properties": {
               "tool_name": {
                 "type": "string",
-                "description": "One of your tool functions, e.g. \"post_slack_message\"."
+                "description": "Your tool function name (e.g. \"post_slack_message\")."
               },
               "arguments_json": {
                 "type": "string",
-                "description": "The call's arguments as a JSON object string."
+                "description": "Arguments as a JSON object string."
               },
               "execute_at": {
                 "type": "string",
-                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+                "description": "ISO 8601 timestamp with UTC offset (e.g. \"2026-10-04T09:00:00-04:00\")."
               },
               "description": {
                 "type": "string",
-                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+                "description": "Short action summary (guides execution if any arguments are approved)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -560,7 +673,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -591,7 +704,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -623,7 +736,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [

@@ -76,9 +76,10 @@ A reply that already started finishes on its model, so the reply that reaches th
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 When `fallback_model` names no [reasoning level](https://docs.mindroom.chat/configuration/models/#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
-This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
+This covers agent and team replies including every team member, delegated agents, workflow agent runs, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
+For a capped user, model `fallbacks` chains also drop priced models other than `fallback_model`.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.

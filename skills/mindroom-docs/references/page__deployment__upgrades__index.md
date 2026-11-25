@@ -14,7 +14,7 @@ Nothing saved for the old tools is translated, so before upgrading, change what 
 - A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` are removed and, where they were off, become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; remove `all`, and set `enable_delete_file: true` only if `all` had turned deletion on and you still want it; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
 - [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
 - Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you delete them, saving any you still want under `filesystem`; settings of the earlier `file` toolkit saved under `filesystem` stop it the same way.
-- A contact's tools, a `dynamic_workflow` `allowed_tools` entry, a saved workflow, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
+- A contact's tools, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
 - A `script` `allowed_tools` list that names `file` or `coding` makes every script launch fail until it names `filesystem`.
 - A background tool job that an agent started with `file` or `coding` does not resume after the upgrade, so let running jobs finish first.
 - Upgrade workers and the sandbox runner together with the primary.
@@ -175,6 +175,15 @@ If the device store is missing, restore the deployment's matching storage backup
 A hard logout, a deleted server device, a changed returned identity, corrupt storage, or an unknown storage format requires operator recovery.
 Clearing the journal or the crypto directory is not a supported repair, because a Nio 1.0 device session is bound to its journal.
 Preserve the failed deployment's state while recovering it, because pending input and attempted deliveries may still need reconciliation.
+
+### Rolling back
+
+Changing only the image back to an older release is unsafe once the new release has opened persistent storage, because older releases can write to upgraded crypto stores and do not reliably reject the newer records.
+Before upgrading, stop all primary, worker, script, and background writers and take one coordinated backup of configuration, credentials, workspaces, memories, the event journal, every Matrix device store and trust sidecar, continuity files, and session storage, including separately mounted session and state volumes.
+Verify that this backup can be restored before proceeding.
+To roll back, stop all writers and keep ingress closed, set the failed upgraded state aside, and restore the complete backup before starting the previous release.
+Restore the journal and device stores together, because each is upgraded separately and a device session is bound to its journal.
+Keep the set-aside upgraded state, because user work and tool actions after the upgrade may not exist in the restored backup.
 
 ## Private storage migration
 

@@ -7,11 +7,11 @@ from mindroom.commands.parsing import CommandType, command_parser
 
 def test_command_parser_with_voice_emoji() -> None:
     """Test that command parser handles voice emoji prefixes."""
-    # Microphone emoji with schedule command
-    command = command_parser.parse("🎤 !schedule in 10 minutes turn off lights")
+    # Microphone emoji with cancel_schedule command
+    command = command_parser.parse("🎤 !cancel_schedule abc123")
     assert command is not None
-    assert command.type == CommandType.SCHEDULE
-    assert command.args["full_text"] == "in 10 minutes turn off lights"
+    assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["task_id"] == "abc123"
 
     # Microphone emoji with help command
     command = command_parser.parse("🎤 !help schedule")
@@ -32,10 +32,9 @@ def test_command_parser_without_emoji() -> None:
     assert command.type == CommandType.HELP
     assert command.args["topic"] is None
 
-    command = command_parser.parse("!schedule tomorrow meeting")
+    command = command_parser.parse("!list_schedules")
     assert command is not None
-    assert command.type == CommandType.SCHEDULE
-    assert command.args["full_text"] == "tomorrow meeting"
+    assert command.type == CommandType.LIST_SCHEDULES
 
 
 def test_non_commands_with_emoji() -> None:

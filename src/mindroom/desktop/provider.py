@@ -21,6 +21,7 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
 from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, normalize_key_chord
+from mindroom.desktop.native_config import MAX_JPEG_QUALITY, MIN_JPEG_QUALITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -222,8 +223,8 @@ class PyAutoGuiDesktopProvider:
         if not 320 <= max_screenshot_width <= 3840:
             msg = "max_screenshot_width must be between 320 and 3840."
             raise ValueError(msg)
-        if not 40 <= jpeg_quality <= 95:
-            msg = "jpeg_quality must be between 40 and 95."
+        if not MIN_JPEG_QUALITY <= jpeg_quality <= MAX_JPEG_QUALITY:
+            msg = f"jpeg_quality must be between {MIN_JPEG_QUALITY} and {MAX_JPEG_QUALITY}."
             raise ValueError(msg)
         try:
             import pyautogui  # noqa: PLC0415
@@ -480,7 +481,6 @@ class PyAutoGuiDesktopProvider:
         end = _normalized_point(target.state.window, x=end_x, y=end_y)
         self._mapped_display(target.state.window)
         if sys.platform == "darwin":
-            self._accessibility.prepare_fallback(app_id, state_id)
             macos_input.drag(
                 start,
                 end,
