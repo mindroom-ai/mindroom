@@ -1426,6 +1426,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
+    "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.notices",
 ]
@@ -10162,6 +10163,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.execution",
+    "mindroom.loop_hooks",
     "mindroom.response_turn",
     "mindroom.teams",
     "mindroom.tool_jobs.execution",

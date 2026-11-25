@@ -21,6 +21,7 @@ from mindroom.tool_system.tool_function import ToolValue
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobCall
     from mindroom.tool_jobs.results import ToolResultPayload
@@ -84,7 +85,7 @@ def _finished_call_ids(run: RunRecord | TeamRunRecord) -> frozenset[str]:
     call_ids.update(
         message.tool_call_id
         for message in run.messages or ()
-        if message.role == "tool" and message.tool_call_id is not None
+        if message.role == "tool" and message.tool_call_id is not None and not message.from_history
     )
     return frozenset(call_ids)
 
@@ -138,7 +139,7 @@ def _saved_by_runtime(
     return by_runtime
 
 
-async def _acknowledge_batch(runtime: ToolJobRuntime, batch: Sequence[_Consumption]) -> None:
+async def _acknowledge_batch(runtime: ToolJobRuntime, batch: Sequence[_Consumption]) -> bool:
     waits = [
         AcknowledgeWait(
             consumption.job.job_id,
@@ -154,11 +155,12 @@ async def _acknowledge_batch(runtime: ToolJobRuntime, batch: Sequence[_Consumpti
     except Exception as error:
         for consumption in batch:
             _log_unconfirmed(consumption.job.job_id, consumption.run_id, error)
-        return
+        return False
     if errors:
         run_ids_by_job = {consumption.job.job_id: consumption.run_id for consumption in batch}
         for job_id, ack_error in errors:
             _log_unconfirmed(job_id, run_ids_by_job.get(job_id), ack_error)
+    return True
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,33 @@ class ConsumptionOwner:
         self._claims.append(_Consumption(runtime, job, claim, run_id, team, call_id, returned_inline))
         if returned_inline:
             runtime.hold_inline(job.job_id, claim)
+
+    async def acknowledge_saved_run(self, run: AnyRunRecord) -> None:
+        """Acknowledge claims already proved by a durably saved run record."""
+        if not self._claims:
+            return
+        team = isinstance(run, TeamRunRecord)
+        finished = _finished_call_ids(run)
+
+        def matches(consumption: _Consumption) -> bool:
+            return consumption.run_id == run.run_id and consumption.team == team and consumption.call_id in finished
+
+        if not any(matches(consumption) for consumption in self._claims):
+            return
+
+        async def settle() -> None:
+            matched = [consumption for consumption in self._claims if matches(consumption)]
+            if not matched:
+                return
+            self._claims = [consumption for consumption in self._claims if not matches(consumption)]
+            by_runtime: dict[ToolJobRuntime, list[_Consumption]] = {}
+            for consumption in matched:
+                by_runtime.setdefault(consumption.runtime, []).append(consumption)
+            for runtime, batch in by_runtime.items():
+                if not await _acknowledge_batch(runtime, batch):
+                    self._claims.extend(batch)
+
+        await run_coroutine_until_complete(settle())
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
@@ -234,6 +263,13 @@ def set_consumption_storage(storage_factory: Callable[[], ConversationStore] | N
     owner = _OWNER.get()
     if owner is not None:
         owner.storage_factory = storage_factory
+
+
+async def acknowledge_saved_run(run: AnyRunRecord) -> None:
+    """Acknowledge claims already proved by ``run`` after its canonical save succeeded."""
+    owner = _OWNER.get()
+    if owner is not None:
+        await owner.acknowledge_saved_run(run)
 
 
 async def finalize_consumption() -> None:
