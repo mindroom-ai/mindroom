@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 logger = get_logger(__name__)
 
@@ -704,7 +704,7 @@ def offered_functions(
 ) -> tuple[frozenset[str] | None, bool]:
     """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
 
-    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    A function stays on by ``all`` or ``enable_<function>``, then the filters. The functions are None when the
     toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
     names no writing functions writes when it runs code. Request filter validation only when the declared functions
     and enable flags predict what the constructor registers, as they do for shell.
@@ -843,7 +843,7 @@ def get_tool_by_name(
     workspace_in_worker: bool | None = None,
     in_sandbox_request: bool = False,
     worker_target: ResolvedWorkerTarget | None,
-) -> AnyToolkit:
+) -> Toolkit:
     """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
 
     The factory, metadata, placement, and credential ownership come from ``tools``; ``runtime_config`` supplies
@@ -865,7 +865,7 @@ def get_tool_by_name(
         else runs_in_worker
     )
 
-    def build() -> AnyToolkit:
+    def build() -> Toolkit:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
         routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
         if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
@@ -878,12 +878,12 @@ def get_tool_by_name(
             raise ToolMetadataValidationError(msg)
 
         # Imported on first tool construction so importing this module stays free
-        # of the agno runtime import chain (#1436).
-        from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
+        # of schema-generation imports (#1436).
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
+        from mindroom.tool_system.toolkits import (  # noqa: PLC0415
             configure_toolkit_functions,
             toolkit_function_names,
         )
-        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
 
         output_file_policy = (
             ToolOutputFilePolicy.from_runtime(
@@ -912,7 +912,7 @@ def get_tool_by_name(
             factory,
             tool_config_overrides=settings.tool_config_overrides,
         )
-        tool_class = load_toolkit_class(tool_name, factory)
+        tool_class = load_toolkit_class(factory)
         init_kwargs = dict(settings.values)
         extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
         proxy_tool_init_overrides = dict(settings.tool_init_overrides or {})
@@ -984,26 +984,18 @@ def get_tool_by_name(
     return _build_with_tool_dependencies(tool_name, metadata, runtime_paths, build)
 
 
-def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
-    """Return the toolkit class ``factory`` registers as ``tool_name``, refusing one MindRoom does not run."""
+def load_toolkit_class[T: type](factory: Callable[[], T]) -> T:
+    """Return the toolkit class ``factory`` registers."""
     with optional_dependency_environment():
-        tool_class = factory()
-    # By module and class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
-    if any((base.__module__, base.__name__) == ("agno.tools.mcp.mcp", "MCPTools") for base in tool_class.__mro__):
-        msg = (
-            f"Tool '{tool_name}' subclasses Agno MCPTools, which MindRoom does not run; "
-            "configure its MCP server under mcp_servers: in config.yaml instead"
-        )
-        raise ToolMetadataValidationError(msg)
-    return tool_class
+        return factory()
 
 
 def _build_with_tool_dependencies(
     tool_name: str,
     metadata: ToolMetadata,
     runtime_paths: RuntimePaths,
-    build: Callable[[], AnyToolkit],
-) -> AnyToolkit:
+    build: Callable[[], Toolkit],
+) -> Toolkit:
     """Run ``build`` once the tool's declared dependencies are present.
 
     When ``build`` raises ImportError and the tool's optional extra installs, ``build`` runs once more.

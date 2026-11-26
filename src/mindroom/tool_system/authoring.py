@@ -4,7 +4,7 @@ A toolkit groups the functions an agent is offered under one name, with instruct
 offers any of them. Each function's model-facing description and parameter schema come from its docstring and
 annotations (``tool_schema``), and every parameter is the model's to fill: a function reads the call it runs for
 through ``current_call()`` instead of taking it as a parameter.
-The module imports no Agno code, so plugin code that authors tools through ``mindroom.plugin_api`` loads none.
+The module keeps its import surface lean so plugin code importing ``mindroom.plugin_api`` stays fast.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -217,7 +216,7 @@ class CurrentCall:
 
 def current_call() -> CurrentCall | None:
     """Return the tool call this task is running; None outside one, such as when code calls a tool method directly."""
-    # Deferred because invocation loads Agno for vendor toolkits, which plugin code importing this module must not;
+    # Deferred to keep plugin_api's import surface free of invocation and schema-generation dependencies;
     # any code running inside a tool call has loaded it already.
     from mindroom.tool_system.invocation import current_tool_call  # noqa: PLC0415
 
@@ -234,17 +233,17 @@ def current_call() -> CurrentCall | None:
     )
 
 
-def toolkit_functions(toolkit: AnyToolkit) -> dict[str, Callable[..., Any]]:
+def toolkit_functions(toolkit: Toolkit) -> dict[str, Callable[..., Any]]:
     """Return the callables of ``toolkit``'s functions by name, one per name, as an agent's run calls them.
 
     Each validates its arguments; for a toolkit ``get_tool_by_name`` built, each also handles ``mindroom_output_path``
-    and sends a call routed to a worker there. For an Agno toolkit, a function's async variant wins where it has one.
+    and sends a call routed to a worker there.
     A call through one inside an async tool shares that call's ownership of the synchronous work it starts, so the
     tool may call them any number of times, at once too; a tool that calls them must be async.
     """
-    # Deferred because the adapter loads Agno for vendor toolkits, which plugin code importing this module must not;
+    # Deferred to keep authoring and plugin_api free of schema-generation imports at import time;
     # code calling a toolkit's functions runs inside MindRoom, which has loaded it already.
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
 
     adapted = adapt_toolkit(toolkit)
     return {function.name: function.entrypoint for function in adapted.functions}

@@ -15,10 +15,10 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
+from mindroom.tool_system.toolkits import adapt_callable
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -62,7 +62,7 @@ def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
     """Derive each ``@tool`` function of an owned toolkit class as an agent build does, without constructing the class.
 
     A function that does not derive, such as one whose annotation names a type imported only for type checking, leaves
-    every agent without the toolkit. An Agno toolkit names its functions only once constructed, so its build checks them.
+    every agent without the toolkit.
     """
     if not issubclass(tool_class, Toolkit):
         return
@@ -126,7 +126,7 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     # Every plugin tool registration sets its factory.
                     assert factory is not None
                     try:
-                        tool_class = load_toolkit_class(tool_name, factory)
+                        tool_class = load_toolkit_class(factory)
                     except ImportError:
                         # A factory may import a package the user installs after the plugin; its build checks it then.
                         continue

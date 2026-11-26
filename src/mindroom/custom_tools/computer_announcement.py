@@ -13,14 +13,14 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
 logger = get_logger(__name__)
 
 
 def computer_announcement_middleware(
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     tool_name: str,
     *,
     agent_name: str,

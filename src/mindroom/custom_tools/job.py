@@ -18,7 +18,6 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     job_summary,
 )
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -29,6 +28,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import configure_toolkit_functions
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence

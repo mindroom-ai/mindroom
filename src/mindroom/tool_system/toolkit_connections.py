@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Connect the Agno toolkits that hold a connection around each run or call that uses them.
+"""Connect toolkits that hold a connection around each run or call that uses them.
 
 A toolkit that sets ``requires_connect``, such as Postgres or Redshift, holds a connection its run must close. A run
 connects every such toolkit first and closes what it connected once it ends; a failure either way is logged as a
@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.toolkits import requires_connect
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection, Coroutine
     from concurrent.futures import Executor
 
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
 
 logger = get_logger(__name__)
@@ -52,7 +52,7 @@ class _ConnectingToolkit(Protocol):
 _pending_cleanups: weakref.WeakKeyDictionary[_ConnectingToolkit, asyncio.Task[None]] = weakref.WeakKeyDictionary()
 
 
-def run_connection(toolkit: AnyToolkit) -> ToolkitConnect | None:
+def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
     """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
     if requires_connect(toolkit):
         return partial(_connect, toolkit)
@@ -128,7 +128,7 @@ async def run_toolkit_lifecycle(operation: Callable[[], object], *, executor: Ex
         await result
 
 
-async def close_connected_toolkit(toolkit: AnyToolkit, *, executor: Executor | None = None) -> None:
+async def close_connected_toolkit(toolkit: Toolkit, *, executor: Executor | None = None) -> None:
     """Close ``toolkit`` when it holds a connection, as ``run_toolkit_lifecycle`` runs its ``close``."""
     if requires_connect(toolkit):
         await run_toolkit_lifecycle(toolkit.close, executor=executor)
@@ -175,7 +175,7 @@ class RetainedToolkitCleanups:
 
 @asynccontextmanager
 async def toolkit_call_lifetime(
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     cleanups: RetainedToolkitCleanups,
     *,
     executor: Executor | None = None,
@@ -225,7 +225,7 @@ async def toolkit_call_lifetime(
 
 def _retain_close(
     cleanups: RetainedToolkitCleanups,
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     *,
     after: Collection[asyncio.Future[Any]],
     executor: Executor | None,

@@ -63,12 +63,6 @@ from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, asse
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_keeps_room_tools
-from mindroom.tool_system.agno_toolkits import (
-    adapt_toolkit,
-    configure_toolkit_functions,
-    offered_refusal,
-    with_offered_instructions,
-)
 from mindroom.tool_system.catalog import get_tool_by_name
 from mindroom.tool_system.construction import (
     ToolConstruction,
@@ -83,6 +77,12 @@ from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_sk
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import run_connection
+from mindroom.tool_system.toolkits import (
+    adapt_toolkit,
+    configure_toolkit_functions,
+    offered_refusal,
+    with_offered_instructions,
+)
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
@@ -105,7 +105,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.registry import ToolRegistry
@@ -146,7 +146,7 @@ class _ToolkitEntry:
     """
 
     adapted: AdaptedToolkit
-    toolkit: AnyToolkit | None = None
+    toolkit: Toolkit | None = None
     deferral: ToolDeferral | None = None
 
 
@@ -179,7 +179,7 @@ class _AgentToolAssembly:
         """Return the toolkits a run offers, in offer order."""
         return tuple(entry.adapted for entry in self.entries)
 
-    def job_sources(self) -> tuple[tuple[AnyToolkit, ToolFunction], ...]:
+    def job_sources(self) -> tuple[tuple[Toolkit, ToolFunction], ...]:
         """Return each function a run offers of a configured toolkit with the toolkit built for it, as tool jobs see it."""
         return tuple(
             (entry.toolkit, function)
@@ -569,7 +569,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
     calls_as_jobs: bool = False,
-) -> AnyToolkit | None:
+) -> Toolkit | None:
     """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
@@ -593,13 +593,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         )
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
 
-    def constructed[T: AnyToolkit](toolkit: T) -> T:
+    def constructed[T: Toolkit](toolkit: T) -> T:
         return bind_toolkit_construction(
             toolkit,
             ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
-    def wrap_direct[T: AnyToolkit](toolkit: T) -> T:
+    def wrap_direct[T: Toolkit](toolkit: T) -> T:
         threshold = config.defaults.tool_output_auto_save_threshold_bytes
         policy = _agent_tool_output_file_policy(agent_runtime, runtime_paths, threshold)
         return constructed(configure_toolkit_functions(toolkit, output_files=policy))
@@ -904,7 +904,7 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
 
 def apply_tool_approval_capability(
     adapted: AdaptedToolkit,
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     config: Config,
     *,
     tools: ToolRegistry,
@@ -1352,7 +1352,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         return entry
 
     def offered_entry(
-        toolkit: AnyToolkit,
+        toolkit: Toolkit,
         adapted: AdaptedToolkit,
         tool_entry: EffectiveToolConfig,
         authored_name: str,
@@ -1763,7 +1763,7 @@ def _build_agent_instructions(
     return instructions
 
 
-def _job_controls_entry(controls: AnyToolkit) -> _ToolkitEntry:
+def _job_controls_entry(controls: Toolkit) -> _ToolkitEntry:
     """Assemble the job controls as their own authored toolkit, which no approval rule gates.
 
     The loop runs the caller's tool hooks around their calls as around any other, but they never ask for approval:

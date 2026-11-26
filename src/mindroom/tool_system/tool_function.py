@@ -1,7 +1,4 @@
-"""The tool values the agent loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return.
-
-They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objects and from owned toolkits.
-"""
+"""The tool values the agent loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return."""
 
 from __future__ import annotations
 
@@ -21,15 +18,6 @@ if TYPE_CHECKING:
 
 type ToolkitClose = Callable[[], Awaitable[None]]
 type ToolkitConnect = Callable[[], Awaitable[ToolkitClose | None]]
-
-
-class InjectedValue(StrEnum):
-    """What a framework-injected parameter receives at call time."""
-
-    ACTOR = "actor"  # The adapted toolkit's agent or team stand-in, ``ToolCallActor``.
-    RUN_CONTEXT = "run_context"
-    MEDIA = "media"  # The run's media, which the agent loop never gives a tool, so None.
-    DEFAULT = "default"  # Nothing, so the parameter keeps its default.
 
 
 class ToolGate(StrEnum):
@@ -62,10 +50,6 @@ class ToolFunction:
     ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
     call stops it only when the call's outcome says so (``ToolOutcome.stop_after_call``), as a model switch for the
     current response does; either way the function controls the run (``controls_run``).
-    ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
-    model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
-    ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
-    adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
     ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
@@ -88,8 +72,6 @@ class ToolFunction:
     stop_after_call: bool = False
     may_stop_run: bool = False
     entrypoint: Callable[..., Any]
-    injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
-    actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 
     @property
@@ -135,7 +117,7 @@ class AdaptedToolkit:
     deferred toolkit hands to tool search or the function's description; an agent refuses an eager toolkit that
     offers such a function.
     ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot
-    honor, such as an Agno hook; an agent refuses a toolkit that still offers such a function.
+    honor; an agent refuses a toolkit that still offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run
     owns none because the toolkit was connected before it or connecting failed.

@@ -35,9 +35,9 @@ from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_c
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_jobs.background_after import application_arguments
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
