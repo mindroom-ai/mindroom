@@ -1150,6 +1150,7 @@ class TriggersTools(Toolkit):
                 validated,
                 expected_rule_uid=existing.rule_uid,
                 update_enabled=args["enabled"] is not None,
+                max_github_pr_per_owner=context.config.external_trigger_policy.max_github_pr_watches_per_owner,
             )
             if updated is None:
                 msg = f"Reactive trigger not found: {resolved_trigger_id}"

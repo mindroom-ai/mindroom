@@ -231,22 +231,13 @@ class ReactiveTriggerStore:
                     msg = f"Owner {record.owner_user_id} reached reactive trigger limit ({max_per_owner})"
                     raise ReactiveTriggerLimitError(msg)
 
-            if max_github_pr_per_owner is not None and record.source.source_type == "github_pr":
-                github_pr_count = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*) FROM reactive_triggers
-                        WHERE owner_user_id = ?
-                          AND source_type = 'github_pr'
-                          AND enabled = 1
-                          AND (expires_at IS NULL OR expires_at > ?)
-                        """,
-                        (record.owner_user_id, record.created_at),
-                    ).fetchone()[0],
+            if record.source.source_type == "github_pr":
+                _check_github_pr_quota(
+                    conn,
+                    record.owner_user_id,
+                    max_github_pr_per_owner=max_github_pr_per_owner,
+                    now=record.created_at,
                 )
-                if github_pr_count >= max_github_pr_per_owner:
-                    msg = f"Owner {record.owner_user_id} reached GitHub PR watch limit ({max_github_pr_per_owner})"
-                    raise ReactiveTriggerLimitError(msg)
 
             conn.execute(
                 """
@@ -344,6 +335,7 @@ class ReactiveTriggerStore:
         *,
         expected_rule_uid: str | None = None,
         update_enabled: bool = False,
+        max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints.
 
@@ -353,7 +345,8 @@ class ReactiveTriggerStore:
         """
         with self._write_transaction() as conn:
             existing = conn.execute(
-                "SELECT rule_uid, enabled, disabled_reason, fire_count, last_fired_at "
+                "SELECT rule_uid, owner_user_id, source_type, enabled, disabled_reason, expires_at, "
+                "fire_count, last_fired_at "
                 "FROM reactive_triggers WHERE trigger_id = ?",
                 (record.trigger_id,),
             ).fetchone()
@@ -362,7 +355,9 @@ class ReactiveTriggerStore:
             live_uid = str(existing["rule_uid"])
             if expected_rule_uid is not None and live_uid != expected_rule_uid:
                 return None
-            effective_enabled = record.enabled if update_enabled else bool(existing["enabled"])
+            existing_enabled = bool(existing["enabled"])
+            existing_expires_at = float(existing["expires_at"]) if existing["expires_at"] is not None else None
+            effective_enabled = record.enabled if update_enabled else existing_enabled
             effective_disabled_reason = (
                 record.disabled_reason
                 if update_enabled
@@ -379,6 +374,20 @@ class ReactiveTriggerStore:
                     ),
                 },
             )
+            was_active = existing_enabled and (
+                existing_expires_at is None or existing_expires_at > persisted.updated_at
+            )
+            becomes_active = persisted.enabled and (
+                persisted.expires_at is None or persisted.expires_at > persisted.updated_at
+            )
+            if str(existing["source_type"]) == "github_pr" and not was_active and becomes_active:
+                _check_github_pr_quota(
+                    conn,
+                    str(existing["owner_user_id"]),
+                    max_github_pr_per_owner=max_github_pr_per_owner,
+                    now=persisted.updated_at,
+                    exclude_trigger_id=persisted.trigger_id,
+                )
             cursor = conn.execute(
                 """
                 UPDATE reactive_triggers
@@ -419,29 +428,44 @@ class ReactiveTriggerStore:
         enabled: bool,
         *,
         expected_rule_uid: str | None = None,
+        max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Enable or disable a reactive trigger and return the updated record, or None if missing/replaced."""
         now = time.time()
         disabled_reason = None if enabled else "manual"
         with self._write_transaction() as conn:
-            if expected_rule_uid is not None:
-                cursor = conn.execute(
-                    """
-                    UPDATE reactive_triggers
-                    SET enabled = ?, disabled_reason = ?, updated_at = ?
-                    WHERE trigger_id = ? AND rule_uid = ?
-                    """,
-                    (1 if enabled else 0, disabled_reason, now, trigger_id, expected_rule_uid),
+            existing = conn.execute(
+                "SELECT rule_uid, owner_user_id, source_type, enabled, expires_at "
+                "FROM reactive_triggers WHERE trigger_id = ?",
+                (trigger_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            live_uid = str(existing["rule_uid"])
+            if expected_rule_uid is not None and live_uid != expected_rule_uid:
+                return None
+            expires_at = float(existing["expires_at"]) if existing["expires_at"] is not None else None
+            if (
+                enabled
+                and not bool(existing["enabled"])
+                and str(existing["source_type"]) == "github_pr"
+                and (expires_at is None or expires_at > now)
+            ):
+                _check_github_pr_quota(
+                    conn,
+                    str(existing["owner_user_id"]),
+                    max_github_pr_per_owner=max_github_pr_per_owner,
+                    now=now,
+                    exclude_trigger_id=trigger_id,
                 )
-            else:
-                cursor = conn.execute(
-                    """
-                    UPDATE reactive_triggers
-                    SET enabled = ?, disabled_reason = ?, updated_at = ?
-                    WHERE trigger_id = ?
-                    """,
-                    (1 if enabled else 0, disabled_reason, now, trigger_id),
-                )
+            cursor = conn.execute(
+                """
+                UPDATE reactive_triggers
+                SET enabled = ?, disabled_reason = ?, updated_at = ?
+                WHERE trigger_id = ? AND rule_uid = ?
+                """,
+                (1 if enabled else 0, disabled_reason, now, trigger_id, live_uid),
+            )
             if cursor.rowcount == 0:
                 return None
             row = conn.execute(
@@ -703,7 +727,12 @@ class ReactiveTriggerStore:
                   AND rt.enabled = 1
                   AND (rt.expires_at IS NULL OR rt.expires_at > ?)
                   AND (cp.trigger_id IS NULL OR cp.next_poll_at <= ?)
-                  AND (cp.pr_state IS NULL OR cp.pr_state = 'open' OR cp.seeded = 0)
+                  AND (
+                      cp.pr_state IS NULL
+                      OR cp.pr_state = 'open'
+                      OR cp.seeded = 0
+                      OR json_extract(rt.spec_json, '$.source.auto_disable_on_close') = 0
+                  )
                   AND json_extract(rt.spec_json, '$.source.webhook_source_id') IS NULL
                 ORDER BY COALESCE(cp.next_poll_at, 0.0) ASC, rt.trigger_id ASC
                 LIMIT ?
@@ -1031,6 +1060,7 @@ class ReactiveTriggerStore:
         verb: str,
         now: float | None = None,
         max_attempts: int = 5,
+        retire_pr_closed_on_fail: bool = False,
     ) -> RetryResult:
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
@@ -1054,7 +1084,7 @@ class ReactiveTriggerStore:
                 backoff_seconds = min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
                 next_status, next_retry_at, result = expected_status, current_time + backoff_seconds, "retrying"
 
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE trigger_firings
                 SET status = ?,
@@ -1066,6 +1096,8 @@ class ReactiveTriggerStore:
                 """,
                 (next_status, attempt, next_retry_at, error, current_time, firing_id, expected_status),
             )
+            if cursor.rowcount > 0 and retire_pr_closed_on_fail and result == "failed":
+                _disable_rule_if_pr_closed(conn, firing_id=firing_id, now=current_time)
             return result
 
     def defer_pending_firing(
@@ -1084,6 +1116,7 @@ class ReactiveTriggerStore:
             verb="defer",
             now=now,
             max_attempts=max_attempts,
+            retire_pr_closed_on_fail=True,
         )
 
     def mark_delivered(
@@ -1308,6 +1341,32 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _check_github_pr_quota(
+    conn: sqlite3.Connection,
+    owner_user_id: str,
+    *,
+    max_github_pr_per_owner: int | None,
+    now: float,
+    exclude_trigger_id: str | None = None,
+) -> None:
+    if max_github_pr_per_owner is None:
+        return
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM reactive_triggers
+        WHERE owner_user_id = ?
+          AND source_type = 'github_pr'
+          AND enabled = 1
+          AND (expires_at IS NULL OR expires_at > ?)
+          AND (? IS NULL OR trigger_id != ?)
+        """,
+        (owner_user_id, now, exclude_trigger_id, exclude_trigger_id),
+    ).fetchone()
+    if int(row[0]) >= max_github_pr_per_owner:
+        msg = f"Owner {owner_user_id} reached GitHub PR watch limit ({max_github_pr_per_owner})"
+        raise ReactiveTriggerLimitError(msg)
 
 
 def _live_rule_uid(conn: sqlite3.Connection, trigger_id: str) -> str | None:

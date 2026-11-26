@@ -16,6 +16,12 @@ import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.approval.tool_approval import (
+    evaluate_tool_approval,
+    tool_may_require_approval,
+    toolkit_approval_alias,
+)
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig, GitHubEventSourceConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -30,6 +36,7 @@ from mindroom.reactive_triggers import (
     GitHubPREventType,
     GitHubPRPoller,
     GitHubPRSourceSpec,
+    ReactiveTriggerLimitError,
     ReactiveTriggerRecord,
     ReactiveTriggerService,
     ReactiveTriggerStore,
@@ -43,6 +50,7 @@ from mindroom.reactive_triggers.github_pr import match_github_webhook_to_pr_rule
 from mindroom.reactive_triggers.github_pr_poller import seed_github_pr_watch
 from mindroom.reactive_triggers.management import set_trigger_enabled_sync
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup
@@ -253,6 +261,7 @@ def _seeded_rule(
     state: dict[str, Any] | None = None,
     poll_interval_seconds: int = 60,
     max_fires_per_hour: int = 10,
+    auto_disable_on_close: bool = True,
 ) -> ReactiveTriggerRecord:
     rec = ReactiveTriggerRecord(
         trigger_id=trigger_id,
@@ -263,6 +272,7 @@ def _seeded_rule(
             events=list(events) if events is not None else ["activity", "ci", "merge", "close"],
             webhook_source_id=webhook_source_id,
             ignore_actors=list(ignore_actors or ()),
+            auto_disable_on_close=auto_disable_on_close,
             poll_interval_seconds=poll_interval_seconds,
         ),
         target=TriggerTargetSpec(agent="dev", room_id=_ROOM, thread_id=_THREAD, reopen_on_fire=True, prompt="Watch"),
@@ -1802,3 +1812,248 @@ async def test_round2_poller_multipage_review_comments_and_error_isolation(
     items = store.list_firings(trigger_id="pr_rc_multi", limit=1)[0].event.data["items"]
     assert len(items) == 1
     assert [c["id"] for c in items[0]["comments"]] == [201, 202, 203]
+
+
+@pytest.mark.asyncio
+async def test_watch_pr_approval_alias_governed_by_triggers_rules(tmp_path: Path) -> None:
+    """A tool_approval rule matching `triggers` also requires approval for `watch_pr` via its ApprovalAlias."""
+    base_cfg, paths = _config(tmp_path)
+    require_cfg = bind_runtime_paths(
+        base_cfg.model_copy(
+            update={
+                "tool_approval": ToolApprovalConfig(
+                    rules=[ApprovalRuleConfig(match="triggers", action="require_approval")],
+                ),
+            },
+        ),
+        paths,
+    )
+    auto_cfg = bind_runtime_paths(
+        base_cfg.model_copy(
+            update={
+                "tool_approval": ToolApprovalConfig(
+                    rules=[ApprovalRuleConfig(match="triggers", action="auto_approve")],
+                ),
+            },
+        ),
+        paths,
+    )
+
+    alias = toolkit_approval_alias(require_cfg, builtin_tool_registry(), "triggers", "watch_pr")
+    assert alias is not None
+    assert alias.judged_as == "triggers"
+    assert tool_may_require_approval(require_cfg, "watch_pr", alias) is True
+    requires, _timeout = await evaluate_tool_approval(
+        require_cfg,
+        paths,
+        "watch_pr",
+        {"repo": "mindroom-ai/mindroom", "number": 42},
+        "dev",
+        alias,
+    )
+    assert requires is True
+
+    assert tool_may_require_approval(auto_cfg, "watch_pr", alias) is False
+    auto_requires, _ = await evaluate_tool_approval(
+        auto_cfg,
+        paths,
+        "watch_pr",
+        {"repo": "mindroom-ai/mindroom", "number": 42},
+        "dev",
+        alias,
+    )
+    assert auto_requires is False
+
+
+@pytest.mark.asyncio
+async def test_auto_disable_on_close_false_stays_due_and_observes_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll-backed watch with auto_disable_on_close=False stays due after close and observes reopen/activity."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(
+        store,
+        "pr_keep_polling",
+        repo="org/repo",
+        number=77,
+        events=["activity", "ci", "close"],
+        webhook_source_id=None,
+        auto_disable_on_close=False,
+        head_sha="sha_v1",
+        state={"pr_etag": '"pr-1"', "timeline_etag": '"tl-1"', "review_comments_etag": '"rc-1"'},
+    )
+    _seeded_rule(
+        store,
+        "pr_stop_polling",
+        repo="org/repo",
+        number=78,
+        events=["activity", "close"],
+        webhook_source_id=None,
+        auto_disable_on_close=True,
+        head_sha="sha_v1",
+        state={"pr_etag": '"pr-1"', "timeline_etag": '"tl-1"', "review_comments_etag": '"rc-1"'},
+    )
+
+    phase = {"step": 1}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path in {"/repos/org/repo/pulls/77", "/repos/org/repo/pulls/78"}:
+            if phase["step"] == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "state": "closed",
+                        "merged": False,
+                        "head": {"sha": "sha_v1"},
+                        "title": "T",
+                        "html_url": "https://gh/77",
+                    },
+                    headers={"ETag": '"pr-closed"'},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "state": "open",
+                    "merged": False,
+                    "head": {"sha": "sha_v2"},
+                    "title": "T",
+                    "html_url": "https://gh/77",
+                },
+                headers={"ETag": '"pr-reopened"'},
+            )
+        if req.url.path == "/repos/org/repo/issues/77/timeline":
+            if phase["step"] == 1:
+                return httpx.Response(304)
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 901, "event": "reopened", "actor": {"login": "bob", "type": "User"}},
+                    {"id": 902, "event": "commented", "user": {"login": "bob", "type": "User"}, "body": "Back open"},
+                ],
+                headers={"ETag": '"tl-2"'},
+            )
+        if req.url.path == "/repos/org/repo/commits/sha_v2/check-runs":
+            return httpx.Response(
+                200,
+                json={"check_runs": [{"id": 50, "name": "ci", "status": "completed", "conclusion": "success"}]},
+                headers={"ETag": '"ci-2"'},
+            )
+        return httpx.Response(304)
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    poller = GitHubPRPoller(
+        store=store,
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        client=_mock_client(handler),
+    )
+
+    # Phase 1: both PRs close; keep_polling remains due while stop_polling is excluded as seeded closed.
+    assert await poller.poll_due_once(now=2000.0) == 2
+    keep_close_firing = store.list_firings(trigger_id="pr_keep_polling", limit=1)[0]
+    assert keep_close_firing.event.kind == "github_pr.closed"
+    assert store.claim_firing(keep_close_firing.id, now=2005.0) == "claimed"
+    keep_rule = store.get_trigger("pr_keep_polling")
+    assert keep_rule is not None
+    assert keep_rule.enabled is True
+
+    due_ids = [rule.trigger_id for rule, _ in store.list_due_github_pr_triggers(now=3000.0)]
+    assert due_ids == ["pr_keep_polling"]
+
+    # Phase 2: PR reopens with new activity + passing CI -> checkpoint returns to "open" and firing enqueues.
+    phase["step"] = 2
+    assert await poller.poll_due_once(now=3000.0) == 1
+    cp_reopened = store.get_github_pr_checkpoint("pr_keep_polling")
+    assert cp_reopened is not None
+    assert (cp_reopened.pr_state, cp_reopened.head_sha) == ("open", "sha_v2")
+    latest = store.list_firings(trigger_id="pr_keep_polling", limit=1)[0]
+    assert latest.event.kind == "github_pr.update"
+    item_types = {item["type"] for item in latest.event.data["items"]}
+    assert {"reopened", "comment", "ci_passing"} <= item_types
+
+
+def test_defer_pending_firing_retires_pr_closed_only_when_retries_exhausted(tmp_path: Path) -> None:
+    """Pending terminal merge firing stays enabled on retryable defers and disables with pr_closed on failure."""
+    _, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(store, "pr_defer_exhaust")
+    terminal_ev = TriggerEvent(
+        source_type="github_pr",
+        source_id="mindroom-ai/mindroom",
+        kind="github_pr.merged",
+        event_id="d_merge_exhaust",
+        timestamp=1100.0,
+        data={"repo": "mindroom-ai/mindroom", "number": 10, "terminal": True},
+    )
+    assert store.enqueue_firing("pr_defer_exhaust", "d_merge_exhaust", terminal_ev)
+    fid = store.list_firings(trigger_id="pr_defer_exhaust")[0].id
+
+    # Retryable attempts keep the firing pending and the watch enabled.
+    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1101.0, max_attempts=3) == "retrying"
+    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1110.0, max_attempts=3) == "retrying"
+    still_on = store.get_trigger("pr_defer_exhaust")
+    still_pending = store.get_firing(fid)
+    assert still_on is not None
+    assert (still_on.enabled, still_on.disabled_reason) == (True, None)
+    assert still_pending is not None
+    assert still_pending.status == "pending"
+
+    # Exhausting max_attempts transitions the firing to failed and retires the watch with pr_closed.
+    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1130.0, max_attempts=3) == "failed"
+    retired = store.get_trigger("pr_defer_exhaust")
+    failed = store.get_firing(fid)
+    assert retired is not None
+    assert (retired.enabled, retired.disabled_reason) == (False, "pr_closed")
+    assert failed is not None
+    assert failed.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_reenabling_github_pr_watch_enforces_max_watches_per_owner(tmp_path: Path) -> None:
+    """Re-enabling a paused github_pr watch via set_enabled or update enforces max_github_pr_watches_per_owner."""
+    config, paths = _config(tmp_path, max_github_pr_watches_per_owner=1)
+    store = ReactiveTriggerStore(paths)
+    watch_a = _seeded_rule(store, "pr_a", repo="org/repo", number=1, webhook_source_id=None)
+
+    # Pause watch A, then create watch B to fill the owner's 1-watch quota.
+    paused_a = store.set_enabled("pr_a", False, expected_rule_uid=watch_a.rule_uid)
+    assert paused_a is not None
+    assert paused_a.enabled is False
+    watch_b = _seeded_rule(store, "pr_b", repo="org/repo", number=2, webhook_source_id=None)
+
+    # Store-level set_enabled and update_trigger both reject re-enabling A.
+    with pytest.raises(ReactiveTriggerLimitError, match="GitHub PR watch limit"):
+        store.set_enabled("pr_a", True, expected_rule_uid=watch_a.rule_uid, max_github_pr_per_owner=1)
+    with pytest.raises(ReactiveTriggerLimitError, match="GitHub PR watch limit"):
+        store.update_trigger(
+            paused_a.model_copy(update={"enabled": True, "disabled_reason": None, "updated_at": time.time()}),
+            expected_rule_uid=watch_a.rule_uid,
+            update_enabled=True,
+            max_github_pr_per_owner=1,
+        )
+
+    # Tool-level set_enabled and update also return structured error payloads and keep A disabled.
+    with tool_runtime_context(_tool_ctx(config, paths)):
+        tool = TriggersTools()
+        err_enable = json.loads(await tool.triggers(action="set_enabled", trigger_id="pr_a", enabled=True))
+        err_update = json.loads(await tool.triggers(action="update", trigger_id="pr_a", enabled=True))
+        assert err_enable["status"] == "error"
+        assert "GitHub PR watch limit" in err_enable["message"]
+        assert err_update["status"] == "error"
+        assert "GitHub PR watch limit" in err_update["message"]
+
+        still_disabled = store.get_trigger("pr_a")
+        assert still_disabled is not None
+        assert still_disabled.enabled is False
+
+        # Once watch B is paused, re-enabling watch A succeeds.
+        paused_b = json.loads(await tool.triggers(action="set_enabled", trigger_id=watch_b.trigger_id, enabled=False))
+        assert paused_b["status"] == "ok"
+        reenabled_a = json.loads(await tool.triggers(action="set_enabled", trigger_id="pr_a", enabled=True))
+        assert reenabled_a["status"] == "ok"
+        assert reenabled_a["trigger"]["enabled"] is True

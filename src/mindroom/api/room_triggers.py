@@ -30,7 +30,11 @@ from mindroom.reactive_triggers.models import (
     SourceType,
     ThreadTagSourceSpec,
 )
-from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
+from mindroom.reactive_triggers.store import (
+    ReactiveTriggerLimitError,
+    ReactiveTriggerStore,
+    ReactiveTriggerStoreError,
+)
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -208,6 +212,8 @@ def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, re
 async def _run_store[T](call: Callable[[], T]) -> T:
     try:
         return await asyncio.to_thread(call)
+    except ReactiveTriggerLimitError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (ExternalTriggerStoreError, ReactiveTriggerStoreError, sqlite3.Error, OSError) as exc:
         raise HTTPException(503, "Trigger store is not available.") from exc
 

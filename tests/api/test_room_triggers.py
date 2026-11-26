@@ -68,12 +68,16 @@ class _Harness:
         admins: list[str] | None = None,
         aliases: dict[str, list[str]] | None = None,
         room_state_events: dict[str, list[dict[str, object]]] | None = None,
+        max_github_pr_watches_per_owner: int = 20,
     ) -> None:
         self.paths: RuntimePaths = test_runtime_paths(tmp_path)
         self.config = Config(
             administrators=admins or [],
             authorization=AuthorizationConfig(aliases=aliases or {}),
-            external_trigger_policy=ExternalTriggerPolicyConfig(admin_users=admins or []),
+            external_trigger_policy=ExternalTriggerPolicyConfig(
+                admin_users=admins or [],
+                max_github_pr_watches_per_owner=max_github_pr_watches_per_owner,
+            ),
             agents={
                 "assistant": AgentConfig(display_name="Assistant", rooms=["lobby", ROOM_A, ROOM_B, ROOM_C]),
                 "ops": AgentConfig(display_name="Ops", rooms=[ROOM_B]),
@@ -482,3 +486,17 @@ def test_github_pr_trigger_projects_with_pr_closed_reopen_on_fire_and_reenable_r
     assert cp.consecutive_errors == 0
     assert cp.next_poll_at <= time.time() + 1.0
     assert h.wake_reactive.call_count == 1
+
+
+def test_reenabling_github_pr_trigger_over_quota_returns_409(tmp_path: Path) -> None:
+    """PATCH enabling a paused github_pr watch returns 409 when max_github_pr_watches_per_owner is reached."""
+    h = _Harness(tmp_path, max_github_pr_watches_per_owner=1)
+    h.add_reactive("tr_pr_paused", GitHubPRSourceSpec(repo="matrix-org/synapse", number=1), enabled=False)
+    h.add_reactive("tr_pr_active", GitHubPRSourceSpec(repo="matrix-org/synapse", number=2), enabled=True)
+
+    resp = h.req("PATCH", ROOM_A, ALICE, "tr_pr_paused", {"enabled": True})
+    assert resp.status_code == 409
+    assert "GitHub PR watch limit" in resp.json()["detail"]
+    paused = h.reactive_store.get_trigger("tr_pr_paused")
+    assert paused is not None
+    assert paused.enabled is False

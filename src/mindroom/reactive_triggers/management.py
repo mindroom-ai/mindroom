@@ -153,7 +153,12 @@ def set_trigger_enabled_sync(
             now=time.time(),
             refreshed_tag_present=refreshed_tag_present,
         )
-    updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=record.rule_uid)
+    updated = reactive_store.set_enabled(
+        trigger_id,
+        enabled,
+        expected_rule_uid=record.rule_uid,
+        max_github_pr_per_owner=config.external_trigger_policy.max_github_pr_watches_per_owner,
+    )
     if updated is None:
         raise _not_found(trigger_id)
     return updated
