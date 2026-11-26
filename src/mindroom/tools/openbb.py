@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -83,10 +84,30 @@ class _OpenBBTools(Toolkit):
         super().__init__(name="openbb_tools", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Restrict ``openbb_get`` actions to the ones enabled on this instance."""
-        if function.name == "openbb_get":
-            return narrow_action_enum(function, self._enabled_actions)
-        return function
+        """Restrict ``openbb_get`` schema and description to enabled actions."""
+        if function.name != "openbb_get":
+            return function
+        narrowed = narrow_action_enum(function, self._enabled_actions)
+        enabled = set(self._enabled_actions)
+        unused_params = set()
+        if not (enabled - {"search_symbol"}):
+            unused_params.add("symbol")
+        if "search_symbol" not in enabled:
+            unused_params.add("company_name")
+        if "company_news" not in enabled:
+            unused_params.add("num_stories")
+        props = {k: v for k, v in narrowed.parameters["properties"].items() if k not in unused_params}
+        action_docs = {
+            "stock_price": "- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).",
+            "search_symbol": "- `search_symbol`: search ticker symbols matching `company_name`.",
+            "company_news": "- `company_news`: recent news for `symbol` (up to `num_stories`).",
+            "company_profile": "- `company_profile`: company overview for `symbol`.",
+            "price_targets": "- `price_targets`: consensus price targets and recommendations for `symbol`.",
+        }
+        desc = "Fetch equity data from the configured OpenBB provider.\n\nActions:\n" + "\n".join(
+            action_docs[a] for a in self._enabled_actions if a in action_docs
+        )
+        return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
 
     def _client(self) -> Any:  # noqa: ANN401 - OpenBB app object
         if self._obb is None:

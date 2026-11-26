@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit
@@ -121,10 +122,34 @@ class _YFinanceTools(Toolkit):
         super().__init__(name="yfinance_tools", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Restrict ``yfinance_get`` actions to the ones enabled on this instance."""
-        if function.name == "yfinance_get":
-            return narrow_action_enum(function, self._enabled_actions)
-        return function
+        """Restrict ``yfinance_get`` schema and description to enabled actions."""
+        if function.name != "yfinance_get":
+            return function
+        narrowed = narrow_action_enum(function, self._enabled_actions)
+        enabled = set(self._enabled_actions)
+        unused_params = set()
+        if not (enabled & {"technical_indicators", "historical_prices"}):
+            unused_params.add("period")
+        if "historical_prices" not in enabled:
+            unused_params.add("interval")
+        if "company_news" not in enabled:
+            unused_params.add("num_stories")
+        props = {k: v for k, v in narrowed.parameters["properties"].items() if k not in unused_params}
+        action_docs = {
+            "stock_price": "- `stock_price`: current/regular market stock price.",
+            "company_info": "- `company_info`: company profile and key metrics.",
+            "fundamentals": "- `fundamentals`: valuation and summary fundamentals.",
+            "income_statements": "- `income_statements`: income statement table as JSON.",
+            "financial_ratios": "- `financial_ratios`: full ticker info/ratios JSON.",
+            "analyst_recommendations": "- `analyst_recommendations`: analyst recommendation history.",
+            "company_news": "- `company_news`: recent news items (capped by `num_stories`).",
+            "technical_indicators": "- `technical_indicators`: OHLCV history for `period` (default `3mo`).",
+            "historical_prices": "- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
+        }
+        desc = "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n" + "\n".join(
+            action_docs[a] for a in self._enabled_actions if a in action_docs
+        )
+        return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
 
     def _dispatch(
         self,

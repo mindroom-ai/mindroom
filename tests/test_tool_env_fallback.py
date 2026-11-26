@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
-import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -72,31 +72,78 @@ def _module_env_reads(module_name: str) -> set[str]:
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
-def _agno_modules(tool_name: str) -> set[str]:
-    """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
+def _imported_module_names(source: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def _classify_imports(source: str, agno_modules: set[str], pending: list[str]) -> None:
+    for imported in _imported_module_names(source):
+        if imported == "agno" or imported.startswith("agno."):
+            agno_modules.add(imported)
+        elif imported.startswith(("mindroom.custom_tools.", "mindroom.tools.")):
+            pending.append(imported)
+
+
+def _ast_tool_modules(factory: Any) -> tuple[set[str], set[str]]:  # noqa: ANN401
+    """Collect imported ``agno.*`` and owned ``mindroom.(tools|custom_tools).*`` modules via AST only."""
+    agno_modules: set[str] = set()
+    owned_modules: set[str] = set()
+    pending: list[str] = []
+    seen: set[str] = set()
+    if factory.__module__ == "mindroom.tools":
+        _classify_imports(textwrap.dedent(inspect.getsource(factory)), agno_modules, pending)
+    else:
+        pending.append(factory.__module__)
+
+    while pending:
+        current = pending.pop()
+        if current in seen or current == "mindroom.tools":
+            continue
+        seen.add(current)
+        spec = importlib.util.find_spec(current)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+            continue
+        owned_modules.add(current)
+        _classify_imports(Path(spec.origin).read_text(encoding="utf-8"), agno_modules, pending)
+    return agno_modules, owned_modules
+
+
+def _agno_modules(tool_name: str) -> tuple[set[str], set[str]]:
+    """Return ``(agno_modules, owned_modules)`` for a built-in tool without importing optional SDKs for native tools."""
     factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
-        return set()
+        return set(), set()
+    ast_agno, owned_modules = _ast_tool_modules(factory)
+    if not ast_agno:
+        return set(), owned_modules
     try:
         toolkit_class = factory()
     except ImportError:
-        # The toolkit's SDK is not installed, so read the Agno modules its registration imports.
-        registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
-        return {
-            node.module
-            for node in ast.walk(registration)
-            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
-        }
-    return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+        return ast_agno, owned_modules
+    mro_agno = {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+    return (mro_agno or ast_agno), owned_modules
 
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
-    modules = _agno_modules(tool_name)
+    """Agno toolkits match declared/allowlisted env reads; native toolkits with declared env never read os.environ."""
+    modules, owned_modules = _agno_modules(tool_name)
+    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
+    if not modules:
+        # Native toolkits resolve ConfigField.env through MindRoom's scoped config loader, never os.environ directly.
+        if declared:
+            native_reads = set().union(*map(_module_env_reads, owned_modules))
+            assert native_reads == set(), f"Native toolkit {tool_name!r} reads os.environ directly: {native_reads}"
+        return
+
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
-    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
 
     assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
         "undeclared": set(),

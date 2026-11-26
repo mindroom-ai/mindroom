@@ -328,18 +328,22 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
-# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
-#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
-#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
-#   and todo respectively.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
+# Legacy format: scheduler, searxng, memory, todo, and the Wave 6 native toolkits (csv, duckdb, sql, postgres,
+#   redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona) previously exposed
+#   individual per-operation function names that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Wave 6: v2026.11.611 / unreleased); replacement: unreleased; consolidated into
+#   action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
-#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name.
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
+#   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",

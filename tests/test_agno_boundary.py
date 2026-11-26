@@ -247,11 +247,49 @@ def build() -> None:
     assert agno_imports(source) == {"agno", "agno.tools", "agno.run", "agno.media"}
 
 
+# Native tool modules that must stay free of Agno imports and AGNO_COMPAT markers.
+AGNO_FREE_TOOL_MODULES = frozenset(
+    {
+        "tools/native_helpers.py",
+        "tools/csv.py",
+        "tools/pandas.py",
+        "tools/duckdb.py",
+        "tools/sql.py",
+        "tools/postgres.py",
+        "tools/redshift.py",
+        "tools/neo4j.py",
+        "tools/yfinance.py",
+        "tools/openbb.py",
+        "tools/financial_datasets_api.py",
+        "tools/openweather.py",
+        "tools/docker.py",
+        "tools/e2b.py",
+        "custom_tools/e2b.py",
+        "tools/daytona.py",
+    },
+)
+
+
 def test_no_module_outside_the_boundary_imports_agno() -> None:
     """Every ``agno`` import under ``src/mindroom`` sits in an allowed package or module."""
     violations = boundary_violations()
 
     assert not violations, f"Agno imports outside the boundary: {violations}"
+
+
+def test_native_tool_modules_have_no_agno_imports_or_compat_markers() -> None:
+    """Rewritten native toolkits neither import Agno nor carry AGNO_COMPAT markers."""
+    agno_hits: dict[str, list[str]] = {}
+    marker_hits: list[str] = []
+    for rel_path in sorted(AGNO_FREE_TOOL_MODULES):
+        source = (SOURCE_ROOT / rel_path).read_text(encoding="utf-8")
+        if imported := agno_imports(source):
+            agno_hits[rel_path] = sorted(imported)
+        if "AGNO_COMPAT:" in source:
+            marker_hits.append(rel_path)
+
+    assert not agno_hits, f"Native tool modules importing Agno: {agno_hits}"
+    assert not marker_hits, f"Native tool modules with AGNO_COMPAT markers: {marker_hits}"
 
 
 def test_reexported_agno_names_are_the_names_the_reexport_binds_from_agno() -> None:

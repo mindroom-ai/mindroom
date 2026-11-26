@@ -128,12 +128,10 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
 }
 # SDK clients that contact their service while a toolkit is constructed, replaced so it registers its functions offline.
 OFFLINE_CLIENTS = {
-    "e2b": "agno.tools.e2b.Sandbox",
     # Its Places client looks for Google Cloud credentials, retrying the metadata server for many seconds.
     "google_maps": "agno.tools.google.maps.places_v1",
     "jira": "agno.tools.jira.JIRA",
     "mem0": "agno.tools.mem0.MemoryClient",
-    "neo4j": "agno.tools.neo4j.GraphDatabase",
     "zep": "agno.tools.zep.Zep",
 }
 # HTTP requests a toolkit sends while constructed, refused before they dial; the goldens record the refused outcome.

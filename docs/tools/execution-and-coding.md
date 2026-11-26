@@ -511,10 +511,8 @@ A `worker_scope: user` worker serves several agents, so each of them reaches eve
 
 ## [`docker`]
 
-`docker` manages containers with functions such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
-It also manages images, volumes, and networks with functions such as `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
+`docker` splits read-only introspection from mutations across three functions: `docker_inspect(action, ...)` (`list_containers`, `inspect_container`, `get_container_logs`, `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`), `docker_container(action, ...)` (`run`, `exec`, `start`, `stop`, `remove`), and `docker_resource(action, ...)` (`pull_image`, `build_image`, `tag_image`, `remove_image`, `create_volume`, `remove_volume`, `create_network`, `remove_network`, `connect_network`, `disconnect_network`).
 Docker daemon access is privileged host control, so `docker` runs in a worker by default, and the runtime that runs it needs a reachable Docker daemon or socket.
-`get_container_logs(stream=True)` returns a message asking for non-streaming mode instead of a live stream.
 
 ### Configuration
 
@@ -532,9 +530,9 @@ agents:
 ```
 
 ```python
-list_containers()
-run_container("postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
-get_container_logs("postgres", tail=50)
+docker_inspect("list_containers")
+docker_container("run", image="postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
+docker_inspect("get_container_logs", target="postgres", tail=50)
 ```
 
 ## [`calculator`]

@@ -26,7 +26,7 @@ _VALID_LANGUAGES = frozenset({"python", "javascript", "typescript"})
 _DEFAULT_API_URL = "https://app.daytona.io/api"
 _DEFAULT_INSTRUCTIONS = (
     "You have a Daytona remote sandbox that keeps its working directory across calls in this reply. "
-    "Execute code with `daytona_run` and report the actual output."
+    "Execute code in the sandbox and report the actual output."
 )
 
 
