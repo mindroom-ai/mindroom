@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -22,8 +23,20 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-# Excludes "cancelled" so cancel-in-progress workflows on new pushes do not wake as CI failures.
+# Excludes "cancelled" so cancel-in-progress workflows on new pushes do not wake as CI failures or all-green passes.
 CI_FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
+CI_PASS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_DRY_RUN_CATEGORY_BY_KIND: Mapping[str, GitHubPREventType] = {
+    "activity": "activity",
+    "ci": "ci",
+    "merge": "merge",
+    "close": "close",
+    "github_pr.merged": "merge",
+    "github_pr.closed": "close",
+}
+_DEFAULT_GITHUB_PR_WEBHOOK_EVENTS: frozenset[str] = frozenset(
+    {"pull_request", "issue_comment", "pull_request_review", "pull_request_review_comment", "check_run", "check_suite"},
+)
 _IGNORED_TIMELINE = frozenset(
     (
         "subscribed",
@@ -191,12 +204,15 @@ def _webhook_targets_pr(src: GitHubPRSourceSpec, cp: GitHubPRCheckpoint | None, 
     raw = ev.data.get("pr_numbers")
     nums = [n for n in raw if isinstance(n, int) and not isinstance(n, bool)] if isinstance(raw, list) else []
     num = ev.data.get("number")
-    number_matches = (isinstance(num, int) and not isinstance(num, bool) and num == src.number) or src.number in nums
+    event_number = num if isinstance(num, int) and not isinstance(num, bool) else None
+    number_matches = event_number == src.number or src.number in nums
     if base in {"check_run", "check_suite"}:
         event_sha = opt_str(ev.data.get("sha"))
         if cp is not None and cp.head_sha and event_sha is not None and event_sha != cp.head_sha:
             return False
-        return number_matches or bool(not nums and cp is not None and cp.head_sha and event_sha == cp.head_sha)
+        if number_matches:
+            return True
+        return bool(not nums and event_number is None and cp is not None and cp.head_sha and event_sha == cp.head_sha)
     return number_matches
 
 
@@ -337,14 +353,39 @@ def group_review_comments(
     return items, keys
 
 
-def summarize_check_runs(runs: Sequence[Mapping[str, Any]]) -> tuple[int, dict[str, dict[str, Any]], int]:
-    """Summarize check-run payloads into (unique_total, failed_by_key, pending_count)."""
+@dataclass(frozen=True, slots=True)
+class CheckRunsSummary:
+    """Aggregated check-run counts for one PR head commit."""
+
+    total: int
+    failed: dict[str, dict[str, Any]]
+    pending: int
+    passed: int
+    non_passing: int
+
+    def overall(self, *, truncated: bool) -> str:
+        """Return overall CI rollup state (only 'passing' when all runs passed and not truncated)."""
+        if self.total == 0:
+            return "none"
+        if self.failed:
+            return "failing"
+        if self.pending or truncated:
+            return "pending"
+        if self.non_passing or self.passed == 0:
+            return "non_passing"
+        return "passing"
+
+
+def summarize_check_runs(runs: Sequence[Mapping[str, Any]]) -> CheckRunsSummary:
+    """Summarize check-run payloads into unique total, failed map, pending, passed, and non-passing counts."""
     seen_keys: set[str] = set()
     failed: dict[str, dict[str, Any]] = {}
-    pending = 0
+    pending = passed = non_passing = 0
     for run in runs:
         name = opt_str(run.get("name")) or "check"
         key = str(run["id"]) if run.get("id") is not None else name
+        if key in seen_keys:
+            continue
         seen_keys.add(key)
         st, conc = (opt_str(run.get("status")) or "").lower(), (opt_str(run.get("conclusion")) or "").lower() or None
         if st != "completed":
@@ -352,7 +393,129 @@ def summarize_check_runs(runs: Sequence[Mapping[str, Any]]) -> tuple[int, dict[s
         elif conc in CI_FAIL_CONCLUSIONS:
             url = opt_str(run.get("html_url")) or opt_str(run.get("url"))
             failed[key] = {"name": name, "conclusion": conc, "url": url}
-    return len(seen_keys), failed, pending
+        elif conc in CI_PASS_CONCLUSIONS:
+            passed += 1
+        else:
+            non_passing += 1
+    return CheckRunsSummary(len(seen_keys), failed, pending, passed, non_passing)
+
+
+def build_github_pr_dry_run_event_and_match(
+    *,
+    config: Config,
+    rule: ReactiveTriggerRecord,
+    checkpoint: GitHubPRCheckpoint | None,
+    actor: str | None,
+    text: str | None,
+    extra_data: Mapping[str, Any],
+    raw_kind: str | None,
+    now: float,
+) -> tuple[TriggerEvent, bool, str | None]:
+    """Build a synthetic github_pr dry-run event and evaluate deterministic rule matching."""
+    assert isinstance(rule.source, GitHubPRSourceSpec)
+    src = rule.source
+    norm_kind = opt_str(raw_kind)
+    mapped_cat = _DRY_RUN_CATEGORY_BY_KIND.get(norm_kind.lower()) if norm_kind is not None else None
+    if norm_kind is not None and mapped_cat is None:
+        return _dry_run_github_pr_webhook_event(
+            config=config,
+            rule=rule,
+            checkpoint=checkpoint,
+            actor=actor,
+            text=text,
+            extra_data=extra_data,
+            normalized_kind=norm_kind,
+            now=now,
+        )
+
+    raw_cat = extra_data.get("category")
+    event_type: GitHubPREventType = (
+        mapped_cat
+        if mapped_cat is not None
+        else (raw_cat if raw_cat in {"activity", "ci", "merge", "close"} else src.events[0])
+    )
+    event_kind = (
+        "github_pr.merged"
+        if event_type == "merge"
+        else ("github_pr.closed" if event_type == "close" else "github_pr.update")
+    )
+    data: dict[str, Any] = {
+        "repo": src.repo,
+        "number": src.number,
+        "terminal": event_type in {"merge", "close"},
+        **extra_data,
+    }
+    event = TriggerEvent(
+        source_type="github_pr",
+        source_id=src.repo.lower(),
+        kind=event_kind,
+        event_id="dry_run",
+        timestamp=now,
+        actor=actor,
+        title=f"{src.repo}#{src.number}",
+        text=text,
+        data=data,
+    )
+    sample_repo, sample_num = data.get("repo"), data.get("number")
+    repo_ok = isinstance(sample_repo, str) and sample_repo.lower() == src.repo.lower()
+    num_ok = isinstance(sample_num, int) and not isinstance(sample_num, bool) and sample_num == src.number
+    if not (repo_ok and num_ok) or event_type not in src.events:
+        return event, False, None
+    if event_type == "activity" and is_ignored_activity_actor(
+        src,
+        actor=actor,
+        actor_type=opt_str(extra_data.get("actor_type")),
+    ):
+        return (
+            event,
+            False,
+            "Dry run only (no state changed or message sent); activity from this actor is ignored by ignore_actors/ignore_bots.",
+        )
+    return event, True, None
+
+
+def _dry_run_github_pr_webhook_event(
+    *,
+    config: Config,
+    rule: ReactiveTriggerRecord,
+    checkpoint: GitHubPRCheckpoint | None,
+    actor: str | None,
+    text: str | None,
+    extra_data: Mapping[str, Any],
+    normalized_kind: str,
+    now: float,
+) -> tuple[TriggerEvent, bool, str | None]:
+    assert isinstance(rule.source, GitHubPRSourceSpec)
+    src, base_event = rule.source, normalized_kind.split(".", 1)[0]
+    data: dict[str, Any] = dict(extra_data)
+    data.setdefault("repo", src.repo)
+    if "number" not in data and "pr_numbers" not in data:
+        data["number"] = src.number
+    if base_event == "issue_comment":
+        data.setdefault("is_pull_request", True)
+
+    webhook_event = TriggerEvent(
+        source_type="external_event",
+        source_id=src.webhook_source_id or src.repo.lower(),
+        kind=normalized_kind,
+        event_id="dry_run",
+        timestamp=now,
+        actor=actor,
+        title=f"{src.repo}#{src.number}",
+        summary=text,
+        text=text,
+        data=data,
+    )
+    allowed_events: frozenset[str] = _DEFAULT_GITHUB_PR_WEBHOOK_EVENTS
+    if src.webhook_source_id is not None:
+        gh_source = config.external_trigger_policy.event_sources.get(src.webhook_source_id)
+        if isinstance(gh_source, GitHubEventSourceConfig):
+            allowed_events = frozenset(gh_source.allowed_events)
+            if base_event not in allowed_events:
+                return webhook_event, False, None
+
+    match_result = match_github_webhook_to_pr_rule(rule, checkpoint, webhook_event, allowed_events=allowed_events)
+    return match_result.event or webhook_event, match_result.event is not None, None
 
 
 def make_pr_item(item_type: str, summary: str, **extra: object) -> dict[str, Any]:
@@ -412,6 +575,34 @@ def build_pr_event(
         summary="\n".join(summaries)[:2000] if summaries else None,
         data=data,
     )
+
+
+def build_poll_pr_event(
+    rule: ReactiveTriggerRecord,
+    kind: str,
+    cp: GitHubPRCheckpoint,
+    state: Mapping[str, Any],
+    items: list[dict[str, Any]],
+    keys: Sequence[str],
+    now: float,
+) -> tuple[str, TriggerEvent]:
+    """Build deterministic dedupe key and normalized TriggerEvent for a polled github_pr wake."""
+    assert isinstance(rule.source, GitHubPRSourceSpec)
+    dkey = f"ghpr:{hashlib.sha256(f'{rule.trigger_id}:{"|".join(sorted(keys))}'.encode()).hexdigest()[:32]}"
+    actor = next((a for it in items if (a := opt_str(it.get("actor")))), None)
+    ev = build_pr_event(
+        rule.source,
+        kind,
+        dkey,
+        now,
+        cp,
+        items,
+        actor=actor,
+        title=opt_str(state.get("pr_title")),
+        url=opt_str(state.get("pr_url")),
+        terminal=cp.pr_state in {"closed", "merged"},
+    )
+    return dkey, ev
 
 
 def extract_pr_summary(payload: Mapping[str, Any]) -> tuple[PRState, str | None, str | None, str | None]:

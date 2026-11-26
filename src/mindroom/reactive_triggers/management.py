@@ -84,9 +84,19 @@ def refresh_reactive_state_on_reenable(
             expected_rule_uid=record.rule_uid,
         )
     elif isinstance(record.source, GitHubPRSourceSpec):
-        existing = reactive_store.get_github_pr_checkpoint(record.trigger_id)
-        refreshed = (
-            existing.model_copy(
+        base = reactive_store.get_github_pr_checkpoint(record.trigger_id) or GitHubPRCheckpoint(updated_at=now)
+        if record.source.webhook_source_id is not None:
+            refreshed = base.model_copy(
+                update={
+                    "head_sha": None,
+                    "pr_state": "open",
+                    "seeded": True,
+                    "consecutive_errors": 0,
+                    "updated_at": now,
+                },
+            )
+        else:
+            refreshed = base.model_copy(
                 update={
                     "seeded": False,
                     "next_poll_at": now,
@@ -94,17 +104,6 @@ def refresh_reactive_state_on_reenable(
                     "updated_at": now,
                 },
             )
-            if existing is not None
-            else GitHubPRCheckpoint(
-                head_sha=None,
-                pr_state="open",
-                seeded=False,
-                next_poll_at=now,
-                consecutive_errors=0,
-                state={},
-                updated_at=now,
-            )
-        )
         reactive_store.upsert_github_pr_checkpoint(
             record.trigger_id,
             refreshed,

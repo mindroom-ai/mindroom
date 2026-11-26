@@ -39,6 +39,8 @@ from mindroom.reactive_triggers import (
     fan_out_external_event,
     verify_and_normalize_github_webhook,
 )
+from mindroom.reactive_triggers.github_pr import match_github_webhook_to_pr_rule
+from mindroom.reactive_triggers.github_pr_poller import seed_github_pr_watch
 from mindroom.reactive_triggers.management import set_trigger_enabled_sync
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -538,6 +540,8 @@ async def test_webhook_seeding_skips_pr_get_on_unreadable_pat(
         ("issue_comment.created", "bob", "LGTM", {"is_pull_request": False}, False),
         ("pull_request.synchronize", "bob", None, {"head_sha": "sha_new"}, False),
         ("pull_request.merged", "mergify[bot]", None, {"merged": True}, True),
+        ("github_pr.merged", "mergify[bot]", None, None, True),
+        ("github_pr.closed", "alice", None, None, True),
     ],
 )
 async def test_triggers_management_and_accurate_dry_run_for_github_pr(
@@ -583,6 +587,7 @@ async def test_triggers_management_and_accurate_dry_run_for_github_pr(
         )
         assert res["status"] == "ok"
         assert res["matched"] is expected
+        assert res["would_fire"] is expected
 
 
 @pytest.mark.asyncio
@@ -1385,3 +1390,415 @@ async def test_service_stop_cancels_inflight_github_pr_poll(
     await service.stop()
     assert cancelled is True
     assert service._github_pr_poll_task is None
+
+
+@pytest.mark.asyncio
+async def test_round2_webhook_sha_fallback_and_reenable_clears_stale_sha(tmp_path: Path) -> None:
+    """Explicit mismatched PR number never falls back to head_sha; webhook re-enable clears stale head_sha."""
+    gh = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "check_run", "check_suite"])
+    config, paths = _config(tmp_path, event_sources={"gh": gh})
+    store = ReactiveTriggerStore(paths)
+    rule = _seeded_rule(store, "pr_42", number=42, webhook_source_id="gh", head_sha="sha_old")
+    cp = store.get_github_pr_checkpoint("pr_42")
+
+    # Explicit number=43 + matching head_sha must NOT match watched PR #42.
+    other_pr_check = TriggerEvent(
+        source_type="external_event",
+        source_id="gh",
+        kind="check_run.completed",
+        event_id="ev_other_pr",
+        timestamp=1100.0,
+        actor="actions[bot]",
+        data={
+            "repo": "mindroom-ai/mindroom",
+            "number": 43,
+            "pr_numbers": [],
+            "sha": "sha_old",
+            "name": "pytest",
+            "conclusion": "failure",
+        },
+    )
+    assert match_github_webhook_to_pr_rule(rule, cp, other_pr_check, allowed_events=gh.allowed_events).matched is False
+
+    # Disabling and re-enabling a webhook watch clears stale head_sha so commits pushed while paused match by PR number.
+    set_trigger_enabled_sync(
+        paths,
+        config,
+        "pr_42",
+        enabled=False,
+        actor_user_id=_OWNER,
+        authorize_reactive=lambda _r: None,
+    )
+    set_trigger_enabled_sync(
+        paths,
+        config,
+        "pr_42",
+        enabled=True,
+        actor_user_id=_OWNER,
+        authorize_reactive=lambda _r: None,
+    )
+    refreshed_cp = store.get_github_pr_checkpoint("pr_42")
+    assert refreshed_cp is not None
+    assert (refreshed_cp.head_sha, refreshed_cp.pr_state, refreshed_cp.seeded) == (None, "open", True)
+
+    payload = _gh_payload(
+        "check_run",
+        action="completed",
+        actor="actions[bot]",
+        actor_type="Bot",
+        sha="sha_pushed_while_paused",
+        conclusion="failure",
+        pr_numbers=[42],
+    )
+    assert (
+        _send_webhook(
+            store,
+            config,
+            paths,
+            source=gh,
+            gh_event="check_run",
+            delivery_id="d_resumed_sha",
+            payload=payload,
+        )
+        == 1
+    )
+    assert store.list_firings(trigger_id="pr_42", limit=1)[0].event.data["items"][0]["type"] == "ci_failure"
+
+
+@pytest.mark.asyncio
+async def test_round2_poller_cancelled_ci_never_reports_all_green(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check run transitioning pending -> completed/cancelled emits 0 firings (neither ci_passing nor ci_failure)."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(
+        store,
+        "pr_cancel_ci",
+        repo="org/repo",
+        number=7,
+        events=["ci"],
+        webhook_source_id=None,
+        head_sha="sha_c1",
+        state={"ci_head_sha": "sha_c1", "last_ci_overall": "pending"},
+    )
+    phase = {"step": 1}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/org/repo/pulls/7":
+            return httpx.Response(304)
+        if phase["step"] == 1:
+            runs = [{"id": 1, "name": "pytest", "status": "completed", "conclusion": "cancelled"}]
+        else:
+            runs = [{"id": 2, "name": "pytest", "status": "completed", "conclusion": "success"}]
+        return httpx.Response(200, json={"check_runs": runs}, headers={"ETag": f'"c-{phase["step"]}"'})
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    poller = GitHubPRPoller(
+        store=store,
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        client=_mock_client(handler),
+    )
+
+    assert await poller.poll_due_once(now=2000.0) == 0
+    assert store.list_firings(trigger_id="pr_cancel_ci") == []
+    cp1 = store.get_github_pr_checkpoint("pr_cancel_ci")
+    assert cp1 is not None
+    assert cp1.state["last_ci_overall"] == "non_passing"
+
+    # Once a subsequent run succeeds, ci_passing emits normally.
+    phase["step"] = 2
+    assert await poller.poll_due_once(now=cp1.next_poll_at + 1.0) == 1
+    assert store.list_firings(trigger_id="pr_cancel_ci", limit=1)[0].event.data["items"][0]["type"] == "ci_passing"
+
+
+@pytest.mark.asyncio
+async def test_round2_poller_pending_merge_survives_subsequent_poll_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending terminal merge firing survives another poll_due_once() tick before delivery."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(store, "pr_merge_survive", repo="org/repo", number=9, webhook_source_id=None, head_sha="s9")
+    hits = {"pr": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/org/repo/pulls/9":
+            hits["pr"] += 1
+            return httpx.Response(200, json={"state": "closed", "merged": True, "head": {"sha": "s9"}})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    client = _mock_client(handler)
+    poller = GitHubPRPoller(store=store, config_provider=lambda: config, runtime_paths=paths, client=client)
+
+    assert await poller.poll_due_once(now=3000.0) == 1
+    cp_merged = store.get_github_pr_checkpoint("pr_merge_survive")
+    assert cp_merged is not None
+    assert cp_merged.pr_state == "merged"
+
+    # Second poll tick before delivery must not re-poll or disable the watch.
+    assert await poller.poll_due_once(now=cp_merged.next_poll_at + 10.0) == 0
+    assert hits["pr"] == 1
+    rule_still_enabled = store.get_trigger("pr_merge_survive")
+    assert rule_still_enabled is not None
+    assert rule_still_enabled.enabled is True
+
+    # Even if _poll_rule is invoked directly on the already-merged checkpoint, it must not disable the rule.
+    assert (
+        await poller._poll_rule(rule_still_enabled, cp_merged, config, client, cp_merged.next_poll_at + 20.0) is False
+    )
+    rule_after_direct = store.get_trigger("pr_merge_survive")
+    assert rule_after_direct is not None
+    assert rule_after_direct.enabled is True
+
+    # Pending merge firing remains claimable and disables the watch only upon claim.
+    firing = store.list_due_firings(now=3000.0)[0]
+    assert store.claim_firing(firing.id, now=3050.0) == "claimed"
+    rule_after_claim = store.get_trigger("pr_merge_survive")
+    assert rule_after_claim is not None
+    assert (rule_after_claim.enabled, rule_after_claim.disabled_reason) == (False, "pr_closed")
+
+
+@pytest.mark.asyncio
+async def test_round2_poller_timeline_advances_past_page_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeline polling advances past _MAX_POLL_PAGES=3 without looping on page 3 304."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(
+        store,
+        "pr_tl4",
+        repo="org/repo",
+        number=4,
+        events=["activity"],
+        webhook_source_id=None,
+        head_sha="sha4",
+        state={"timeline_page": 1, "seen_timeline_ids": []},
+    )
+    pages_fetched: list[int] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/org/repo/pulls/4":
+            return httpx.Response(304)
+        if req.url.path == "/repos/org/repo/pulls/4/comments":
+            return httpx.Response(304)
+        page = int(req.url.params.get("page", "1"))
+        pages_fetched.append(page)
+        if req.headers.get("If-None-Match") == f'"tl-{page}"':
+            return httpx.Response(304)
+        headers: dict[str, str] = {"ETag": f'"tl-{page}"'}
+        if page < 4:
+            headers["Link"] = (
+                f'<https://api.github.com/repos/org/repo/issues/4/timeline?per_page=100&page={page + 1}>; rel="next"'
+            )
+        return httpx.Response(
+            200,
+            json=[{"id": page * 10, "event": "commented", "user": {"login": "alice"}, "body": f"page {page}"}],
+            headers=headers,
+        )
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    poller = GitHubPRPoller(
+        store=store,
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        client=_mock_client(handler),
+    )
+
+    # Tick 1 fetches pages 1..3 and persists timeline_page=4, timeline_etag=None.
+    assert await poller.poll_due_once(now=2000.0) == 1
+    cp1 = store.get_github_pr_checkpoint("pr_tl4")
+    assert cp1 is not None
+    assert (cp1.state["timeline_page"], cp1.state["timeline_etag"]) == (4, None)
+    assert pages_fetched == [1, 2, 3]
+
+    # Tick 2 fetches page 4 cleanly instead of looping on page 3's 304.
+    assert await poller.poll_due_once(now=cp1.next_poll_at + 1.0) == 1
+    assert pages_fetched == [1, 2, 3, 4]
+    latest_items = store.list_firings(trigger_id="pr_tl4", limit=1)[0].event.data["items"]
+    assert [it["id"] for it in latest_items] == [40]
+
+
+@pytest.mark.asyncio
+async def test_round2_poller_timeline_seed_tail_drains_silently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When seeding hits _MAX_SEED_PAGES, remaining tail pages drain silently and then normal polling resumes."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    monkeypatch.setattr("mindroom.reactive_triggers.github_pr_poller._MAX_SEED_PAGES", 2)
+    extra_tail = {"added": False}
+
+    def seed_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/org/repo/pulls/5":
+            return httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": "sha5"}})
+        if req.url.path == "/repos/org/repo/pulls/5/comments":
+            return httpx.Response(200, json=[])
+        page = int(req.url.params.get("page", "1"))
+        headers: dict[str, str] = {"ETag": f'"st-{page}"'}
+        if page < 3:
+            headers["Link"] = (
+                f'<https://api.github.com/repos/org/repo/issues/5/timeline?per_page=100&page={page + 1}>; rel="next"'
+            )
+        entries = [{"id": page * 100, "event": "commented", "user": {"login": "alice"}, "body": f"hist {page}"}]
+        if page == 3 and extra_tail["added"]:
+            entries.append({"id": 301, "event": "commented", "user": {"login": "alice"}, "body": "brand new"})
+        return httpx.Response(200, json=entries, headers=headers)
+
+    seed_client = _mock_client(seed_handler)
+    seeded = await seed_github_pr_watch(
+        "org/repo",
+        5,
+        ["activity"],
+        owner_user_id=_OWNER,
+        config=config,
+        runtime_paths=paths,
+        poll_interval_seconds=60,
+        now=1000.0,
+        client=seed_client,
+    )
+    assert (seeded.checkpoint.state["timeline_page"], seeded.checkpoint.state["seed_tail_pending"]) == (3, True)
+    seed_rule = ReactiveTriggerRecord(
+        trigger_id="pr_tl_seed",
+        owner_user_id=_OWNER,
+        source=GitHubPRSourceSpec(repo="org/repo", number=5, events=["activity"], webhook_source_id=None),
+        target=TriggerTargetSpec(agent="dev", room_id="!room:example.org", prompt="Watch"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    store.create_trigger(seed_rule, initial_github_pr_checkpoint=seeded.checkpoint)
+    seed_poller = GitHubPRPoller(store=store, config_provider=lambda: config, runtime_paths=paths, client=seed_client)
+
+    assert await seed_poller.poll_due_once(now=seeded.checkpoint.next_poll_at + 1.0) == 0
+    cp_drained = store.get_github_pr_checkpoint("pr_tl_seed")
+    assert cp_drained is not None
+    assert cp_drained.state["seed_tail_pending"] is False
+
+    extra_tail["added"] = True
+    assert await seed_poller.poll_due_once(now=cp_drained.next_poll_at + 1.0) == 1
+    assert [it["id"] for it in store.list_firings(trigger_id="pr_tl_seed", limit=1)[0].event.data["items"]] == [301]
+
+
+@pytest.mark.asyncio
+async def test_round2_poller_multipage_review_comments_and_error_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-page inline review comments deliver page 2 without skipping; one failing rule does not abort others."""
+    config, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    _seeded_rule(
+        store,
+        "pr_rc_multi",
+        repo="org/repo",
+        number=42,
+        events=["activity"],
+        webhook_source_id=None,
+        head_sha="sha42",
+        state={"max_review_comment_id": 100, "review_comments_etag": '"rc-old"'},
+    )
+    _seeded_rule(
+        store,
+        "pr_broken",
+        repo="org/broken",
+        number=99,
+        events=["activity"],
+        webhook_source_id=None,
+        head_sha="sha99",
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/org/repo/pulls/42":
+            return httpx.Response(304)
+        if req.url.path == "/repos/org/repo/issues/42/timeline":
+            return httpx.Response(304)
+        if req.url.path == "/repos/org/repo/pulls/42/comments":
+            page = int(req.url.params.get("page", "1"))
+            if page == 1:
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": 203,
+                            "pull_request_review_id": 7,
+                            "path": "c.py",
+                            "body": "c3",
+                            "user": {"login": "bob"},
+                        },
+                        {
+                            "id": 202,
+                            "pull_request_review_id": 7,
+                            "path": "b.py",
+                            "body": "c2",
+                            "user": {"login": "bob"},
+                        },
+                    ],
+                    headers={
+                        "ETag": '"rc-p1"',
+                        "Link": '<https://api.github.com/repos/org/repo/pulls/42/comments?sort=created&direction=desc&per_page=100&page=2>; rel="next"',
+                    },
+                )
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 201, "pull_request_review_id": 7, "path": "a.py", "body": "c1", "user": {"login": "bob"}},
+                    {"id": 100, "pull_request_review_id": 6, "path": "old.py", "body": "old", "user": {"login": "bob"}},
+                ],
+                headers={"ETag": '"rc-p2"'},
+            )
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
+        AsyncMock(return_value=("ghp_tok", "token")),
+    )
+    poller = GitHubPRPoller(
+        store=store,
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        client=_mock_client(handler),
+    )
+
+    orig_poll_rule = poller._poll_rule
+
+    async def _poll_with_one_crash(
+        rule: ReactiveTriggerRecord,
+        cp: GitHubPRCheckpoint | None,
+        cfg: Config,
+        client: httpx.AsyncClient,
+        now: float,
+    ) -> bool:
+        if rule.trigger_id == "pr_broken":
+            msg = "unexpected boom"
+            raise RuntimeError(msg)
+        return await orig_poll_rule(rule, cp, cfg, client, now)
+
+    monkeypatch.setattr(poller, "_poll_rule", _poll_with_one_crash)
+
+    assert await poller.poll_due_once(now=2500.0) == 1
+    cp_after = store.get_github_pr_checkpoint("pr_rc_multi")
+    assert cp_after is not None
+    assert (cp_after.state["max_review_comment_id"], cp_after.state["review_comments_etag"]) == (203, '"rc-p1"')
+    items = store.list_firings(trigger_id="pr_rc_multi", limit=1)[0].event.data["items"]
+    assert len(items) == 1
+    assert [c["id"] for c in items[0]["comments"]] == [201, 202, 203]

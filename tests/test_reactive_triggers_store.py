@@ -1247,3 +1247,50 @@ def test_github_pr_checkpoint_terminal_claim_and_owner_quota(tmp_path: Path) -> 
     assert raw_spec is not None
     parsed_spec = ReactiveTriggerRecord.model_validate_json(str(raw_spec["spec_json"]))
     assert (parsed_spec.enabled, parsed_spec.disabled_reason) == (False, "pr_closed")
+
+
+def test_pr_closed_and_expired_watches_do_not_consume_owner_quotas(tmp_path: Path) -> None:
+    """Auto-retired pr_closed watches and expired PR watches do not consume owner trigger quotas."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+
+    def _pr_rec(
+        trigger_id: str,
+        number: int,
+        *,
+        created_at: float = 1000.0,
+        expires_at: float | None = None,
+    ) -> ReactiveTriggerRecord:
+        return ReactiveTriggerRecord(
+            trigger_id=trigger_id,
+            owner_user_id=_OWNER,
+            source=GitHubPRSourceSpec(repo="MindRoom-AI/mindroom", number=number),
+            target=TriggerTargetSpec(agent="dev", room_id="!room:example.org", prompt="Watch PR"),
+            expires_at=expires_at,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    rec1 = _pr_rec("gh_pr_1", 1)
+    cp1 = GitHubPRCheckpoint(head_sha="sha1", seeded=True, next_poll_at=1100.0, updated_at=1000.0)
+    store.create_trigger(rec1, initial_github_pr_checkpoint=cp1, max_per_owner=1, max_github_pr_per_owner=1)
+
+    rec2 = _pr_rec("gh_pr_2", 2, created_at=1050.0)
+    with pytest.raises(ReactiveTriggerLimitError, match="reactive trigger limit"):
+        store.create_trigger(rec2, max_per_owner=1, max_github_pr_per_owner=1)
+
+    # Auto-disable first watch with pr_closed -> excluded from both max_per_owner and max_github_pr_per_owner.
+    store.update_github_pr_checkpoint_and_enqueue(
+        "gh_pr_1",
+        cp1.model_copy(update={"pr_state": "closed", "updated_at": 1020.0}),
+        disable_reason="pr_closed",
+        expected_rule_uid=rec1.rule_uid,
+        now=1020.0,
+    )
+    store.create_trigger(rec2, max_per_owner=1, max_github_pr_per_owner=1)
+
+    # Expired PR watch does not consume max_github_pr_per_owner.
+    store.delete_trigger("gh_pr_2")
+    expired_pr = _pr_rec("gh_pr_expired", 3, created_at=1000.0, expires_at=1100.0)
+    store.create_trigger(expired_pr, max_github_pr_per_owner=1)
+    fresh_pr = _pr_rec("gh_pr_fresh", 4, created_at=1200.0)
+    store.create_trigger(fresh_pr, max_github_pr_per_owner=1)

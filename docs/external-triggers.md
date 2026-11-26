@@ -8,11 +8,11 @@ Triggers let MindRoom wake an agent or team automatically in response to eventsâ
 
 Use them for:
 
-- **Reactive triggers**, created with the unified `triggers(action=...)` tool (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `subscribe_event`) or `watch_pr(...)`, to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes a single `triggers(action=...)` function.
+`triggers` is the canonical toolkit name and exposes `triggers(action=...)` and `watch_pr(...)`.
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](tools/dynamic-tools.md).
 
@@ -256,7 +256,7 @@ external_trigger_policy:
 | `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
 | `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
 | `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
-| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `allowed_events` | `["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
 | `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 

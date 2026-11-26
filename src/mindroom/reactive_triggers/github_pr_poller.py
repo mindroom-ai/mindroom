@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 import httpx
 
@@ -23,30 +23,18 @@ from mindroom.github_client import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.reactive_triggers.github_pr import (
-    PRState,
-    build_pr_event,
-    extract_pr_summary,
-    format_timeline_entry,
-    group_review_comments,
-    make_pr_item,
-    opt_str,
-    summarize_check_runs,
-    timeline_key,
-    update_pr_checkpoint,
-)
+from mindroom.reactive_triggers import github_pr as gh
 from mindroom.reactive_triggers.models import (
-    DisabledReason,
     GitHubPRCheckpoint,
     GitHubPREventType,
     GitHubPRSourceSpec,
     ReactiveTriggerRecord,
-    TriggerEvent,
 )
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.reactive_triggers.models import DisabledReason
     from mindroom.reactive_triggers.store import ReactiveTriggerStore
 
 logger = get_logger(__name__)
@@ -54,7 +42,10 @@ _MAX_SEEN_IDS, _MAX_SEED_PAGES, _MAX_POLL_PAGES, _MAX_BACKOFF_SEC = 500, 10, 3, 
 _BucketKey = Literal["anonymous"] | tuple[str, GitHubAuthMode]
 _FetchFn = Callable[[str, str | None], Awaitable[GitHubGetResult]]
 _PollResult = tuple[list[dict[str, Any]], list[str]]
-_CheckRunsPageResult = tuple[list[Mapping[str, Any]] | None, str | None, bool]
+_DueEntry = tuple[ReactiveTriggerRecord, GitHubPRCheckpoint | None]
+_Src = GitHubPRSourceSpec
+_State = dict[str, Any]
+_ChecksPages = tuple[list[Mapping[str, Any]] | None, str | None, bool]
 
 
 class GitHubPRWatchError(ValueError):
@@ -77,11 +68,15 @@ class SeededPRState:
 
     checkpoint: GitHubPRCheckpoint
     auth_mode: GitHubAuthMode
-    pr_state: PRState = "open"
+    pr_state: gh.PRState = "open"
     head_sha: str | None = None
     pr_title: str | None = None
     pr_url: str | None = None
     notes: list[str] = field(default_factory=list)
+
+
+def _fail_watch(msg: str, cause: Exception | None = None) -> NoReturn:
+    raise GitHubPRWatchError(msg) from cause
 
 
 async def seed_github_pr_watch(
@@ -103,42 +98,36 @@ async def seed_github_pr_watch(
         token, auth_mode = await resolve_owner_github_token(owner_user_id, config, runtime_paths)
     except (CredentialsUnreadableError, OAuthProviderError) as exc:
         if not webhook_only:
-            msg = f"Unable to resolve GitHub credentials for PR watch: {exc}"
-            raise GitHubPRWatchError(msg) from exc
+            _fail_watch(f"Unable to resolve GitHub credentials for PR watch: {exc}", exc)
         notes.append("Saved GitHub credentials could not be read; skipped initial head_sha lookup for webhook watch.")
-        cp = GitHubPRCheckpoint(head_sha=None, pr_state="open", seeded=True, updated_at=now)
-        return SeededPRState(cp, "anonymous", notes=notes)
+        return SeededPRState(GitHubPRCheckpoint(seeded=True, updated_at=now), "anonymous", notes=notes)
 
-    res = await _seed_get_pr(repo, number, token, auth_mode, webhook_only, notes, client)
+    res = await _seed_get_pr(repo, number, token, auth_mode, notes, client, webhook_only=webhook_only)
     if res is None:
         return SeededPRState(GitHubPRCheckpoint(seeded=True, updated_at=now), auth_mode, notes=notes)
 
-    pr_state, head_sha, title, url = extract_pr_summary(res.data)
+    pr_state, head_sha, title, url = gh.extract_pr_summary(res.data)
     if pr_state != "open":
-        msg = f"GitHub PR {repo}#{number} is already {pr_state}."
-        raise GitHubPRWatchError(msg)
+        _fail_watch(f"GitHub PR {repo}#{number} is already {pr_state}.")
     if webhook_only:
         cp = GitHubPRCheckpoint(head_sha=head_sha, pr_state="open", seeded=True, updated_at=now)
         return SeededPRState(cp, auth_mode, pr_state, head_sha, title, url, notes)
 
-    state: dict[str, Any] = {"pr_etag": res.etag, "pr_title": title, "pr_url": url}
+    state: _State = {"pr_etag": res.etag, "pr_title": title, "pr_url": url}
     src = GitHubPRSourceSpec(repo=repo, number=number, events=list(events), poll_interval_seconds=poll_interval_seconds)
 
     async def _fetch(path: str, etag: str | None) -> GitHubGetResult:
         try:
             got = await github_get_json(path, token=token, etag=etag, client=client)
         except (httpx.HTTPError, TimeoutError, GitHubClientError) as exc:
-            msg = f"Failed to seed GitHub PR {repo}#{number} state: {exc}"
-            raise GitHubPRWatchError(msg) from exc
+            _fail_watch(f"Failed to seed GitHub PR {repo}#{number} state: {exc}", exc)
         if got.status_code not in {200, 304}:
-            msg = f"Failed to seed GitHub PR {repo}#{number} endpoint {path} (HTTP {got.status_code})."
-            raise GitHubPRWatchError(msg)
+            _fail_watch(f"Failed to seed GitHub PR {repo}#{number} endpoint {path} (HTTP {got.status_code}).")
         return got
 
     await _collect_endpoints(src, head_sha, state, _fetch, seed_only=True)
     nxt = _next_poll_at(poll_interval_seconds, now, auth_mode, _parse_remaining(res.headers))
-    cp = _seeded_cp(head_sha, pr_state, nxt, state, now)
-    return SeededPRState(cp, auth_mode, pr_state, head_sha, title, url, notes)
+    return SeededPRState(_cp(head_sha, pr_state, nxt, state, now), auth_mode, pr_state, head_sha, title, url, notes)
 
 
 async def _seed_get_pr(
@@ -146,9 +135,10 @@ async def _seed_get_pr(
     number: int,
     token: str | None,
     auth_mode: GitHubAuthMode,
-    webhook_only: bool,
     notes: list[str],
     client: httpx.AsyncClient | None,
+    *,
+    webhook_only: bool,
 ) -> GitHubGetResult | None:
     try:
         res = await github_get_json(f"/repos/{repo}/pulls/{number}", token=token, client=client)
@@ -156,8 +146,7 @@ async def _seed_get_pr(
         if webhook_only:
             notes.append(f"Initial PR lookup failed for {repo}#{number}; fork CI will match after next PR update.")
             return None
-        msg = f"Failed to reach GitHub API for {repo}#{number}: {exc}"
-        raise GitHubPRWatchError(msg) from exc
+        _fail_watch(f"Failed to reach GitHub API for {repo}#{number}: {exc}", exc)
     if res.status_code == 200 and isinstance(res.data, dict):
         return res
     if webhook_only:
@@ -166,8 +155,7 @@ async def _seed_get_pr(
     hint = (
         " Connect GitHub for private repos." if auth_mode == "anonymous" and res.status_code in {401, 403, 404} else ""
     )
-    msg = f"Failed to fetch GitHub PR {repo}#{number} (HTTP {res.status_code}).{hint}"
-    raise GitHubPRWatchError(msg)
+    _fail_watch(f"Failed to fetch GitHub PR {repo}#{number} (HTTP {res.status_code}).{hint}")
 
 
 class GitHubPRPoller:
@@ -202,20 +190,19 @@ class GitHubPRPoller:
         due = await asyncio.to_thread(self._store.list_due_github_pr_triggers, now=now_ts, limit=50)
         if not due:
             return 0
+        async with AsyncExitStack() as stack:
+            client = (
+                self._client
+                if self._client is not None
+                else await stack.enter_async_context(httpx.AsyncClient(timeout=20.0, follow_redirects=False))
+            )
 
-        async def _run(active: httpx.AsyncClient) -> list[bool]:
             async def _one(rule: ReactiveTriggerRecord, cp: GitHubPRCheckpoint | None) -> bool:
                 async with self._semaphore:
-                    return await self._poll_rule(rule, cp, cfg, active, now_ts)
+                    return await self._poll_rule(rule, cp, cfg, client, now_ts)
 
-            return list(await asyncio.gather(*(_one(r, c) for r, c in due)))
-
-        if self._client is not None:
-            results = await _run(self._client)
-        else:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as owned:
-                results = await _run(owned)
-        enqueued = sum(1 for ok in results if ok)
+            results = await asyncio.gather(*(_one(r, c) for r, c in due), return_exceptions=True)
+        enqueued = _count_enqueued(due, results)
         if enqueued > 0 and self._on_enqueued is not None:
             self._on_enqueued()
         return enqueued
@@ -233,17 +220,13 @@ class GitHubPRPoller:
         try:
             token, auth_mode = await resolve_owner_github_token(rule.owner_user_id, cfg, self._runtime_paths)
         except (CredentialsUnreadableError, OAuthProviderError) as exc:
-            logger.warning(
-                "GitHub credentials unavailable for github_pr poll",
-                trigger_id=rule.trigger_id,
-                error=str(exc),
-            )
+            logger.warning("GitHub credentials unavailable for poll", trigger_id=rule.trigger_id, error=str(exc))
             await self._record_error(rule, cp, now)
             return False
 
         bucket: _BucketKey = "anonymous" if auth_mode == "anonymous" else (rule.owner_user_id, auth_mode)
         if (paused := self._bucket_paused_until.get(bucket, 0.0)) > now:
-            await self._upsert_cp(rule, update_pr_checkpoint(cp, updated_at=now, next_poll_at=paused))
+            await self._upsert_cp(rule, gh.update_pr_checkpoint(cp, updated_at=now, next_poll_at=paused))
             return False
 
         min_rem: list[int | None] = [None]
@@ -265,7 +248,7 @@ class GitHubPRPoller:
         try:
             return await self._poll_body(rule, cp, auth_mode, now, _fetch, min_rem)
         except _RateLimitedError as exc:
-            await self._upsert_cp(rule, update_pr_checkpoint(cp, updated_at=now, next_poll_at=exc.resume_at))
+            await self._upsert_cp(rule, gh.update_pr_checkpoint(cp, updated_at=now, next_poll_at=exc.resume_at))
         except (_PollHTTPError, httpx.HTTPError, TimeoutError, GitHubClientError) as exc:
             logger.warning("GitHub PR poll failed", trigger_id=rule.trigger_id, repo=rule.source.repo, error=str(exc))
             await self._record_error(rule, cp, now)
@@ -281,15 +264,15 @@ class GitHubPRPoller:
         min_rem: list[int | None],
     ) -> bool:
         assert isinstance(rule.source, GitHubPRSourceSpec)
-        src = rule.source
-        state: dict[str, Any] = copy.deepcopy(cp.state) if cp is not None else {}
-        head_sha, pr_state = (cp.head_sha, cp.pr_state) if cp is not None else (None, "open")
+        src, state = rule.source, copy.deepcopy(cp.state) if cp is not None else {}
+        prev_state: gh.PRState = cp.pr_state if cp is not None else "open"
+        head_sha, pr_state = (cp.head_sha, prev_state) if cp is not None else (None, "open")
         seed_only = cp is None or not cp.seeded
 
-        pr_etag = None if seed_only else opt_str(state.get("pr_etag"))
+        pr_etag = None if seed_only else gh.opt_str(state.get("pr_etag"))
         pr_res = await fetch(f"/repos/{src.repo}/pulls/{src.number}", pr_etag)
         if pr_res.status_code == 200 and isinstance(pr_res.data, dict):
-            pr_state, new_sha, title, url = extract_pr_summary(pr_res.data)
+            pr_state, new_sha, title, url = gh.extract_pr_summary(pr_res.data)
             head_sha = new_sha or head_sha
             state.update(pr_etag=pr_res.etag, pr_title=title, pr_url=url)
         elif pr_res.status_code == 304:
@@ -298,59 +281,34 @@ class GitHubPRPoller:
             msg = f"Unexpected PR payload for {src.repo}#{src.number}"
             raise _PollHTTPError(msg)
 
-        poll_ci = pr_state == "open"
-        items, keys = await _collect_endpoints(src, head_sha, state, fetch, seed_only=seed_only, poll_ci=poll_ci)
-        was_open = not seed_only and cp is not None and cp.pr_state == "open"
+        ci_sha = head_sha if pr_state == "open" else None
+        items, keys = await _collect_endpoints(src, ci_sha, state, fetch, seed_only=seed_only)
+        was_open = not seed_only and prev_state == "open"
         merged_hit = was_open and pr_state == "merged" and "merge" in src.events
         closed_hit = was_open and pr_state == "closed" and "close" in src.events
-        if merged_hit:
-            items.append(make_pr_item("merged", f"PR #{src.number} merged", url=state.get("pr_url")))
-            keys.append(f"pr:merged:{head_sha or ''}")
-        elif closed_hit:
-            items.append(make_pr_item("closed", f"PR #{src.number} closed without merge", url=state.get("pr_url")))
-            keys.append(f"pr:closed:{head_sha or ''}")
+        if merged_hit or closed_hit:
+            term_type = "merged" if merged_hit else "closed"
+            term_msg = f"PR #{src.number} merged" if merged_hit else f"PR #{src.number} closed without merge"
+            items.append(gh.make_pr_item(term_type, term_msg, url=state.get("pr_url")))
+            keys.append(f"pr:{term_type}:{head_sha or ''}")
 
         nxt = _next_poll_at(src.poll_interval_seconds, now, auth_mode, min_rem[0])
-        new_cp = _seeded_cp(head_sha, pr_state, nxt, state, now)
-        terminal = pr_state in {"closed", "merged"}
+        new_cp, terminal = _cp(head_sha, pr_state, nxt, state, now), pr_state in {"closed", "merged"}
+        dkey, ev = None, None
+        disable: DisabledReason | None = None
         if seed_only or not items:
-            disable: DisabledReason | None = "pr_closed" if (terminal and src.auto_disable_on_close) else None
-            await self._commit_cp(rule, new_cp, now=now, disable=disable)
-            return False
-
-        kind = "github_pr.merged" if merged_hit else ("github_pr.closed" if closed_hit else "github_pr.update")
-        dkey = f"ghpr:{hashlib.sha256(f'{rule.trigger_id}:{"|".join(sorted(keys))}'.encode()).hexdigest()[:32]}"
-        actor = next((a for it in items if (a := opt_str(it.get("actor")))), None)
-        ev = build_pr_event(
-            src,
-            kind,
-            dkey,
-            now,
-            new_cp,
-            items,
-            actor=actor,
-            title=opt_str(state.get("pr_title")),
-            url=opt_str(state.get("pr_url")),
-            terminal=terminal,
-        )
-        return await self._commit_cp(rule, new_cp, now=now, dedupe_key=dkey, event=ev)
-
-    async def _commit_cp(
-        self,
-        rule: ReactiveTriggerRecord,
-        cp: GitHubPRCheckpoint,
-        *,
-        now: float,
-        dedupe_key: str | None = None,
-        event: TriggerEvent | None = None,
-        disable: DisabledReason | None = None,
-    ) -> bool:
+            if terminal and src.auto_disable_on_close and (seed_only or prev_state == "open"):
+                disable = "pr_closed"
+        else:
+            kind = "github_pr.merged" if merged_hit else ("github_pr.closed" if closed_hit else "github_pr.update")
+            dkey, ev = gh.build_poll_pr_event(rule, kind, new_cp, state, items, keys, now)
+        commit = self._store.update_github_pr_checkpoint_and_enqueue
         return await asyncio.to_thread(
-            self._store.update_github_pr_checkpoint_and_enqueue,
+            commit,
             rule.trigger_id,
-            cp,
-            dedupe_key=dedupe_key,
-            event=event,
+            new_cp,
+            dedupe_key=dkey,
+            event=ev,
             disable_reason=disable,
             expected_rule_uid=rule.rule_uid,
             now=now,
@@ -364,116 +322,119 @@ class GitHubPRPoller:
         assert isinstance(rule.source, GitHubPRSourceSpec)
         errs = (cp.consecutive_errors if cp is not None else 0) + 1
         backoff = min(_MAX_BACKOFF_SEC, float(rule.source.poll_interval_seconds) * (2 ** min(errs, 5)))
-        next_cp = update_pr_checkpoint(cp, updated_at=now, consecutive_errors=errs, next_poll_at=now + backoff)
+        next_cp = gh.update_pr_checkpoint(cp, updated_at=now, consecutive_errors=errs, next_poll_at=now + backoff)
         await self._upsert_cp(rule, next_cp)
 
 
-def _seeded_cp(
-    head_sha: str | None,
-    pr_state: PRState,
-    next_poll_at: float,
-    state: dict[str, Any],
-    now: float,
-) -> GitHubPRCheckpoint:
-    return GitHubPRCheckpoint(
-        head_sha=head_sha,
-        pr_state=pr_state,
-        seeded=True,
-        next_poll_at=next_poll_at,
-        state=state,
-        updated_at=now,
-    )
+def _cp(sha: str | None, state: gh.PRState, nxt: float, st: _State, now: float) -> GitHubPRCheckpoint:
+    return GitHubPRCheckpoint(head_sha=sha, pr_state=state, seeded=True, next_poll_at=nxt, state=st, updated_at=now)
+
+
+def _count_enqueued(due: Sequence[_DueEntry], results: Sequence[bool | BaseException]) -> int:
+    enqueued = 0
+    for (rule, _), outcome in zip(due, results, strict=True):
+        if isinstance(outcome, Exception):
+            logger.warning("Unexpected github_pr poll error", trigger_id=rule.trigger_id, error=str(outcome))
+        elif isinstance(outcome, BaseException):
+            raise outcome
+        elif outcome:
+            enqueued += 1
+    return enqueued
 
 
 async def _collect_endpoints(
-    src: GitHubPRSourceSpec,
-    head_sha: str | None,
-    state: dict[str, Any],
+    src: _Src,
+    sha: str | None,
+    state: _State,
     fetch: _FetchFn,
     *,
     seed_only: bool,
-    poll_ci: bool = True,
 ) -> _PollResult:
-    items: list[dict[str, Any]] = []
-    keys: list[str] = []
+    items, keys = [], []
     if "activity" in src.events:
-        tl_i, tl_k = await _poll_timeline(src, state, fetch, seed_only=seed_only)
-        rc_i, rc_k = await _poll_review_comments(src, state, fetch, seed_only=seed_only)
-        items.extend((*tl_i, *rc_i))
-        keys.extend((*tl_k, *rc_k))
-    if "ci" in src.events and poll_ci and head_sha:
-        ci_i, ci_k = await _poll_check_runs(src, head_sha, state, fetch, seed_only=seed_only)
-        items.extend(ci_i)
-        keys.extend(ci_k)
+        for fn in (_poll_timeline, _poll_review_comments):
+            sub_items, sub_keys = await fn(src, state, fetch, seed_only=seed_only)
+            items.extend(sub_items)
+            keys.extend(sub_keys)
+    if "ci" in src.events and sha:
+        ci_items, ci_keys = await _poll_check_runs(src, sha, state, fetch, seed_only=seed_only)
+        items.extend(ci_items)
+        keys.extend(ci_keys)
     return items, keys
 
 
-async def _poll_timeline(
-    src: GitHubPRSourceSpec,
-    state: dict[str, Any],
-    fetch: _FetchFn,
-    *,
-    seed_only: bool,
-) -> _PollResult:
+async def _poll_timeline(src: GitHubPRSourceSpec, state: _State, fetch: _FetchFn, *, seed_only: bool) -> _PollResult:
+    suppress = seed_only or bool(state.get("seed_tail_pending"))
     page = 1 if seed_only else max(1, int(state.get("timeline_page") or 1))
     seen = [] if seed_only else [k for k in state.get("seen_timeline_ids", []) if isinstance(k, str)]
-    seen_set, items, keys = set(seen), [], []
-    for step in range(_MAX_SEED_PAGES if seed_only else _MAX_POLL_PAGES):
-        etag = None if seed_only or step > 0 else opt_str(state.get("timeline_etag"))
+    seen_set, items, keys, max_pages = set(seen), [], [], _MAX_SEED_PAGES if seed_only else _MAX_POLL_PAGES
+    for step in range(max_pages):
+        etag = None if seed_only or step > 0 else gh.opt_str(state.get("timeline_etag"))
         res = await fetch(f"/repos/{src.repo}/issues/{src.number}/timeline?per_page=100&page={page}", etag)
         if res.status_code == 304:
             state["timeline_etag"] = res.etag or state.get("timeline_etag")
             break
         entries = res.data if isinstance(res.data, list) else []
         for entry in entries:
-            if not isinstance(entry, Mapping) or (key := timeline_key(entry)) in seen_set:
+            if not isinstance(entry, Mapping) or (key := gh.timeline_key(entry)) in seen_set:
                 continue
             seen_set.add(key)
             seen.append(key)
-            if not seed_only and (fmt := format_timeline_entry(src, entry)) is not None:
+            if not suppress and (fmt := gh.format_timeline_entry(src, entry)) is not None:
                 items.append(fmt)
                 keys.append(f"tl:{key}")
-        state.update(timeline_page=page, timeline_etag=res.etag)
-        if (next_p := res.next_page or (page + 1 if len(entries) >= 100 else None)) is None:
+        next_p = res.next_page or (page + 1 if len(entries) >= 100 else None)
+        if next_p is None:
+            state.update(timeline_page=page, timeline_etag=res.etag, seed_tail_pending=False)
+            break
+        if step + 1 >= max_pages:
+            state.update(timeline_page=next_p, timeline_etag=None, seed_tail_pending=suppress)
             break
         page = next_p
     state["seen_timeline_ids"] = seen[-_MAX_SEEN_IDS:]
     return items, keys
 
 
-async def _poll_review_comments(
-    src: GitHubPRSourceSpec,
-    state: dict[str, Any],
-    fetch: _FetchFn,
-    *,
-    seed_only: bool,
-) -> _PollResult:
-    etag = None if seed_only else opt_str(state.get("review_comments_etag"))
-    res = await fetch(f"/repos/{src.repo}/pulls/{src.number}/comments?sort=created&direction=desc&per_page=100", etag)
-    if res.status_code == 304:
-        state["review_comments_etag"] = res.etag or etag
-        return [], []
-    comments = res.data if isinstance(res.data, list) else []
+async def _poll_review_comments(src: _Src, state: _State, fetch: _FetchFn, *, seed_only: bool) -> _PollResult:
     prev_max = 0 if seed_only else int(state.get("max_review_comment_id") or 0)
-    max_id, raw_new = prev_max, []
-    for c in comments:
-        cid = c.get("id") if isinstance(c, Mapping) else None
-        if isinstance(cid, int) and not isinstance(cid, bool) and cid > prev_max:
+    page1_etag = None if seed_only else gh.opt_str(state.get("review_comments_etag"))
+    max_id, raw_new, seen_ids, page = prev_max, [], set(), 1
+    for step in range(1 if seed_only else _MAX_POLL_PAGES):
+        q = f"sort=created&direction=desc&per_page=100{f'&page={page}' if page > 1 else ''}"
+        res = await fetch(f"/repos/{src.repo}/pulls/{src.number}/comments?{q}", page1_etag if step == 0 else None)
+        if res.status_code == 304:
+            state["review_comments_etag"] = res.etag or page1_etag
+            return [], []
+        if step == 0:
+            page1_etag = res.etag
+        comments = res.data if isinstance(res.data, list) else []
+        hit_old = False
+        for c in comments:
+            cid = c.get("id") if isinstance(c, Mapping) else None
+            if not isinstance(cid, int) or isinstance(cid, bool):
+                continue
+            if cid <= prev_max:
+                hit_old = True
+                continue
             max_id = max(max_id, cid)
-            if not seed_only:
+            if not seed_only and cid not in seen_ids:
+                seen_ids.add(cid)
                 raw_new.append(c)
-    state.update(max_review_comment_id=max_id, review_comments_etag=res.etag)
+        if seed_only or hit_old or not comments or res.next_page is None:
+            break
+        page = res.next_page
+    state.update(max_review_comment_id=max_id, review_comments_etag=page1_etag)
     if not raw_new:
         return [], []
     raw_new.reverse()
-    return group_review_comments(src, raw_new)
+    return gh.group_review_comments(src, raw_new)
 
 
-async def _fetch_check_runs_pages(repo: str, head_sha: str, etag: str | None, fetch: _FetchFn) -> _CheckRunsPageResult:
+async def _fetch_check_runs(repo: str, sha: str, etag: str | None, fetch: _FetchFn) -> _ChecksPages:
     runs: list[Mapping[str, Any]] = []
     single_etag, page, truncated = None, 1, False
     for step in range(_MAX_POLL_PAGES):
-        path = f"/repos/{repo}/commits/{head_sha}/check-runs?per_page=100&page={page}"
+        path = f"/repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}"
         res = await fetch(path, etag if step == 0 else None)
         if res.status_code == 304:
             return None, res.etag or etag, False
@@ -490,40 +451,33 @@ async def _fetch_check_runs_pages(repo: str, head_sha: str, etag: str | None, fe
     return runs, single_etag, truncated
 
 
-async def _poll_check_runs(
-    src: GitHubPRSourceSpec,
-    head_sha: str,
-    state: dict[str, Any],
-    fetch: _FetchFn,
-    *,
-    seed_only: bool,
-) -> _PollResult:
-    if seed_only or state.get("ci_head_sha") != head_sha:
-        state.update(ci_head_sha=head_sha, checks_etag=None, notified_failed_checks=[], last_ci_overall="none")
-    etag = None if seed_only else opt_str(state.get("checks_etag"))
-    runs, single_etag, truncated = await _fetch_check_runs_pages(src.repo, head_sha, etag, fetch)
+async def _poll_check_runs(src: _Src, sha: str, state: _State, fetch: _FetchFn, *, seed_only: bool) -> _PollResult:
+    if seed_only or state.get("ci_head_sha") != sha:
+        state.update(ci_head_sha=sha, checks_etag=None, notified_failed_checks=[], last_ci_overall="none")
+    etag = None if seed_only else gh.opt_str(state.get("checks_etag"))
+    runs, single_etag, truncated = await _fetch_check_runs(src.repo, sha, etag, fetch)
     if runs is None:
         state["checks_etag"] = single_etag
         return [], []
 
-    total, failed, pending = summarize_check_runs(runs)
-    overall = "none" if total == 0 else ("failing" if failed else ("pending" if (pending or truncated) else "passing"))
+    s = gh.summarize_check_runs(runs)
+    overall = s.overall(truncated=truncated)
     if seed_only:
-        state.update(checks_etag=single_etag, notified_failed_checks=sorted(failed), last_ci_overall=overall)
+        state.update(checks_etag=single_etag, notified_failed_checks=sorted(s.failed), last_ci_overall=overall)
         return [], []
     notified = {k for k in state.get("notified_failed_checks", []) if isinstance(k, str)}
     items, keys = [], []
-    for key in sorted(set(failed) - notified):
-        info = failed[key]
+    for key in sorted(set(s.failed) - notified):
+        info = s.failed[key]
         msg = f"CI check '{info['name']}' finished with {info['conclusion']}"
-        extra = {"id": key, "name": info["name"], "conclusion": info["conclusion"], "sha": head_sha, "url": info["url"]}
-        items.append(make_pr_item("ci_failure", msg, **extra))
-        keys.append(f"ci:fail:{head_sha}:{key}")
+        extra = {"id": key, "name": info["name"], "conclusion": info["conclusion"], "sha": sha, "url": info["url"]}
+        items.append(gh.make_pr_item("ci_failure", msg, **extra))
+        keys.append(f"ci:fail:{sha}:{key}")
         notified.add(key)
     if overall == "passing" and state.get("last_ci_overall") != "passing":
-        pass_msg = f"All {total} CI checks passed for {head_sha[:7]}"
-        items.append(make_pr_item("ci_passing", pass_msg, sha=head_sha, total=total))
-        keys.append(f"ci:pass:{head_sha}")
+        msg = f"All {s.total} CI checks passed for {sha[:7]}"
+        items.append(gh.make_pr_item("ci_passing", msg, sha=sha, total=s.total))
+        keys.append(f"ci:pass:{sha}")
     state.update(checks_etag=single_etag, notified_failed_checks=sorted(notified), last_ci_overall=overall)
     return items, keys
 

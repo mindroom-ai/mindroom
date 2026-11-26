@@ -219,7 +219,11 @@ class ReactiveTriggerStore:
             if max_per_owner is not None:
                 owner_count = int(
                     conn.execute(
-                        "SELECT COUNT(*) FROM reactive_triggers WHERE owner_user_id = ?",
+                        """
+                        SELECT COUNT(*) FROM reactive_triggers
+                        WHERE owner_user_id = ?
+                          AND (disabled_reason IS NULL OR disabled_reason != 'pr_closed')
+                        """,
                         (record.owner_user_id,),
                     ).fetchone()[0],
                 )
@@ -230,8 +234,14 @@ class ReactiveTriggerStore:
             if max_github_pr_per_owner is not None and record.source.source_type == "github_pr":
                 github_pr_count = int(
                     conn.execute(
-                        "SELECT COUNT(*) FROM reactive_triggers WHERE owner_user_id = ? AND source_type = 'github_pr'",
-                        (record.owner_user_id,),
+                        """
+                        SELECT COUNT(*) FROM reactive_triggers
+                        WHERE owner_user_id = ?
+                          AND source_type = 'github_pr'
+                          AND enabled = 1
+                          AND (expires_at IS NULL OR expires_at > ?)
+                        """,
+                        (record.owner_user_id, record.created_at),
                     ).fetchone()[0],
                 )
                 if github_pr_count >= max_github_pr_per_owner:
@@ -693,6 +703,7 @@ class ReactiveTriggerStore:
                   AND rt.enabled = 1
                   AND (rt.expires_at IS NULL OR rt.expires_at > ?)
                   AND (cp.trigger_id IS NULL OR cp.next_poll_at <= ?)
+                  AND (cp.pr_state IS NULL OR cp.pr_state = 'open' OR cp.seeded = 0)
                   AND json_extract(rt.spec_json, '$.source.webhook_source_id') IS NULL
                 ORDER BY COALESCE(cp.next_poll_at, 0.0) ASC, rt.trigger_id ASC
                 LIMIT ?

@@ -45,10 +45,9 @@ from mindroom.reactive_triggers.external_sources import (
     validate_subscription_against_source,
 )
 from mindroom.reactive_triggers.github_pr import (
+    build_github_pr_dry_run_event_and_match,
     check_github_pr_source_access,
     find_covering_github_webhook_source,
-    is_ignored_activity_actor,
-    match_github_webhook_to_pr_rule,
 )
 from mindroom.reactive_triggers.github_pr_poller import seed_github_pr_watch
 from mindroom.reactive_triggers.management import (
@@ -1844,11 +1843,12 @@ def _build_dry_run_event_and_match(
         return event, matches_external_event(rule.source, event), None
 
     if isinstance(rule.source, GitHubPRSourceSpec):
-        return _build_github_pr_dry_run_event_and_match(
-            context=context,
+        return build_github_pr_dry_run_event_and_match(
+            config=context.config,
             rule=rule,
             checkpoint=github_pr_checkpoint,
-            args=args,
+            actor=args["actor"],
+            text=args["text"],
             extra_data=extra_data,
             raw_kind=raw_kind,
             now=now,
@@ -1910,138 +1910,6 @@ def _has_external_event_source_access(
     except ValueError:
         return False
     return True
-
-
-_GITHUB_PR_HIGH_LEVEL_CATEGORIES: frozenset[str] = frozenset({"activity", "ci", "merge", "close"})
-_DEFAULT_GITHUB_PR_WEBHOOK_EVENTS: frozenset[str] = frozenset(
-    {"pull_request", "issue_comment", "pull_request_review", "pull_request_review_comment", "check_run", "check_suite"},
-)
-
-
-def _build_github_pr_dry_run_event_and_match(
-    *,
-    context: ToolRuntimeContext,
-    rule: ReactiveTriggerRecord,
-    checkpoint: GitHubPRCheckpoint | None,
-    args: _TriggerParams,
-    extra_data: dict[str, Any],
-    raw_kind: str | None,
-    now: float,
-) -> tuple[TriggerEvent, bool, str | None]:
-    assert isinstance(rule.source, GitHubPRSourceSpec)
-    source = rule.source
-    normalized_kind = raw_kind.strip() if raw_kind and raw_kind.strip() else None
-    if normalized_kind is not None and normalized_kind.lower() not in _GITHUB_PR_HIGH_LEVEL_CATEGORIES:
-        return _dry_run_github_pr_webhook_event(
-            context=context,
-            rule=rule,
-            checkpoint=checkpoint,
-            args=args,
-            extra_data=extra_data,
-            normalized_kind=normalized_kind,
-            now=now,
-        )
-
-    event_type: GitHubPREventType
-    if normalized_kind is not None:
-        lower = normalized_kind.lower()
-        event_type = (
-            "activity"
-            if lower == "activity"
-            else ("ci" if lower == "ci" else ("merge" if lower == "merge" else "close"))
-        )
-    else:
-        raw_cat = extra_data.get("category")
-        event_type = raw_cat if raw_cat in {"activity", "ci", "merge", "close"} else source.events[0]
-    sample_actor = args["actor"]
-    actor_type = extra_data.get("actor_type")
-    sample_actor_type = actor_type if isinstance(actor_type, str) else None
-    event_kind = (
-        "github_pr.merged"
-        if event_type == "merge"
-        else ("github_pr.closed" if event_type == "close" else "github_pr.update")
-    )
-    data = {
-        "repo": source.repo,
-        "number": source.number,
-        "terminal": event_type in {"merge", "close"},
-        **extra_data,
-    }
-    event = TriggerEvent(
-        source_type="github_pr",
-        source_id=source.repo.lower(),
-        kind=event_kind,
-        event_id="dry_run",
-        timestamp=now,
-        actor=sample_actor,
-        title=f"{source.repo}#{source.number}",
-        text=args["text"],
-        data=data,
-    )
-    sample_repo = data.get("repo")
-    sample_number = data.get("number")
-    repo_matches = isinstance(sample_repo, str) and sample_repo.lower() == source.repo.lower()
-    number_matches = (
-        isinstance(sample_number, int) and not isinstance(sample_number, bool) and sample_number == source.number
-    )
-    if not (repo_matches and number_matches) or event_type not in source.events:
-        return event, False, None
-    if event_type == "activity" and is_ignored_activity_actor(
-        source,
-        actor=sample_actor,
-        actor_type=sample_actor_type,
-    ):
-        return (
-            event,
-            False,
-            "Dry run only (no state changed or message sent); activity from this actor is ignored by ignore_actors/ignore_bots.",
-        )
-    return event, True, None
-
-
-def _dry_run_github_pr_webhook_event(
-    *,
-    context: ToolRuntimeContext,
-    rule: ReactiveTriggerRecord,
-    checkpoint: GitHubPRCheckpoint | None,
-    args: _TriggerParams,
-    extra_data: dict[str, Any],
-    normalized_kind: str,
-    now: float,
-) -> tuple[TriggerEvent, bool, str | None]:
-    assert isinstance(rule.source, GitHubPRSourceSpec)
-    source = rule.source
-    base_event = normalized_kind.split(".", 1)[0]
-    data: dict[str, Any] = dict(extra_data)
-    if "repo" not in data:
-        data["repo"] = source.repo
-    if "number" not in data and "pr_numbers" not in data:
-        data["number"] = source.number
-    if base_event == "issue_comment" and "is_pull_request" not in data:
-        data["is_pull_request"] = True
-
-    webhook_event = TriggerEvent(
-        source_type="external_event",
-        source_id=source.webhook_source_id or source.repo.lower(),
-        kind=normalized_kind,
-        event_id="dry_run",
-        timestamp=now,
-        actor=args["actor"],
-        title=f"{source.repo}#{source.number}",
-        summary=args["text"],
-        text=args["text"],
-        data=data,
-    )
-    allowed_events = _DEFAULT_GITHUB_PR_WEBHOOK_EVENTS
-    if source.webhook_source_id is not None:
-        gh_source = context.config.external_trigger_policy.event_sources.get(source.webhook_source_id)
-        if isinstance(gh_source, GitHubEventSourceConfig):
-            allowed_events = frozenset(gh_source.allowed_events)
-            if base_event not in allowed_events:
-                return webhook_event, False, None
-
-    match_result = match_github_webhook_to_pr_rule(rule, checkpoint, webhook_event, allowed_events=allowed_events)
-    return match_result.event or webhook_event, match_result.event is not None, None
 
 
 async def _read_thread_tag_present(
