@@ -461,7 +461,7 @@ async def _countable_thread_history(
     """Return history an automatic pass may count, or nothing.
 
     An automatic pass records the counted size as its baseline on every outcome
-    except an untitled thread's generation exception (which sets a short retry
+    except an untitled thread's failed generation pass (which sets a short retry
     cooldown instead), so it must not run at all on a count it cannot trust. Both reasons it
     cannot are handled the same way -- the history is unavailable, or it is a
     page of a longer thread -- because both leave the pass with no number worth
@@ -659,7 +659,16 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
         logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
-async def maybe_generate_thread_summary(  # noqa: C901, PLR0911, PLR0912
+def _record_generation_failure(room_id: str, thread_id: str, state: SummaryState) -> None:
+    """Cool down an untitled thread's failed generation pass, or advance an already-titled thread's baseline."""
+    baselines = schedule.THREAD_SUMMARY_BASELINES
+    if state.summary is None:
+        baselines.record_failure_cooldown(room_id, thread_id)
+    else:
+        baselines.record(room_id, thread_id, state.message_count)
+
+
+async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -763,20 +772,16 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911, PLR0912
                 tag_vocabulary=tag_vocabulary,
                 room_instructions=room_instructions,
                 current_title=current_title,
+                allow_fallback=state.summary is None,
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
-            if state.summary is None:
-                baselines.record_failure_cooldown(room_id, thread_id)
-            else:
-                # Already titled: record current count to wait until the next threshold.
-                baselines.record(room_id, thread_id, message_count)
+            _record_generation_failure(room_id, thread_id, state)
             return
 
         if generated is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
-            # Record current count to prevent retry storms until next threshold
-            baselines.record(room_id, thread_id, message_count)
+            _record_generation_failure(room_id, thread_id, state)
             return
 
         # A kept title with tags to apply is posted again as it is, so the notice records the tags as done.
@@ -793,7 +798,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911, PLR0912
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            baselines.record(room_id, thread_id, message_count)
+            _record_generation_failure(room_id, thread_id, state)
             return
 
         await _deliver_generated_summary(

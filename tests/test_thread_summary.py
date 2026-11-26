@@ -2370,18 +2370,20 @@ class TestMaybeGenerateThreadSummary:
         self.client.room_send.assert_not_awaited()
 
     async def test_generation_failure_no_event(self) -> None:
-        """No Matrix event sent when the model answers nothing; count is recorded to prevent retries."""
+        """No Matrix event sent when the model answers nothing; an untitled thread enters failure cooldown."""
         self._summarizer("")
         self._history(_make_thread_history(5))
 
         await self._maybe_generate(_mock_config())
 
         self.client.room_send.assert_not_awaited()
-        # Count is recorded to prevent retry storms
-        assert self._count() == 5
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_failed_first_summary_does_not_skip_to_initial_enrichment(self) -> None:
-        """A failed first summary must keep the next attempt summary-only."""
+        """A failed first summary must keep the next attempt summary-only after cooldown."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
         client = make_matrix_client_mock()
         client.user_id = None
         model = self._summarizer("", _title("🧵 Login failure investigation"))
@@ -2389,6 +2391,10 @@ class TestMaybeGenerateThreadSummary:
 
         self._history(_make_thread_history(5))
         await self._maybe_generate(config, client=client)
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        now[0] = 160.0
         self._history(_make_thread_history(15))
         await self._maybe_generate(config, client=client)
 
@@ -2481,6 +2487,106 @@ class TestMaybeGenerateThreadSummary:
         await self._maybe_generate(_mock_config())
         self.client.room_send.assert_not_awaited()
         assert self._count() == thread_size
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    async def test_untitled_thread_posts_shortest_fallback_when_all_attempts_exceed_word_limit(self) -> None:
+        """An untitled post-reply pass falls back to the shortest <=80-char title when all attempts exceed 6 words."""
+        model = self._summarizer(
+            _title("🧵 Review of the login failure investigation notes"),
+            _title("🧵 Fix auth token refresh retry race condition"),
+            _title("🧵 Investigate auth token refresh retry race condition"),
+        )
+        self._history(_make_thread_history(5))
+
+        await self._maybe_generate(_mock_config())
+
+        assert len(model.requests) == 3
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Fix auth token refresh retry race condition"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize("failure", ["over-80-chars", "unparsed", "empty-normalized"])
+    async def test_untitled_none_or_empty_generation_cools_down_and_retries_after_expiry(self, failure: str) -> None:
+        """Untitled generated-None and empty-normalized exits set cooldown without advancing baseline, then retry."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        config = _mock_config()
+        self._history(_make_thread_history(5))
+
+        if failure == "empty-normalized":
+            fake_generate = AsyncMock(
+                side_effect=[GeneratedSummary(summary="** **"), GeneratedSummary(summary="🧵 Recovered title")],
+            )
+            self.monkeypatch.setattr(automatic, "generate_summary", fake_generate)
+        else:
+            over_80 = "🧵 " + " ".join(["longwordlong"] * 7)
+            initial = [_title(over_80)] * 3 if failure == "over-80-chars" else [""]
+            self._summarizer(*initial, _title("🧵 Recovered title"))
+
+        await self._maybe_generate(config)
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+        assert self.conversation_reader.read_strict.await_count == 1
+
+        now[0] = 130.0
+        await self._maybe_generate(config)
+        assert self.conversation_reader.read_strict.await_count == 1
+
+        now[0] = 160.0
+        await self._maybe_generate(config)
+        assert _sent_summaries(self.client)[0]["summary"] == "🧵 Recovered title"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize(
+        ("existing_count", "thread_size", "existing_summary", "retitle"),
+        [
+            (5, 15, "🧵 Existing title", False),
+            (0, 5, "🧵 Existing title", False),
+            (5, 7, "🧵 Existing title", True),
+            (5, 15, "🧵 Review of PR #548 session persistence hooks", False),
+        ],
+        ids=["durable-title", "provisional-title", "retitle", "long-legacy-title"],
+    )
+    async def test_titled_thread_skips_fallback_and_records_count_without_cooldown(
+        self,
+        existing_count: int,
+        thread_size: int,
+        existing_summary: str,
+        retitle: bool,
+    ) -> None:
+        """Already-titled threads never use overlong fallback and record message_count without failure cooldown."""
+        model = self._summarizer(*[_title("🧵 Plan migration for all backend service instances")] * 3)
+        self._history(
+            [
+                *_make_thread_history(thread_size),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=existing_count,
+                    summary=existing_summary,
+                    initial_enrichment_complete=True if existing_count > 0 else None,
+                ),
+            ],
+        )
+
+        await self._maybe_generate(_mock_config(), retitle=retitle)
+
+        assert len(model.requests) == 3
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == thread_size
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    async def test_provisional_title_all_rejected_skips_fallback_and_cooldown(self) -> None:
+        """Provisional titles stay strict (no fallback) and do not set failure cooldown."""
+        model = self._summarizer(*[_title("🧵 Plan migration for all backend service instances")] * 3)
+        self._history(_make_thread_history(1))
+
+        await self._provisional(config=_mock_config(first_threshold=2))
+
+        assert len(model.requests) == 3
+        self.client.room_send.assert_not_awaited()
         assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_send_failure_still_records_count(self) -> None:
@@ -3002,6 +3108,7 @@ class TestGenerateSummary:
         *,
         model_name: str = "default",
         tag_vocabulary: str | None = None,
+        allow_fallback: bool = False,
     ) -> GeneratedSummary | None:
         return await generate_summary(
             thread_history,
@@ -3009,6 +3116,7 @@ class TestGenerateSummary:
             runtime_paths,
             model_name=model_name,
             tag_vocabulary=tag_vocabulary,
+            allow_fallback=allow_fallback,
         )
 
     async def test_prompt_instructions_and_delimiters(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3075,6 +3183,137 @@ class TestGenerateSummary:
 
         assert result is None
         assert len(model.requests) == 3
+
+    @pytest.mark.parametrize(
+        ("prompts", "first_rejected", "second_rejected", "expected_snippet"),
+        [
+            (
+                None,
+                "🧵 Review of the login failure investigation notes",
+                "🧵 Review of the login failure investigation notes",
+                "Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words after the emoji. Drop secondary detail rather than cutting the phrase short.",
+            ),
+            (
+                {"THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE": "BAD: {rejected_title} | {error}"},
+                "🧵 Review of the login failure investigation notes",
+                "🧵 Detailed review of login failure investigation logs",
+                "BAD: 🧵 Detailed review of login failure investigation logs",
+            ),
+        ],
+        ids=["default-template-repeated-rejection", "custom-template-distinct-rejections"],
+    )
+    async def test_rejected_titles_accumulate_across_retries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        prompts: dict[str, str] | None,
+        first_rejected: str,
+        second_rejected: str,
+        expected_snippet: str,
+    ) -> None:
+        """Attempt 3 keeps attempt 1's and attempt 2's rejections so retries never resend an identical prompt."""
+        model = _summary_model(
+            _title(first_rejected),
+            _title(second_rejected),
+            _title("🧵 Login failure investigation"),
+        )
+        install_model_providers(monkeypatch, {"default": model})
+        config = Config(prompts=prompts) if prompts is not None else _mock_config()
+
+        result = await self._summarize(_make_thread_history(3), config, _mock_runtime_paths())
+
+        assert result == GeneratedSummary(summary="🧵 Login failure investigation")
+        first, second, third = (_prompt(request) for request in model.requests)
+        assert second.startswith(f"{first}\n\n")
+        assert third.startswith(f"{second}\n\n")
+        assert third != second
+        assert expected_snippet in third
+        if prompts is None:
+            block = f"<rejected_title>\n{first_rejected}\n</rejected_title>\n{title_error(first_rejected)}"
+            assert second.count(block) == 1
+            assert third.count(block) == 2
+        else:
+            first_idx = third.index(f"BAD: {first_rejected} | {title_error(first_rejected)}")
+            second_idx = third.index(f"BAD: {second_rejected} | {title_error(second_rejected)}")
+            assert first_idx < second_idx
+
+    @pytest.mark.parametrize(
+        ("answers", "expected", "expected_calls"),
+        [
+            (
+                [
+                    _title("🧵 a b c d e f g h"),
+                    _title("🧵 Plan migration for all backend service instances"),
+                    _title("🧵 Planning migration for all backend service instances"),
+                ],
+                "🧵 Plan migration for all backend service instances",
+                3,
+            ),
+            (
+                [
+                    _title("🧵 Fix alpha beta gamma delta zeta eta"),
+                    _title("🧵 Fix a1 b2 c3 d4 e5 f6"),
+                    _title("🧵 Fix g1 h2 i3 j4 k5 l6"),
+                ],
+                "🧵 Fix a1 b2 c3 d4 e5 f6",
+                3,
+            ),
+            (
+                [
+                    _title("🧵 " + " ".join(["longwordlong"] * 7)),
+                    _title("🧵 Review of the login failure investigation notes now"),
+                    _title("🧵 " + " ".join(["anotherlongw"] * 7)),
+                ],
+                "🧵 Review of the login failure investigation notes now",
+                3,
+            ),
+            (
+                [_title("🧵 " + " ".join(["longwordlong"] * 7))] * 3,
+                None,
+                3,
+            ),
+            (
+                [_title(""), _title("   "), _title("** **")],
+                None,
+                3,
+            ),
+            (
+                [
+                    _title("🧵 Plan migration for all backend service instances"),
+                    "",
+                ],
+                "🧵 Plan migration for all backend service instances",
+                2,
+            ),
+        ],
+        ids=[
+            "fewer-words-beats-fewer-chars",
+            "fewer-chars-and-earlier-wins-ties",
+            "skips-over-80-char-candidate",
+            "all-over-80-chars-returns-none",
+            "all-empty-returns-none",
+            "later-non-schema-preserves-earlier-fallback",
+        ],
+    )
+    async def test_allow_fallback_selects_shortest_intact_candidate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        answers: list[BaseModel | str],
+        expected: str | None,
+        expected_calls: int,
+    ) -> None:
+        """With allow_fallback=True, pick the best <=80-char candidate by (word_count, len), preserving earlier ties."""
+        model = _summary_model(*answers)
+        install_model_providers(monkeypatch, {"default": model})
+
+        result = await self._summarize(
+            _make_thread_history(3),
+            _mock_config(),
+            _mock_runtime_paths(),
+            allow_fallback=True,
+        )
+
+        assert result == (None if expected is None else GeneratedSummary(summary=expected))
+        assert len(model.requests) == expected_calls
 
     async def test_current_title_follows_an_overridden_user_prompt_escaped(
         self,
