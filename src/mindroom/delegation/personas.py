@@ -55,7 +55,7 @@ _GENERATED_PERSONA_FUNCTIONS = SKILL_FUNCTION_NAMES | {KNOWLEDGE_SEARCH_TOOL_NAM
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
 
-class PersonaError(ValueError):
+class _PersonaError(ValueError):
     """A persona or profile that cannot be used; the message is user-facing."""
 
 
@@ -81,10 +81,10 @@ class _InvalidPersonaProfile:
 def _system_prompt(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         msg = "Cannot delegate: system_prompt must be a non-empty string."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     if len(value.encode()) > _MAX_PERSONA_PROMPT_BYTES:
         msg = "Cannot delegate: system_prompt exceeds 64 KiB."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     return value
 
 
@@ -93,11 +93,11 @@ def _name_entries(value: object, argument: str, noun: str) -> tuple[str, ...] | 
         return None
     if not isinstance(value, (list, tuple)) or not all(isinstance(entry, str) and entry.strip() for entry in value):
         msg = f"Cannot delegate: {argument} must be a list of {noun} names."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     return tuple(dict.fromkeys(cast("str", entry).strip() for entry in value))
 
 
-def inline_persona(
+def _inline_persona(
     system_prompt: object,
     tools: object,
     skills: object,
@@ -118,36 +118,36 @@ def inline_persona(
 
 
 def _parse_profile(name: str, content: str) -> _PersonaProfile:
-    """Parse one profile file; ``PersonaError`` carries the reason it is invalid."""
+    """Parse one profile file; ``_PersonaError`` carries the reason it is invalid."""
     try:
         frontmatter, body = parse_skill_markdown(content)
     except SkillMarkdownError as exc:
         msg = "it must start with a YAML mapping between --- lines"
-        raise PersonaError(msg) from exc
+        raise _PersonaError(msg) from exc
     unknown = sorted(map(str, set(frontmatter) - _PROFILE_KEYS))
     if unknown:
         msg = f"unsupported frontmatter keys: {', '.join(unknown)}"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     description = frontmatter.get("description")
     if not isinstance(description, str) or not description.strip():
         msg = "description is required"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     if len(description) > _MAX_DESCRIPTION_CHARS:
         msg = f"description exceeds {_MAX_DESCRIPTION_CHARS} characters"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     model = frontmatter.get("model")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         msg = "model must be a model name"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     mode = frontmatter.get("mode")
     if mode is not None and mode not in _MODES:
         msg = "mode must be standard or minimal"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     if not body:
         msg = "the body after the frontmatter is the system prompt and must not be empty"
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     try:
-        persona = inline_persona(
+        persona = _inline_persona(
             body,
             frontmatter.get("tools"),
             frontmatter.get("skills"),
@@ -155,9 +155,9 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
             source_kind="profile",
             source_name=name,
         )
-    except PersonaError as exc:
+    except _PersonaError as exc:
         msg = str(exc).removeprefix("Cannot delegate: ").removesuffix(".")
-        raise PersonaError(msg) from exc
+        raise _PersonaError(msg) from exc
     return _PersonaProfile(
         name=name,
         description=description.strip(),
@@ -191,7 +191,7 @@ def _read_profile(  # noqa: PLR0911 - each refusal is its own reason
         return _parse_profile(name, data.decode()), len(data)
     except UnicodeDecodeError:
         return _InvalidPersonaProfile(name=name, reason="the file is not UTF-8 text"), len(data)
-    except PersonaError as exc:
+    except _PersonaError as exc:
         return _InvalidPersonaProfile(name=name, reason=str(exc)), len(data)
 
 
@@ -221,11 +221,11 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
-    """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
+def _load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
+    """Read one named profile, raising ``_PersonaError`` with the user-facing reason."""
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     not_found = f"Cannot delegate: subagent profile '{name}' was not found in {_PROFILE_DIRNAME}/."
     try:
         with open_directory_within_root(workspace_root, _PROFILE_DIRNAME) as directory_fd:
@@ -233,10 +233,10 @@ def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     except OSError:
         entry = None
     if entry is None:
-        raise PersonaError(not_found)
+        raise _PersonaError(not_found)
     if isinstance(entry, _InvalidPersonaProfile):
         msg = f"Cannot delegate: subagent profile '{name}' is invalid: {entry.reason}."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
     return entry
 
 
@@ -343,7 +343,7 @@ def missing_persona_tool(
     return None
 
 
-def validate_persona_tools(
+def _validate_persona_tools(
     tools: tuple[str, ...] | None,
     available_toolkits: Mapping[str, tuple[str, ...] | None],
     cap: tuple[str, ...] | None,
@@ -358,7 +358,7 @@ def validate_persona_tools(
             else sorted(available_toolkits)
         )
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
-        raise PersonaError(msg)
+        raise _PersonaError(msg)
 
 
 def require_built_persona_tools(
@@ -377,7 +377,7 @@ def require_built_persona_tools(
             separator and (function not in built[toolkit] or function in left_out.get(toolkit, ()))
         ):
             msg = f"Cannot delegate: tool '{entry}' is not available to you."
-            raise PersonaError(msg)
+            raise _PersonaError(msg)
 
 
 def follow_up_refusal(
@@ -401,7 +401,7 @@ def follow_up_refusal(
     )
 
 
-def self_only_refusal(agent_name: str) -> str:
+def _self_only_refusal(agent_name: str) -> str:
     """Explain that a caller may author only its own subagents."""
     return (
         f"Cannot author a subagent for '{agent_name}': "
@@ -410,7 +410,7 @@ def self_only_refusal(agent_name: str) -> str:
 
 
 @dataclass(frozen=True)
-class PersonaRequest:
+class _PersonaRequest:
     """The persona, model, and mode one ``run_subagent`` call asks for."""
 
     persona: SubagentPersona | None
@@ -434,7 +434,7 @@ def resolve_persona_request(  # noqa: PLR0911
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
     cap: SubagentPersona | None,
-) -> PersonaRequest | str:
+) -> _PersonaRequest | str:
     """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
 
     ``cap`` is the persona of the authored subagent making this call, if any: copies it authors stay
@@ -454,32 +454,32 @@ def resolve_persona_request(  # noqa: PLR0911
                 f"Cannot start a configured copy of '{agent_name}' from an authored subagent; "
                 "pass system_prompt or profile so the copy stays within your tools, skills, and knowledge."
             )
-        return PersonaRequest(persona=None, model=model, agent_mode=mode)
+        return _PersonaRequest(persona=None, model=model, agent_mode=mode)
     if agent_name != caller_name:
-        return self_only_refusal(agent_name)
+        return _self_only_refusal(agent_name)
     inline = (system_prompt, tools, skills, knowledge)
     if profile is not None and any(value is not None for value in inline):
         return "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge, not both."
     try:
         if profile is None:
-            persona = inline_persona(system_prompt, tools, skills, knowledge)
+            persona = _inline_persona(system_prompt, tools, skills, knowledge)
             if persona.tools is not None:
                 # Only tools this call names may say file or coding; a saved profile or snapshot is read as written.
                 persona = replace(persona, tools=canonical_tool_names(persona.tools))
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
-            loaded = load_profile(workspace_root(), profile)
+            loaded = _load_profile(workspace_root(), profile)
             persona, model = loaded.persona, model or loaded.model
             mode = "minimal" if minimal else loaded.mode or "standard"
         persona = _capped_persona(persona, available_toolkits(), available_skills, available_knowledge, cap)
-        require_minimal_shell(persona, mode)
-    except PersonaError as exc:
+        _require_minimal_shell(persona, mode)
+    except _PersonaError as exc:
         return str(exc)
-    return PersonaRequest(persona=persona, model=model, agent_mode=mode)
+    return _PersonaRequest(persona=persona, model=model, agent_mode=mode)
 
 
-def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
+def _require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
     """Refuse a minimal persona whose tool list drops shell, which minimal mode runs through."""
     tools = persona.tools
     if mode != "minimal" or tools is None:
@@ -490,7 +490,7 @@ def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
         "Cannot delegate: a minimal subagent runs its tools through shell, so its tools must include shell or "
         f"shell.{SHELL_FUNCTION}; use standard mode for a subagent without shell."
     )
-    raise PersonaError(msg)
+    raise _PersonaError(msg)
 
 
 def _capped_persona(
@@ -506,7 +506,7 @@ def _capped_persona(
     depth inherits the cap's tools without ``delegate``; any other inherited tool the caller lost still refuses.
     """
     # Skills and knowledge resolve first, while persona.tools still says whether the author named tools.
-    persona = capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
+    persona = _capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
     persona = replace(
         persona,
         knowledge=_capped_names(
@@ -521,11 +521,11 @@ def _capped_persona(
         keep_delegate = "delegate" in available_toolkits
         tools = tuple(entry for entry in cap_tools if keep_delegate or entry.partition(".")[0] != "delegate")
         persona = replace(persona, tools=tools)
-    validate_persona_tools(persona.tools, available_toolkits, cap_tools)
+    _validate_persona_tools(persona.tools, available_toolkits, cap_tools)
     return persona
 
 
-def capped_persona_skills(
+def _capped_persona_skills(
     persona: SubagentPersona,
     available_skills: Callable[[], Sequence[str]],
     skill_cap: tuple[str, ...] | None,
@@ -557,7 +557,7 @@ def _capped_names(
             if name not in available or (cap is not None and name not in cap):
                 yours = [entry for entry in cap if entry in available] if cap is not None else sorted(available)
                 msg = f"Cannot delegate: unknown {nouns[0]} '{name}'. Your {nouns[1]}: {', '.join(yours) or 'none'}."
-                raise PersonaError(msg)
+                raise _PersonaError(msg)
     return kept
 
 

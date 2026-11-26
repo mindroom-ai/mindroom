@@ -11,11 +11,11 @@ import nio
 from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
+from mindroom.api.room_reads import read_in_room
 from mindroom.matrix.history_visibility import read_room_history
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.plugin_http import read_in_room
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

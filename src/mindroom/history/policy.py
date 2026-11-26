@@ -36,7 +36,7 @@ def _compaction_input_budget(
     return max(0, budget)
 
 
-def resolve_history_execution_plan(
+def _resolve_history_execution_plan(
     *,
     config: Config,
     history_settings: ResolvedHistorySettings,
@@ -75,7 +75,7 @@ def resolve_history_execution_plan(
     trigger_tokens = None
     limit_tokens = None
     if replay_window_tokens is not None:
-        limit_tokens = context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens)
+        limit_tokens = _context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens)
         # Without automatic compaction nothing compacts at the trigger, so a request fits the limit.
         trigger_tokens = limit_tokens
         if history_settings.automatic_compaction:
@@ -84,7 +84,7 @@ def resolve_history_execution_plan(
 
     fit_window = effective_active_window if effective_active_window is not None else replay_window_tokens
     fit_limit_tokens = (
-        context_budget_after_reserve(fit_window, compaction_config.reserve_tokens) if fit_window is not None else None
+        _context_budget_after_reserve(fit_window, compaction_config.reserve_tokens) if fit_window is not None else None
     )
 
     return ResolvedHistoryExecutionPlan(
@@ -118,7 +118,7 @@ def resolve_history_preparation_inputs(
     """Resolve history settings and execution plan for one run scope."""
     return HistoryPreparationInputs(
         history_settings=history_settings,
-        execution_plan=resolve_history_execution_plan(
+        execution_plan=_resolve_history_execution_plan(
             config=config,
             history_settings=history_settings,
             active_model_name=active_model_name,
@@ -237,7 +237,7 @@ def _resolve_fallback_summary_input_budget(
     return fallback_budget if unavailable_reason is None else None
 
 
-def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int) -> int:
+def _context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int) -> int:
     """Return the usable context budget after the clamped reserve."""
     normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens)
@@ -248,7 +248,7 @@ def fork_input_limit_tokens(context_window: int, reserve_tokens: int) -> int:
     if context_window <= 0:
         return 0
     effective_reserve = max(reserve_tokens, min(4_096, context_window // 2))
-    fit_limit = context_budget_after_reserve(context_window, effective_reserve)
+    fit_limit = _context_budget_after_reserve(context_window, effective_reserve)
     safety_margin = min(4_096, context_window // 50)
     return max(0, fit_limit - safety_margin)
 

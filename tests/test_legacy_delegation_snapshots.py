@@ -18,7 +18,8 @@ from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, subagent_sessions_dir
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, subagent_sessions_dir, tracking_dir
+from mindroom.delegation import legacy_snapshots
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.delegation.sessions import update_subagent_turn_sync
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
@@ -474,3 +475,101 @@ def test_the_readers_take_only_the_current_shape(field: str | None, persona_fiel
 
     with pytest.raises((KeyError, TypeError)):
         DelegationChild.from_dict(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_a_clean_second_start_skips_scanning_session_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean migration writes a versioned receipt so the next boot skips scanning subagent_sessions/."""
+    paths = _restore("v2026.10.18", tmp_path)
+    receipt = tracking_dir(paths) / legacy_snapshots._RECEIPT
+
+    await migrate_subagent_sessions(paths)
+
+    assert json.loads(receipt.read_text(encoding="utf-8")) == {"version": legacy_snapshots._RECEIPT_VERSION}
+    monkeypatch.setattr(
+        legacy_snapshots,
+        "subagent_sessions_dir",
+        lambda _paths: (_ for _ in ()).throw(AssertionError("should not scan subagent_sessions after receipt")),
+    )
+    await migrate_subagent_sessions(paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["unreadable", "rejected", "symlink"])
+async def test_an_unclean_session_file_withholds_the_receipt_until_repaired(defect: str, tmp_path: Path) -> None:
+    """An unreadable, rejected, or symlinked session file withholds the receipt so repairing it lets the next boot migrate it."""
+    paths = _restore("v2026.10.18", tmp_path / "state")
+    sessions = subagent_sessions_dir(paths)
+    receipt = tracking_dir(paths) / legacy_snapshots._RECEIPT
+    target_path = sorted(sessions.glob("*.json"))[0]
+    original_bytes = target_path.read_bytes()
+
+    if defect == "unreadable":
+        target_path.write_bytes(b"{not json")
+    elif defect == "rejected":
+        payload = json.loads(original_bytes)
+        del payload["child"]["model_name"]
+        target_path.write_text(json.dumps(payload))
+    else:
+        outside = tmp_path / "outside.json"
+        outside.write_bytes(original_bytes)
+        target_path.unlink()
+        target_path.symlink_to(outside)
+
+    await migrate_subagent_sessions(paths)
+    assert not receipt.exists()
+
+    # Repair the defective file back to the legacy snapshot and verify the next boot migrates it and writes the receipt.
+    target_path.unlink()
+    target_path.write_bytes(original_bytes)
+
+    await migrate_subagent_sessions(paths)
+
+    assert receipt.is_file()
+    assert set(json.loads(target_path.read_text())["child"]) == _CHILD_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_missing_sessions_directory_does_not_write_receipt(tmp_path: Path) -> None:
+    """Skipping a missing subagent_sessions directory does not record a migration receipt."""
+    paths = _paths(tmp_path)
+    receipt = tracking_dir(paths) / legacy_snapshots._RECEIPT
+
+    await migrate_subagent_sessions(paths)
+
+    assert not receipt.exists()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_sessions_directory_withholds_the_receipt_until_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory listing failure logs a warning and withholds the receipt so a later readable boot migrates."""
+    paths = _restore("v2026.10.18", tmp_path)
+    sessions = subagent_sessions_dir(paths)
+    receipt = tracking_dir(paths) / legacy_snapshots._RECEIPT
+    original_iterdir = Path.iterdir
+
+    def unreadable_iterdir(self: Path) -> object:
+        if self == sessions:
+            msg = "directory unreadable"
+            raise PermissionError(msg)
+        return original_iterdir(self)
+
+    with monkeypatch.context() as patch, capture_logs() as logs:
+        patch.setattr(Path, "iterdir", unreadable_iterdir)
+        await migrate_subagent_sessions(paths)
+
+    assert not receipt.exists()
+    assert any(
+        entry["event"] == "subagent_session_rewrite_skipped" and entry["path"] == str(sessions) for entry in logs
+    )
+
+    await migrate_subagent_sessions(paths)
+
+    assert receipt.is_file()
+    assert all(set(child) == _CHILD_FIELDS for child in _session_children(paths).values())

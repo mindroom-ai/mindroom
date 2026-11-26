@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     import nio
 
 _FALLBACK_STATUS = {"M_FORBIDDEN": 403, "M_NOT_FOUND": 404}
-TRANSIENT_HOMESERVER_HTTP_STATUSES = frozenset({502, 503, 504})
+_TRANSIENT_HOMESERVER_HTTP_STATUSES = frozenset({502, 503, 504})
 
 
 class StateFailure(StrEnum):
@@ -48,4 +48,4 @@ def response_http_status(response: object) -> int | None:
 
 def is_transient_homeserver_status(http_status: int | None) -> bool:
     """Return whether an HTTP status indicates a transient homeserver gateway/restart failure."""
-    return http_status in TRANSIENT_HOMESERVER_HTTP_STATUSES
+    return http_status in _TRANSIENT_HOMESERVER_HTTP_STATUSES

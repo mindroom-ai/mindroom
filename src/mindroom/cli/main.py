@@ -235,14 +235,19 @@ def run(
             raise typer.Exit(1) from None
         # Pick up the new config and .env before pairing and startup.
         runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    runtime_paths = _protect_dashboard_from_workers(runtime_paths, config_path, storage_path)
+    runtime_paths = with_api_port(
+        _protect_dashboard_from_workers(runtime_paths, config_path, storage_path),
+        api_port,
+    )
     # Report a broken config or missing model keys before any pairing waits for a human.
     config = _load_active_config_or_exit(runtime_paths)
     if not first_run:
         # First-run setup has already said which provider credentials are still missing.
         check_env_keys(config, runtime_paths=runtime_paths)
+    paired = False
     try:
         if local_pairing_required(runtime_paths):
+            paired = True
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
             from mindroom.api.startup_probes import serve_startup_probes  # noqa: PLC0415
 
@@ -276,6 +281,7 @@ def run(
             api=api,
             api_port=api_port,
             api_host=api_host,
+            runtime_paths=None if paired else runtime_paths,
         ),
     )
 
@@ -330,14 +336,16 @@ async def _run(
     api: bool,
     api_port: int,
     api_host: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import EventJournalLostError, PermanentStartupError  # noqa: PLC0415
 
-    # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port the API serves on.
-    runtime_paths = with_api_port(activate_cli_runtime(path=config_path, storage_path=storage_path), api_port)
-    # Validate again: pairing may have rewritten owner placeholders in the config.
-    _load_active_config_or_exit(runtime_paths)
+    if runtime_paths is None:
+        # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port the API serves on.
+        runtime_paths = with_api_port(activate_cli_runtime(path=config_path, storage_path=storage_path), api_port)
+        # Validate again: pairing may have rewritten .env or owner placeholders in the config.
+        _load_active_config_or_exit(runtime_paths)
 
     console.print(section(f"Starting MindRoom (log level: {log_level})"))
     if api:

@@ -670,6 +670,11 @@ def _html_block_spans(html: str) -> list[tuple[int, int]]:
     return spans
 
 
+def html_block_spans(html: str) -> list[tuple[int, int]]:
+    """Return each top-level block of ``html`` as ``(start, end)`` character offsets."""
+    return _html_block_spans(html)
+
+
 def _trace_calls(layer: Mapping[str, Any], version: int) -> dict[int, dict[str, Any]] | None:
     """Return the named calls of a layer's trace of ``version`` by marker index; None unless each entry is a mapping."""
     payload = layer.get(_TOOL_TRACE_KEY)

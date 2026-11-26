@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ from mindroom.heap_probe import (
     _refreeze_runtime_heap,
     _run_heap_refreeze,
     _run_heap_type_probe,
+    _trim_malloc,
     freeze_startup_heap,
     start_heap_tasks,
 )
@@ -126,10 +128,13 @@ async def test_an_invalid_interval_fails_before_any_heap_task_exists(env: dict[s
 
 
 @pytest.mark.asyncio
-async def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replaced bots must be collectable again, and garbage must be gone before the survivors are frozen."""
+async def test_refreeze_collects_released_objects_before_freezing_the_survivors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replaced bots are collected before survivors are frozen, then glibc arenas are trimmed off the event loop."""
     gc_calls: list[str] = []
     frozen = [12_000]
+    loop_thread = threading.current_thread()
 
     def unfreeze() -> None:
         gc_calls.append("unfreeze")
@@ -143,20 +148,27 @@ async def test_refreeze_collects_released_objects_before_freezing_the_survivors(
         gc_calls.append("freeze")
         frozen[0] = 3_000_000
 
+    def trim() -> bool:
+        gc_calls.append("trim")
+        assert threading.current_thread() is not loop_thread
+        return True
+
     fake_gc = SimpleNamespace(unfreeze=unfreeze, collect=collect, freeze=freeze, get_freeze_count=lambda: frozen[0])
     monkeypatch.setattr(heap_probe, "gc", fake_gc)
     monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: 512)
+    monkeypatch.setattr(heap_probe, "_trim_malloc", trim)
 
     with capture_logs() as logs:
         await _refreeze_runtime_heap()
 
-    assert gc_calls == ["unfreeze", "collect", "freeze"]
+    assert gc_calls == ["unfreeze", "collect", "freeze", "trim"]
     [record] = [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"]
     assert record["frozen_objects"] == 3_000_000
     assert record["collected"] == 4_321
     assert record["collect_seconds"] >= 0
     assert record["paged_in_kib"] == 512
     assert record["page_in_seconds"] >= 0
+    assert record["malloc_trimmed"] is True
 
 
 @pytest.mark.asyncio
@@ -168,6 +180,7 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
     ready = asyncio.Event()
     parked = asyncio.Event()
     monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: steps.append("page_in") or 0)
+    monkeypatch.setattr(heap_probe, "_trim_malloc", lambda: steps.append("trim") or True)
     monkeypatch.setattr(
         heap_probe,
         "gc",
@@ -201,11 +214,13 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
         "page_in",
         "unfreeze",
         "freeze",
+        "trim",
         (2000, 10, 100),
         600.0,
         "page_in",
         "unfreeze",
         "freeze",
+        "trim",
         600.0,
     ]
 
@@ -379,6 +394,41 @@ def test_allocator_totals_are_none_without_glibc_mallinfo2(monkeypatch: pytest.M
     assert heap_probe._malloc_stats() is None
 
 
+def test_trim_malloc_is_none_without_glibc_malloc_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Other C libraries have no malloc_trim, so trimming reports none instead of failing."""
+    monkeypatch.setattr(heap_probe, "_malloc_trim", lambda: None)
+
+    assert _trim_malloc() is None
+
+
+@pytest.mark.parametrize(("returned", "expected"), [(1, True), (0, False)])
+def test_trim_malloc_calls_malloc_trim_with_zero_pad(
+    monkeypatch: pytest.MonkeyPatch,
+    returned: int,
+    expected: bool,
+) -> None:
+    """Trimming passes pad=0 to glibc and converts the integer return code to bool."""
+    pads: list[int] = []
+
+    def fake_trim(pad: int) -> int:
+        pads.append(pad)
+        return returned
+
+    monkeypatch.setattr(heap_probe, "_malloc_trim", lambda: fake_trim)
+
+    assert _trim_malloc() is expected
+    assert pads == [0]
+
+
+def test_trim_malloc_returns_bool_when_glibc_malloc_trim_is_available() -> None:
+    """On glibc the real malloc_trim(0) call returns a bool; elsewhere it returns None."""
+    trimmed = _trim_malloc()
+    if heap_probe._malloc_trim() is None:
+        assert trimmed is None
+    else:
+        assert isinstance(trimmed, bool)
+
+
 @pytest.mark.asyncio
 async def test_probe_task_logs_once_per_interval_and_stops_on_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop waits one interval before each walk and ends cleanly when shutdown cancels it."""
@@ -426,7 +476,7 @@ async def test_start_helper_returns_named_task_that_cancels_cleanly() -> None:
 def test_freeze_startup_heap_collects_then_freezes_and_logs_the_frozen_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Garbage is collected before the survivors are frozen, and one record reports both."""
+    """Garbage is collected before survivors are frozen, then malloc is trimmed and logged."""
     frozen = [0]
     gc_calls: list[str] = []
 
@@ -434,17 +484,23 @@ def test_freeze_startup_heap_collects_then_freezes_and_logs_the_frozen_count(
         gc_calls.append("freeze")
         frozen[0] = 469_281
 
+    def trim() -> bool:
+        gc_calls.append("trim")
+        return True
+
     fake_gc = SimpleNamespace(
         collect=lambda: gc_calls.append("collect"),
         freeze=freeze,
         get_freeze_count=lambda: frozen[0],
     )
     monkeypatch.setattr(heap_probe, "gc", fake_gc)
+    monkeypatch.setattr(heap_probe, "_trim_malloc", trim)
 
     with capture_logs() as logs:
         freeze_startup_heap()
 
-    assert gc_calls == ["collect", "freeze"]
+    assert gc_calls == ["collect", "freeze", "trim"]
     [record] = [entry for entry in logs if entry["event"] == "startup_heap_frozen"]
     assert record["frozen_objects"] == 469_281
     assert record["collect_seconds"] >= 0
+    assert record["malloc_trimmed"] is True

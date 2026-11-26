@@ -143,8 +143,8 @@ Remove the single-controller cliff so one Mac can pair with multiple agents with
   - Settings → **This Mac**: full status, paired agents list, **Full Access** / **Choose limits…** editor, permissions, diagnostics, and **Revoke All**.
   - `/desktop` slash command in Electron opens the native Mac Access sheet directly instead of printing JSON.
 - **Consent Sheet (the 2nd click):**
-  > **Allow `<agent>` full access to this Mac?**  
-  > `<agent>` can see your screen, control every app, and run shell commands as your macOS user without asking, including after restart. Stop anytime from the menu bar.  
+  > **Allow `<agent>` full access to this Mac?**\
+  > `<agent>` can see your screen, control every app, and run shell commands as your macOS user without asking, including after restart. Stop anytime from the menu bar.\
   > **[Allow Full Access]** · **Choose limits…** · **Cancel**
 - **Automatic background flow after clicking Allow Full Access:**
   1. Send `setup_request.v1` over Olm (`callKeyProvider.ts`'s `encryptToDeviceMessages` pattern) → receive `setup_offer.v1`.

@@ -378,15 +378,16 @@ def spans_in_room(
     return frozenset(str(row["span_id"]) for row in rows)
 
 
+_OPEN_REPLIES_SQL = (
+    f"SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages "  # noqa: S608 - a fixed column list
+    "WHERE state IN ('active', 'paused') "
+    "ORDER BY principal_id, created_at_ns, reply_id"
+)
+
+
 def open_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
     """Return every principal's replies not yet terminal, with their principal."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
-        WHERE state IN ('active', 'paused')
-        ORDER BY principal_id, created_at_ns, reply_id
-        """,  # noqa: S608 - a fixed column list
-    )
+    rows = transaction.fetchall(_OPEN_REPLIES_SQL)
     return tuple((str(row["principal_id"]), _reply(row)) for row in rows)
 
 
