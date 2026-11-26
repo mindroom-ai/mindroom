@@ -1673,15 +1673,7 @@ async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> 
     """An agent's question in the newest reply counts only in a thread the requester started, when it asks them."""
     ctx = _workflow_context([])
     persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
-    prompt = interactive_prompt_content(
-        InteractivePrompt(
-            creator_agent="general",
-            question_text="Pick one",
-            options={"👍": "a", "1": "a"},
-            option_labels={"👍": "A", "1": "A"},
-            source_event_id="$src",
-        ),
-    )
+    prompt = _question_prompt()
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     latest_reply = {"sender": _AGENT_ID, "origin_server_ts": now_ms, "content": {"body": "Pick one", **prompt}}
     to_bob = {**latest_reply, "content": {**latest_reply["content"], "com.mindroom.acting_requester": "@bob:localhost"}}

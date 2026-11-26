@@ -8,6 +8,7 @@ contains is not answered here; the conversation projection reads that.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections import Counter
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 from aiohttp import ClientError
+from nio.api import RelationshipType
 from nio.responses import Response, RoomThreadsError, RoomThreadsResponse, verify
 from nio.schemas import Schemas
 
@@ -541,3 +543,48 @@ async def enumerate_room_thread_root_ids(
 
         seen_next_tokens.add(next_token)
         page_token = next_token
+
+
+async def recent_thread_reply_sources(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]] | None:
+    """Return up to ``limit`` newest-first raw thread reply sources from one ``/relations`` page.
+
+    Callers read only structured metadata keys (``io.mindroom.interactive``,
+    ``io.mindroom.thread_summary``, ``m.new_content``), never agent tool-marker text.
+    """
+    if limit <= 0:
+        return []
+    sources: list[dict[str, Any]] = []
+    try:
+        # Bounds backwalk to one small relations page past trailing title notices/redactions.
+        relations = client.room_get_event_relations(
+            room_id,
+            thread_id,
+            RelationshipType.thread,
+            direction=nio.MessageDirection.back,
+            limit=limit,
+        )
+        async with contextlib.aclosing(relations):
+            scanned = 0
+            async for related in relations:
+                scanned += 1
+                if not isinstance(related, nio.RedactedEvent):
+                    if not isinstance(related.source, dict):
+                        break
+                    sources.append(related.source)
+                if scanned >= limit:
+                    break
+    except (nio.ProtocolError, ClientError, TimeoutError):
+        logger.debug(
+            "recent_thread_reply_sources_failed",
+            room_id=room_id,
+            thread_id=thread_id,
+            exc_info=True,
+        )
+        return None
+    return sources

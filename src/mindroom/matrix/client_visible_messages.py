@@ -334,7 +334,7 @@ def _room_message_fallback_body(event: nio.Event) -> str:
     return ""
 
 
-def decrypt_wire_event_source(
+def _decrypt_wire_event_source(
     client: nio.AsyncClient,
     event_source: Mapping[str, Any],
     room_id: str | None = None,
@@ -353,7 +353,7 @@ def decrypt_wire_event_source(
     return decrypted.source if decrypted is not None and isinstance(decrypted.source, dict) else None
 
 
-def decrypt_bundled_replacement(
+def _decrypt_bundled_replacement(
     client: nio.AsyncClient,
     raw_source: Mapping[str, Any],
     *,
@@ -365,11 +365,7 @@ def decrypt_bundled_replacement(
     for candidate in bundled_replacement_candidates(raw_source):
         if candidate.get("sender") != sender:
             continue
-        resolved = (
-            decrypt_wire_event_source(client, candidate, room_id)
-            if candidate.get("type") == "m.room.encrypted"
-            else candidate
-        )
+        resolved = _decrypt_wire_event_source(client, candidate, room_id)
         if resolved is None:
             return None, True
         content = resolved.get("content")
@@ -383,6 +379,32 @@ def decrypt_bundled_replacement(
         if isinstance(content.get("m.new_content"), dict):
             return resolved, False
     return None, False
+
+
+def decrypt_event_with_edit(
+    client: nio.AsyncClient,
+    raw: Mapping[str, Any],
+    *,
+    room_id: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+    """Decrypt one wire event source and its newest same-sender bundled ``m.replace`` edit."""
+    decrypted = _decrypt_wire_event_source(client, raw, room_id)
+    if decrypted is None:
+        return None
+    sender = raw.get("sender")
+    if not isinstance(sender, str):
+        return decrypted, None
+    event_id = decrypted.get("event_id") or raw.get("event_id")
+    edit, unreadable = _decrypt_bundled_replacement(
+        client,
+        raw,
+        sender=sender,
+        event_id=event_id if isinstance(event_id, str) else None,
+        room_id=room_id,
+    )
+    if unreadable:
+        return None
+    return decrypted, edit
 
 
 async def thread_root_body_preview(
@@ -399,21 +421,12 @@ async def thread_root_body_preview(
     raw_source = event.source if isinstance(event.source, dict) else {}
     replacement_source: Mapping[str, Any] = raw_source
     if isinstance(event, nio.MegolmEvent):
-        effective_room_id = room_id or (event.room_id if isinstance(event.room_id, str) else None)
         if (
             raw_source.get("type") != "m.room.encrypted"
-            or (event_source := decrypt_wire_event_source(client, raw_source, effective_room_id)) is None
+            or (decrypted := decrypt_event_with_edit(client, raw_source, room_id=room_id)) is None
         ):
             return "[encrypted]"
-        edit, unreadable = decrypt_bundled_replacement(
-            client,
-            raw_source,
-            sender=event.sender,
-            event_id=event.event_id,
-            room_id=effective_room_id,
-        )
-        if unreadable:
-            return "[encrypted]"
+        event_source, edit = decrypted
         replacement_source = {"unsigned": {"m.relations": {"m.replace": edit}}} if edit is not None else {}
         fallback_body = (event_source.get("content") or {}).get("body", "")
     else:
@@ -681,8 +694,7 @@ __all__ = [
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
     "bundled_replacement_candidates",
-    "decrypt_bundled_replacement",
-    "decrypt_wire_event_source",
+    "decrypt_event_with_edit",
     "extract_visible_edit_body",
     "is_visible_room_message",
     "message_preview",

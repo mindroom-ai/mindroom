@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import time
 from collections import defaultdict, deque
@@ -13,7 +12,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import nio
 from aiohttp import ClientError
-from nio.api import RelationshipType
 
 from mindroom.approval.manager import get_approval_store
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
@@ -24,14 +22,17 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
-    decrypt_bundled_replacement,
-    decrypt_wire_event_source,
+    decrypt_event_with_edit,
     message_preview,
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.joined_members import read_joined_members
-from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.room_history_reads import (
+    RoomThreadsPageError,
+    get_room_threads_page,
+    recent_thread_reply_sources,
+)
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_summary.state import current_thread_summary
 from mindroom.thread_workflow import QUESTION_WAITS_MS, latest_reply_question_ts, room_thread_facts, thread_workflow
@@ -56,6 +57,7 @@ class MatrixRoomTools(Toolkit):
     _MAX_THREAD_LIMIT: ClassVar[int] = 50
     # Each summary reads a whole thread, which is a homeserver walk the first time; a few at once keep a full page fast.
     _SUMMARY_READ_CONCURRENCY: ClassVar[int] = 6
+    # Bounds backwalk to one small relations page past trailing title notices/redactions.
     _TITLE_NOTICE_BACKWALK_LIMIT: ClassVar[int] = 5
     _MAX_STATE_EVENTS: ClassVar[int] = 100
 
@@ -307,10 +309,6 @@ class MatrixRoomTools(Toolkit):
                 retry_after_ms=getattr(state, "retry_after_ms", None),
             )
         facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
-        room_encrypted = any(
-            isinstance(event, dict) and event.get("type") == "m.room.encryption" and event.get("state_key") == ""
-            for event in state.events
-        )
         bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
         replying = set[str | None]().union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
         manager = get_approval_store()
@@ -331,7 +329,6 @@ class MatrixRoomTools(Toolkit):
             bot_ids=bot_ids,
             requester_ids=requester_ids,
             now=now,
-            room_encrypted=room_encrypted,
         )
         return {
             event.event_id: thread_workflow(
@@ -356,7 +353,6 @@ class MatrixRoomTools(Toolkit):
         bot_ids: Collection[str],
         requester_ids: Collection[str],
         now: int,
-        room_encrypted: bool,
     ) -> dict[str, int | None]:
         def is_summary(source: Mapping[str, Any]) -> bool:
             content = source.get("content")
@@ -366,61 +362,37 @@ class MatrixRoomTools(Toolkit):
                 and isinstance(content.get(THREAD_SUMMARY_CONTENT_KEY), dict)
             )
 
+        def reply_question_ts(reply: dict[str, Any]) -> int | None:
+            return latest_reply_question_ts({"io.mindroom.latest_reply": reply}, bot_ids, requester_ids)
+
         def decrypt_bot_reply(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             sender = raw.get("sender")
             if not isinstance(sender, str) or sender not in bot_ids:
                 return None
-            reply = decrypt_wire_event_source(client, raw, room_id)
-            if reply is None or reply.get("type") != "m.room.message":
+            decrypted = decrypt_event_with_edit(client, raw, room_id=room_id)
+            if decrypted is None:
                 return None
-            reply_id = reply.get("event_id") or raw.get("event_id")
-            edit, unreadable = decrypt_bundled_replacement(
-                client,
-                raw,
-                sender=sender,
-                event_id=reply_id if isinstance(reply_id, str) else None,
-                room_id=room_id,
-            )
-            if unreadable:
+            reply, edit = decrypted
+            if reply.get("type") != "m.room.message":
                 return None
             return {**reply, "unsigned": {"m.relations": {"m.replace": edit}}} if edit is not None else reply
 
         async def backwalk(thread_id: str) -> tuple[str, int | None]:
             async with reads:
-                try:
-                    relations = client.room_get_event_relations(
-                        room_id,
-                        thread_id,
-                        RelationshipType.thread,
-                        direction=nio.MessageDirection.back,
-                        limit=self._TITLE_NOTICE_BACKWALK_LIMIT,
-                    )
-                    async with contextlib.aclosing(relations):
-                        scanned = 0
-                        async for related in relations:
-                            scanned += 1
-                            if not isinstance(related, nio.RedactedEvent):
-                                if (
-                                    not isinstance(related.source, dict)
-                                    or (reply := decrypt_bot_reply(related.source)) is None
-                                ):
-                                    return thread_id, None
-                                if not is_summary(reply):
-                                    return thread_id, latest_reply_question_ts(
-                                        {"io.mindroom.latest_reply": reply},
-                                        bot_ids,
-                                        requester_ids,
-                                    )
-                            if scanned >= self._TITLE_NOTICE_BACKWALK_LIMIT:
-                                return thread_id, None
-                except (nio.ProtocolError, ClientError, TimeoutError):
-                    logger.debug(
-                        "matrix_room_threads_title_backwalk_failed",
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        exc_info=True,
-                    )
+                sources = await recent_thread_reply_sources(
+                    client,
+                    room_id,
+                    thread_id,
+                    limit=self._TITLE_NOTICE_BACKWALK_LIMIT,
+                )
+            if sources is None:
                 return thread_id, None
+            for raw in sources:
+                if (reply := decrypt_bot_reply(raw)) is None:
+                    return thread_id, None
+                if not is_summary(reply):
+                    return thread_id, reply_question_ts(reply)
+            return thread_id, None
 
         question_times: dict[str, int | None] = {}
         backwalk_ids: list[str] = []
@@ -438,8 +410,8 @@ class MatrixRoomTools(Toolkit):
             if isinstance(meta.get("io.mindroom.latest_reply"), dict):
                 question_times[event.event_id] = latest_reply_question_ts(meta, bot_ids, requester_ids)
             elif (
-                room_encrypted
-                and isinstance(raw := meta.get("latest_event"), dict)
+                isinstance(raw := meta.get("latest_event"), dict)
+                and raw.get("type") == "m.room.encrypted"
                 and (reply := decrypt_bot_reply(raw)) is not None
             ):
                 if is_summary(reply):
@@ -447,11 +419,7 @@ class MatrixRoomTools(Toolkit):
                     if not isinstance(ts, int) or isinstance(ts, bool) or ts > now - QUESTION_WAITS_MS:
                         backwalk_ids.append(event.event_id)
                 else:
-                    question_times[event.event_id] = latest_reply_question_ts(
-                        {"io.mindroom.latest_reply": reply},
-                        bot_ids,
-                        requester_ids,
-                    )
+                    question_times[event.event_id] = reply_question_ts(reply)
 
         if backwalk_ids:
             reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
