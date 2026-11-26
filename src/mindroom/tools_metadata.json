@@ -214,23 +214,16 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Tool for interacting with Discord channels and servers",
       "display_name": "Discord",
       "docs_url": "https://docs.mindroom.chat/tools/messaging-and-social/#discord",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "delete_message",
-        "get_channel_info",
-        "get_channel_messages",
-        "get_tool_config",
-        "get_tool_description",
-        "get_tool_name",
-        "list_channels",
-        "send_message"
+        "discord_manage",
+        "discord_read",
+        "discord_send"
       ],
       "helper_text": null,
       "icon": "SiDiscord",
@@ -949,19 +942,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "delete_message",
-        "edit_message",
-        "get_chat",
-        "get_file",
-        "pin_message",
-        "react_with_emoji",
-        "send_animation",
-        "send_audio",
-        "send_document",
-        "send_message",
-        "send_photo",
-        "send_sticker",
-        "send_video"
+        "telegram_manage",
+        "telegram_read",
+        "telegram_send"
       ],
       "helper_text": null,
       "icon": "SiTelegram",
@@ -1273,9 +1256,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_call_details",
-        "list_messages",
-        "send_sms"
+        "send_sms",
+        "twilio_read"
       ],
       "helper_text": null,
       "icon": "TbBrandTwilio",
@@ -1357,8 +1339,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_rooms",
-        "send_message"
+        "webex_read",
+        "webex_send"
       ],
       "helper_text": null,
       "icon": "SiWebex",
@@ -1576,14 +1558,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "send_document",
-        "send_image",
-        "send_list_message",
-        "send_location",
-        "send_reaction",
-        "send_reply_buttons",
-        "send_template_message",
-        "send_text_message"
+        "whatsapp_send"
       ],
       "helper_text": null,
       "icon": "SiWhatsapp",
@@ -7336,7 +7311,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "email_user"
+        "smtp_send_email"
       ],
       "helper_text": null,
       "icon": "Mail",
@@ -15094,12 +15069,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_post",
-        "get_home_timeline",
-        "get_user_info",
-        "reply_to_post",
-        "search_posts",
-        "send_dm"
+        "x_read",
+        "x_write"
       ],
       "helper_text": null,
       "icon": "SiX",
@@ -15176,21 +15147,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Video conferencing platform for scheduling and managing meetings",
       "display_name": "Zoom",
       "docs_url": "https://docs.mindroom.chat/tools/messaging-and-social/#zoom",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "delete_meeting",
-        "get_meeting",
-        "get_meeting_recordings",
-        "get_upcoming_meetings",
-        "list_meetings",
-        "schedule_meeting"
+        "zoom_manage",
+        "zoom_read"
       ],
       "helper_text": null,
       "icon": "SiZoom",

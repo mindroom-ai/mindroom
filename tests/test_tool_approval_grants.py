@@ -987,19 +987,29 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         ("memory", ("list", "search", "delete")),
         ("todo", ("list", "add", "update")),
         ("scheduler", ("list", "create", "cancel")),
+        ("twilio_read", ("get_call_details", "list_messages")),
+        ("discord_read", ("get_channel_messages", "get_channel_info", "list_channels")),
+        ("telegram_read", ("get_chat", "get_file")),
+        ("telegram_send", ("message", "document")),
+        ("telegram_manage", ("edit", "delete", "pin")),
+        ("whatsapp_send", ("text", "template", "reaction")),
+        ("zoom_read", ("get_meeting", "get_meeting_recordings")),
+        ("zoom_manage", ("schedule_meeting", "delete_meeting")),
+        ("x_read", ("search_posts", "get_home_timeline")),
+        ("x_write", ("create_post", "reply_to_post", "send_dm")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
     tool_name: str,
-    actions: tuple[str, str, str],
+    actions: tuple[str, ...],
 ) -> None:
     """Timed grants for unified action-dispatched tools must be scoped per action."""
     config = Config()
     ops = [grant_operation(config, tool_name, {"action": action}) for action in actions]
     assert all(op is not None for op in ops)
     assert ops[0] == grant_operation(config, tool_name, {"action": f" {actions[0]} "})
-    assert len(set(ops)) == 3
-    assert len({op.key for op in ops if op is not None}) == 3
+    assert len(set(ops)) == len(actions)
+    assert len({op.key for op in ops if op is not None}) == len(actions)
     assert grant_operation(config, tool_name, {}) is None
     assert grant_operation(config, tool_name, {"action": ""}) is None
     assert grant_operation(config, tool_name, {"action": "   "}) is None
@@ -1008,7 +1018,13 @@ def test_action_dispatched_grant_operation_binds_to_action(
 
 @pytest.mark.parametrize(
     ("tool_name", "action"),
-    [("triggers", "list"), ("memory", "list"), ("todo", "list"), ("scheduler", "list")],
+    [
+        ("triggers", "list"),
+        ("memory", "list"),
+        ("todo", "list"),
+        ("scheduler", "list"),
+        ("zoom_manage", "schedule_meeting"),
+    ],
 )
 def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
     tool_name: str,
@@ -1017,7 +1033,7 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
     """Action-dispatched tools cannot offer any-arguments scheduled approvals that could switch actions."""
     from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
 
-    config = Config()
+    config = Config.model_validate({"tool_approval": {"scheduled_any_arguments": True}})
     assert (
         scheduled_call_offers_any_arguments(
             config,
@@ -1040,6 +1056,20 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
         ("scheduler", "schedule", "scheduler"),
         ("searxng", "image_search", "searxng_search"),
         ("searxng", "search_web", "searxng_search"),
+        ("email", "email_user", "smtp_send_email"),
+        ("twilio", "get_call_details", "twilio_read"),
+        ("discord", "get_channel_messages", "discord_read"),
+        ("discord", "send_message", "discord_send"),
+        ("discord", "delete_message", "discord_manage"),
+        ("telegram", "get_file", "telegram_read"),
+        ("telegram", "send_photo", "telegram_send"),
+        ("telegram", "delete_message", "telegram_manage"),
+        ("whatsapp", "send_text_message", "whatsapp_send"),
+        ("webex", "list_rooms", "webex_read"),
+        ("zoom", "get_meeting_recordings", "zoom_read"),
+        ("zoom", "delete_meeting", "zoom_manage"),
+        ("x", "search_posts", "x_read"),
+        ("x", "send_dm", "x_write"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
@@ -1052,7 +1082,8 @@ def test_retired_consolidated_approval_rules_fail_closed(
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
-    tool_entry: object = {toolkit: {"host": "https://search.example.test"}} if toolkit == "searxng" else toolkit
+    options = {"searxng": {"host": "https://search.example.test"}, "telegram": {"chat_id": "1234"}}
+    tool_entry: object = {toolkit: options[toolkit]} if toolkit in options else toolkit
     stale_data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},

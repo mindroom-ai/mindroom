@@ -381,8 +381,7 @@ def test_zoom_never_offers_its_access_token_to_the_model() -> None:
     """The account-wide Zoom bearer token stays inside the toolkit, while the meeting tools remain."""
     toolkit = cast("Any", _BUILTINS.factory("zoom")())()
 
-    assert "get_access_token" not in toolkit.functions
-    assert "schedule_meeting" in toolkit.functions
+    assert set(toolkit.functions) == {"zoom_read", "zoom_manage"}
 
 
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
@@ -393,15 +392,8 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
         "get_youtube_video_captions",
         "get_youtube_video_data",
     )
-    assert _BUILTINS.entries["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
-    assert _BUILTINS.entries["x"].function_names == (
-        "create_post",
-        "get_home_timeline",
-        "get_user_info",
-        "reply_to_post",
-        "search_posts",
-        "send_dm",
-    )
+    assert _BUILTINS.entries["twilio"].function_names == ("send_sms", "twilio_read")
+    assert _BUILTINS.entries["x"].function_names == ("x_read", "x_write")
 
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:

@@ -299,12 +299,9 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
     return None
 
 
-# LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
-# Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
-#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
-#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
-#   function taking an `action` parameter.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
+# Legacy format: the names below were offered individually and could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 for scheduler, searxng, memory, and todo; messaging names retired in Wave 7.
 # Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
 #   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
 #   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
@@ -372,6 +369,57 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "email": {"email_user": "smtp_send_email"},
+    "twilio": {"get_call_details": "twilio_read", "list_messages": "twilio_read"},
+    "discord": {
+        "get_channel_messages": "discord_read",
+        "get_channel_info": "discord_read",
+        "list_channels": "discord_read",
+        "send_message": "discord_send",
+        "delete_message": "discord_manage",
+    },
+    "telegram": {
+        "get_chat": "telegram_read",
+        "get_file": "telegram_read",
+        "send_message": "telegram_send",
+        "send_photo": "telegram_send",
+        "send_document": "telegram_send",
+        "send_video": "telegram_send",
+        "send_audio": "telegram_send",
+        "send_animation": "telegram_send",
+        "send_sticker": "telegram_send",
+        "edit_message": "telegram_manage",
+        "delete_message": "telegram_manage",
+        "react_with_emoji": "telegram_manage",
+        "pin_message": "telegram_manage",
+    },
+    "whatsapp": {
+        "send_text_message": "whatsapp_send",
+        "send_template_message": "whatsapp_send",
+        "send_reply_buttons": "whatsapp_send",
+        "send_list_message": "whatsapp_send",
+        "send_image": "whatsapp_send",
+        "send_document": "whatsapp_send",
+        "send_location": "whatsapp_send",
+        "send_reaction": "whatsapp_send",
+    },
+    "webex": {"list_rooms": "webex_read", "send_message": "webex_send"},
+    "zoom": {
+        "get_meeting": "zoom_read",
+        "get_upcoming_meetings": "zoom_read",
+        "list_meetings": "zoom_read",
+        "get_meeting_recordings": "zoom_read",
+        "schedule_meeting": "zoom_manage",
+        "delete_meeting": "zoom_manage",
+    },
+    "x": {
+        "get_user_info": "x_read",
+        "get_home_timeline": "x_read",
+        "search_posts": "x_read",
+        "create_post": "x_write",
+        "reply_to_post": "x_write",
+        "send_dm": "x_write",
     },
 }
 

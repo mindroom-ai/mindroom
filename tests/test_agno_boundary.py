@@ -249,6 +249,27 @@ def build() -> None:
     assert agno_imports(source) == {"agno", "agno.tools", "agno.run", "agno.media"}
 
 
+def test_native_comms_tools_have_no_agno_dependency() -> None:
+    """Messaging tools own their exposed functions, including Zoom's OAuth boundary."""
+    for name in (
+        "_comms",
+        "aws_ses",
+        "discord",
+        "email",
+        "resend",
+        "telegram",
+        "twilio",
+        "webex",
+        "whatsapp",
+        "x",
+        "zoom",
+    ):
+        path = SOURCE_ROOT / "tools" / f"{name}.py"
+        source = path.read_text(encoding="utf-8")
+        assert not agno_imports(source), path
+        assert "AGNO_COMPAT:" not in source, path
+
+
 def test_no_module_outside_the_boundary_imports_agno() -> None:
     """Every ``agno`` import under ``src/mindroom`` sits in an allowed package or module."""
     violations = boundary_violations()
