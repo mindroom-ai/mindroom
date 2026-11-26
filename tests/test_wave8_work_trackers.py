@@ -12,6 +12,7 @@ import pytest
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.clickup import clickup_tools
 from mindroom.tools.linear import linear_tools
+from mindroom.tools.native_helpers import UNSET, resolve_toggle
 from mindroom.tools.notion import notion_tools
 from mindroom.tools.trello import trello_tools
 
@@ -241,3 +242,18 @@ def test_trello_read_write_and_validation() -> None:
     fake_card.change_list.assert_called_once_with("l2")
     bad = json.loads(toolkit.trello_read(action="board_lists", board_id="b1/../../x"))
     assert "Invalid board_id" in bad["error"]
+
+
+def test_resolve_toggle_all_precedence_and_explicit_none_fail_closed() -> None:
+    """all=True overrides UNSET and explicit False, while explicit None stays fail-closed."""
+    assert resolve_toggle(UNSET, default=False, enable_all=True) is True
+    assert resolve_toggle(False, default=True, enable_all=True) is True
+    assert resolve_toggle(None, default=True, enable_all=True) is False
+    assert resolve_toggle(False, default=True, enable_all=False) is False
+    assert resolve_toggle(UNSET, default=False, enable_all=False) is False
+    assert resolve_toggle(None, default=True, enable_all=False) is False
+
+    override_false = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=False, all=True)
+    assert override_false._allow_update is True
+    explicit_none = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=None, all=True)
+    assert explicit_none._allow_update is False

@@ -13991,10 +13991,10 @@ get_random_photo(query="workspace desk", count=3)
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Brand API key for `search_by_identifier()`; falls back to `BRANDFETCH_API_KEY`. |
-| `client_id` | `text` | `null` | Brand Search client ID for `search_by_brand()`; falls back to `BRANDFETCH_CLIENT_ID`. |
-| `enable_search_by_identifier` | `boolean` | `true` | Enable `search_by_identifier()`. |
-| `enable_search_by_brand` | `boolean` | `false` | Enable `search_by_brand()`. |
+| `api_key` | `password` | `null` | Brand API key for `brandfetch_lookup(action="by_identifier")`; falls back to `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `null` | Brand Search client ID for `brandfetch_lookup(action="by_brand")`; falls back to `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `true` | Enable `brandfetch_lookup(action="by_identifier")`. |
+| `enable_search_by_brand` | `boolean` | `false` | Enable `brandfetch_lookup(action="by_brand")`. |
 | `base_url` | `url` | `https://api.brandfetch.io/v2` | Brandfetch API base URL. |
 | `timeout` | `number` | `20.0` | Request timeout in seconds. |
 | `all` | `boolean` | `false` | Enable all functions. |
@@ -15224,8 +15224,8 @@ Items whose requester was never recorded are skipped and logged once as `todo_po
 
 ## [`bitbucket`]
 
-`bitbucket` works on one configured repository: its details, commits, pull requests, pull request changes, and issues.
-`list_repositories()` lists the whole workspace.
+`bitbucket` provides `bitbucket_read()` (`list_repositories`, `repository_details`, `commits`, `pull_requests`, `pull_request_details`, `pull_request_changes`, `issues`) and `bitbucket_create_repository()` for one configured repository.
+`bitbucket_read(action="list_repositories")` lists the whole workspace.
 It authenticates with HTTP Basic using `username` plus `token`, or `username` plus `password` when no token is set.
 
 | Option | Type | Required | Default | Notes |
@@ -15252,7 +15252,7 @@ agents:
 
 - For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`.
 - Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
-- `create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
+- `bitbucket_create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
 ## [`jira`]
 
@@ -15287,7 +15287,7 @@ agents:
 
 ## [`linear`]
 
-`linear` reads the current user, teams, issues, assigned issues, workflow-state issues, and high-priority issues, and creates and updates issues.
+`linear` provides `linear_read()` (`viewer`, `teams`, `issue`, `assigned_issues`, `workflow_issues`, `high_priority_issues`) and `linear_write()` (`create_issue`, `update_issue`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -15301,12 +15301,12 @@ agents:
       - linear
 ```
 
-- `get_issue_details()` accepts an issue UUID or a key such as `BLA-123`.
-- `create_issue()` needs a `team_id` from `get_teams_details()`; to assign an issue to yourself, pass the ID from `get_user_details()` as `assignee_id`.
+- `linear_read(action="issue")` accepts an issue UUID or a key such as `BLA-123`.
+- `linear_write(action="create_issue")` needs a `team_id` from `linear_read(action="teams")`; to assign an issue to yourself, pass the ID from `linear_read(action="viewer")` as `assignee_id`.
 
 ## [`clickup`]
 
-`clickup` lists spaces, lists, and tasks, and creates, reads, updates, and deletes tasks.
+`clickup` provides `clickup_read()` (`list_spaces`, `list_lists`, `list_tasks`, `get_task`) and `clickup_write()` (`create_task`, `update_task`, `delete_task`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -15323,9 +15323,9 @@ agents:
 ```
 
 - Spaces and lists are matched by name, case-insensitively.
-- `list_tasks()` returns tasks from every list in a space.
-- `create_task()` always creates the task in the first list of the matched space, so check `list_lists()` when placement matters.
-- `update_task()` passes any field updates through to the ClickUp API.
+- `clickup_read(action="list_tasks")` returns tasks from every list in a space.
+- `clickup_write(action="create_task")` always creates the task in the first list of the matched space, so check `clickup_read(action="list_lists")` when placement matters.
+- `clickup_write(action="update_task")` passes any field updates through to the ClickUp API.
 
 ## [`confluence`]
 
@@ -15355,15 +15355,15 @@ agents:
 
 ## [`notion`]
 
-`notion` creates pages in one database, appends a paragraph to an existing page, and searches the database by tag.
+`notion` provides `notion_write()` (`create_page`, `update_page`) and `notion_search()` for one database.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `yes` | `null` | Notion internal integration token. Also read from `NOTION_API_KEY`. |
 | `database_id` | `text` | `yes` | `null` | Notion database ID. Also read from `NOTION_DATABASE_ID`. |
-| `enable_create_page` | `boolean` | `no` | `true` | Enable `create_page()`. |
-| `enable_update_page` | `boolean` | `no` | `true` | Enable `update_page()`. |
-| `enable_search_pages` | `boolean` | `no` | `true` | Enable `search_pages()`. |
+| `enable_create_page` | `boolean` | `no` | `true` | Enable `notion_write(action="create_page")`. |
+| `enable_update_page` | `boolean` | `no` | `true` | Enable `notion_write(action="update_page")`. |
+| `enable_search_pages` | `boolean` | `no` | `true` | Enable `notion_search()`. |
 | `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
 
 ```yaml
@@ -15377,11 +15377,11 @@ agents:
 
 - Create the integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it, or the tool cannot create or find pages.
 - The database must have a title property named `Name` and a select property named `Tag`.
-- `create_page()` sets a title, a tag, and one paragraph, and `update_page()` appends a paragraph rather than rewriting the page.
+- `notion_write(action="create_page")` sets a title, a tag, and one paragraph, and `notion_write(action="update_page")` appends a paragraph rather than rewriting the page.
 
 ## [`trello`]
 
-`trello` lists, creates, and inspects boards, lists, and cards, and moves cards between lists.
+`trello` provides `trello_read()` (`list_boards`, `board_lists`, `cards`) and `trello_write()` (`create_board`, `create_list`, `create_card`, `move_card`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -15397,12 +15397,12 @@ agents:
 ```
 
 - All three credentials are needed; if any is missing, Trello rejects the calls with an authentication error.
-- `create_card()` finds the target list by name, case-insensitively, while `move_card()` needs the card ID and destination list ID from `get_cards()` and `get_board_lists()`.
-- `list_boards()` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
+- `trello_write(action="create_card")` finds the target list by name, case-insensitively, while `trello_write(action="move_card")` needs the card ID and destination list ID from `trello_read(action="cards")` and `trello_read(action="board_lists")`.
+- `trello_read(action="list_boards")` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
 
 ## [`todoist`]
 
-`todoist` creates, reads, updates, completes, and deletes tasks, and lists active tasks and projects.
+`todoist` provides `todoist_read()` (`get_task`, `list_tasks`, `list_projects`) and `todoist_write()` (`create_task`, `update_task`, `close_task`, `delete_task`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -15415,10 +15415,10 @@ agents:
       - todoist
 ```
 
-- `create_task()` accepts an optional `project_id` from `get_projects()`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
-- `update_task()` can also change the description, due date or time, due language, assignee, and section.
+- `todoist_write(action="create_task")` accepts an optional `project_id` from `todoist_read(action="list_projects")`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
+- `todoist_write(action="update_task")` can also change the description, due date or time, due language, assignee, and section.
 - `priority` runs from `1` to `4`, where `4` is the highest.
-- `close_task()` marks a task complete, while `delete_task()` removes it permanently.
+- `todoist_write(action="close_task")` marks a task complete, while `todoist_write(action="delete_task")` removes it permanently.
 
 ## [`zendesk`]
 
@@ -16704,11 +16704,11 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `event_type_id` | `number` | `no` | `null` | Cal.com event type ID used for slot lookup and new bookings. |
 | `user_timezone` | `text` | `no` | `null` | IANA timezone for returned booking times; `America/New_York` when unset. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
-| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
-| `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
-| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
-| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `reschedule_booking()`. |
-| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
+| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `cal_com_read(action="available_slots")`. |
+| `enable_create_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="create_booking")`. |
+| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `cal_com_read(action="upcoming_bookings")`. |
+| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="reschedule_booking")`. |
+| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="cancel_booking")`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
 Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
@@ -17786,14 +17786,14 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
-| `search_places` | `boolean` | `true` | Enable `search_places()`. |
-| `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
-| `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
-| `geocode_address` | `boolean` | `true` | Enable `geocode_address()`. |
-| `reverse_geocode` | `boolean` | `true` | Enable `reverse_geocode()`. |
-| `get_distance_matrix` | `boolean` | `true` | Enable `get_distance_matrix()`. |
-| `get_elevation` | `boolean` | `true` | Enable `get_elevation()`. |
-| `get_timezone` | `boolean` | `true` | Enable `get_timezone()`. |
+| `search_places` | `boolean` | `true` | Enable `google_maps_places(action="search_places")`. |
+| `get_directions` | `boolean` | `true` | Enable `google_maps_routes(action="directions")`. |
+| `validate_address` | `boolean` | `true` | Enable `google_maps_places(action="validate_address")`. |
+| `geocode_address` | `boolean` | `true` | Enable `google_maps_places(action="geocode")`. |
+| `reverse_geocode` | `boolean` | `true` | Enable `google_maps_places(action="reverse_geocode")`. |
+| `get_distance_matrix` | `boolean` | `true` | Enable `google_maps_routes(action="distance_matrix")`. |
+| `get_elevation` | `boolean` | `true` | Enable `google_maps_places(action="elevation")`. |
+| `get_timezone` | `boolean` | `true` | Enable `google_maps_places(action="timezone")`. |
 
 Enable the Places API and Address Validation API in the same Google Cloud project as the API key when using `search_places` or `validate_address`.
 
@@ -17880,7 +17880,7 @@ agents:
 shopify_store(action="products", max_results=25, status="ACTIVE")
 shopify_store(action="orders", max_results=50, created_after="2026-03-01", created_before="2026-03-31")
 shopify_store(action="low_stock", threshold=10)
-get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
+shopify_analytics(action="average_order_value", group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
 ## `homeassistant`

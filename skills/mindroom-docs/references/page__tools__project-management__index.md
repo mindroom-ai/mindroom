@@ -177,8 +177,8 @@ Items whose requester was never recorded are skipped and logged once as `todo_po
 
 ## [`bitbucket`]
 
-`bitbucket` works on one configured repository: its details, commits, pull requests, pull request changes, and issues.
-`list_repositories()` lists the whole workspace.
+`bitbucket` provides `bitbucket_read()` (`list_repositories`, `repository_details`, `commits`, `pull_requests`, `pull_request_details`, `pull_request_changes`, `issues`) and `bitbucket_create_repository()` for one configured repository.
+`bitbucket_read(action="list_repositories")` lists the whole workspace.
 It authenticates with HTTP Basic using `username` plus `token`, or `username` plus `password` when no token is set.
 
 | Option | Type | Required | Default | Notes |
@@ -205,7 +205,7 @@ agents:
 
 - For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`.
 - Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
-- `create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
+- `bitbucket_create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
 ## [`jira`]
 
@@ -240,7 +240,7 @@ agents:
 
 ## [`linear`]
 
-`linear` reads the current user, teams, issues, assigned issues, workflow-state issues, and high-priority issues, and creates and updates issues.
+`linear` provides `linear_read()` (`viewer`, `teams`, `issue`, `assigned_issues`, `workflow_issues`, `high_priority_issues`) and `linear_write()` (`create_issue`, `update_issue`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -254,12 +254,12 @@ agents:
       - linear
 ```
 
-- `get_issue_details()` accepts an issue UUID or a key such as `BLA-123`.
-- `create_issue()` needs a `team_id` from `get_teams_details()`; to assign an issue to yourself, pass the ID from `get_user_details()` as `assignee_id`.
+- `linear_read(action="issue")` accepts an issue UUID or a key such as `BLA-123`.
+- `linear_write(action="create_issue")` needs a `team_id` from `linear_read(action="teams")`; to assign an issue to yourself, pass the ID from `linear_read(action="viewer")` as `assignee_id`.
 
 ## [`clickup`]
 
-`clickup` lists spaces, lists, and tasks, and creates, reads, updates, and deletes tasks.
+`clickup` provides `clickup_read()` (`list_spaces`, `list_lists`, `list_tasks`, `get_task`) and `clickup_write()` (`create_task`, `update_task`, `delete_task`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -276,9 +276,9 @@ agents:
 ```
 
 - Spaces and lists are matched by name, case-insensitively.
-- `list_tasks()` returns tasks from every list in a space.
-- `create_task()` always creates the task in the first list of the matched space, so check `list_lists()` when placement matters.
-- `update_task()` passes any field updates through to the ClickUp API.
+- `clickup_read(action="list_tasks")` returns tasks from every list in a space.
+- `clickup_write(action="create_task")` always creates the task in the first list of the matched space, so check `clickup_read(action="list_lists")` when placement matters.
+- `clickup_write(action="update_task")` passes any field updates through to the ClickUp API.
 
 ## [`confluence`]
 
@@ -308,15 +308,15 @@ agents:
 
 ## [`notion`]
 
-`notion` creates pages in one database, appends a paragraph to an existing page, and searches the database by tag.
+`notion` provides `notion_write()` (`create_page`, `update_page`) and `notion_search()` for one database.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `yes` | `null` | Notion internal integration token. Also read from `NOTION_API_KEY`. |
 | `database_id` | `text` | `yes` | `null` | Notion database ID. Also read from `NOTION_DATABASE_ID`. |
-| `enable_create_page` | `boolean` | `no` | `true` | Enable `create_page()`. |
-| `enable_update_page` | `boolean` | `no` | `true` | Enable `update_page()`. |
-| `enable_search_pages` | `boolean` | `no` | `true` | Enable `search_pages()`. |
+| `enable_create_page` | `boolean` | `no` | `true` | Enable `notion_write(action="create_page")`. |
+| `enable_update_page` | `boolean` | `no` | `true` | Enable `notion_write(action="update_page")`. |
+| `enable_search_pages` | `boolean` | `no` | `true` | Enable `notion_search()`. |
 | `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
 
 ```yaml
@@ -330,11 +330,11 @@ agents:
 
 - Create the integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it, or the tool cannot create or find pages.
 - The database must have a title property named `Name` and a select property named `Tag`.
-- `create_page()` sets a title, a tag, and one paragraph, and `update_page()` appends a paragraph rather than rewriting the page.
+- `notion_write(action="create_page")` sets a title, a tag, and one paragraph, and `notion_write(action="update_page")` appends a paragraph rather than rewriting the page.
 
 ## [`trello`]
 
-`trello` lists, creates, and inspects boards, lists, and cards, and moves cards between lists.
+`trello` provides `trello_read()` (`list_boards`, `board_lists`, `cards`) and `trello_write()` (`create_board`, `create_list`, `create_card`, `move_card`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -350,12 +350,12 @@ agents:
 ```
 
 - All three credentials are needed; if any is missing, Trello rejects the calls with an authentication error.
-- `create_card()` finds the target list by name, case-insensitively, while `move_card()` needs the card ID and destination list ID from `get_cards()` and `get_board_lists()`.
-- `list_boards()` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
+- `trello_write(action="create_card")` finds the target list by name, case-insensitively, while `trello_write(action="move_card")` needs the card ID and destination list ID from `trello_read(action="cards")` and `trello_read(action="board_lists")`.
+- `trello_read(action="list_boards")` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
 
 ## [`todoist`]
 
-`todoist` creates, reads, updates, completes, and deletes tasks, and lists active tasks and projects.
+`todoist` provides `todoist_read()` (`get_task`, `list_tasks`, `list_projects`) and `todoist_write()` (`create_task`, `update_task`, `close_task`, `delete_task`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -368,10 +368,10 @@ agents:
       - todoist
 ```
 
-- `create_task()` accepts an optional `project_id` from `get_projects()`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
-- `update_task()` can also change the description, due date or time, due language, assignee, and section.
+- `todoist_write(action="create_task")` accepts an optional `project_id` from `todoist_read(action="list_projects")`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
+- `todoist_write(action="update_task")` can also change the description, due date or time, due language, assignee, and section.
 - `priority` runs from `1` to `4`, where `4` is the highest.
-- `close_task()` marks a task complete, while `delete_task()` removes it permanently.
+- `todoist_write(action="close_task")` marks a task complete, while `todoist_write(action="delete_task")` removes it permanently.
 
 ## [`zendesk`]
 

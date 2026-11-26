@@ -150,10 +150,10 @@ get_random_photo(query="workspace desk", count=3)
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Brand API key for `search_by_identifier()`; falls back to `BRANDFETCH_API_KEY`. |
-| `client_id` | `text` | `null` | Brand Search client ID for `search_by_brand()`; falls back to `BRANDFETCH_CLIENT_ID`. |
-| `enable_search_by_identifier` | `boolean` | `true` | Enable `search_by_identifier()`. |
-| `enable_search_by_brand` | `boolean` | `false` | Enable `search_by_brand()`. |
+| `api_key` | `password` | `null` | Brand API key for `brandfetch_lookup(action="by_identifier")`; falls back to `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `null` | Brand Search client ID for `brandfetch_lookup(action="by_brand")`; falls back to `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `true` | Enable `brandfetch_lookup(action="by_identifier")`. |
+| `enable_search_by_brand` | `boolean` | `false` | Enable `brandfetch_lookup(action="by_brand")`. |
 | `base_url` | `url` | `https://api.brandfetch.io/v2` | Brandfetch API base URL. |
 | `timeout` | `number` | `20.0` | Request timeout in seconds. |
 | `all` | `boolean` | `false` | Enable all functions. |

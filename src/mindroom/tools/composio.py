@@ -158,6 +158,7 @@ def _wrap_composio_action(
 def composio_tools() -> type[Toolkit]:
     """Return selected Composio actions as a native MindRoom toolkit."""
     from composio import Action, ComposioToolSet
+    from composio.constants import DEFAULT_BASE_URL
 
     disable_vendor_telemetry()
 
@@ -184,9 +185,10 @@ def composio_tools() -> type[Toolkit]:
                 msg = "Composio requires a nonempty actions list."
                 raise ValueError(msg)
             resolved_key = require_non_empty(api_key, "Composio API key")
+            resolved_base_url = base_url.strip() if isinstance(base_url, str) and base_url.strip() else DEFAULT_BASE_URL
             toolset = ComposioToolSet(
                 api_key=resolved_key,
-                base_url=base_url,
+                base_url=resolved_base_url,
                 entity_id=entity_id,
                 workspace_id=workspace_id,
                 output_dir=output_dir,

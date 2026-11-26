@@ -12,6 +12,28 @@ from mindroom.tools.native_helpers import error_json, json_dumps, require_non_em
 _ReadAction = Literal["user_info", "top_posts", "subreddit_info", "trending_subreddits", "subreddit_stats"]
 _WriteAction = Literal["create_post", "reply_to_post", "reply_to_comment"]
 _TimeFilter = Literal["all", "day", "hour", "month", "week", "year"]
+_REDDIT_URL = "https://www.reddit.com"
+_REDDIT_OAUTH_URL = "https://oauth.reddit.com"
+_REDDIT_SHORT_URL = "https://redd.it"
+
+
+def _link_flair_templates(sub_obj: Any) -> list[dict[str, Any]]:  # noqa: ANN401
+    flair_mgr = sub_obj.flair.link_templates
+    if hasattr(flair_mgr, "user_selectable"):
+        try:
+            return [dict(item) for item in flair_mgr.user_selectable()]
+        except Exception:  # noqa: S110 - fall back to moderator link_templates listing
+            pass
+    return [dict(item) for item in flair_mgr]
+
+
+def _flair_label(template: dict[str, Any]) -> str:
+    return str(template.get("flair_text") or template.get("text") or "")
+
+
+def _flair_template_id(template: dict[str, Any]) -> str | None:
+    raw = template.get("flair_template_id") or template.get("id")
+    return str(raw) if raw else None
 
 
 def _extract_reddit_id(value: str, field_name: str, *, post_url: bool = False) -> str:
@@ -57,15 +79,24 @@ class _RedditTools(Toolkit):
         if self.reddit is None and self.client_id and self.client_secret:
             import praw
 
+            has_user_auth = bool(self.username and self.password)
             kwargs: dict[str, Any] = {
+                "site_name": "DEFAULT",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
                 "user_agent": self.user_agent,
+                "username": self.username if has_user_auth else None,
+                "password": self.password if has_user_auth else None,
+                "refresh_token": None,
+                "redirect_uri": None,
+                "reddit_url": _REDDIT_URL,
+                "oauth_url": _REDDIT_OAUTH_URL,
+                "short_url": _REDDIT_SHORT_URL,
+                "check_for_updates": False,
             }
-            if self.username and self.password:
-                kwargs["username"] = self.username
-                kwargs["password"] = self.password
             self.reddit = praw.Reddit(**kwargs)
+            if not has_user_auth:
+                self.reddit.read_only = True
         super().__init__(name="reddit", tools=[self.reddit_read, self.reddit_write])
 
     def _check_user_auth(self) -> bool:
@@ -124,7 +155,7 @@ class _RedditTools(Toolkit):
             }
         elif action == "subreddit_info":
             sub = self.reddit.subreddit(safe_path_segment(require_non_empty(subreddit, "subreddit"), "subreddit"))
-            flairs = [flair["text"] for flair in sub.flair.link_templates]
+            flairs = [label for template in _link_flair_templates(sub) if (label := _flair_label(template))]
             result = {
                 "display_name": sub.display_name,
                 "title": sub.title,
@@ -192,14 +223,23 @@ class _RedditTools(Toolkit):
         clean_title = require_non_empty(title, "title")
         clean_content = require_non_empty(content, "content")
         sub_obj = self.reddit.subreddit(clean_sub)
+        resolved_flair_id: str | None = None
         if flair:
-            available = [f["text"] for f in sub_obj.flair.link_templates]
-            if flair not in available:
+            templates = _link_flair_templates(sub_obj)
+            matched = next(
+                (t for t in templates if flair in {_flair_label(t), _flair_template_id(t)}),
+                None,
+            )
+            if matched is None:
+                available = [label for t in templates if (label := _flair_label(t))]
                 return f"Invalid flair. Available flairs: {', '.join(available)}"
+            resolved_flair_id = _flair_template_id(matched)
+            if resolved_flair_id is None:
+                return f"Flair '{flair}' does not have a valid template ID."
         submission = (
-            sub_obj.submit(title=clean_title, selftext=clean_content, flair_id=flair)
+            sub_obj.submit(title=clean_title, selftext=clean_content, flair_id=resolved_flair_id)
             if is_self
-            else sub_obj.submit(title=clean_title, url=clean_content, flair_id=flair)
+            else sub_obj.submit(title=clean_title, url=clean_content, flair_id=resolved_flair_id)
         )
         return json_dumps(
             {

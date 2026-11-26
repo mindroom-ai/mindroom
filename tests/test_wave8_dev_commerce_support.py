@@ -273,3 +273,123 @@ def test_zendesk_validation_toggles_and_search(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(httpx, "get", fake_get)
     toolkit = zendesk_tools()(username="u", password="p", company_name="acme")  # noqa: S106
     assert json.loads(toolkit.search_zendesk("reset password")) == ["Reset here"]
+
+
+def test_bitbucket_pr_diff_follows_same_origin_redirect_and_rejects_cross_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bitbucket PR diff follows same-origin 302 redirects and rejects cross-origin redirects without leaking auth."""
+    requests_seen: list[tuple[str, str, dict[str, str]]] = []
+    redirect_targets = {
+        7: "https://api.bitbucket.org/2.0/repositories/ws/repo/diff/ws/repo:abc..def?topic=true",
+        8: "/2.0/repositories/ws/repo/diff/ws/repo:rel",
+        9: "https://evil.example/steal-auth",
+        10: "http://api.bitbucket.org/2.0/repositories/ws/repo/diff/downgrade",
+        11: "https://api.bitbucket.org:8443/2.0/repositories/ws/repo/diff/other-port",
+    }
+
+    def fake_request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        follow_redirects: bool = False,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        assert follow_redirects is False
+        requests_seen.append((method, url, headers))
+        req = httpx.Request(method, url)
+        for pr_id, target in redirect_targets.items():
+            if url.endswith(f"/pullrequests/{pr_id}/diff"):
+                return httpx.Response(302, request=req, headers={"Location": target})
+        if "/diff/ws/repo:abc..def" in url:
+            return httpx.Response(
+                200,
+                request=req,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                text="diff A",
+            )
+        if url.endswith("/diff/ws/repo:rel"):
+            return httpx.Response(200, request=req, headers={"Content-Type": "text/plain"}, text="diff B")
+        pytest.fail(f"Unexpected request sent to {url}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    toolkit = bitbucket_tools()(username="u", token="secret-tok", workspace="ws", repo_slug="repo")  # noqa: S106
+
+    assert toolkit.bitbucket_read(action="pull_request_changes", pull_request_id=7) == "diff A"
+    assert toolkit.bitbucket_read(action="pull_request_changes", pull_request_id=8) == "diff B"
+
+    for bad_pr in (9, 10, 11):
+        err = json.loads(toolkit.bitbucket_read(action="pull_request_changes", pull_request_id=bad_pr))
+        assert "cross-origin redirect" in err["error"]
+
+    assert all(url.startswith("https://api.bitbucket.org/") for _, url, _ in requests_seen)
+
+
+def test_shopify_analytics_uses_minimal_report_specific_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aggregate Shopify reports omit customer and unneeded lineItems fields to avoid PCD permission errors."""
+    queries_by_call: list[str] = []
+
+    def fake_post(url: str, *, json: dict[str, object], **_kwargs: object) -> httpx.Response:
+        req = httpx.Request("POST", url)
+        query = str(json["query"])
+        queries_by_call.append(query)
+        order_node = {
+            "createdAt": "2026-11-01T10:00:00Z",
+            "displayFinancialStatus": "PAID",
+            "displayFulfillmentStatus": "FULFILLED",
+            "totalPriceSet": {"shopMoney": {"amount": "50.00", "currencyCode": "USD"}},
+            "subtotalPriceSet": {"shopMoney": {"amount": "45.00"}},
+            "totalShippingPriceSet": {"shopMoney": {"amount": "5.00"}},
+            "totalTaxSet": {"shopMoney": {"amount": "0.00"}},
+            "customer": {
+                "id": "gid://shopify/Customer/1",
+                "email": "ada@example.com",
+                "firstName": "Ada",
+                "lastName": "Lovelace",
+                "numberOfOrders": 2,
+                "amountSpent": {"amount": "100.00", "currencyCode": "USD"},
+            },
+            "lineItems": {
+                "edges": [
+                    {
+                        "node": {
+                            "quantity": 2,
+                            "variant": {
+                                "id": "v1",
+                                "title": "Default",
+                                "sku": "W1",
+                                "product": {"id": "gid://shopify/Product/1", "title": "Widget"},
+                            },
+                            "originalUnitPriceSet": {"shopMoney": {"amount": "20.00", "currencyCode": "USD"}},
+                        },
+                    },
+                ],
+            },
+        }
+        return httpx.Response(200, request=req, json={"data": {"orders": {"edges": [{"node": order_node}]}}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    toolkit = shopify_tools()(shop_name="acme", access_token="shpat_123")  # noqa: S106
+
+    aov = json.loads(toolkit.shopify_analytics(action="average_order_value"))
+    assert aov["overall_average_order_value"] == 50.0
+    aov_query = queries_by_call[-1]
+    assert "createdAt" in aov_query
+    assert "totalPriceSet" in aov_query
+    assert "customer" not in aov_query
+    assert "lineItems" not in aov_query
+
+    toolkit.shopify_analytics(action="sales_trends", compare_previous_period=False)
+    assert "customer" not in queries_by_call[-1]
+
+    toolkit.shopify_analytics(action="order_analytics")
+    assert "customer" not in queries_by_call[-1]
+
+    toolkit.shopify_analytics(action="top_selling")
+    assert "customer" not in queries_by_call[-1]
+
+    toolkit.shopify_analytics(action="repeat_customers", min_occurrences=1)
+    repeat_query = queries_by_call[-1]
+    assert "customer" in repeat_query
+    assert "lineItems" not in repeat_query

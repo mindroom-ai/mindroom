@@ -34,62 +34,59 @@ _AnalyticsAction = Literal[
 ]
 _GroupBy = Literal["day", "week", "month"]
 
-_QUERY_SHOP_INFO = """
-query {
-  shop {
-    name email currencyCode
-    primaryDomain { url }
-    billingAddress { country city }
-    plan { displayName }
-  }
+_QUERY_SHOP_INFO = (
+    "query { shop { name email currencyCode primaryDomain { url }"
+    " billingAddress { country city } plan { displayName } } }"
+)
+_QUERY_PRODUCTS = (
+    "query Products($first: Int!, $query: String) { products(first: $first, query: $query) { edges { node {"
+    " id title status totalInventory tracksInventory createdAt updatedAt"
+    " priceRangeV2 { minVariantPrice { amount currencyCode } maxVariantPrice { amount currencyCode } }"
+    " variants(first: 50) { edges { node { id title sku price inventoryQuantity inventoryPolicy } } }"
+    " } } } }"
+)
+_ORDER_META = "id name createdAt displayFinancialStatus displayFulfillmentStatus"
+_TOTAL_MONEY = "totalPriceSet { shopMoney { amount currencyCode } }"
+_QTY_ITEMS = "lineItems(first: 100) { edges { node { quantity } } }"
+_CUSTOMER_DETAIL = "customer { id email firstName lastName numberOfOrders amountSpent { amount currencyCode } }"
+_ORDER_SELECTIONS: dict[str, str] = {
+    "average_order_value": f"createdAt {_TOTAL_MONEY}",
+    "sales_trends": f"{_TOTAL_MONEY} {_QTY_ITEMS}",
+    "sales_by_date": f"createdAt {_TOTAL_MONEY} {_QTY_ITEMS}",
+    "order_analytics": (
+        f"displayFinancialStatus displayFulfillmentStatus {_TOTAL_MONEY}"
+        " subtotalPriceSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } }"
+        f" totalTaxSet {{ shopMoney {{ amount }} }} {_QTY_ITEMS}"
+    ),
+    "top_selling": (
+        "lineItems(first: 100) { edges { node {"
+        " quantity variant { product { id title } } originalUnitPriceSet { shopMoney { amount } } } } }"
+    ),
+    "bought_together": "lineItems(first: 100) { edges { node { variant { product { id title } } } } }",
+    "product_breakdown": (
+        "createdAt lineItems(first: 100) { edges { node { quantity"
+        " variant { id title sku product { id title } }"
+        " originalUnitPriceSet { shopMoney { amount currencyCode } } } } }"
+    ),
+    "repeat_customers": f"totalPriceSet {{ shopMoney {{ amount }} }} {_CUSTOMER_DETAIL}",
+    "customer_orders": (
+        f"{_ORDER_META} {_TOTAL_MONEY} {_CUSTOMER_DETAIL} lineItems(first: 100) {{ edges {{ node {{ title quantity }} }} }}"
+    ),
+    "orders": (
+        f"{_ORDER_META} {_TOTAL_MONEY} subtotalPriceSet {{ shopMoney {{ amount }} }}"
+        " customer { id email firstName lastName } lineItems(first: 100) { edges { node {"
+        " id title quantity variant { sku } originalUnitPriceSet { shopMoney { amount } } } } }"
+    ),
 }
-"""
-_QUERY_PRODUCTS = """
-query Products($first: Int!, $query: String) {
-  products(first: $first, query: $query) {
-    edges {
-      node {
-        id title status totalInventory tracksInventory createdAt updatedAt
-        priceRangeV2 {
-          minVariantPrice { amount currencyCode }
-          maxVariantPrice { amount currencyCode }
-        }
-        variants(first: 50) {
-          edges { node { id title sku price inventoryQuantity inventoryPolicy } }
-        }
-      }
-    }
-  }
-}
-"""
-_QUERY_ORDERS = """
-query Orders($first: Int!, $query: String, $reverse: Boolean!) {
-  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: $reverse) {
-    edges {
-      node {
-        id name createdAt displayFinancialStatus displayFulfillmentStatus
-        totalPriceSet { shopMoney { amount currencyCode } }
-        subtotalPriceSet { shopMoney { amount } }
-        totalShippingPriceSet { shopMoney { amount } }
-        totalTaxSet { shopMoney { amount } }
-        customer {
-          id email firstName lastName numberOfOrders
-          amountSpent { amount currencyCode }
-        }
-        lineItems(first: 100) {
-          edges {
-            node {
-              id title quantity
-              variant { id title sku product { id title } }
-              originalUnitPriceSet { shopMoney { amount currencyCode } }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
+
+
+def _orders_query(selection: str) -> str:
+    fields = _ORDER_SELECTIONS[selection]
+    return (
+        "query Orders($first: Int!, $query: String, $reverse: Boolean!) {"
+        " orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: $reverse) {"
+        f" edges {{ node {{ {fields} }} }} }} }}"
+    )
 
 
 def _normalize_shop_name(value: str | None) -> str | None:
@@ -116,8 +113,7 @@ def _build_order_query(
     if created_after:
         parts.append(f"created_at:>={created_after}")
     if created_before:
-        op = "<" if before_exclusive else "<="
-        parts.append(f"created_at:{op}{created_before}")
+        parts.append(f"created_at:{'<' if before_exclusive else '<='}{created_before}")
     if customer_email:
         parts.append(f"email:{customer_email}")
     return " AND ".join(parts) if parts else None
@@ -131,8 +127,22 @@ def _shop_currency(node: dict[str, Any], key: str = "totalPriceSet") -> str | No
     return node.get(key, {}).get("shopMoney", {}).get("currencyCode")
 
 
-def _order_items(node: dict[str, Any]) -> list[dict[str, Any]]:
-    return [edge["node"] for edge in node.get("lineItems", {}).get("edges", []) if isinstance(edge, dict)]
+def _edges_nodes(container: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    return [edge["node"] for edge in container.get(key, {}).get("edges", []) if isinstance(edge, dict)]
+
+
+def _customer_name(customer: dict[str, Any]) -> str:
+    return f"{customer.get('firstName', '')} {customer.get('lastName', '')}".strip()
+
+
+def _pct_change(current: float, previous: float) -> float:
+    if previous > 0:
+        return ((current - previous) / previous) * 100
+    return 100.0 if current > 0 else 0.0
+
+
+def _trend_label(change: float) -> str:
+    return "up" if change > 0 else ("down" if change < 0 else "flat")
 
 
 class _ShopifyTools(Toolkit):
@@ -176,6 +186,7 @@ class _ShopifyTools(Toolkit):
 
     def _fetch_orders(
         self,
+        selection: str,
         *,
         limit: int = 250,
         query_filter: str | None = None,
@@ -184,24 +195,21 @@ class _ShopifyTools(Toolkit):
         variables: dict[str, Any] = {"first": max(1, min(limit, 250)), "reverse": reverse}
         if query_filter:
             variables["query"] = query_filter
-        result = self._graphql(_QUERY_ORDERS, variables)
-        if "error" in result:
-            return result
-        return [edge["node"] for edge in result.get("orders", {}).get("edges", []) if isinstance(edge, dict)]
+        result = self._graphql(_orders_query(selection), variables)
+        return result if "error" in result else _edges_nodes(result, "orders")
 
     def _fetch_products(self, *, limit: int, status: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
         variables: dict[str, Any] = {"first": max(1, min(limit, 250))}
         if status:
             variables["query"] = f"status:{status}"
         result = self._graphql(_QUERY_PRODUCTS, variables)
-        if "error" in result:
-            return result
-        return [edge["node"] for edge in result.get("products", {}).get("edges", []) if isinstance(edge, dict)]
+        return result if "error" in result else _edges_nodes(result, "products")
 
-    def _format_products(self, nodes: list[dict[str, Any]], *, inventory_view: bool) -> list[dict[str, Any]]:
+    @staticmethod
+    def _format_products(nodes: list[dict[str, Any]], *, inventory_view: bool) -> list[dict[str, Any]]:
         formatted: list[dict[str, Any]] = []
         for node in nodes:
-            variants = [edge["node"] for edge in node.get("variants", {}).get("edges", []) if isinstance(edge, dict)]
+            variants = _edges_nodes(node, "variants")
             if inventory_view:
                 formatted.append(
                     {
@@ -260,13 +268,13 @@ class _ShopifyTools(Toolkit):
                 continue
             variants = [
                 {
-                    "id": v["node"]["id"],
-                    "title": v["node"]["title"],
-                    "sku": v["node"].get("sku"),
-                    "inventory_quantity": v["node"].get("inventoryQuantity"),
+                    "id": v["id"],
+                    "title": v["title"],
+                    "sku": v.get("sku"),
+                    "inventory_quantity": v.get("inventoryQuantity"),
                 }
-                for v in node.get("variants", {}).get("edges", [])
-                if v["node"].get("inventoryQuantity") is not None and v["node"]["inventoryQuantity"] <= threshold
+                for v in _edges_nodes(node, "variants")
+                if v.get("inventoryQuantity") is not None and v["inventoryQuantity"] <= threshold
             ]
             if variants:
                 low_stock.append(
@@ -303,65 +311,68 @@ class _ShopifyTools(Toolkit):
             return json_dumps(res if "error" in res else res.get("shop", {}))
         if action in {"products", "inventory_levels"}:
             nodes = self._fetch_products(limit=max_results, status="ACTIVE" if action == "inventory_levels" else status)
-            if isinstance(nodes, dict):
-                return json_dumps(nodes)
-            return json_dumps(self._format_products(nodes, inventory_view=action == "inventory_levels"))
+            return json_dumps(
+                nodes
+                if isinstance(nodes, dict)
+                else self._format_products(nodes, inventory_view=action == "inventory_levels"),
+            )
         if action == "low_stock":
             return json_dumps(self._low_stock(threshold, max_results))
         q = _build_order_query(status=status, created_after=created_after, created_before=created_before)
-        orders = self._fetch_orders(limit=max_results, query_filter=q, reverse=True)
+        orders = self._fetch_orders("orders", limit=max_results, query_filter=q, reverse=True)
         if isinstance(orders, dict):
             return json_dumps(orders)
-        formatted = [
-            {
-                "id": o["id"],
-                "name": o["name"],
-                "created_at": o["createdAt"],
-                "financial_status": o.get("displayFinancialStatus"),
-                "fulfillment_status": o.get("displayFulfillmentStatus"),
-                "total": o.get("totalPriceSet", {}).get("shopMoney", {}).get("amount"),
-                "subtotal": o.get("subtotalPriceSet", {}).get("shopMoney", {}).get("amount"),
-                "currency": _shop_currency(o),
-                "customer": (
-                    {
-                        "id": o["customer"].get("id"),
-                        "email": o["customer"].get("email"),
-                        "name": f"{o['customer'].get('firstName', '')} {o['customer'].get('lastName', '')}".strip(),
-                    }
-                    if o.get("customer")
-                    else None
-                ),
-                "line_items": [
-                    {
-                        "id": item.get("id"),
-                        "title": item["title"],
-                        "quantity": item["quantity"],
-                        "unit_price": item.get("originalUnitPriceSet", {}).get("shopMoney", {}).get("amount"),
-                        "sku": item.get("variant", {}).get("sku") if item.get("variant") else None,
-                    }
-                    for item in _order_items(o)
-                ],
-            }
-            for o in orders
-        ]
-        return json_dumps(formatted)
+        return json_dumps(
+            [
+                {
+                    "id": o["id"],
+                    "name": o["name"],
+                    "created_at": o["createdAt"],
+                    "financial_status": o.get("displayFinancialStatus"),
+                    "fulfillment_status": o.get("displayFulfillmentStatus"),
+                    "total": o.get("totalPriceSet", {}).get("shopMoney", {}).get("amount"),
+                    "subtotal": o.get("subtotalPriceSet", {}).get("shopMoney", {}).get("amount"),
+                    "currency": _shop_currency(o),
+                    "customer": (
+                        {
+                            "id": o["customer"].get("id"),
+                            "email": o["customer"].get("email"),
+                            "name": _customer_name(o["customer"]),
+                        }
+                        if o.get("customer")
+                        else None
+                    ),
+                    "line_items": [
+                        {
+                            "id": item.get("id"),
+                            "title": item["title"],
+                            "quantity": item["quantity"],
+                            "unit_price": item.get("originalUnitPriceSet", {}).get("shopMoney", {}).get("amount"),
+                            "sku": item.get("variant", {}).get("sku") if item.get("variant") else None,
+                        }
+                        for item in _edges_nodes(o, "lineItems")
+                    ],
+                }
+                for o in orders
+            ],
+        )
 
-    def _top_selling(self, orders: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    @staticmethod
+    def _top_selling(orders: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
         sales: dict[str, dict[str, Any]] = {}
         for order in orders:
-            for item in _order_items(order):
+            for item in _edges_nodes(order, "lineItems"):
                 product = (item.get("variant") or {}).get("product")
                 if not product:
                     continue
                 pid = product["id"]
                 qty = int(item.get("quantity", 0))
-                unit_price = _shop_amount(item, "originalUnitPriceSet")
                 entry = sales.setdefault(
                     pid,
                     {"id": pid, "title": product["title"], "total_quantity": 0, "total_revenue": 0.0, "order_count": 0},
                 )
                 entry["total_quantity"] += qty
-                entry["total_revenue"] += qty * unit_price
+                entry["total_revenue"] += qty * _shop_amount(item, "originalUnitPriceSet")
                 entry["order_count"] += 1
         ranked = sorted(sales.values(), key=lambda item: item["total_quantity"], reverse=True)[:limit]
         for idx, product in enumerate(ranked, start=1):
@@ -369,29 +380,30 @@ class _ShopifyTools(Toolkit):
             product["total_revenue"] = round(product["total_revenue"], 2)
         return ranked
 
-    def _bought_together(self, orders: list[dict[str, Any]], min_occurrences: int, limit: int) -> list[dict[str, Any]]:
+    @staticmethod
+    def _bought_together(orders: list[dict[str, Any]], min_occurrences: int, limit: int) -> list[dict[str, Any]]:
         pair_counter: Counter[tuple[str, str]] = Counter()
         names: dict[str, str] = {}
         for order in orders:
             pids: set[str] = set()
-            for item in _order_items(order):
+            for item in _edges_nodes(order, "lineItems"):
                 product = (item.get("variant") or {}).get("product")
                 if product:
                     pids.add(product["id"])
                     names[product["id"]] = product["title"]
-            for pair in combinations(sorted(pids), 2):
-                pair_counter[pair] += 1
+            pair_counter.update(combinations(sorted(pids), 2))
         return [
             {
-                "product_1": {"id": pair[0], "title": names.get(pair[0], "Unknown")},
-                "product_2": {"id": pair[1], "title": names.get(pair[1], "Unknown")},
+                "product_1": {"id": p1, "title": names.get(p1, "Unknown")},
+                "product_2": {"id": p2, "title": names.get(p2, "Unknown")},
                 "times_bought_together": count,
             }
-            for pair, count in pair_counter.most_common(limit)
+            for (p1, p2), count in pair_counter.most_common(limit)
             if count >= min_occurrences
         ]
 
-    def _sales_by_date(self, orders: list[dict[str, Any]], start: str, end: str) -> dict[str, Any]:
+    @staticmethod
+    def _sales_by_date(orders: list[dict[str, Any]], start: str, end: str) -> dict[str, Any]:
         total_revenue = 0.0
         total_items = 0
         currency: str | None = None
@@ -400,16 +412,16 @@ class _ShopifyTools(Toolkit):
             amount = _shop_amount(order, "totalPriceSet")
             currency = _shop_currency(order) or currency
             day = str(order["createdAt"])[:10]
-            qty = sum(int(item.get("quantity", 0)) for item in _order_items(order))
+            qty = sum(int(item.get("quantity", 0)) for item in _edges_nodes(order, "lineItems"))
             total_revenue += amount
             total_items += qty
             bucket = daily.setdefault(day, {"date": day, "revenue": 0.0, "orders": 0, "items": 0})
             bucket["revenue"] += amount
             bucket["orders"] += 1
             bucket["items"] += qty
-        sorted_daily = sorted(daily.values(), key=lambda row: row["date"])
-        for row in sorted_daily:
-            row["revenue"] = round(row["revenue"], 2)
+        sorted_daily = [
+            {**row, "revenue": round(row["revenue"], 2)} for row in sorted(daily.values(), key=lambda r: r["date"])
+        ]
         count = len(orders)
         return {
             "period": {"start": start, "end": end},
@@ -421,8 +433,8 @@ class _ShopifyTools(Toolkit):
             "daily_breakdown": sorted_daily,
         }
 
+    @staticmethod
     def _order_analytics(
-        self,
         orders: list[dict[str, Any]],
         created_after: str | None,
         created_before: str | None,
@@ -431,7 +443,7 @@ class _ShopifyTools(Toolkit):
             return {"message": "No orders found in the specified period"}
         values = [_shop_amount(o, "totalPriceSet") for o in orders]
         total_revenue = sum(values)
-        total_items = sum(sum(int(item.get("quantity", 0)) for item in _order_items(o)) for o in orders)
+        total_items = sum(sum(int(i.get("quantity", 0)) for i in _edges_nodes(o, "lineItems")) for o in orders)
         count = len(orders)
         return {
             "period": {"created_after": created_after, "created_before": created_before},
@@ -450,8 +462,8 @@ class _ShopifyTools(Toolkit):
             "fulfillment_status_breakdown": dict(Counter(o.get("displayFulfillmentStatus", "UNKNOWN") for o in orders)),
         }
 
+    @staticmethod
     def _product_breakdown(
-        self,
         orders: list[dict[str, Any]],
         product_id: str,
         created_after: str | None,
@@ -468,7 +480,7 @@ class _ShopifyTools(Toolkit):
         for order in orders:
             day = str(order["createdAt"])[:10]
             matched = False
-            for item in _order_items(order):
+            for item in _edges_nodes(order, "lineItems"):
                 variant = item.get("variant") or {}
                 product = variant.get("product") or {}
                 if product.get("id") != normalized:
@@ -500,11 +512,6 @@ class _ShopifyTools(Toolkit):
                 order_count += 1
         if product_title is None:
             return {"error": "Product not found in any orders during this period"}
-        for row in variants.values():
-            row["revenue"] = round(row["revenue"], 2)
-        sorted_daily = sorted(daily.values(), key=lambda row: row["date"])
-        for row in sorted_daily:
-            row["revenue"] = round(row["revenue"], 2)
         return {
             "product_id": normalized,
             "product_title": product_title,
@@ -514,13 +521,19 @@ class _ShopifyTools(Toolkit):
             "order_count": order_count,
             "currency": currency,
             "average_units_per_order": round(total_qty / order_count, 2) if order_count else 0,
-            "variant_breakdown": list(variants.values()),
-            "daily_sales": sorted_daily,
+            "variant_breakdown": [{**r, "revenue": round(r["revenue"], 2)} for r in variants.values()],
+            "daily_sales": [
+                {**r, "revenue": round(r["revenue"], 2)} for r in sorted(daily.values(), key=lambda r: r["date"])
+            ],
         }
 
     def _customer_orders(self, customer_email: str, limit: int) -> dict[str, Any]:
-        q = _build_order_query(customer_email=customer_email)
-        orders = self._fetch_orders(limit=limit, query_filter=q, reverse=True)
+        orders = self._fetch_orders(
+            "customer_orders",
+            limit=limit,
+            query_filter=_build_order_query(customer_email=customer_email),
+            reverse=True,
+        )
         if isinstance(orders, dict):
             return orders
         if not orders:
@@ -530,7 +543,7 @@ class _ShopifyTools(Toolkit):
             "customer": {
                 "email": customer_email,
                 "id": cust.get("id"),
-                "name": f"{cust.get('firstName', '')} {cust.get('lastName', '')}".strip(),
+                "name": _customer_name(cust),
                 "total_orders": cust.get("numberOfOrders"),
                 "total_spent": cust.get("amountSpent", {}).get("amount"),
                 "currency": cust.get("amountSpent", {}).get("currencyCode"),
@@ -543,7 +556,7 @@ class _ShopifyTools(Toolkit):
                     "financial_status": o.get("displayFinancialStatus"),
                     "fulfillment_status": o.get("displayFulfillmentStatus"),
                     "total": o.get("totalPriceSet", {}).get("shopMoney", {}).get("amount"),
-                    "items": [{"title": i["title"], "quantity": i["quantity"]} for i in _order_items(o)],
+                    "items": [{"title": i["title"], "quantity": i["quantity"]} for i in _edges_nodes(o, "lineItems")],
                 }
                 for o in orders
             ],
@@ -551,11 +564,11 @@ class _ShopifyTools(Toolkit):
 
     def _period_summary(self, start: str, end: str) -> dict[str, Any]:
         q = _build_order_query(paid_only=True, created_after=start, created_before=end, before_exclusive=True)
-        orders = self._fetch_orders(limit=250, query_filter=q)
+        orders = self._fetch_orders("sales_trends", limit=250, query_filter=q)
         if isinstance(orders, dict):
             return orders
         revenue = sum(_shop_amount(o, "totalPriceSet") for o in orders)
-        items = sum(sum(int(i.get("quantity", 0)) for i in _order_items(o)) for o in orders)
+        items = sum(sum(int(i.get("quantity", 0)) for i in _edges_nodes(o, "lineItems")) for o in orders)
         return {
             "total_orders": len(orders),
             "total_revenue": round(revenue, 2),
@@ -590,26 +603,18 @@ class _ShopifyTools(Toolkit):
             prev = self._period_summary(prev_start, prev_end)
             if "error" not in prev:
                 payload["previous_period"] = {"start": prev_start, "end": prev_end, **prev}
-                rev_chg = (
-                    ((cur["total_revenue"] - prev["total_revenue"]) / prev["total_revenue"]) * 100
-                    if prev["total_revenue"] > 0
-                    else (100.0 if cur["total_revenue"] > 0 else 0.0)
-                )
-                ord_chg = (
-                    ((cur["total_orders"] - prev["total_orders"]) / prev["total_orders"]) * 100
-                    if prev["total_orders"] > 0
-                    else (100.0 if cur["total_orders"] > 0 else 0.0)
-                )
+                rev_chg = _pct_change(cur["total_revenue"], prev["total_revenue"])
+                ord_chg = _pct_change(cur["total_orders"], prev["total_orders"])
                 payload["comparison"] = {
                     "revenue_change_percent": round(rev_chg, 2),
                     "orders_change_percent": round(ord_chg, 2),
-                    "revenue_trend": "up" if rev_chg > 0 else ("down" if rev_chg < 0 else "flat"),
-                    "orders_trend": "up" if ord_chg > 0 else ("down" if ord_chg < 0 else "flat"),
+                    "revenue_trend": _trend_label(rev_chg),
+                    "orders_trend": _trend_label(ord_chg),
                 }
         return payload
 
+    @staticmethod
     def _average_order_value(
-        self,
         orders: list[dict[str, Any]],
         group_by: _GroupBy,
         created_after: str | None,
@@ -625,10 +630,8 @@ class _ShopifyTools(Toolkit):
             if group_by == "week":
                 iso = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=UTC).isocalendar()
                 key = f"{iso[0]}-W{iso[1]:02d}"
-            elif group_by == "month":
-                key = day[:7]
             else:
-                key = day
+                key = day[:7] if group_by == "month" else day
             grouped.setdefault(key, []).append(_shop_amount(order, "totalPriceSet"))
         breakdown = [
             {
@@ -649,7 +652,8 @@ class _ShopifyTools(Toolkit):
             "breakdown": breakdown,
         }
 
-    def _repeat_customers(self, orders: list[dict[str, Any]], min_orders: int, limit: int) -> list[dict[str, Any]]:
+    @staticmethod
+    def _repeat_customers(orders: list[dict[str, Any]], min_orders: int, limit: int) -> list[dict[str, Any]]:
         customers: dict[str, dict[str, Any]] = {}
         for order in orders:
             cust = order.get("customer") or {}
@@ -661,7 +665,7 @@ class _ShopifyTools(Toolkit):
                 {
                     "id": cid,
                     "email": cust.get("email"),
-                    "name": f"{cust.get('firstName', '')} {cust.get('lastName', '')}".strip(),
+                    "name": _customer_name(cust),
                     "total_orders_all_time": cust.get("numberOfOrders"),
                     "total_spent_all_time": cust.get("amountSpent", {}).get("amount"),
                     "currency": cust.get("amountSpent", {}).get("currencyCode"),
@@ -671,9 +675,11 @@ class _ShopifyTools(Toolkit):
             )
             row["orders_in_period"] += 1
             row["spent_in_period"] += _shop_amount(order, "totalPriceSet")
-        repeat = [row for row in customers.values() if row["orders_in_period"] >= min_orders]
-        for row in repeat:
-            row["spent_in_period"] = round(row["spent_in_period"], 2)
+        repeat = [
+            {**row, "spent_in_period": round(row["spent_in_period"], 2)}
+            for row in customers.values()
+            if row["orders_in_period"] >= min_orders
+        ]
         repeat.sort(key=lambda row: (row["orders_in_period"], row["spent_in_period"]), reverse=True)
         return repeat[:limit]
 
@@ -694,16 +700,19 @@ class _ShopifyTools(Toolkit):
         if action == "sales_trends":
             return self._sales_trends(created_after, created_before, compare_previous_period)
 
-        paid_only = action != "order_analytics"
         if action == "sales_by_date":
             start = require_non_empty(created_after, "created_after")
             end = require_non_empty(created_before, "created_before")
             q = _build_order_query(paid_only=True, created_after=start, created_before=end)
-            orders = self._fetch_orders(limit=250, query_filter=q)
+            orders = self._fetch_orders("sales_by_date", limit=250, query_filter=q)
             return orders if isinstance(orders, dict) else self._sales_by_date(orders, start, end)
 
-        q = _build_order_query(paid_only=paid_only, created_after=created_after, created_before=created_before)
-        orders = self._fetch_orders(limit=250, query_filter=q)
+        q = _build_order_query(
+            paid_only=action != "order_analytics",
+            created_after=created_after,
+            created_before=created_before,
+        )
+        orders = self._fetch_orders(action, limit=250, query_filter=q)
         if isinstance(orders, dict):
             return orders
         if action == "top_selling":

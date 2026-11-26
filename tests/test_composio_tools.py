@@ -140,3 +140,28 @@ def test_composio_requires_scoped_api_key_and_ignores_host_env(monkeypatch: pyte
     monkeypatch.setenv("COMPOSIO_API_KEY", "host-secret")
     with pytest.raises(ValueError, match="Composio API key"):
         composio_tools()(actions=["GITHUB_GET_A_REPOSITORY"], lock=False)
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_pins_default_base_url_against_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitted base_url pins to Composio vendor default instead of ambient COMPOSIO_BASE_URL."""
+    monkeypatch.setenv("COMPOSIO_BASE_URL", "https://evil.example/api")
+    seen_base_urls: list[str] = []
+
+    def capture_validate(self: ComposioToolSet, **_kwargs: object) -> None:
+        seen_base_urls.append(self._base_url)
+
+    monkeypatch.setattr(ComposioToolSet, "validate_tools", capture_validate)
+
+    composio_tools()(api_key="test-key", actions=["GITHUB_GET_A_REPOSITORY"], lock=False)
+    composio_tools()(
+        api_key="test-key",
+        base_url="https://custom.composio.example/api",
+        actions=["GITHUB_GET_A_REPOSITORY"],
+        lock=False,
+    )
+
+    assert seen_base_urls == [
+        "https://backend.composio.dev/api",
+        "https://custom.composio.example/api",
+    ]

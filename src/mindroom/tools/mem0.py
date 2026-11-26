@@ -15,6 +15,34 @@ from mindroom.tools.native_helpers import UNSET, UnsetType, json_dumps, require_
 _ReadAction = Literal["search", "get_all"]
 
 
+class _Mem0ScopeMismatchError(ValueError):
+    """Raised when configured org_id/project_id disagrees with the Mem0 API key scope."""
+
+
+def _validate_client_scope(
+    client: Any,  # noqa: ANN401
+    *,
+    org_id: str | None,
+    project_id: str | None,
+) -> None:
+    if org_id is not None:
+        discovered_org = getattr(client, "org_id", None)
+        if discovered_org != org_id:
+            msg = (
+                f"Configured Mem0 org_id ({org_id!r}) does not match the organization "
+                f"resolved from the API key ({discovered_org!r})."
+            )
+            raise _Mem0ScopeMismatchError(msg)
+    if project_id is not None:
+        discovered_project = getattr(client, "project_id", None)
+        if discovered_project != project_id:
+            msg = (
+                f"Configured Mem0 project_id ({project_id!r}) does not match the project "
+                f"resolved from the API key ({discovered_project!r})."
+            )
+            raise _Mem0ScopeMismatchError(msg)
+
+
 def _build_mem0_client(
     *,
     api_key: str | None,
@@ -33,10 +61,7 @@ def _build_mem0_client(
         if project_id and "project_id" in sig.parameters:
             client_kwargs["project_id"] = project_id
         client = MemoryClient(**client_kwargs)
-        if org_id and "org_id" not in sig.parameters:
-            client.org_id = org_id
-        if project_id and "project_id" not in sig.parameters:
-            client.project_id = project_id
+        _validate_client_scope(client, org_id=org_id, project_id=project_id)
         return client
     if config is not None:
         return Memory.from_config(config)
@@ -100,6 +125,8 @@ class _Mem0Tools(Toolkit):
                     project_id=self.project_id,
                     config=self._config,
                 )
+            except _Mem0ScopeMismatchError:
+                raise
             except Exception as exc:
                 msg = f"Failed to initialize Mem0 client: {redact_sensitive_text(failure_text(exc))}"
                 raise ConnectionError(msg) from None
@@ -140,6 +167,8 @@ class _Mem0Tools(Toolkit):
                 return "Error getting all memories: Listing Mem0 memories is disabled."
             results = self._get_client().get_all(filters={"user_id": user_id})
             return json_dumps(_extract_memory_list(results))
+        except _Mem0ScopeMismatchError:
+            raise
         except Exception as exc:
             prefix = "Error searching memory" if action == "search" else "Error getting all memories"
             return self._redacted_error(prefix, exc)
@@ -151,6 +180,8 @@ class _Mem0Tools(Toolkit):
             text = json_dumps(content) if isinstance(content, dict) else str(content)
             result = self._get_client().add([{"role": "user", "content": text}], user_id=user_id, infer=self.infer)
             return json_dumps(result)
+        except _Mem0ScopeMismatchError:
+            raise
         except Exception as exc:
             return self._redacted_error("Error adding memory", exc)
 
@@ -159,6 +190,8 @@ class _Mem0Tools(Toolkit):
         try:
             user_id = self._require_user_id("mem0_delete_all")
             self._get_client().delete_all(user_id=user_id)
+        except _Mem0ScopeMismatchError:
+            raise
         except Exception as exc:
             return self._redacted_error("Error deleting all memories", exc)
         else:

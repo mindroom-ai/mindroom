@@ -26,10 +26,12 @@ def resolve_toggle(
     enable_all: bool = False,
 ) -> bool:
     """Resolve a boolean toggle without letting explicit ``None`` silently enable a tool."""
-    if value is UNSET:
-        return True if enable_all else default
     if value is None:
         return False
+    if enable_all:
+        return True
+    if value is UNSET:
+        return default
     return bool(value)
 
 

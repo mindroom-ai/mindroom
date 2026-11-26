@@ -55,14 +55,29 @@ def _simplify_track(track: dict[str, Any], *, rank: int | None = None) -> dict[s
 
 
 def _simplify_playlist(playlist: dict[str, Any]) -> dict[str, Any]:
+    items_meta = playlist.get("items") if isinstance(playlist.get("items"), dict) else playlist.get("tracks")
     return {
         "id": playlist.get("id"),
         "name": playlist.get("name"),
         "owner": playlist.get("owner", {}).get("display_name"),
-        "track_count": playlist.get("tracks", {}).get("total"),
+        "track_count": items_meta.get("total") if isinstance(items_meta, dict) else None,
         "url": playlist.get("external_urls", {}).get("spotify"),
         "uri": playlist.get("uri"),
         "public": playlist.get("public"),
+    }
+
+
+def _extract_playlist_item(entry: object) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    media = entry.get("item") if isinstance(entry.get("item"), dict) else entry.get("track")
+    if not isinstance(media, dict):
+        return None
+    return {
+        "id": media.get("id"),
+        "name": media.get("name"),
+        "artists": [a["name"] for a in media.get("artists", []) if isinstance(a, dict) and "name" in a],
+        "uri": media.get("uri"),
     }
 
 
@@ -130,7 +145,7 @@ class SpotifyTools(Toolkit):
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         with httpx.Client(timeout=self.timeout) as client:
             response = client.request(method=method, url=url, headers=headers, json=body, params=params)
-            if response.status_code == 204:
+            if response.status_code == 204 or (response.is_success and not response.content):
                 return {"success": True}
             try:
                 payload = response.json()
@@ -327,8 +342,6 @@ class SpotifyTools(Toolkit):
     def _get_playlist(self, playlist_id: str | None, *, include_tracks: bool) -> dict[str, Any]:
         safe_id = safe_path_segment(require_non_empty(playlist_id, "playlist_id"), "playlist_id")
         fields = "id,name,description,public,owner(display_name),external_urls"
-        if include_tracks:
-            fields += ",tracks.items(track(id,name,artists(name),uri))"
         result = self._make_request(f"playlists/{safe_id}", params={"fields": fields})
         if "error" in result:
             return result
@@ -340,17 +353,12 @@ class SpotifyTools(Toolkit):
             "owner": result.get("owner", {}).get("display_name"),
             "url": result.get("external_urls", {}).get("spotify"),
         }
-        if include_tracks and "tracks" in result:
-            info["tracks"] = [
-                {
-                    "id": item["track"]["id"],
-                    "name": item["track"]["name"],
-                    "artists": [a["name"] for a in item["track"].get("artists", [])],
-                    "uri": item["track"]["uri"],
-                }
-                for item in result["tracks"].get("items", [])
-                if isinstance(item, dict) and isinstance(item.get("track"), dict)
-            ]
+        if include_tracks:
+            items_res = self._make_request(f"playlists/{safe_id}/items")
+            if "error" in items_res:
+                return items_res
+            raw_items = items_res.get("items", [])
+            info["tracks"] = [parsed for entry in raw_items if (parsed := _extract_playlist_item(entry)) is not None]
         return info
 
     def spotify_library(
@@ -420,12 +428,8 @@ class SpotifyTools(Toolkit):
         track_uris: list[str] | None,
     ) -> dict[str, Any]:
         clean_name = require_non_empty(name, "name")
-        user = self._make_request("me")
-        if "error" in user:
-            return user
-        user_id = safe_path_segment(str(user.get("id", "")), "user_id")
         playlist = self._make_request(
-            f"users/{user_id}/playlists",
+            "me/playlists",
             method="POST",
             body={"name": clean_name, "description": description or "", "public": bool(public)},
         )
@@ -434,7 +438,7 @@ class SpotifyTools(Toolkit):
         tracks_added = 0
         if track_uris:
             pid = safe_path_segment(str(playlist.get("id", "")), "playlist_id")
-            add_res = self._make_request(f"playlists/{pid}/tracks", method="POST", body={"uris": track_uris[:100]})
+            add_res = self._make_request(f"playlists/{pid}/items", method="POST", body={"uris": track_uris[:100]})
             if "error" in add_res:
                 playlist["track_add_error"] = add_res["error"]
             else:
@@ -502,7 +506,7 @@ class SpotifyTools(Toolkit):
                     body: dict[str, Any] = {"uris": track_uris[:100]}
                     if position is not None:
                         body["position"] = position
-                    res = self._make_request(f"playlists/{safe_id}/tracks", method="POST", body=body)
+                    res = self._make_request(f"playlists/{safe_id}/items", method="POST", body=body)
                     data = (
                         {"success": True, "tracks_added": len(track_uris[:100]), "snapshot_id": res["snapshot_id"]}
                         if "snapshot_id" in res
@@ -510,9 +514,9 @@ class SpotifyTools(Toolkit):
                     )
                 else:
                     res = self._make_request(
-                        f"playlists/{safe_id}/tracks",
+                        f"playlists/{safe_id}/items",
                         method="DELETE",
-                        body={"tracks": [{"uri": uri} for uri in track_uris]},
+                        body={"items": [{"uri": uri} for uri in track_uris]},
                     )
                     data = (
                         {"success": True, "tracks_removed": len(track_uris), "snapshot_id": res["snapshot_id"]}

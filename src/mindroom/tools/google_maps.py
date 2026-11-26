@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import quote
 
+from mindroom.failure_text import failure_text
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -20,6 +24,26 @@ from mindroom.tools.native_helpers import (
 _PlacesAction = Literal["search_places", "geocode", "reverse_geocode", "validate_address", "elevation", "timezone"]
 _RoutesAction = Literal["directions", "distance_matrix"]
 _TravelMode = Literal["driving", "walking", "bicycling", "transit"]
+_GOOGLE_MAPS_BASE_URL = "https://maps.googleapis.com"
+_GOOGLE_PLACES_UNIVERSE = "googleapis.com"
+_DISTANCE_MATRIX_AVOID = frozenset({"tolls", "highways", "ferries"})
+_KEY_QUERY_RE = re.compile(r"([?&]key=)[^&\s\"\x27)]+")
+
+
+def _normalize_distance_matrix_avoid(avoid: list[str] | str | None) -> str | None:
+    if avoid is None:
+        return None
+    items = [avoid] if isinstance(avoid, str) else avoid
+    cleaned = [item.strip().lower() for item in items if isinstance(item, str) and item.strip()]
+    if not cleaned:
+        return None
+    if len(cleaned) > 1:
+        msg = "distance_matrix supports at most one avoid restriction ('tolls', 'highways', or 'ferries')."
+        raise ValueError(msg)
+    if cleaned[0] not in _DISTANCE_MATRIX_AVOID:
+        msg = f"Invalid distance_matrix avoid value {cleaned[0]!r}; expected 'tolls', 'highways', or 'ferries'."
+        raise ValueError(msg)
+    return cleaned[0]
 
 
 def _parse_optional_datetime(value: str | None) -> datetime | None:
@@ -54,7 +78,7 @@ class _GoogleMapTools(Toolkit):
 
         import googlemaps
 
-        self.client: Any = googlemaps.Client(key=self.api_key)
+        self.client: Any = googlemaps.Client(key=self.api_key, base_url=_GOOGLE_MAPS_BASE_URL)
         self._places_client: Any = None
 
         self._places_flags: dict[str, bool] = {
@@ -81,8 +105,22 @@ class _GoogleMapTools(Toolkit):
         if self._places_client is None:
             from google.maps import places_v1
 
-            self._places_client = places_v1.PlacesClient(client_options={"api_key": self.api_key})
+            self._places_client = places_v1.PlacesClient(
+                client_options={
+                    "api_key": self.api_key,
+                    "api_endpoint": places_v1.PlacesClient.DEFAULT_ENDPOINT,
+                    "universe_domain": _GOOGLE_PLACES_UNIVERSE,
+                },
+            )
         return self._places_client
+
+    def _sanitize_error(self, exc: Exception) -> str:
+        text = failure_text(exc)
+        for secret in (self.api_key, quote(self.api_key, safe="")):
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+        text = _KEY_QUERY_RE.sub(r"\1[REDACTED]", text)
+        return redact_sensitive_text(text)
 
     def _search_places(self, query: str) -> list[dict[str, Any]]:
         from google.maps import places_v1
@@ -184,7 +222,7 @@ class _GoogleMapTools(Toolkit):
                 ),
             )
         except Exception as exc:
-            return error_json(str(exc))
+            return error_json(self._sanitize_error(exc))
 
     def google_maps_routes(
         self,
@@ -213,7 +251,7 @@ class _GoogleMapTools(Toolkit):
                     require_non_empty(destination, "destination"),
                     mode=mode,
                     departure_time=dep,
-                    avoid=avoid,
+                    avoid=avoid or None,
                 )
             else:
                 if not origins or not destinations:
@@ -223,11 +261,11 @@ class _GoogleMapTools(Toolkit):
                     destinations,
                     mode=mode,
                     departure_time=dep,
-                    avoid=avoid,
+                    avoid=_normalize_distance_matrix_avoid(avoid),
                 )
             return json_dumps(data)
         except Exception as exc:
-            return error_json(str(exc))
+            return error_json(self._sanitize_error(exc))
 
 
 @register_tool_with_metadata(

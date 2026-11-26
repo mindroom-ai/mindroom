@@ -59,11 +59,16 @@ class _ZepTools(Toolkit):
         if self._initialized and self.zep_client is not None:
             return True
         from zep_cloud import BadRequestError, NotFoundError
-        from zep_cloud.client import Zep
+        from zep_cloud.base_client import BaseClient
+        from zep_cloud.environment import ZepEnvironment
 
         try:
             if self.zep_client is None:
-                self.zep_client = Zep(api_key=self._api_key)
+                self.zep_client = BaseClient(
+                    api_key=self._api_key,
+                    base_url=ZepEnvironment.DEFAULT.value,
+                    environment=ZepEnvironment.DEFAULT,
+                )
             self.session_id = self.session_id_provided or str(uuid.uuid4())
             self.user_id = self.user_id_provided or f"user-{uuid.uuid4()}"
             if self.user_id_provided is None:

@@ -102,3 +102,47 @@ def test_mem0_tool_failures_reach_the_model_without_the_rejected_key(monkeypatch
     assert found.startswith("Invalid query for key ")
     assert rejected_key not in added
     assert rejected_key not in found
+
+
+class _ScopedMem0Client(_Mem0Client):
+    """Fake Mem0 2.2 MemoryClient that discovers org_id and project_id from the API key."""
+
+    def __init__(self, *, org_id: str | None, project_id: str | None) -> None:
+        super().__init__()
+        self.org_id = org_id
+        self.project_id = project_id
+
+
+def test_mem0_org_and_project_mismatch_raises_without_overwriting() -> None:
+    """Configured org_id/project_id must match discovered API key scope instead of silently overwriting."""
+    mismatched_org = _ScopedMem0Client(org_id="org-actual", project_id="proj-actual")
+    with patch("mem0.client.main.MemoryClient", return_value=mismatched_org):
+        toolkit = mem0_tools()(user_id="alice", api_key="m0-key", org_id="org-expected", project_id="proj-actual")
+        with pytest.raises(ValueError, match="org_id"):
+            toolkit.mem0_delete_all()
+        assert mismatched_org.org_id == "org-actual"
+        assert toolkit.client is None
+        assert mismatched_org.top_level == {}
+
+    mismatched_project = _ScopedMem0Client(org_id="org-actual", project_id="proj-actual")
+    with patch("mem0.client.main.MemoryClient", return_value=mismatched_project):
+        toolkit = mem0_tools()(user_id="alice", api_key="m0-key", org_id="org-actual", project_id="proj-expected")
+        with pytest.raises(ValueError, match="project_id"):
+            toolkit.mem0_add("Likes tea")
+        assert mismatched_project.project_id == "proj-actual"
+        assert toolkit.client is None
+        assert mismatched_project.top_level == {}
+
+    undiscovered = _ScopedMem0Client(org_id=None, project_id=None)
+    with patch("mem0.client.main.MemoryClient", return_value=undiscovered):
+        toolkit = mem0_tools()(user_id="alice", api_key="m0-key", org_id="org-expected")
+        with pytest.raises(ValueError, match="org_id"):
+            toolkit.mem0_read(action="get_all")
+        assert toolkit.client is None
+
+    matching = _ScopedMem0Client(org_id="org-actual", project_id="proj-actual")
+    with patch("mem0.client.main.MemoryClient", return_value=matching):
+        toolkit = mem0_tools()(user_id="alice", api_key="m0-key", org_id="org-actual", project_id="proj-actual")
+        found = json.loads(toolkit.mem0_read(action="get_all"))
+        assert found == [{"id": "m1", "memory": "Likes green tea"}]
+        assert toolkit.client is matching

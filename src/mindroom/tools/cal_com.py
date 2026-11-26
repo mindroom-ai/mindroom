@@ -32,7 +32,7 @@ class _CalComTools(Toolkit):
     def __init__(
         self,
         api_key: str | None = None,
-        event_type_id: int | str | None = None,
+        event_type_id: int | None = None,
         user_timezone: str | None = None,
         timeout: int = 30,
         enable_get_available_slots: bool | None | UnsetType = UNSET,

@@ -114,11 +114,11 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `event_type_id` | `number` | `no` | `null` | Cal.com event type ID used for slot lookup and new bookings. |
 | `user_timezone` | `text` | `no` | `null` | IANA timezone for returned booking times; `America/New_York` when unset. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
-| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
-| `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
-| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
-| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `reschedule_booking()`. |
-| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
+| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `cal_com_read(action="available_slots")`. |
+| `enable_create_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="create_booking")`. |
+| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `cal_com_read(action="upcoming_bookings")`. |
+| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="reschedule_booking")`. |
+| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="cancel_booking")`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
 Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.

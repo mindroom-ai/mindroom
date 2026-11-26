@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any, Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import httpx
 
@@ -25,14 +25,30 @@ _ReadAction = Literal[
 _PrState = Literal["OPEN", "MERGED", "DECLINED", "SUPERSEDED"]
 
 
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
+
+
+def _url_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        msg = "Invalid Bitbucket URL."
+        raise ValueError(msg)
+    port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
+    return (scheme, host, port)
+
+
 def _normalize_base_url(server_url: str, api_version: str) -> str:
     raw = require_non_empty(server_url, "Bitbucket server_url").rstrip("/")
     if not raw.startswith(("http://", "https://")):
         raw = f"https://{raw}"
-    parsed = urlsplit(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+    try:
+        _url_origin(raw)
+    except ValueError as exc:
         msg = "Invalid Bitbucket server_url."
-        raise ValueError(msg)
+        raise ValueError(msg) from exc
     safe_version = safe_path_segment(require_non_empty(api_version, "api_version"), "api_version")
     return f"{raw}/{safe_version}"
 
@@ -75,18 +91,41 @@ class _BitbucketTools(Toolkit):
         *,
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
+        allow_same_origin_redirects: bool = False,
     ) -> dict[str, Any] | str:
         url = f"{self.base_url}{endpoint}"
-        response = httpx.request(
-            method,
-            url,
-            headers=self.headers,
-            params=params,
-            json=data,
-            timeout=self.timeout,
-        )
+        expected_origin = _url_origin(self.base_url)
+        request_params = params
+        redirects = 0
+        while True:
+            response = httpx.request(
+                method,
+                url,
+                headers=self.headers,
+                params=request_params,
+                json=data,
+                timeout=self.timeout,
+                follow_redirects=False,
+            )
+            if allow_same_origin_redirects and method == "GET" and response.status_code in _REDIRECT_STATUSES:
+                location = response.headers.get("Location")
+                if not location:
+                    msg = "Bitbucket API returned a redirect without a Location header."
+                    raise ValueError(msg)
+                if redirects >= _MAX_REDIRECTS:
+                    msg = "Bitbucket API exceeded maximum redirect hops."
+                    raise ValueError(msg)
+                next_url = urljoin(url, location)
+                if _url_origin(next_url) != expected_origin:
+                    msg = "Refused cross-origin redirect from Bitbucket API."
+                    raise ValueError(msg)
+                url = next_url
+                request_params = None
+                redirects += 1
+                continue
+            break
         response.raise_for_status()
-        content_type = response.headers.get("Content-Type", "application/json")
+        content_type = response.headers.get("Content-Type", "application/json").lower()
         if content_type.startswith("application/json"):
             return response.json() if response.text else {}
         if content_type.startswith("text/plain"):
@@ -156,7 +195,11 @@ class _BitbucketTools(Toolkit):
             elif action == "pull_request_details":
                 result = self._request("GET", f"{repo_path}/pullrequests/{self._require_pr_id(pull_request_id)}")
             elif action == "pull_request_changes":
-                diff = self._request("GET", f"{repo_path}/pullrequests/{self._require_pr_id(pull_request_id)}/diff")
+                diff = self._request(
+                    "GET",
+                    f"{repo_path}/pullrequests/{self._require_pr_id(pull_request_id)}/diff",
+                    allow_same_origin_redirects=True,
+                )
                 return diff if isinstance(diff, str) else json_dumps(diff)
             else:
                 result = self._request("GET", f"{repo_path}/issues", params={"pagelen": capped})

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import googlemaps.exceptions
 import httpx
 import pytest
 
@@ -50,59 +52,167 @@ def test_spotify_search_playlist_playback_and_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spotify executes search, playlist mutations, playback, and rejects traversal IDs."""
+    """Spotify uses Feb 2026 playlist endpoints (/me/playlists, /playlists/{id}/items), playback, and path checks."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     manager = get_runtime_credentials_manager(paths)
     toolkit = SpotifyTools(runtime_paths=paths, credentials_manager=manager, worker_target=None)
     monkeypatch.setattr(toolkit, "_current_access_token", lambda: "tok-123")
+    seen_calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    responses: dict[tuple[str, str], tuple[int, dict[str, object] | None]] = {
+        (
+            "GET",
+            "/v1/search",
+        ): (
+            200,
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "id": "t1",
+                            "name": "Track One",
+                            "artists": [{"name": "Artist"}],
+                            "album": {"name": "Album"},
+                            "uri": "spotify:track:t1",
+                            "popularity": 80,
+                        },
+                    ],
+                },
+            },
+        ),
+        (
+            "POST",
+            "/v1/me/playlists",
+        ): (
+            201,
+            {
+                "id": "pl1",
+                "name": "Focus",
+                "description": "",
+                "external_urls": {"spotify": "https://open.spotify.com/playlist/pl1"},
+                "uri": "spotify:playlist:pl1",
+            },
+        ),
+        (
+            "GET",
+            "/v1/me/playlists",
+        ): (
+            200,
+            {
+                "items": [
+                    {
+                        "id": "pl1",
+                        "name": "Focus",
+                        "owner": {"display_name": "Listener"},
+                        "items": {"total": 2},
+                        "external_urls": {"spotify": "https://open.spotify.com/playlist/pl1"},
+                        "uri": "spotify:playlist:pl1",
+                        "public": False,
+                    },
+                ],
+            },
+        ),
+        (
+            "GET",
+            "/v1/playlists/pl1",
+        ): (
+            200,
+            {
+                "id": "pl1",
+                "name": "Focus",
+                "description": "",
+                "public": False,
+                "owner": {"display_name": "Listener"},
+                "external_urls": {"spotify": "https://open.spotify.com/playlist/pl1"},
+            },
+        ),
+        (
+            "GET",
+            "/v1/playlists/pl1/items",
+        ): (
+            200,
+            {
+                "items": [
+                    {
+                        "item": {
+                            "id": "t1",
+                            "name": "Track One",
+                            "artists": [{"name": "Artist"}],
+                            "uri": "spotify:track:t1",
+                        },
+                    },
+                    {
+                        "track": {
+                            "id": "t2",
+                            "name": "Track Two",
+                            "artists": [{"name": "Artist Two"}],
+                            "uri": "spotify:track:t2",
+                        },
+                    },
+                ],
+            },
+        ),
+        ("POST", "/v1/playlists/pl1/items"): (201, {"snapshot_id": "snap-add"}),
+        ("DELETE", "/v1/playlists/pl1/items"): (200, {"snapshot_id": "snap-del"}),
+        ("PUT", "/v1/me/player/play"): (204, None),
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/search":
-            return httpx.Response(
-                200,
-                json={
-                    "tracks": {
-                        "items": [
-                            {
-                                "id": "t1",
-                                "name": "Track One",
-                                "artists": [{"name": "Artist"}],
-                                "album": {"name": "Album"},
-                                "uri": "spotify:track:t1",
-                                "popularity": 80,
-                            },
-                        ],
-                    },
-                },
-            )
-        if request.url.path == "/v1/me":
-            return httpx.Response(200, json={"id": "u1"})
-        if request.url.path == "/v1/users/u1/playlists":
-            return httpx.Response(
-                200,
-                json={
-                    "id": "pl1",
-                    "name": "Focus",
-                    "description": "",
-                    "external_urls": {"spotify": "https://open.spotify.com/playlist/pl1"},
-                    "uri": "spotify:playlist:pl1",
-                },
-            )
-        if request.url.path == "/v1/me/player/play":
-            return httpx.Response(204)
-        return httpx.Response(404, json={"error": {"message": "not found"}})
+        body = json.loads(request.content.decode()) if request.content else None
+        seen_calls.append((request.method, request.url.path, body))
+        entry = responses.get((request.method, request.url.path))
+        if entry is None:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        status_code, payload = entry
+        return httpx.Response(status_code) if payload is None else httpx.Response(status_code, json=payload)
 
     real_client = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
 
     tracks = json.loads(toolkit.spotify_search(action="search", query="focus"))
     assert tracks[0]["id"] == "t1"
-    playlist = json.loads(toolkit.spotify_playlist_write(action="create", name="Focus"))
+
+    playlist = json.loads(
+        toolkit.spotify_playlist_write(action="create", name="Focus", track_uris=["spotify:track:t1"]),
+    )
     assert playlist["id"] == "pl1"
+    assert playlist["tracks_added"] == 1
+
+    added = json.loads(
+        toolkit.spotify_playlist_write(
+            action="add_tracks",
+            playlist_id="pl1",
+            track_uris=["spotify:track:t2"],
+            position=1,
+        ),
+    )
+    assert added == {"success": True, "tracks_added": 1, "snapshot_id": "snap-add"}
+
+    user_playlists = json.loads(toolkit.spotify_library(action="user_playlists"))
+    assert user_playlists[0]["track_count"] == 2
+
+    loaded = json.loads(toolkit.spotify_library(action="playlist", playlist_id="pl1", include_tracks=True))
+    assert [t["id"] for t in loaded["tracks"]] == ["t1", "t2"]
+
+    removed = json.loads(
+        toolkit.spotify_playlist_write(
+            action="remove_tracks",
+            playlist_id="pl1",
+            track_uris=["spotify:track:t1"],
+        ),
+    )
+    assert removed == {"success": True, "tracks_removed": 1, "snapshot_id": "snap-del"}
+
     played = json.loads(toolkit.spotify_play(track_uri="spotify:track:t1"))
     assert played["success"] is True
     bad = json.loads(toolkit.spotify_library(action="playlist", playlist_id="../escape"))
     assert "Invalid playlist_id" in bad["error"]
+
+    assert ("POST", "/v1/me/playlists", {"name": "Focus", "description": "", "public": False}) in seen_calls
+    assert ("POST", "/v1/playlists/pl1/items", {"uris": ["spotify:track:t1"]}) in seen_calls
+    assert ("POST", "/v1/playlists/pl1/items", {"uris": ["spotify:track:t2"], "position": 1}) in seen_calls
+    assert ("DELETE", "/v1/playlists/pl1/items", {"items": [{"uri": "spotify:track:t1"}]}) in seen_calls
+    assert all("/users/" not in path and not path.endswith("/tracks") for _, path, _ in seen_calls)
 
 
 def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
@@ -134,16 +244,18 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
         over18=False,
         public_description="pub",
         url="/r/python/",
-        flair=SimpleNamespace(link_templates=[{"text": "News"}]),
+        flair=SimpleNamespace(link_templates=[{"id": "tmpl-news-123", "text": "News"}]),
         top=lambda **_kwargs: [],
-        submit=lambda **kwargs: SimpleNamespace(
-            id="p2",
-            title=kwargs["title"],
-            url="https://reddit.com/p2",
-            permalink="/r/python/comments/p2/",
-            created_utc=2.0,
-            author="bot",
-            link_flair_text=kwargs.get("flair_id"),
+        submit=MagicMock(
+            side_effect=lambda **kwargs: SimpleNamespace(
+                id="p2",
+                title=kwargs["title"],
+                url="https://reddit.com/p2",
+                permalink="/r/python/comments/p2/",
+                created_utc=2.0,
+                author="bot",
+                link_flair_text="News" if kwargs.get("flair_id") == "tmpl-news-123" else None,
+            ),
         ),
     )
     reddit = MagicMock()
@@ -163,8 +275,18 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
     toolkit = reddit_tools()(reddit_instance=reddit, username="bot", password="pw", allowed_subreddits=["Python"])  # noqa: S106
     stats = json.loads(toolkit.reddit_read(action="subreddit_stats", subreddit="python"))
     assert stats["subreddit_stats"]["subscribers"] == 100
-    posted = json.loads(toolkit.reddit_write(action="create_post", subreddit="python", title="Hi", content="Body"))
+    posted = json.loads(
+        toolkit.reddit_write(action="create_post", subreddit="python", title="Hi", content="Body", flair="News"),
+    )
     assert posted["post"]["id"] == "p2"
+    assert fake_sub.submit.call_args.kwargs["flair_id"] == "tmpl-news-123"
+    assert "Invalid flair" in toolkit.reddit_write(
+        action="create_post",
+        subreddit="python",
+        title="Hi",
+        content="Body",
+        flair="Unknown",
+    )
     replied = json.loads(
         toolkit.reddit_write(
             action="reply_to_post",
@@ -251,3 +373,98 @@ def test_brandfetch_toggles_validation_and_lookup(monkeypatch: pytest.MonkeyPatc
     all_tool = brandfetch_tools()(api_key="bf_key", client_id="bf_cid", all=True)
     assert json.loads(all_tool.brandfetch_lookup("Nike", action="by_brand"))[0]["domain"] == "nike.com"
     assert "Invalid query" in json.loads(all_tool.brandfetch_lookup("../secret"))["error"]
+
+
+def test_reddit_app_only_isolation_ignores_ambient_praw_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """App-only Reddit client pins official endpoints, ignores praw_* env vars, and stays read-only."""
+    monkeypatch.setenv("praw_username", "host_user")
+    monkeypatch.setenv("praw_password", "host_pass")
+    monkeypatch.setenv("praw_refresh_token", "host_refresh")
+    monkeypatch.setenv("praw_redirect_uri", "https://evil.example/cb")
+    monkeypatch.setenv("praw_site", "missing_host_site")
+    monkeypatch.setenv("praw_reddit_url", "https://evil.example")
+    monkeypatch.setenv("praw_oauth_url", "https://evil-oauth.example")
+    monkeypatch.setenv("praw_short_url", "https://evil.short")
+
+    toolkit = reddit_tools()(client_id="cid", client_secret="csec", user_agent="TestAgent/1.0")  # noqa: S106
+    assert toolkit.reddit is not None
+    assert toolkit.reddit.read_only is True
+    assert toolkit.reddit.config.username is None
+    assert toolkit.reddit.config.password is None
+    assert toolkit.reddit.config.refresh_token is None
+    assert toolkit.reddit.config.redirect_uri is None
+    assert toolkit.reddit.config.reddit_url == "https://www.reddit.com"
+    assert toolkit.reddit.config.oauth_url == "https://oauth.reddit.com"
+    assert toolkit.reddit.config.short_url == "https://redd.it"
+    assert toolkit.reddit.config.check_for_updates is False
+    assert "User authentication required" in toolkit.reddit_write(
+        action="create_post",
+        subreddit="python",
+        title="Title",
+        content="Body",
+    )
+
+
+def test_google_maps_sanitizes_transport_error_fixes_distance_matrix_avoid_and_pins_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Google Maps scrubs API keys from TransportError, accepts single avoid on distance_matrix, and pins endpoints."""
+    api_key = "AIzaSySecretKeyForMapsRedactionTest99"
+    monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "evil.example")
+    monkeypatch.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "always")
+
+    toolkit = google_maps_tools()(key=api_key)
+    assert toolkit.client.base_url == "https://maps.googleapis.com"
+    places_client = toolkit._get_places_client()
+    assert places_client.api_endpoint == "places.googleapis.com"
+    assert places_client.universe_domain == "googleapis.com"
+
+    # Real googlemaps.distance_matrix validation runs here; only _request is stubbed.
+    seen_params: list[dict[str, object]] = []
+
+    def fake_request(url: str, params: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        seen_params.append({"url": url, **params})
+        return {"rows": [{"elements": [{"status": "OK"}]}]}
+
+    monkeypatch.setattr(toolkit.client, "_request", fake_request)
+    dm = json.loads(
+        toolkit.google_maps_routes(
+            action="distance_matrix",
+            origins=["Seattle"],
+            destinations=["Portland"],
+            avoid=["tolls"],
+        ),
+    )
+    assert dm["rows"][0]["elements"][0]["status"] == "OK"
+    assert seen_params[-1]["avoid"] == "tolls"
+
+    multi_avoid = json.loads(
+        toolkit.google_maps_routes(
+            action="distance_matrix",
+            origins=["Seattle"],
+            destinations=["Portland"],
+            avoid=["tolls", "highways"],
+        ),
+    )
+    assert "at most one avoid" in multi_avoid["error"]
+
+    # TransportError wrapping a URL with ?key=... must never leak the API key to tool output or logs.
+    leaky = googlemaps.exceptions.TransportError(
+        RuntimeError(
+            f"HTTPSConnectionPool(host='maps.googleapis.com', port=443): Max retries exceeded with url: "
+            f"/maps/api/geocode/json?address=Paris&key={api_key}",
+        ),
+    )
+    toolkit.client.geocode = MagicMock(side_effect=leaky)
+    toolkit.client.directions = MagicMock(side_effect=leaky)
+
+    with caplog.at_level(logging.DEBUG):
+        places_err = toolkit.google_maps_places(action="geocode", address="Paris")
+        routes_err = toolkit.google_maps_routes(action="directions", origin="A", destination="B")
+
+    assert api_key not in places_err
+    assert "[REDACTED]" in places_err
+    assert api_key not in routes_err
+    assert "[REDACTED]" in routes_err
+    assert api_key not in caplog.text

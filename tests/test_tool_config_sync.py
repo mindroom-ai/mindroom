@@ -407,9 +407,8 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
     """Internal Zep initialization must not be advertised as a model-callable function."""
     assert _BUILTINS.entries["zep"].function_names == (
-        "add_zep_message",
-        "get_zep_memory",
-        "search_zep_memory",
+        "zep_read",
+        "zep_add_message",
     )
 
 

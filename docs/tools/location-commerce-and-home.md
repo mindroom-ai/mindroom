@@ -28,14 +28,14 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
-| `search_places` | `boolean` | `true` | Enable `search_places()`. |
-| `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
-| `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
-| `geocode_address` | `boolean` | `true` | Enable `geocode_address()`. |
-| `reverse_geocode` | `boolean` | `true` | Enable `reverse_geocode()`. |
-| `get_distance_matrix` | `boolean` | `true` | Enable `get_distance_matrix()`. |
-| `get_elevation` | `boolean` | `true` | Enable `get_elevation()`. |
-| `get_timezone` | `boolean` | `true` | Enable `get_timezone()`. |
+| `search_places` | `boolean` | `true` | Enable `google_maps_places(action="search_places")`. |
+| `get_directions` | `boolean` | `true` | Enable `google_maps_routes(action="directions")`. |
+| `validate_address` | `boolean` | `true` | Enable `google_maps_places(action="validate_address")`. |
+| `geocode_address` | `boolean` | `true` | Enable `google_maps_places(action="geocode")`. |
+| `reverse_geocode` | `boolean` | `true` | Enable `google_maps_places(action="reverse_geocode")`. |
+| `get_distance_matrix` | `boolean` | `true` | Enable `google_maps_routes(action="distance_matrix")`. |
+| `get_elevation` | `boolean` | `true` | Enable `google_maps_places(action="elevation")`. |
+| `get_timezone` | `boolean` | `true` | Enable `google_maps_places(action="timezone")`. |
 
 Enable the Places API and Address Validation API in the same Google Cloud project as the API key when using `search_places` or `validate_address`.
 
@@ -122,7 +122,7 @@ agents:
 shopify_store(action="products", max_results=25, status="ACTIVE")
 shopify_store(action="orders", max_results=50, created_after="2026-03-01", created_before="2026-03-31")
 shopify_store(action="low_stock", threshold=10)
-get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
+shopify_analytics(action="average_order_value", group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
 ## `homeassistant`

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+from zep_cloud.base_client import BaseClient
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
@@ -119,7 +120,7 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
         nodes=[SimpleNamespace(name="Tea", summary="Beverage")],
     )
 
-    with patch("zep_cloud.client.Zep", return_value=fake_zep) as zep_cls:
+    with patch("zep_cloud.base_client.BaseClient", return_value=fake_zep) as zep_cls:
         toolkit = zep_tools()(
             api_key="scoped-zep-key",
             user_id="alice",
@@ -131,7 +132,9 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
 
         added = toolkit.zep_add_message("user", "I love green tea")
         assert "added successfully" in added
-        zep_cls.assert_called_once_with(api_key="scoped-zep-key")
+        assert zep_cls.call_count == 1
+        assert zep_cls.call_args.kwargs["api_key"] == "scoped-zep-key"
+        assert zep_cls.call_args.kwargs["base_url"] == "https://api.getzep.com/api/v2"
         call_kwargs = fake_zep.thread.add_messages.call_args.kwargs
         assert call_kwargs["thread_id"] == "sess-1"
         assert call_kwargs["ignore_roles"] == ["assistant"]
@@ -192,3 +195,22 @@ def test_wave8_retired_approval_rules_fail_closed_and_action_scoped_grants(tmp_p
     assert op_create is not None
     assert op_update is not None
     assert op_create != op_update
+
+
+def test_zep_pins_vendor_endpoint_against_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zep BaseClient ignores ambient ZEP_API_URL and stays pinned to api.getzep.com."""
+    monkeypatch.setenv("ZEP_API_URL", "https://evil.example")
+    constructed: list[BaseClient] = []
+    real_init = BaseClient.__init__
+
+    def capture_init(self: BaseClient, *args: object, **kwargs: object) -> None:
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+        constructed.append(self)
+        self.user = MagicMock()
+        self.thread = MagicMock()
+
+    monkeypatch.setattr(BaseClient, "__init__", capture_init)
+    toolkit = zep_tools()(api_key="scoped-zep-key", user_id="alice", session_id="sess-1")
+    assert toolkit.initialize() is True
+    assert len(constructed) == 1
+    assert constructed[0]._client_wrapper.get_base_url() == "https://api.getzep.com/api/v2"
