@@ -1,9 +1,8 @@
-"""Tests for the standalone Mem0 toolkit against Mem0 2's entity-filter API."""
+"""Tests for the native Mem0 toolkit against Mem0 2's entity-filter API."""
 
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -45,27 +44,30 @@ def test_mem0_tool_search_and_listing_pass_the_user_as_a_filter(
     api_key: str | None,
 ) -> None:
     """Every toolkit function works on Mem0 2, local or platform; search and get-all pass the user as a filter."""
-    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    monkeypatch.setenv("MEM0_API_KEY", "host-env-secret")
     client = _Mem0Client()
     with (
-        patch("agno.tools.mem0.Memory", return_value=client),
-        patch("agno.tools.mem0.MemoryClient", return_value=client),
+        patch("mem0.memory.main.Memory", return_value=client) as local_memory,
+        patch("mem0.client.main.MemoryClient", return_value=client) as platform_client,
     ):
         toolkit = mem0_tools()(user_id="alice", api_key=api_key)
-    # The toolkit reads its configured user and never this run's context.
-    run_context: Any = None
+        added = toolkit.mem0_add("Likes green tea")
+        found = toolkit.mem0_read(action="search", query="tea")
+        listed = toolkit.mem0_read(action="get_all")
+        deleted = toolkit.mem0_delete_all()
 
-    added = toolkit.add_memory(run_context, "Likes green tea")
-    found = toolkit.search_memory(run_context, "tea")
-    listed = toolkit.get_all_memories(run_context)
-    deleted = toolkit.delete_all_memories(run_context)
+    if api_key is None:
+        local_memory.assert_called_once()
+        platform_client.assert_not_called()
+    else:
+        platform_client.assert_called_once_with(api_key=api_key)
+        local_memory.assert_not_called()
 
     assert json.loads(added) == {"results": [{"id": "m2", "memory": "Likes green tea", "event": "ADD"}]}
     assert json.loads(found) == [{"id": "m1", "memory": "Likes green tea"}]
     assert json.loads(listed) == [{"id": "m1", "memory": "Likes green tea"}]
     assert deleted == "Successfully deleted all memories for user_id: alice."
     assert client.filters == {"search tea": {"user_id": "alice"}, "get_all": {"user_id": "alice"}}
-    # Mem0 2 still takes the user of an add or a delete-all as a top-level argument.
     assert client.top_level == {"add": {"user_id": "alice", "infer": True}, "delete_all": {"user_id": "alice"}}
 
 
@@ -88,18 +90,15 @@ class _FailingMem0Client(_Mem0Client):
 
 
 def test_mem0_tool_failures_reach_the_model_without_the_rejected_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed provider call's text reaches the model with credentials redacted and Agno's usual framing."""
+    """A failed provider call's text reaches the model with credentials redacted."""
     monkeypatch.delenv("MEM0_API_KEY", raising=False)
     rejected_key = "sk-ant-" + "api03-" + "Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8Ba7"
-    with patch("agno.tools.mem0.Memory", return_value=_FailingMem0Client(rejected_key)):
+    with patch("mem0.memory.main.Memory", return_value=_FailingMem0Client(rejected_key)):
         toolkit = mem0_tools()(user_id="alice")
-    run_context: Any = None
-
-    added = toolkit.add_memory(run_context, "Likes green tea")
-    found = toolkit.search_memory(run_context, "tea")
+        added = toolkit.mem0_add("Likes green tea")
+        found = toolkit.mem0_read(action="search", query="tea")
 
     assert added.startswith("Error adding memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
-    # Agno returns a ValueError's text without its error prefix, which stays so.
     assert found.startswith("Invalid query for key ")
     assert rejected_key not in added
     assert rejected_key not in found

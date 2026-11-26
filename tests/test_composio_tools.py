@@ -1,19 +1,24 @@
-"""Composio action registration through the installed SDK, without external calls."""
+"""Composio action registration through the native `composio-core` wrapper, without external calls."""
+
+from __future__ import annotations
 
 import json
 import socket
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools import Toolkit
+from composio import ComposioToolSet
 from composio.client.collections import ActionModel
-from composio_agno import ComposioToolSet
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.composio import composio_tools
 from tests.agent_tool_helpers import toolkit_offers
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -72,9 +77,9 @@ def offline_composio(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def _assert_registered_actions(tool: Toolkit) -> None:
-    """Exercise the same Toolkit protocol agent assembly consumes."""
+    """Exercise the same native Toolkit protocol agent assembly consumes."""
     assert isinstance(tool, Toolkit)
-    assert set(tool.get_functions()) == {"github_get_a_repository", "github_get_the_authenticated_user"}
+    assert set(tool.functions) == {"github_get_a_repository", "github_get_the_authenticated_user"}
     function = toolkit_offers(tool, "github_get_a_repository")
     assert function.parameters["properties"]["owner"]["type"] == "string"
     assert "owner" in function.parameters["required"]
@@ -87,7 +92,7 @@ def _assert_registered_actions(tool: Toolkit) -> None:
 
 @pytest.mark.usefixtures("offline_composio")
 def test_composio_factory_exposes_selected_sdk_actions() -> None:
-    """Returning the raw SDK toolset loses the callable Agno tool surface."""
+    """Native Composio toolkit wraps selected composio-core action schemas cleanly."""
     tool = composio_tools()(
         api_key="test-key",
         entity_id="test-user",
@@ -127,3 +132,11 @@ def test_composio_requires_explicit_action_selection(selection: dict[str, list[s
     """Missing selection should explain configuration instead of returning an unusable tool."""
     with pytest.raises(ValueError, match="actions"):
         composio_tools()(api_key="test-key", lock=False, **selection)
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_requires_scoped_api_key_and_ignores_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing API key fails closed instead of falling back to host COMPOSIO_API_KEY."""
+    monkeypatch.setenv("COMPOSIO_API_KEY", "host-secret")
+    with pytest.raises(ValueError, match="Composio API key"):
+        composio_tools()(actions=["GITHUB_GET_A_REPOSITORY"], lock=False)

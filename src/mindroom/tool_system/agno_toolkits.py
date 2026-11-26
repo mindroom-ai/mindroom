@@ -254,7 +254,6 @@ _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
     ),
     "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
     "agno.tools.reasoning.ReasoningTools": frozenset({"analyze", "think"}),
-    "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
 }
 
 

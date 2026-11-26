@@ -147,7 +147,7 @@ clickup = [
 coding = []
 compact_context = []
 composio = [
-  "composio-agno",
+  "composio-core",
 ]
 config_manager = [
   "pydantic>=2",

@@ -1,14 +1,165 @@
-"""Mem0 Memory tool configuration."""
+"""Mem0 persistent memory toolkit."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import inspect
+from typing import Any, Literal
 
+from mindroom.failure_text import failure_text
+from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import UNSET, UnsetType, json_dumps, require_non_empty, resolve_toggle
 
-if TYPE_CHECKING:
-    from agno.tools.mem0 import Mem0Tools
+_ReadAction = Literal["search", "get_all"]
+
+
+def _build_mem0_client(
+    *,
+    api_key: str | None,
+    org_id: str | None,
+    project_id: str | None,
+    config: dict[str, Any] | None,
+) -> Any:  # noqa: ANN401
+    from mem0.client.main import MemoryClient
+    from mem0.memory.main import Memory
+
+    if api_key:
+        sig = inspect.signature(MemoryClient.__init__)
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if org_id and "org_id" in sig.parameters:
+            client_kwargs["org_id"] = org_id
+        if project_id and "project_id" in sig.parameters:
+            client_kwargs["project_id"] = project_id
+        client = MemoryClient(**client_kwargs)
+        if org_id and "org_id" not in sig.parameters:
+            client.org_id = org_id
+        if project_id and "project_id" not in sig.parameters:
+            client.project_id = project_id
+        return client
+    if config is not None:
+        return Memory.from_config(config)
+    return Memory()
+
+
+def _extract_memory_list(results: object) -> list[Any]:
+    if isinstance(results, dict) and isinstance(results.get("results"), list):
+        return results["results"]
+    if isinstance(results, list):
+        return results
+    return []
+
+
+class Mem0Tools(Toolkit):
+    """Store, search, list, and delete persistent user memories via Mem0 2."""
+
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        api_key: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        infer: bool = True,
+        enable_add_memory: bool | None | UnsetType = UNSET,
+        enable_search_memory: bool | None | UnsetType = UNSET,
+        enable_get_all_memories: bool | None | UnsetType = UNSET,
+        enable_delete_all_memories: bool | None | UnsetType = UNSET,
+        all: bool | None | UnsetType = UNSET,  # noqa: A002
+    ) -> None:
+        self._config = config
+        self.api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
+        self.user_id = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+        self.org_id = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+        self.project_id = project_id.strip() if isinstance(project_id, str) and project_id.strip() else None
+        self.infer = infer
+        self.client: Any = None
+
+        enable_all = resolve_toggle(all, default=False)
+        self._allow_add = resolve_toggle(enable_add_memory, default=True, enable_all=enable_all)
+        self._allow_search = resolve_toggle(enable_search_memory, default=True, enable_all=enable_all)
+        self._allow_get_all = resolve_toggle(enable_get_all_memories, default=True, enable_all=enable_all)
+        self._allow_delete_all = resolve_toggle(enable_delete_all_memories, default=True, enable_all=enable_all)
+
+        tools: list[Any] = []
+        if self._allow_search or self._allow_get_all:
+            tools.append(self.mem0_read)
+        if self._allow_add:
+            tools.append(self.mem0_add)
+        if self._allow_delete_all:
+            tools.append(self.mem0_delete_all)
+        super().__init__(name="mem0", tools=tools)
+
+    def _get_client(self) -> Any:  # noqa: ANN401
+        if self.client is None:
+            try:
+                self.client = _build_mem0_client(
+                    api_key=self.api_key,
+                    org_id=self.org_id,
+                    project_id=self.project_id,
+                    config=self._config,
+                )
+            except Exception as exc:
+                msg = f"Failed to initialize Mem0 client: {redact_sensitive_text(failure_text(exc))}"
+                raise ConnectionError(msg) from None
+        return self.client
+
+    def _require_user_id(self, method_name: str) -> str:
+        if not self.user_id:
+            msg = f"Error in {method_name}: A user_id must be configured on the mem0 tool."
+            raise ValueError(msg)
+        return self.user_id
+
+    @staticmethod
+    def _redacted_error(prefix: str, exc: Exception) -> str:
+        text = redact_sensitive_text(failure_text(exc))
+        if isinstance(exc, ValueError):
+            return text
+        return f"{prefix}: {text}"
+
+    def mem0_read(self, action: _ReadAction, query: str | None = None) -> str:
+        """Search or list stored Mem0 memories for the configured user.
+
+        Actions:
+        - `search`: Semantic search across memories (`query`).
+        - `get_all`: Return all memories for the user.
+        """
+        try:
+            user_id = self._require_user_id("mem0_read")
+            if action == "search":
+                if not self._allow_search:
+                    return "Error searching memory: Searching Mem0 memories is disabled."
+                clean_query = require_non_empty(query, "query")
+                results = self._get_client().search(clean_query, filters={"user_id": user_id})
+                return json_dumps(_extract_memory_list(results))
+            if not self._allow_get_all:
+                return "Error getting all memories: Listing Mem0 memories is disabled."
+            results = self._get_client().get_all(filters={"user_id": user_id})
+            return json_dumps(_extract_memory_list(results))
+        except Exception as exc:
+            prefix = "Error searching memory" if action == "search" else "Error getting all memories"
+            return self._redacted_error(prefix, exc)
+
+    def mem0_add(self, content: str | dict[str, str]) -> str:
+        """Store a fact or key-value dictionary in the user's Mem0 memory."""
+        try:
+            user_id = self._require_user_id("mem0_add")
+            text = json_dumps(content) if isinstance(content, dict) else str(content)
+            result = self._get_client().add([{"role": "user", "content": text}], user_id=user_id, infer=self.infer)
+            return json_dumps(result)
+        except Exception as exc:
+            return self._redacted_error("Error adding memory", exc)
+
+    def mem0_delete_all(self) -> str:
+        """Permanently delete all Mem0 memories for the configured user."""
+        try:
+            user_id = self._require_user_id("mem0_delete_all")
+            self._get_client().delete_all(user_id=user_id)
+        except Exception as exc:
+            return self._redacted_error("Error deleting all memories", exc)
+        else:
+            return f"Successfully deleted all memories for user_id: {user_id}."
 
 
 @register_tool_with_metadata(
@@ -18,10 +169,10 @@ if TYPE_CHECKING:
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
     category=ToolCategory.PRODUCTIVITY,
-    status=ToolStatus.REQUIRES_CONFIG,  # Requires API key for cloud usage
-    setup_type=SetupType.API_KEY,  # Optional API key for cloud usage
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
     icon="Brain",
-    icon_color="text-purple-600",  # Memory/brain theme
+    icon_color="text-purple-600",
     config_fields=[
         ConfigField(
             name="api_key",
@@ -97,12 +248,11 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["mem0ai"],  # Already in pyproject.toml
+    dependencies=["mem0ai"],
     docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#mem0",
-    function_names=("add_memory", "delete_all_memories", "get_all_memories", "search_memory"),
+    function_names=("mem0_read", "mem0_add", "mem0_delete_all"),
+    action_scoped_grants=("mem0_read",),
 )
 def mem0_tools() -> type[Mem0Tools]:
     """Return Mem0 memory tools for persistent memory management."""
-    from mindroom.tools.agno_compat_mem0 import UserFilterMem0Tools
-
-    return UserFilterMem0Tools
+    return Mem0Tools

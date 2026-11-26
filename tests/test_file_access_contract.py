@@ -31,9 +31,9 @@ import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.file_access as file_access_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.path_safety as path_safety_module
-import mindroom.tools.agno_compat_airflow as airflow_module
 import mindroom.tools.agno_compat_groq as groq_module
 import mindroom.tools.agno_compat_openai as openai_module
+import mindroom.tools.airflow as airflow_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
@@ -49,9 +49,9 @@ from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
+from mindroom.tools.airflow import AirflowTools
 from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
 from tests.microsoft_graph_test_support import FakeGraph
 from tests.microsoft_graph_test_support import publish_grant as publish_microsoft_grant
@@ -280,7 +280,7 @@ async def _read_dag_file(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool = MindRoomAirflowTools(tool_output_workspace_root=workspace, file_access=file_access)
+    tool = AirflowTools(tool_output_workspace_root=workspace, file_access=file_access)
     return tool.read_dag_file(raw_path) == _TEXT
 
 

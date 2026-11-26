@@ -494,6 +494,17 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "search_by_brand": "brandfetch_lookup",
         "asearch_by_brand": "brandfetch_lookup",
     },
+    "mem0": {
+        "search_memory": "mem0_read",
+        "get_all_memories": "mem0_read",
+        "add_memory": "mem0_add",
+        "delete_all_memories": "mem0_delete_all",
+    },
+    "zep": {
+        "get_zep_memory": "zep_read",
+        "search_zep_memory": "zep_read",
+        "add_zep_message": "zep_add_message",
+    },
 }
 
 

@@ -103,6 +103,7 @@ def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None
 _PIP_TO_IMPORT: dict[str, str] = {
     "atlassian-python-api": "atlassian",
     "beautifulsoup4": "bs4",
+    "composio-core": "composio",
     "firecrawl-py": "firecrawl",
     "linkup-sdk": "linkup",
     "mem0ai": "mem0",

@@ -1,6 +1,5 @@
 """Tests for package-level import side effects."""
 
-import enum
 import importlib
 import json
 import os
@@ -12,11 +11,11 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
-from agno.tools import Toolkit
 
 import mindroom
 from mindroom import vendor_telemetry
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tools.composio import composio_tools
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 
@@ -68,31 +67,23 @@ def test_composio_tools_reapplies_vendor_telemetry_after_lazy_import(
     class FakeComposioToolSet:
         pass
 
-    composio_agno_module = types.ModuleType("composio_agno")
-    composio_agno_module.ComposioToolSet = FakeComposioToolSet
+    class FakeAction:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
     sentry_module = types.ModuleType("composio.utils.sentry")
 
     def update_dsn() -> None:
         pass
 
     sentry_module.update_dsn = update_dsn
-    # Fake every SDK module the loader imports, so the real SDK never initializes against the fake Sentry module.
     composio_module = types.ModuleType("composio")
-    composio_module.AppType = str
-    workspace_module = types.ModuleType("composio.tools.env.base")
-    workspace_module.WorkspaceConfigType = object
-    toolset_module = types.ModuleType("composio.tools.toolset")
-    toolset_module.MetadataType = toolset_module.ProcessorsType = dict
-    logging_module = types.ModuleType("composio.utils.logging")
-    logging_module.LogLevel = enum.Enum("LogLevel", "INFO")
+    composio_module.Action = FakeAction
+    composio_module.ComposioToolSet = FakeComposioToolSet
     unregistered: list[object] = []
     for module in (
         composio_module,
-        workspace_module,
-        toolset_module,
-        logging_module,
         sentry_module,
-        composio_agno_module,
     ):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(vendor_telemetry.atexit, "unregister", unregistered.append)
