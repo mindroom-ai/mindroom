@@ -17,6 +17,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_system import media_attachments
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
+from tests.conftest import delivered_matrix_event
 from tests.test_attachments_tool import _tool_context
 from tests.test_media_delivery import image_bytes
 
@@ -154,7 +155,10 @@ async def test_viewed_image_can_be_saved_and_explicitly_shared(tmp_path: Path) -
     tools = AttachmentTools(tool_output_workspace_root=tmp_path)
     with (
         tool_runtime_context(context),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$image")) as send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$image")),
+        ) as send,
     ):
         viewed = await tools.view_file(path="image.png")
         handle = json.loads(viewed.content)["attachment_id"]

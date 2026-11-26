@@ -144,9 +144,9 @@ async def test_recipient_attachments_keep_order_and_arrive_before_dispatch(
         *,
         thread_id: str | None,
         **_kwargs: object,
-    ) -> str:
+    ) -> object:
         observed.append((path.read_text(), thread_id))
-        return f"$file{len(observed)}"
+        return delivered_matrix_event(f"$file{len(observed)}")
 
     async def send_text(_client: nio.AsyncClient, _room_id: str, content: dict[str, Any]) -> object:
         observed.append(("dispatch", content["m.relates_to"]["event_id"]))
@@ -154,7 +154,7 @@ async def test_recipient_attachments_keep_order_and_arrive_before_dispatch(
 
     with (
         tool_runtime_context(runtime),
-        patch("mindroom.custom_tools.attachments.send_file_message", side_effect=send_file),
+        patch("mindroom.custom_tools.attachments.send_file_message_outcome", side_effect=send_file),
         patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result", side_effect=send_text),
     ):
         result = json.loads(
@@ -266,7 +266,10 @@ async def test_explicit_room_timeline_keeps_all_deliveries_outside_threads(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$text")),
         ) as send,
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")) as send_file,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file")),
+        ) as send_file,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -298,8 +301,13 @@ async def test_recipient_partial_delivery_keeps_handle_and_does_not_retry(
     with (
         tool_runtime_context(runtime),
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(side_effect=["$first", "$second" if fail_text else None]),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(
+                side_effect=[
+                    delivered_matrix_event("$first"),
+                    delivered_matrix_event("$second") if fail_text else None,
+                ],
+            ),
         ) as files,
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
@@ -332,7 +340,10 @@ async def test_attachment_id_like_filename_can_be_sent_with_dot_slash(
     runtime = replace(context, storage_path=tmp_path)
     with (
         tool_runtime_context(runtime),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")) as send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file")),
+        ) as send,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -354,7 +365,10 @@ async def test_room_recipient_receives_trusted_attachment_references(
     runtime = replace(context, storage_path=tmp_path)
     with (
         tool_runtime_context(runtime),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")),
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file")),
+        ),
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$text")),

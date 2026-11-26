@@ -596,8 +596,8 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -662,8 +662,8 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -732,8 +732,8 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(team_turn),
     ):
@@ -772,8 +772,8 @@ async def test_matrix_message_send_with_attachments_keeps_existing_thread(tmp_pa
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$reply_evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -828,8 +828,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -885,8 +885,8 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -1011,8 +1011,8 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
 
     with (
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(side_effect=["$file_one", "$file_two"]),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(side_effect=[delivered_matrix_event("$file_one"), delivered_matrix_event("$file_two")]),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -1063,8 +1063,8 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -1115,8 +1115,8 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -1166,8 +1166,8 @@ async def test_matrix_message_send_outside_workspace_attachment_follows_file_acc
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -1301,8 +1301,8 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(ctx),
     ):
@@ -2470,8 +2470,8 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 2),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),

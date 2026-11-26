@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,22 +17,27 @@ from PIL import Image, JpegImagePlugin, PngImagePlugin
 from structlog.testing import capture_logs
 
 from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    _format_media_too_large_detail,
     _msgtype_for_mimetype,
-    _upload_file_as_mxc,
+    _upload_file_as_mxc_outcome,
     edit_message_result,
     send_audio_message,
     send_file_message,
+    send_file_message_outcome,
     send_message_result,
     send_runtime_encrypted_media_message,
+    upload_media_bytes_as_mxc_outcome,
 )
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, join_room
 from mindroom.matrix.client_session import MindRoomAsyncClient
-from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.media import extract_media_caption, homeserver_max_upload_size
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
     from typing import BinaryIO
 
     from nio.durable import DurableSync
@@ -82,7 +88,8 @@ def _encrypted_file(mimetype: str, size: int) -> dict[str, object]:
 
 
 async def _upload_file(client: AsyncMock, file: Path, mimetype: str) -> tuple[str | None, dict[str, Any] | None]:
-    return await _upload_file_as_mxc(client, "!room:localhost", file, mimetype=mimetype, filename=file.name)
+    outcome = await _upload_file_as_mxc_outcome(client, "!room:localhost", file, mimetype=mimetype, filename=file.name)
+    return (None, None) if isinstance(outcome, MatrixDeliveryFailure) else outcome
 
 
 def _thread_fallback() -> dict[str, object]:
@@ -95,7 +102,7 @@ def _thread_fallback() -> dict[str, object]:
 
 
 class TestUploadFileAsMxc:
-    """Tests for _upload_file_as_mxc."""
+    """Tests for _upload_file_as_mxc_outcome."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tuple_response", [False, True])
@@ -1189,3 +1196,187 @@ class TestEncryptionEnabledDuringMediaUpload:
         assert event_id == "$media:localhost"
         assert _wire_content(client)["file"] == _encrypted_file("audio/ogg", 5)
         client._send.assert_not_awaited()
+
+
+class TestHomeserverMaxUploadSize:
+    """Tests for homeserver_max_upload_size caching and fail-open behavior."""
+
+    @pytest.mark.asyncio
+    async def test_caches_positive_limit_per_client(self) -> None:
+        """A valid m.upload.size response is cached so repeated uploads avoid extra config calls."""
+        client = _mock_client()
+        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(
+            upload_size=24 * 1024 * 1024,
+        )
+
+        assert await homeserver_max_upload_size(client) == 24 * 1024 * 1024
+        assert await homeserver_max_upload_size(client) == 24 * 1024 * 1024
+        client.content_repository_config.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "first_result",
+        [
+            nio.ContentRepositoryConfigError("unavailable", status_code="M_UNKNOWN"),
+            RuntimeError("network down"),
+            nio.ContentRepositoryConfigResponse(upload_size=None),
+            nio.ContentRepositoryConfigResponse(upload_size=0),
+        ],
+        ids=["error-response", "exception", "omitted", "zero"],
+    )
+    async def test_fails_open_without_caching_and_recovers(self, first_result: object) -> None:
+        """Errors, exceptions, or missing limits return None without poisoning the cache."""
+        client = _mock_client()
+        valid = nio.ContentRepositoryConfigResponse(upload_size=10 * 1024 * 1024)
+        client.content_repository_config.side_effect = [first_result, valid]
+
+        assert await homeserver_max_upload_size(client) is None
+        assert await homeserver_max_upload_size(client) == 10 * 1024 * 1024
+        assert client.content_repository_config.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_client_without_config_method_fails_open(self) -> None:
+        """Minimal mock clients lacking content_repository_config fail open to None."""
+        minimal_client = SimpleNamespace()
+        assert await homeserver_max_upload_size(cast("nio.AsyncClient", minimal_client)) is None
+
+
+class TestMediaUploadTooLarge:
+    """Tests for pre-flight and server-side M_TOO_LARGE / HTTP 413 handling."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_preflight_rejects_oversized_file_without_reading_or_uploading(
+        self,
+        tmp_path: Path,
+        encrypted: bool,
+    ) -> None:
+        """Files exceeding m.upload.size fail immediately without read_bytes(), upload(), or room_send()."""
+        client = _delivering_client(encrypted=encrypted)
+        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=1024)
+        oversized = tmp_path / "report.log"
+        oversized.write_bytes(b"x" * 2048)
+
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be called")):
+            outcome = await send_file_message_outcome(client, "!room:localhost", oversized)
+
+        assert isinstance(outcome, MatrixDeliveryFailure)
+        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+        assert outcome.status == 413
+        assert "report.log" in outcome.detail
+        assert "2.0 KiB" in outcome.detail
+        assert "1.0 KiB" in outcome.detail
+        assert "M_TOO_LARGE" in outcome.detail
+        assert "Compress it" in outcome.detail
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_preflight_allows_file_at_exact_upload_limit(self, tmp_path: Path) -> None:
+        """A file whose byte size equals m.upload.size is allowed to upload."""
+        client = _delivering_client(encrypted=False)
+        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=1024)
+        exact = tmp_path / "exact.bin"
+        exact.write_bytes(b"x" * 1024)
+
+        outcome = await send_file_message_outcome(client, "!room:localhost", exact)
+
+        assert isinstance(outcome, DeliveredMatrixEvent)
+        assert outcome.event_id == "$media:localhost"
+        client.upload.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_preflight_rejects_oversized_bytes_without_uploading(self) -> None:
+        """upload_media_bytes_as_mxc_outcome rejects payloads over m.upload.size before upload."""
+        client = _mock_client(encrypted=True)
+        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=100)
+
+        outcome = await upload_media_bytes_as_mxc_outcome(
+            client,
+            "!room:localhost",
+            b"a" * 150,
+            filename="clip.png",
+            mimetype="image/png",
+        )
+
+        assert isinstance(outcome, MatrixDeliveryFailure)
+        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+        assert outcome.status == 413
+        assert "clip.png" in outcome.detail
+        assert "150 B" in outcome.detail
+        assert "100 B" in outcome.detail
+        client.upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("upload_error", "post_413_limit", "expected_fragment"),
+        [
+            (
+                nio.UploadError("Payload too large", status_code="M_TOO_LARGE"),
+                None,
+                "was rejected by the homeserver as too large (M_TOO_LARGE)",
+            ),
+            (
+                nio.UploadError("unknown error", http_status=413),
+                None,
+                "was rejected by the homeserver as too large (M_TOO_LARGE)",
+            ),
+            (
+                nio.UploadError("Payload too large", status_code="M_TOO_LARGE", http_status=413),
+                100,
+                "exceeds the homeserver upload limit of 100 B (M_TOO_LARGE)",
+            ),
+        ],
+        ids=["m-too-large-no-limit", "http-413-no-limit", "m-too-large-with-recovered-limit"],
+    )
+    async def test_server_side_too_large_upload_error_returns_typed_failure(
+        self,
+        upload_error: nio.UploadError,
+        post_413_limit: int | None,
+        expected_fragment: str,
+    ) -> None:
+        """Server-side M_TOO_LARGE or HTTP 413 UploadError becomes a PAYLOAD_TOO_LARGE failure."""
+        client = _mock_client(encrypted=False)
+        client.content_repository_config.side_effect = [
+            nio.ContentRepositoryConfigError("temp error"),
+            (
+                nio.ContentRepositoryConfigResponse(upload_size=post_413_limit)
+                if post_413_limit is not None
+                else nio.ContentRepositoryConfigError("still unavailable")
+            ),
+        ]
+        client.upload.return_value = (upload_error, None)
+
+        outcome = await upload_media_bytes_as_mxc_outcome(
+            client,
+            "!room:localhost",
+            b"z" * 250,
+            filename="big.bin",
+            mimetype="application/octet-stream",
+        )
+
+        assert isinstance(outcome, MatrixDeliveryFailure)
+        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+        assert outcome.status == 413
+        assert "big.bin" in outcome.detail
+        assert "250 B" in outcome.detail
+        assert expected_fragment in outcome.detail
+        assert "Compress it" in outcome.detail
+
+    @pytest.mark.asyncio
+    async def test_non_413_upload_error_keeps_send_file_message_outcome_none(self, tmp_path: Path) -> None:
+        """Generic upload errors continue returning None so callers know no event was requested."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (nio.UploadError("server error", status_code="M_UNKNOWN", http_status=500), None)
+        sample = tmp_path / "doc.txt"
+        sample.write_text("hello", encoding="utf-8")
+
+        assert await send_file_message_outcome(client, "!room:localhost", sample) is None
+
+    def test_near_boundary_formatting_includes_exact_byte_counts(self) -> None:
+        """When file size and limit round to the same MiB string, exact byte counts disambiguate them."""
+        limit = 24 * 1024 * 1024
+        detail = _format_media_too_large_detail("report.log", limit + 1, limit)
+        assert f"{limit + 1} B" in detail
+        assert f"{limit} B" in detail
+        assert "24.0 MiB" in detail

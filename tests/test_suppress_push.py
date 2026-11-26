@@ -51,6 +51,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_event,
     delivered_matrix_side_effect,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
@@ -889,8 +890,8 @@ async def test_matrix_message_attachments_suppress_push_only_for_agent_handoffs(
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
         ) as mock_send_file,
         tool_runtime_context(context),
     ):

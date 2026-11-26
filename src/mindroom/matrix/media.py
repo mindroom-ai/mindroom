@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 import nio
 from aiohttp import ClientConnectionError, ClientResponse
@@ -48,6 +51,7 @@ _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+_MAX_UPLOAD_SIZE_CACHE: WeakKeyDictionary[nio.AsyncClient, int] = WeakKeyDictionary()
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -142,6 +146,44 @@ def upload_content_uri(upload_result: object) -> str | None:
     upload_response = upload_result[0] if isinstance(upload_result, tuple) else upload_result
     if isinstance(upload_response, nio.UploadResponse) and upload_response.content_uri:
         return str(upload_response.content_uri)
+    return None
+
+
+async def homeserver_max_upload_size(client: nio.AsyncClient) -> int | None:
+    """Return the homeserver's advertised ``m.upload.size`` limit in bytes, cached per client.
+
+    Fails open to ``None`` when the homeserver omits the limit, returns an error, or the client
+    cannot query the content repository configuration. Failures are not cached so transient errors recover.
+    """
+    try:
+        cached = _MAX_UPLOAD_SIZE_CACHE.get(client)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+
+    fetch_config = getattr(client, "content_repository_config", None)
+    if not callable(fetch_config):
+        return None
+    try:
+        maybe_response = fetch_config()
+        response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
+    except Exception as error:
+        logger.debug("homeserver_upload_limit_fetch_failed", error=str(error))
+        return None
+
+    if (
+        isinstance(response, nio.ContentRepositoryConfigResponse)
+        and isinstance(response.upload_size, int)
+        and not isinstance(response.upload_size, bool)
+        and response.upload_size > 0
+    ):
+        with contextlib.suppress(TypeError):
+            _MAX_UPLOAD_SIZE_CACHE[client] = response.upload_size
+        return response.upload_size
+
+    if isinstance(response, nio.ContentRepositoryConfigError):
+        logger.debug("homeserver_upload_limit_error_response", error=str(response))
     return None
 
 
