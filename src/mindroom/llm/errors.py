@@ -31,6 +31,8 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 # The marker of a request rejected because it replayed provider-encrypted state another upstream created: the request
 # pipeline resends it once without that state, and the request's media did not cause it.
 ENCRYPTED_REPLAY_REJECTED = "encrypted_replay_rejected"
+# The marker of a stream that went silent past the idle timeout and was retried once.
+STREAM_STALLED = "stream_stalled"
 # The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "The model's safeguards refused the response"
 
@@ -200,6 +202,7 @@ __all__ = [
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
     "QUOTA_EXHAUSTED",
     "SAFEGUARD_REFUSAL",
+    "STREAM_STALLED",
     "TOKENS_PER_MINUTE",
     "TRANSPORT_TIMEOUT",
     "AuthenticationFailed",

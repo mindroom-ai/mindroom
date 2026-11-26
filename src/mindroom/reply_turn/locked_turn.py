@@ -23,6 +23,7 @@ from mindroom.conversation_resolver import read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.error_handling import StructuredReplyError, log_reply_error, model_error_labels
 from mindroom.failure_text import failure_text
 from mindroom.final_delivery import (
     AwaitingApproval,
@@ -467,10 +468,31 @@ class LockedTurns:
             if isinstance(error, PausePresentationError):
                 # The run paused, but its reply could not show the pause: no approval exists for it.
                 return FinalDeliveryOutcome(ending=Failed(FailureCause.APPROVAL_NOT_STARTED))
-            # A stream's failure wraps the error the reader should see.
-            shown = error.error if isinstance(error, StreamingDeliveryError) else error
-            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(shown)))
+            return self._failed_attempt_outcome(error)
         return FinalDeliveryOutcome(ending=attempt) if isinstance(attempt, Cancelled) else attempt
+
+    def _failed_attempt_outcome(self, error: Exception) -> FinalDeliveryOutcome:
+        """Classify a delivery or resumed-run exception into a failed outcome with structured ``error_info``."""
+        # A stream's failure wraps the error the reader should see.
+        shown = error.error if isinstance(error, StreamingDeliveryError) else error
+        if isinstance(shown, StructuredReplyError):
+            return FinalDeliveryOutcome(
+                ending=Failed(FailureCause.ERROR, failure_text(shown), error_info=shown.error_info),
+            )
+        if not isinstance(shown, Exception):
+            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(shown)))
+        handle = current_span()
+        is_approval_resume = handle is not None and handle.span.kind is rl.SpanKind.APPROVAL_RESUME
+        model_label, provider = model_error_labels(handle.reply_model if handle is not None else None)
+        info = log_reply_error(
+            shown,
+            self.deps.agent_name,
+            runtime_paths=self.deps.runtime_paths,
+            model_label=model_label,
+            provider=provider,
+        )
+        detail = info.plain_text if is_approval_resume else failure_text(shown)
+        return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, detail, error_info=info.to_wire()))
 
     async def run_and_settle_locked_response(
         self,

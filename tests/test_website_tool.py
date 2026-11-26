@@ -469,11 +469,11 @@ def test_website_reader_logs_a_fetched_url_without_its_query_or_fragment(monkeyp
     """A successful read logs the page URL without its query or fragment, which can carry secrets."""
     logged_messages: list[str] = []
 
-    def record(message: str) -> None:
+    def record(message: str, *_args: object, **_kwargs: object) -> None:
         logged_messages.append(message)
 
-    for log_function in ("log_debug", "log_warning", "log_error"):
-        monkeypatch.setattr(f"mindroom.custom_tools.website.{log_function}", record)
+    for log_method in ("debug", "warning", "error"):
+        monkeypatch.setattr(f"mindroom.custom_tools.website.logger.{log_method}", record)
     _serve(
         monkeypatch,
         lambda _url: _page("<main><p>Reference material with enough page text for the reader.</p></main>"),
@@ -494,11 +494,11 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     full_url = "https://user:secret@example.test/docs?token=query-secret#frag-secret"
     logged_messages: list[str] = []
 
-    def record(message: str) -> None:
+    def record(message: str, *_args: object, **_kwargs: object) -> None:
         logged_messages.append(message)
 
-    for log_function in ("log_debug", "log_warning", "log_error"):
-        monkeypatch.setattr(f"mindroom.custom_tools.website.{log_function}", record)
+    for log_method in ("debug", "warning", "error"):
+        monkeypatch.setattr(f"mindroom.custom_tools.website.logger.{log_method}", record)
     requested_urls = _serve(monkeypatch, lambda _url: _page("<main><p>Docs</p></main>"))
 
     with pytest.raises(PublicFetchError, match="credentials_in_url"):

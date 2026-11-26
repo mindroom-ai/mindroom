@@ -137,6 +137,7 @@ from mindroom.tool_system.google_workspaces import (
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION
+from mindroom.tool_system.plugin_room_access import resolve_accessible_room_id, shared_room_ids
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -290,9 +291,11 @@ __all__ = [
     "register_atlassian_connection_tools",
     "register_google_workspace_tools",
     "register_tool_with_metadata",
+    "resolve_accessible_room_id",
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_turn_model",
+    "shared_room_ids",
     "stop_worker_service",
     "tool",
     "toolkit_functions",
