@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _STALL_DURATION_RE = re.compile(r"\bfor\s+(\d+(?:\.\d+)?)s\b")
+# Bound exception-derived fields in ``io.mindroom.ai_run.error`` so oversized provider errors
+# cannot push Matrix edit payloads (duplicated into top-level and ``m.new_content``) over the 64 KiB limit.
+_MAX_ERROR_SUMMARY_CHARS = 1_000
+_MAX_ERROR_DETAIL_CHARS = 2_000
+_MAX_ERROR_CODE_CHARS = 200
 
 type ReplyErrorKind = Literal[
     "safeguard_refusal",
@@ -146,6 +151,13 @@ def _stall_duration_label(safe_error: str) -> str | None:
     return f"{seconds:g}s"
 
 
+def _truncate_error_text(text: str, max_chars: int) -> str:
+    """Bound exception-derived text after redaction so wire error metadata stays compact."""
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 1].rstrip()}…"
+
+
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error: str) -> str:
     identity = current_execution_identity()
     if runtime_paths is not None and identity is not None and identity.channel == "headless":
@@ -158,14 +170,15 @@ def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error
     dashboard = f"the MindRoom dashboard ({dashboard_url})" if dashboard_url else "the MindRoom dashboard"
     return (
         "No AI provider key is set up yet, so I can't reply. "
-        f"Open {dashboard}, choose **Connect your AI provider**, paste your key, then send your message again."
+        f"Open {dashboard}, choose Connect your AI provider, paste your key, then send your message again."
     )
 
 
 def _classify_provider_error(  # noqa: PLR0911 - one return per provider error kind
     error: ProviderError,
     *,
-    safe_error: str,
+    raw_error: str,
+    safe_summary: str,
     resolved_model: str | None,
     resolved_provider: str | None,
 ) -> tuple[ReplyErrorKind, str, str, bool, ReplyErrorAction | None]:
@@ -178,13 +191,16 @@ def _classify_provider_error(  # noqa: PLR0911 - one return per provider error k
         return (
             "quota_exhausted",
             "Account quota reached",
-            f"{provider_text} rejected this request because the account's quota or credits are exhausted.",
+            (
+                f"{provider_text} rejected this request because the account's quota or credits are exhausted. "
+                "Add credit, renew the plan, or raise the spending limit, then try again."
+            ),
             False,
             None,
         )
     if isinstance(error, AuthenticationFailed):
         title = f"Authentication failed ({resolved_provider})" if resolved_provider else "Authentication failed"
-        return ("authentication_failed", title, safe_error, False, None)
+        return ("authentication_failed", title, safe_summary, False, None)
     if isinstance(error, ContextWindowExceeded) and error.code == TOKENS_PER_MINUTE:
         return (
             "tokens_per_minute",
@@ -205,29 +221,28 @@ def _classify_provider_error(  # noqa: PLR0911 - one return per provider error k
         return (
             "rate_limited",
             "Rate limit reached",
-            f"{model_text} hit {provider_inline}'s rate limit after automatic retries.",
+            f"{model_text} hit {provider_inline}'s rate limit. Try again shortly.",
             True,
             "retry",
         )
     if isinstance(error, ProviderUnavailable) and error.code == STREAM_STALLED:
-        duration = _stall_duration_label(safe_error)
+        duration = _stall_duration_label(raw_error)
         summary = (
-            f"{provider_text} sent no data for {duration} (retried once automatically)."
-            if duration
-            else f"{provider_text} stopped sending data after automatic retry."
+            f"{provider_text} sent no data for {duration}." if duration else f"{provider_text} stopped sending data."
         )
         return ("stream_stalled", f"{model_text} stopped responding", summary, True, "continue")
     if isinstance(error, ProviderUnavailable):
         status = error.status_code
         status_hint = f" ({status})" if status is not None and 500 <= status < 600 else ""
+        provider_title = resolved_provider or "Model provider"
         return (
             "provider_unavailable",
-            f"{provider_text} unavailable{status_hint}",
-            f"{model_text} could not complete the reply after automatic retries.",
+            f"{provider_title} unavailable{status_hint}",
+            f"{model_text} could not complete the reply. Try again shortly.",
             True,
             "continue",
         )
-    return ("runtime_error", "Reply failed", safe_error, False, None)
+    return ("runtime_error", "Reply failed", safe_summary, False, None)
 
 
 def describe_reply_error(
@@ -242,26 +257,37 @@ def describe_reply_error(
     An error's type alone decides its classification: a provider error was classified from the provider's status and
     wording where its adapter raised it, and any other error shows its own text, except that a timeout says so.
     """
-    safe_error = redact_sensitive_text(failure_text(error))
+    raw_error = failure_text(error)
+    safe_error = redact_sensitive_text(raw_error, max_length=_MAX_ERROR_DETAIL_CHARS)
+    safe_summary = _truncate_error_text(safe_error, _MAX_ERROR_SUMMARY_CHARS)
     provider_error = error if isinstance(error, ProviderError) else None
     resolved_model = model_label.strip() if model_label and model_label.strip() else None
     model_text = resolved_model or "The model"
     raw_provider = (provider_error.provider or provider) if provider_error is not None else None
     resolved_provider = _display_provider_name(raw_provider)
     status_code = provider_error.status_code if provider_error is not None else None
-    code = provider_error.code if provider_error is not None else None
+    code = (
+        redact_sensitive_text(provider_error.code, max_length=_MAX_ERROR_CODE_CHARS)
+        if provider_error is not None and provider_error.code
+        else None
+    )
 
     retryable = False
     action: ReplyErrorAction | None = None
     if isinstance(error, ModelSafeguardRefusal):
-        reason_hint = f" ({error.provider_code})" if error.provider_code else ""
+        safe_provider_code = (
+            redact_sensitive_text(error.provider_code, max_length=_MAX_ERROR_CODE_CHARS)
+            if error.provider_code
+            else None
+        )
+        reason_hint = f" ({safe_provider_code})" if safe_provider_code else ""
         kind: ReplyErrorKind = "safeguard_refusal"
         title = "Blocked by model safeguards"
         summary = (
             f"{model_text}'s safeguards blocked this request{reason_hint}. "
             "Choose another model (/model list) or revise the prompt."
         )
-        code = error.provider_code
+        code = safe_provider_code
     elif needs_provider_key(error):
         kind = "missing_api_key"
         title = "No AI provider key configured"
@@ -270,7 +296,8 @@ def describe_reply_error(
     elif provider_error is not None:
         kind, title, summary, retryable, action = _classify_provider_error(
             provider_error,
-            safe_error=safe_error,
+            raw_error=raw_error,
+            safe_summary=safe_summary,
             resolved_model=resolved_model,
             resolved_provider=resolved_provider,
         )
@@ -283,18 +310,47 @@ def describe_reply_error(
     else:
         kind = "runtime_error"
         title = "Reply failed"
-        summary = safe_error
+        summary = safe_summary
 
     return ReplyErrorInfo(
         kind=kind,
         title=title,
         summary=summary,
-        detail=None if not safe_error or safe_error == summary else safe_error,
+        detail=None if kind == "quota_exhausted" or not safe_error or safe_error == summary else safe_error,
         code=code,
         status_code=status_code,
         provider=resolved_provider,
         retryable=retryable,
         action=action,
+    )
+
+
+def log_reply_error(
+    error: Exception,
+    agent_name: str | None = None,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    model_label: str | None = None,
+    provider: str | None = None,
+) -> ReplyErrorInfo:
+    """Log ``error`` as ``agent_error`` and return its structured ``ReplyErrorInfo`` classification."""
+    provider_error = error if isinstance(error, ProviderError) else None
+
+    logger.error(
+        "agent_error",
+        agent=agent_name or "agent",
+        error_type=type(error).__name__,
+        error=repr(error),
+        error_code=provider_error.code if provider_error else None,
+        status_code=provider_error.status_code if provider_error else None,
+        provider=provider_error.provider if provider_error else None,
+    )
+
+    return describe_reply_error(
+        error,
+        runtime_paths=runtime_paths,
+        model_label=model_label,
+        provider=provider,
     )
 
 
@@ -313,20 +369,9 @@ def get_user_friendly_error_message(
     Pass ``include_agent_prefix=False`` when the Matrix sender is already the agent itself, while still passing
     ``agent_name`` for structured error logging.
     """
-    provider_error = error if isinstance(error, ProviderError) else None
-
-    logger.error(
-        "agent_error",
-        agent=agent_name or "agent",
-        error_type=type(error).__name__,
-        error=repr(error),
-        error_code=provider_error.code if provider_error else None,
-        status_code=provider_error.status_code if provider_error else None,
-        provider=provider_error.provider if provider_error else None,
-    )
-
-    info = describe_reply_error(
+    info = log_reply_error(
         error,
+        agent_name=agent_name,
         runtime_paths=runtime_paths,
         model_label=model_label,
         provider=provider,

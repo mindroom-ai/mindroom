@@ -1735,9 +1735,7 @@ async def test_full_run_stream_stalled_emits_structured_ai_run_error_and_omits_a
 
     writes = turn.homeserver.writes
     final_body = str(_visible_content(writes[-1]).get("body", ""))
-    assert (
-        final_body == "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min (retried once automatically)."
-    )
+    assert final_body == "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min."
     assert not final_body.startswith("[general]")
     final_ai_run = _ai_run(writes[-1])
     assert final_ai_run is not None
@@ -1746,7 +1744,7 @@ async def test_full_run_stream_stalled_emits_structured_ai_run_error_and_omits_a
     assert final_ai_run["error"] == {
         "kind": "stream_stalled",
         "title": "Primary stopped responding",
-        "summary": "OpenRouter sent no data for 5 min (retried once automatically).",
+        "summary": "OpenRouter sent no data for 5 min.",
         "detail": "Model stream stalled: no provider event for 300s",
         "code": STREAM_STALLED,
         "status_code": 504,
@@ -1780,7 +1778,7 @@ async def test_streaming_response_failed_reply_without_extra_content_populates_a
         yield "Partial answer."
         await asyncio.sleep(0.02)
         yield FailedReply(
-            "\n\n⚠️ Primary stopped responding — OpenRouter sent no data for 5 min (retried once automatically).",
+            "\n\n⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
             stall,
         )
 
@@ -1803,7 +1801,7 @@ async def test_streaming_response_failed_reply_without_extra_content_populates_a
         "error": {
             "kind": "stream_stalled",
             "title": "Primary stopped responding",
-            "summary": "OpenRouter sent no data for 5 min (retried once automatically).",
+            "summary": "OpenRouter sent no data for 5 min.",
             "detail": "Model stream stalled: no provider event for 300s",
             "code": STREAM_STALLED,
             "status_code": 504,
@@ -1845,17 +1843,14 @@ async def test_team_run_failure_emits_structured_ai_run_error_with_model_label(
 
     writes = turn.homeserver.writes
     final_body = str(_visible_content(writes[-1]).get("body", ""))
-    assert final_body == (
-        "[Team (Writer, Checker)] ⚠️ Primary stopped responding — "
-        "OpenRouter sent no data for 5 min (retried once automatically)."
-    )
+    assert final_body == ("[Team (Writer, Checker)] ⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.")
     final_ai_run = _ai_run(writes[-1])
     assert final_ai_run is not None
     assert final_ai_run["status"] == "error"
     assert final_ai_run["error"] == {
         "kind": "stream_stalled",
         "title": "Primary stopped responding",
-        "summary": "OpenRouter sent no data for 5 min (retried once automatically).",
+        "summary": "OpenRouter sent no data for 5 min.",
         "detail": "Model stream stalled: no provider event for 300s",
         "code": STREAM_STALLED,
         "status_code": 504,

@@ -69,6 +69,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
+    from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import ApprovalCall
@@ -926,11 +927,7 @@ def publish_error_run_metadata(
     if collector is None:
         return
     model = sinks.active_model() if sinks.active_model is not None else None
-    terminal = build_terminal_note_ai_run_metadata_content(
-        "error",
-        model=model,
-        error_info=error_info,
-    )[AI_RUN_METADATA_KEY]
+    terminal = build_terminal_note_ai_run_metadata_content("error", model=model)[AI_RUN_METADATA_KEY]
     merged = {**terminal, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
     if error_info is not None:
         merged["error"] = dict(error_info)
@@ -944,6 +941,8 @@ async def _settle_failure(
     run: TurnRunState,
     continuation: TurnContinuationRunState,
     failure: HandledAttempt,
+    *,
+    runtime_paths: RuntimePaths | None = None,
 ) -> FailedReply:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
@@ -954,6 +953,7 @@ async def _settle_failure(
             model_label, provider = model_error_labels(model)
             error_info = describe_reply_error(
                 failure.reply.error,
+                runtime_paths=runtime_paths,
                 model_label=model_label,
                 provider=provider,
             ).to_wire()
@@ -1176,6 +1176,7 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
@@ -1197,6 +1198,7 @@ async def stream_response_turn[ChunkT](
             continuation=continuation,
             cli_lifetime=lifetime,
             resume=resume or TurnResume(),
+            runtime_paths=runtime_paths,
         ),
     )
     try:
@@ -1215,6 +1217,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
+    runtime_paths: RuntimePaths | None = None,
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
@@ -1263,7 +1266,15 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    yield await _settle_failure(ctx, adapter, sinks, run, continuation, resolution)
+                    yield await _settle_failure(
+                        ctx,
+                        adapter,
+                        sinks,
+                        run,
+                        continuation,
+                        resolution,
+                        runtime_paths=runtime_paths,
+                    )
                     return
                 settle = _settle_completed_attempt(
                     ctx,
@@ -1296,6 +1307,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
             return
         failure = HandledAttempt(FailedReply(adapter.unexpected_error_text(e), e))
-        reply = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
+        reply = await _settle_failure(ctx, adapter, sinks, run, continuation, failure, runtime_paths=runtime_paths)
         logger.exception("Response turn failed", entity=ctx.entity_label)
         yield reply

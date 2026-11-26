@@ -1,5 +1,6 @@
 """Tests for error handling module."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -113,27 +114,27 @@ _OAUTH_HOST_UNREACHABLE = (
     [
         pytest.param(
             ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code="connection_error"),
-            "⚠️ VertexAI unavailable — The model could not complete the reply after automatic retries.",
+            "⚠️ VertexAI unavailable — The model could not complete the reply. Try again shortly.",
             id="unavailable-host-name-holds-auth",
         ),
         pytest.param(
             ProviderUnavailable("upstream replied 401 from the gateway", provider="OpenAI", status_code=503),
-            "⚠️ OpenAI unavailable (503) — The model could not complete the reply after automatic retries.",
+            "⚠️ OpenAI unavailable (503) — The model could not complete the reply. Try again shortly.",
             id="unavailable-wording-holds-401",
         ),
         pytest.param(
             ProviderUnavailable("failed to generate a response", provider="OpenAI", status_code=500),
-            "⚠️ OpenAI unavailable (500) — The model could not complete the reply after automatic retries.",
+            "⚠️ OpenAI unavailable (500) — The model could not complete the reply. Try again shortly.",
             id="unavailable-wording-holds-rate",
         ),
         pytest.param(
             RateLimited("oauth2 gateway throttled the request", provider="OpenAI", status_code=429),
-            "⏱️ Rate limit reached — The model hit OpenAI's rate limit after automatic retries.",
+            "⏱️ Rate limit reached — The model hit OpenAI's rate limit. Try again shortly.",
             id="rate-limited-wording-holds-auth",
         ),
         pytest.param(
             RateLimited("upstream unavailable", provider="OpenAI", status_code=429),
-            "⏱️ Rate limit reached — The model hit OpenAI's rate limit after automatic retries.",
+            "⏱️ Rate limit reached — The model hit OpenAI's rate limit. Try again shortly.",
             id="rate-limited-generic-wording",
         ),
         pytest.param(
@@ -229,12 +230,13 @@ def test_missing_provider_key_points_to_dashboard_setup(tmp_path: Path) -> None:
 
     assert message == (
         "[mind] 🔑 No AI provider key is set up yet, so I can't reply. "
-        "Open the MindRoom dashboard (https://42.mindroom.chat), choose **Connect your AI provider**, "
+        "Open the MindRoom dashboard (https://42.mindroom.chat), choose Connect your AI provider, "
         "paste your key, then send your message again."
     )
     assert info.kind == "missing_api_key"
     assert info.title == "No AI provider key configured"
     assert not info.summary.startswith("🔑")
+    assert "**" not in info.summary
     assert info.code == MISSING_API_KEY
 
 
@@ -244,7 +246,7 @@ def test_missing_provider_key_without_public_url_names_dashboard() -> None:
 
     message = get_user_friendly_error_message(error)
 
-    assert "Open the MindRoom dashboard, choose **Connect your AI provider**" in message
+    assert "Open the MindRoom dashboard, choose Connect your AI provider" in message
     assert "OPENROUTER_API_KEY" not in message
 
 
@@ -327,9 +329,13 @@ def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
     info = describe_reply_error(error)
     assert reply == (
         "[assistant] 💳 Account quota reached — "
-        "OpenRouter rejected this request because the account's quota or credits are exhausted."
+        "OpenRouter rejected this request because the account's quota or credits are exhausted. "
+        "Add credit, renew the plan, or raise the spending limit, then try again."
     )
     assert "openrouter.ai" not in reply
+    assert "openrouter.ai" not in str(info.to_wire())
+    assert info.detail is None
+    assert "detail" not in info.to_wire()
     assert info.kind == "quota_exhausted"
     assert info.code == QUOTA_EXHAUSTED
     assert info.provider == "OpenRouter"
@@ -342,22 +348,22 @@ def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
     [
         pytest.param(
             "Model stream stalled: no provider event for 300s",
-            "OpenRouter sent no data for 5 min (retried once automatically).",
+            "OpenRouter sent no data for 5 min.",
             id="exact-minutes",
         ),
         pytest.param(
             "Model stream stalled: no provider event for 90s",
-            "OpenRouter sent no data for 1 min 30s (retried once automatically).",
+            "OpenRouter sent no data for 1 min 30s.",
             id="minutes-and-seconds",
         ),
         pytest.param(
             "Model stream stalled: no provider event for 45s",
-            "OpenRouter sent no data for 45s (retried once automatically).",
+            "OpenRouter sent no data for 45s.",
             id="sub-minute",
         ),
         pytest.param(
             "stream stalled",
-            "OpenRouter stopped sending data after automatic retry.",
+            "OpenRouter stopped sending data.",
             id="without-duration",
         ),
     ],
@@ -464,7 +470,7 @@ def test_include_agent_prefix_false_omits_prefix_while_preserving_structured_log
             include_agent_prefix=False,
         )
 
-    assert message == "⚠️ Neon stopped responding — OpenRouter sent no data for 5 min (retried once automatically)."
+    assert message == "⚠️ Neon stopped responding — OpenRouter sent no data for 5 min."
     assert not message.startswith("[mindroom_dev]")
     [entry] = [log for log in logs if log["event"] == "agent_error"]
     assert entry["agent"] == "mindroom_dev"
@@ -482,3 +488,79 @@ def test_model_error_labels_prefers_display_name_over_id() -> None:
     )
     assert model_error_labels({"config": "default", "id": "gpt-6", "provider": "openai"}) == ("gpt-6", "openai")
     assert model_error_labels(None) == (None, None)
+
+
+def test_provider_unavailable_without_provider_uses_clean_title() -> None:
+    """Unknown provider omits the awkward leading article from provider_unavailable titles."""
+    without_status = describe_reply_error(ProviderUnavailable("gateway error", provider=""), model_label="Neon")
+    with_status = describe_reply_error(
+        ProviderUnavailable("gateway error", provider="", status_code=503),
+        model_label="Neon",
+    )
+
+    assert without_status.title == "Model provider unavailable"
+    assert without_status.summary == "Neon could not complete the reply. Try again shortly."
+    assert with_status.title == "Model provider unavailable (503)"
+
+
+@pytest.mark.parametrize(
+    ("secret_code", "leaked_secret"),
+    [
+        pytest.param("sk-live-secret1234567890", "sk-live-secret1234567890", id="api-key"),
+        pytest.param("Bearer tok_supersecret123456", "tok_supersecret123456", id="bearer-token"),
+    ],
+)
+def test_model_safeguard_refusal_redacts_provider_code(secret_code: str, leaked_secret: str) -> None:
+    """A secret-bearing provider_code is redacted before entering summary, code, detail, or plain text."""
+    error = ModelSafeguardRefusal(provider="OpenRouter", usage=MessageMetrics(), provider_code=secret_code)
+
+    info = describe_reply_error(error, model_label="Neon")
+    wire = info.to_wire()
+
+    assert leaked_secret not in info.summary
+    assert leaked_secret not in (info.code or "")
+    assert leaked_secret not in (info.detail or "")
+    assert leaked_secret not in info.plain_text
+    assert leaked_secret not in str(wire)
+    assert "***redacted***" in info.summary
+    assert "***redacted***" in wire["code"]
+
+
+def test_huge_provider_error_is_bounded_for_matrix_edit_delivery(tmp_path: Path) -> None:
+    """A 50 KiB+ provider error stays bounded in summary and detail well under Matrix's 64 KiB event limit."""
+    huge_html = "<html><body>503 Service Unavailable " + ("<div>gateway timeout</div> " * 2500) + "</body></html>"
+    assert len(huge_html.encode("utf-8")) > 50_000
+
+    unavailable_wire = describe_reply_error(
+        ProviderUnavailable(huge_html, provider="OpenRouter", status_code=503),
+        model_label="Neon",
+    ).to_wire()
+    assert unavailable_wire["summary"] == "Neon could not complete the reply. Try again shortly."
+    assert len(unavailable_wire["detail"]) <= 2_000
+    # Even when duplicated into top-level and m.new_content on a Matrix edit, wire metadata stays tiny.
+    edit_payload = {
+        "io.mindroom.ai_run": {"version": 1, "status": "error", "error": unavailable_wire},
+        "m.new_content": {"io.mindroom.ai_run": {"version": 1, "status": "error", "error": unavailable_wire}},
+    }
+    assert len(json.dumps(edit_payload).encode("utf-8")) < 10_000
+
+    runtime_wire = describe_reply_error(RuntimeError(huge_html), model_label="Neon").to_wire()
+    assert len(runtime_wire["summary"]) <= 1_000
+    assert runtime_wire["summary"].endswith("…")
+    assert len(runtime_wire["detail"]) <= 2_000
+
+    # Trusted static missing-key guidance is never truncated or stripped.
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_PUBLIC_URL": "https://42.mindroom.chat/"},
+    )
+    missing_wire = describe_reply_error(
+        missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter"),
+        runtime_paths=runtime_paths,
+    ).to_wire()
+    assert missing_wire["summary"] == (
+        "No AI provider key is set up yet, so I can't reply. "
+        "Open the MindRoom dashboard (https://42.mindroom.chat), choose Connect your AI provider, "
+        "paste your key, then send your message again."
+    )

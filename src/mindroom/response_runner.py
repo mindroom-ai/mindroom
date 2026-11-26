@@ -45,7 +45,7 @@ from mindroom.delegation.background import job_acknowledgers
 from mindroom.delegation.cost import carried_receipts, receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.error_handling import get_user_friendly_error_message, model_error_labels
+from mindroom.error_handling import log_reply_error, model_error_labels
 from mindroom.final_delivery import (
     Cancelled,
     Completed,
@@ -738,20 +738,22 @@ class ResponseRunner:
             confirms = handle.unconfirmed_progress
             now_ns = time.time_ns()
             model_label, provider = model_error_labels(handle.reply_model)
-            error_text = get_user_friendly_error_message(
+            info = log_reply_error(
                 cause,
                 self.deps.agent_name,
                 runtime_paths=self.deps.runtime_paths,
                 model_label=model_label,
                 provider=provider,
-                include_agent_prefix=False,
             )
+            error_text = info.plain_text
+            error_info = info.to_wire()
             await gateway.end_reply_span(
                 handle,
                 lambda reply, span: rl.dispatch_failed(
                     rl.confirm_progress(reply, confirms),
                     span,
                     error_text=error_text,
+                    error_info=error_info,
                     now_ns=now_ns,
                 ),
             )

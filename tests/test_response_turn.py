@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import constants
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.constants import (
@@ -30,6 +31,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.participation import ParticipationGate
+from mindroom.providers.errors import missing_api_key_error
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -419,6 +421,7 @@ async def _collect_turn(
     sinks: TurnSinks | None = None,
     continuation: TurnContinuationRunState | None = None,
     resume: TurnResume | None = None,
+    runtime_paths: constants.RuntimePaths | None = None,
     **adapter_options: object,
 ) -> list[str | FailedReply]:
     """Run one turn of ``attempt`` to its end and return what it streamed; unset inputs are the usual test ones."""
@@ -429,6 +432,7 @@ async def _collect_turn(
             sinks or TurnSinks(),
             continuation=continuation or _continuation(),
             resume=resume,
+            runtime_paths=runtime_paths,
         ),
     )
 
@@ -1947,3 +1951,32 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(
         assert recorder.outcome == "skipped"
         assert recorder.interrupted_calls == []
         assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_settle_failure_uses_runtime_paths_for_missing_api_key_dashboard_url(tmp_path: Path) -> None:
+    """Fallback error classification in _settle_failure keeps the configured dashboard URL when runtime_paths is passed."""
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_PUBLIC_URL": "https://42.mindroom.chat/"},
+    )
+    collector: dict[str, Any] = {}
+
+    missing_error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
+
+    async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> StreamAttemptResolution:
+        raise missing_error
+
+    chunks = await _collect_turn(
+        _streamed(attempt),
+        sinks=TurnSinks(run_metadata_collector=collector),
+        runtime_paths=runtime_paths,
+    )
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], FailedReply)
+    assert collector["io.mindroom.ai_run"]["status"] == "error"
+    assert collector["io.mindroom.ai_run"]["error"]["kind"] == "missing_api_key"
+    assert "https://42.mindroom.chat" in collector["io.mindroom.ai_run"]["error"]["summary"]
+    assert "**" not in collector["io.mindroom.ai_run"]["error"]["summary"]

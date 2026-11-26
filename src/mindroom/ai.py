@@ -41,7 +41,7 @@ from mindroom.delegation.lifecycle import (
     running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
-from mindroom.error_handling import describe_reply_error, get_user_friendly_error_message, model_error_labels
+from mindroom.error_handling import log_reply_error, model_error_labels
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.failure_text import failure_text
 from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
@@ -1442,16 +1442,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             active_model=active,
             fallback_model_name=ctx.active_model_name,
         )
-        info = describe_reply_error(error, runtime_paths=runtime_paths, model_label=model_label, provider=provider)
-        text = get_user_friendly_error_message(
+        info = log_reply_error(
             error,
             agent_name=agent_name,
             runtime_paths=runtime_paths,
             model_label=model_label,
             provider=provider,
-            include_agent_prefix=False,
         )
-        return text, info.to_wire()
+        return info.plain_text, info.to_wire()
 
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
@@ -1614,6 +1612,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         sinks,
         resume=resume,
         continuation=_initial_agent_continuation(ctx),
+        runtime_paths=runtime_paths,
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.

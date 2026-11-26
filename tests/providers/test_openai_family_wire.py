@@ -1604,17 +1604,17 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
         (
             {"message": "Rate limit exceeded: free-models-per-min", "code": 429},
             RateLimited,
-            "⏱️ Rate limit reached — The model hit OpenAI's rate limit after automatic retries.",
+            "⏱️ Rate limit reached — The model hit OpenAI's rate limit. Try again shortly.",
         ),
         (
             {"message": "Slow down", "code": 529},
             ProviderUnavailable,
-            "⚠️ OpenAI unavailable — The model could not complete the reply after automatic retries.",
+            "⚠️ OpenAI unavailable — The model could not complete the reply. Try again shortly.",
         ),
         (
             {"message": "Service Unavailable", "code": 503},
             ProviderUnavailable,
-            "⚠️ OpenAI unavailable — The model could not complete the reply after automatic retries.",
+            "⚠️ OpenAI unavailable — The model could not complete the reply. Try again shortly.",
         ),
     ],
     ids=["429", "529", "503"],

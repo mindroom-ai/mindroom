@@ -2170,7 +2170,7 @@ _REQUESTS_OAUTH_HOST_FAILURE = (
     '(Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7f0>: '
     "Failed to resolve 'oauth2.googleapis.com' ([Errno -3] Temporary failure in name resolution)\"))"
 )
-_UNAVAILABLE_FINAL_MESSAGE = "⚠️ VertexAI unavailable — The model could not complete the reply after automatic retries."
+_UNAVAILABLE_FINAL_MESSAGE = "⚠️ VertexAI unavailable — The model could not complete the reply. Try again shortly."
 
 
 class _RefreshFailingCredentials(Credentials):

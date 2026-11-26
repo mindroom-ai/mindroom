@@ -98,7 +98,7 @@ def _assert_friendly_error(error: ProviderError, expected: str) -> None:
         else:
             assert info.kind == "provider_unavailable"
             assert message.startswith(f"⚠️ {info.provider} unavailable")
-            assert message.endswith("The model could not complete the reply after automatic retries.")
+            assert message.endswith("The model could not complete the reply. Try again shortly.")
         return
     assert message.startswith(expected)
 

@@ -20,7 +20,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, model_payload, with_prior_usage
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
-from mindroom.error_handling import describe_reply_error, get_user_friendly_error_message, model_error_labels
+from mindroom.error_handling import describe_reply_error, log_reply_error, model_error_labels
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
@@ -735,20 +735,15 @@ class _TeamTurn:
         else:
             model = active_model
         model_label, provider = model_error_labels(model)
-        error_info = describe_reply_error(
+        info = log_reply_error(
             error,
-            runtime_paths=self.runtime_paths,
-            model_label=model_label,
-            provider=provider,
-        ).to_wire()
-        text = get_user_friendly_error_message(
-            error,
-            self.ctx.entity_label,
+            agent_name=self.ctx.entity_label,
             runtime_paths=self.runtime_paths,
             model_label=model_label,
             provider=provider,
         )
-        return text, error_info
+        text = f"[{self.ctx.entity_label}] {info.plain_text}" if self.ctx.entity_label else info.plain_text
+        return text, info.to_wire()
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
@@ -864,6 +859,7 @@ async def team_response_stream(
         adapter,
         sinks,
         continuation=turn.initial_continuation(),
+        runtime_paths=turn.runtime_paths,
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.
