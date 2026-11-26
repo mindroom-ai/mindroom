@@ -997,4 +997,114 @@ def test_gmail_instructions_name_only_offered_compose_functions(
     instructions = gmail_tools.instructions_for(gmail_tools.functions)
     assert "send_email(" not in instructions
     assert "create_draft_email" in instructions
-    assert "send_email_reply" in instructions
+    assert "send_email_reply(thread_id, message_id, to, subject, body)" in instructions
+
+
+@pytest.mark.parametrize("subject", ["", "   "])
+def test_send_email_reply_rejects_empty_subject_without_calling_send(
+    subject: str,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """send_email_reply must validate the caller's original subject before prepending Re:."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    gmail_tools.service = service
+
+    result = gmail_tools.send_email_reply(
+        thread_id="thread-1",
+        message_id="msg-1",
+        to="alice@example.com",
+        subject=subject,
+        body="Following up.",
+    )
+
+    assert "Subject cannot be empty" in result
+    service.users.return_value.messages.return_value.send.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected_subject"),
+    [
+        ("Quarterly review", "Re: Quarterly review"),
+        ("Re: Quarterly review", "Re: Quarterly review"),
+    ],
+)
+def test_send_email_reply_prefixes_valid_subject_once(
+    subject: str,
+    expected_subject: str,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """send_email_reply prefixes non-empty subjects with Re: exactly once."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.messages.return_value.send.return_value.execute.return_value = {"id": "sent-1"}
+    gmail_tools.service = service
+
+    result = json.loads(
+        gmail_tools.send_email_reply(
+            thread_id="thread-1",
+            message_id="msg-1",
+            to="alice@example.com",
+            subject=subject,
+            body="Following up.",
+        ),
+    )
+
+    assert result == {"id": "sent-1"}
+    sent_body = service.users.return_value.messages.return_value.send.call_args.kwargs["body"]
+    parsed = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(sent_body["raw"]))
+    assert parsed["subject"] == expected_subject
+    assert sent_body["threadId"] == "thread-1"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_event", "expected_extra"),
+    [
+        (
+            HttpError(SimpleNamespace(status=500, reason="Internal Server Error"), b"boom"),
+            "gmail_list_emails_failed",
+            {"status": 500},
+        ),
+        (
+            RuntimeError("unexpected failure"),
+            "gmail_list_emails_unexpected_error",
+            {"error_type": "RuntimeError"},
+        ),
+    ],
+)
+def test_gmail_list_warning_logs_do_not_leak_sender_or_search_query(
+    failure: Exception,
+    expected_event: str,
+    expected_extra: dict[str, object],
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Warning logs on Gmail list failures must log only fixed operation names, never sender or query text."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.side_effect = failure
+    gmail_tools.service = service
+
+    sensitive_sender = "private-ceo@secret-corp.example"
+    sensitive_context = "confidential acquisition offer 2026"
+    sensitive_query = "from:board@secret-corp.example salary"
+
+    with patch("mindroom.custom_tools.gmail.logger") as mock_logger:
+        gmail_tools.get_emails_from_user(user=sensitive_sender)
+        gmail_tools.get_emails_by_context(context=sensitive_context)
+        gmail_tools.search_emails(query=sensitive_query)
+
+    assert len(mock_logger.warning.call_args_list) == 3
+    expected_ops = ["get_emails_from_user", "get_emails_by_context", "search_emails"]
+    for call, expected_op in zip(mock_logger.warning.call_args_list, expected_ops, strict=True):
+        assert call.args == (expected_event,)
+        assert call.kwargs == {"operation": expected_op, **expected_extra}
+        serialized = repr((call.args, call.kwargs))
+        assert sensitive_sender not in serialized
+        assert sensitive_context not in serialized
+        assert sensitive_query not in serialized

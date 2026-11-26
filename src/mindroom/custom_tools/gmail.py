@@ -19,7 +19,7 @@ from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit
+from mindroom.custom_tools.google_service import GoogleApiToolkit, visible_google_function_map
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
@@ -76,24 +76,9 @@ _GMAIL_QUERY_INSTRUCTIONS = textwrap.dedent("""\
 _COMPOSE_HINT_NAMES = ("send_email", "create_draft_email", "send_email_reply")
 
 
-def validate_email(email: str) -> bool:
+def _validate_email(email: str) -> bool:
     """Validate email address syntax."""
     return bool(_EMAIL_PATTERN.match(email.strip()))
-
-
-def _visible_compose_map(function_names: Collection[str]) -> dict[str, str]:
-    offered = list(function_names)
-    mapping: dict[str, str] = {}
-    for base in _COMPOSE_HINT_NAMES:
-        if base in offered:
-            mapping[base] = base
-            continue
-        suffix = f"_{base}"
-        for name in offered:
-            if name.endswith(suffix):
-                mapping[base] = name
-                break
-    return mapping
 
 
 def _compose_instructions_for(visible: dict[str, str]) -> str:
@@ -109,7 +94,10 @@ def _compose_instructions_for(visible: dict[str, str]) -> str:
     elif draft_name:
         lines.append(f"- **New email:** `{draft_name}(to, subject, body)`")
     if reply_name:
-        lines.append(f"- **Reply (send now):** `{reply_name}(message_id, body)` keeps the message in the thread")
+        lines.append(
+            f"- **Reply (send now):** `{reply_name}(thread_id, message_id, to, subject, body)` "
+            "keeps the message in the thread",
+        )
     if draft_name:
         lines.append(
             f"- **Reply (draft):** `{draft_name}(to, subject, body, thread_id=..., message_id=...)` "
@@ -181,7 +169,7 @@ def _validate_email_params(to: str, subject: str, body: str) -> None:
         msg = "Recipient email cannot be empty"
         raise ValueError(msg)
     for email in to.split(","):
-        if not validate_email(email.strip()):
+        if not _validate_email(email.strip()):
             msg = f"Invalid recipient email format: {email}"
             raise ValueError(msg)
     if not subject or not subject.strip():
@@ -413,6 +401,10 @@ class GmailTools(GoogleApiToolkit):
             **kwargs,
         )
 
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return Gmail service-account scopes, honoring explicit constructor scopes."""
+        return tuple(self.scopes)
+
     @property
     def instructions(self) -> str:  # ty: ignore[incompatible-property-override]
         """Return instructions scoped to the currently registered Gmail functions."""
@@ -424,7 +416,7 @@ class GmailTools(GoogleApiToolkit):
             return self._custom_instructions
         if not function_names:
             return ""
-        compose_section = _compose_instructions_for(_visible_compose_map(function_names))
+        compose_section = _compose_instructions_for(visible_google_function_map(function_names, _COMPOSE_HINT_NAMES))
         return f"{_GMAIL_QUERY_INSTRUCTIONS}{compose_section}"
 
     def _load_attachments(self, attachments: object) -> list[tuple[str, bytes]] | None:
@@ -442,6 +434,7 @@ class GmailTools(GoogleApiToolkit):
         query: str | None,
         count: int,
         page_token: str | None,
+        operation: str,
         error_label: str,
     ) -> str:
         try:
@@ -463,10 +456,10 @@ class GmailTools(GoogleApiToolkit):
                 response["nextPageToken"] = results["nextPageToken"]
             return json.dumps(response)
         except HttpError as exc:
-            logger.warning("gmail_list_emails_failed", operation=error_label, status=exc.resp.status)
+            logger.warning("gmail_list_emails_failed", operation=operation, status=exc.resp.status)
             return json.dumps({"error": f"Error retrieving {error_label}: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_list_emails_unexpected_error", operation=error_label, error_type=type(exc).__name__)
+            logger.warning("gmail_list_emails_unexpected_error", operation=operation, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     def _modify_simple_label(
@@ -650,6 +643,43 @@ class GmailTools(GoogleApiToolkit):
         file_path.write_bytes(data)
         return str(file_path)
 
+    def _prepare_outgoing_message(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        cc: str | None = None,
+        bcc: str | None = None,
+        attachments: str | list[str] | None = None,
+        thread_id: str | None = None,
+        message_id: str | None = None,
+        is_reply: bool = False,
+    ) -> dict[str, str] | str:
+        """Load attachments, validate fields, and build a Gmail MIME payload.
+
+        Returns a JSON error string if attachment loading fails, raises ``ValueError``
+        for invalid email parameters, or returns the encoded MIME payload dict.
+        """
+        try:
+            loaded_attachments = self._load_attachments(attachments)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        _validate_email_params(to, subject, body)
+        if (is_reply or thread_id) and not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        return _build_mime_message(
+            [addr.strip() for addr in to.split(",")],
+            subject,
+            body,
+            cc=[addr.strip() for addr in cc.split(",")] if cc else None,
+            bcc=[addr.strip() for addr in bcc.split(",")] if bcc else None,
+            thread_id=thread_id,
+            message_id=message_id,
+            attachments=loaded_attachments,
+        )
+
     def _send_email_impl(
         self,
         *,
@@ -661,27 +691,23 @@ class GmailTools(GoogleApiToolkit):
         attachments: str | list[str] | None = None,
         thread_id: str | None = None,
         message_id: str | None = None,
+        is_reply: bool = False,
         error_verb: str = "sending email",
     ) -> str:
         try:
-            loaded_attachments = self._load_attachments(attachments)
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        try:
-            _validate_email_params(to, subject, body)
-            if thread_id and not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-            mime = _build_mime_message(
-                to.split(","),
-                subject,
-                body,
-                cc=cc.split(",") if cc else None,
-                bcc=bcc.split(",") if bcc else None,
+            mime = self._prepare_outgoing_message(
+                to=to,
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                attachments=attachments,
                 thread_id=thread_id,
                 message_id=message_id,
-                attachments=loaded_attachments,
+                is_reply=is_reply,
             )
+            if isinstance(mime, str):
+                return mime
             service = self._google_api_service()
             sent = service.users().messages().send(userId="me", body=mime).execute()
         except HttpError as exc:
@@ -703,7 +729,13 @@ class GmailTools(GoogleApiToolkit):
             JSON with emails array and nextPageToken if more results exist.
 
         """
-        return self._list_emails(query=None, count=count, page_token=page_token, error_label="latest emails")
+        return self._list_emails(
+            query=None,
+            count=count,
+            page_token=page_token,
+            operation="get_latest_emails",
+            error_label="latest emails",
+        )
 
     def get_emails_from_user(self, user: str = "", count: int = 10, page_token: str | None = None) -> str:
         """Get X number of emails from a specific user (name or email).
@@ -718,7 +750,13 @@ class GmailTools(GoogleApiToolkit):
 
         """
         query = f"from:{user}" if "@" in user else f"from:{user}*"
-        return self._list_emails(query=query, count=count, page_token=page_token, error_label=f"emails from {user}")
+        return self._list_emails(
+            query=query,
+            count=count,
+            page_token=page_token,
+            operation="get_emails_from_user",
+            error_label=f"emails from {user}",
+        )
 
     def get_unread_emails(self, count: int = 10, page_token: str | None = None) -> str:
         """Get the X number of latest unread emails from the user's inbox.
@@ -731,7 +769,13 @@ class GmailTools(GoogleApiToolkit):
             JSON with emails array and nextPageToken if more results exist.
 
         """
-        return self._list_emails(query="is:unread", count=count, page_token=page_token, error_label="unread emails")
+        return self._list_emails(
+            query="is:unread",
+            count=count,
+            page_token=page_token,
+            operation="get_unread_emails",
+            error_label="unread emails",
+        )
 
     def get_starred_emails(self, count: int = 10, page_token: str | None = None) -> str:
         """Get X number of starred emails from the user's inbox.
@@ -744,7 +788,13 @@ class GmailTools(GoogleApiToolkit):
             JSON with emails array and nextPageToken if more results exist.
 
         """
-        return self._list_emails(query="is:starred", count=count, page_token=page_token, error_label="starred emails")
+        return self._list_emails(
+            query="is:starred",
+            count=count,
+            page_token=page_token,
+            operation="get_starred_emails",
+            error_label="starred emails",
+        )
 
     def get_emails_by_context(self, context: str = "", count: int = 10, page_token: str | None = None) -> str:
         """Get X number of emails matching a specific context or search term.
@@ -762,6 +812,7 @@ class GmailTools(GoogleApiToolkit):
             query=context,
             count=count,
             page_token=page_token,
+            operation="get_emails_by_context",
             error_label=f"emails by context '{context}'",
         )
 
@@ -797,6 +848,7 @@ class GmailTools(GoogleApiToolkit):
             query=query,
             count=num_emails or 10,
             page_token=page_token,
+            operation="get_emails_by_date",
             error_label="emails by date",
         )
 
@@ -836,7 +888,13 @@ class GmailTools(GoogleApiToolkit):
             JSON with emails array and nextPageToken if more results exist.
 
         """
-        return self._list_emails(query=query, count=count, page_token=page_token, error_label="emails")
+        return self._list_emails(
+            query=query,
+            count=count,
+            page_token=page_token,
+            operation="search_emails",
+            error_label="emails",
+        )
 
     def mark_email_as_read(self, message_id: str = "") -> str:
         """Mark a specific email as read by removing the 'UNREAD' label.
@@ -953,24 +1011,18 @@ class GmailTools(GoogleApiToolkit):
 
         """
         try:
-            loaded_attachments = self._load_attachments(attachments)
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        try:
-            _validate_email_params(to, subject, body)
-            if thread_id and not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-            mime = _build_mime_message(
-                to.split(","),
-                subject,
-                body,
-                cc=cc.split(",") if cc else None,
-                bcc=bcc.split(",") if bcc else None,
+            mime = self._prepare_outgoing_message(
+                to=to,
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                attachments=attachments,
                 thread_id=thread_id,
                 message_id=message_id,
-                attachments=loaded_attachments,
             )
+            if isinstance(mime, str):
+                return mime
             service = self._google_api_service()
             draft = service.users().drafts().create(userId="me", body={"message": mime}).execute()
         except HttpError as exc:
@@ -1045,15 +1097,15 @@ class GmailTools(GoogleApiToolkit):
             JSON string containing sent email details including id.
 
         """
-        reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
         return self._send_email_impl(
             to=to,
-            subject=reply_subject,
+            subject=subject,
             body=body,
             cc=cc,
             attachments=attachments,
             thread_id=thread_id,
             message_id=message_id,
+            is_reply=True,
             error_verb="sending reply",
         )
 
@@ -1074,7 +1126,7 @@ class GmailTools(GoogleApiToolkit):
         if (
             not isinstance(email_address, str)
             or email_address != email_address.strip()
-            or not validate_email(email_address)
+            or not _validate_email(email_address)
         ):
             msg = "Connected Gmail profile did not return one valid email address"
             raise RuntimeError(msg)
@@ -1502,24 +1554,18 @@ class GmailTools(GoogleApiToolkit):
 
         """
         try:
-            loaded_attachments = self._load_attachments(attachments)
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        try:
-            _validate_email_params(to, subject, body)
-            if thread_id and not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-            mime = _build_mime_message(
-                [addr.strip() for addr in to.split(",")],
-                subject,
-                body,
-                cc=[addr.strip() for addr in cc.split(",")] if cc else None,
-                bcc=[addr.strip() for addr in bcc.split(",")] if bcc else None,
+            mime = self._prepare_outgoing_message(
+                to=to,
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                attachments=attachments,
                 thread_id=thread_id,
                 message_id=message_id,
-                attachments=loaded_attachments,
             )
+            if isinstance(mime, str):
+                return mime
             service = self._google_api_service()
             result = service.users().drafts().update(userId="me", id=draft_id, body={"message": mime}).execute()
         except HttpError as exc:

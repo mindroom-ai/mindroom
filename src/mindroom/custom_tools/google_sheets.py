@@ -15,7 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SERVICE_NAME = "Google Sheets"
+_SHEETS_READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+_SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 
 def _resolve_toggle(
@@ -57,6 +59,7 @@ class GoogleSheetsTools(GoogleApiToolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
+        scopes: Sequence[str] | None = None,
         spreadsheet_id: str | None = None,
         spreadsheet_range: str | None = None,
         read: bool | None = None,
@@ -75,6 +78,15 @@ class GoogleSheetsTools(GoogleApiToolkit):
         enable_read = _resolve_toggle("read", "read_sheet", read, read_sheet)
         enable_create = _resolve_toggle("create", "create_sheet", create, create_sheet)
         enable_update = _resolve_toggle("update", "update_sheet", update, update_sheet)
+        if scopes is None:
+            resolved_scopes: list[str] = []
+            if all or enable_read:
+                resolved_scopes.append(_SHEETS_READ_SCOPE)
+            if all or enable_create or enable_update or create_duplicate_sheet:
+                resolved_scopes.append(_SHEETS_WRITE_SCOPE)
+            self.scopes = list(dict.fromkeys(resolved_scopes))
+        else:
+            self.scopes = list(scopes)
 
         tools: list[Callable[..., str]] = []
         if all or enable_read:
@@ -97,6 +109,10 @@ class GoogleSheetsTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
+
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return Sheets service-account scopes matching enabled operations or explicit scopes."""
+        return tuple(self.scopes)
 
     def read_sheet(
         self,
@@ -171,16 +187,14 @@ class GoogleSheetsTools(GoogleApiToolkit):
             A message indicating the success or failure of the operation.
 
         """
-        sheet_id = self.spreadsheet_id or spreadsheet_id
-        sheet_range = self.spreadsheet_range or range_name
-        if not sheet_id or not sheet_range:
-            return "Spreadsheet ID and range must be provided either in constructor or method call"
+        if not (spreadsheet_id and spreadsheet_id.strip()) or not (range_name and range_name.strip()):
+            return "Spreadsheet ID and range_name must be provided in update_sheet call"
 
         try:
             service = self._google_api_service()
             service.spreadsheets().values().update(
-                spreadsheetId=sheet_id,
-                range=sheet_range,
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
                 valueInputOption="RAW",
                 body={"values": data},
             ).execute()
@@ -189,7 +203,7 @@ class GoogleSheetsTools(GoogleApiToolkit):
         except Exception as exc:
             logger.warning("google_sheets_update_failed", error_type=type(exc).__name__)
             return f"Error updating Google Sheet: {exc}"
-        return f"Sheet updated successfully: {sheet_id}"
+        return f"Sheet updated successfully: {spreadsheet_id}"
 
     def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict[str, Any]]) -> str:
         """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.

@@ -257,6 +257,26 @@ class _CommitWriteResult(Protocol):
     html_url: str
 
 
+def _format_content_write_result(
+    content_result: _ContentWriteResult,
+    commit_result: _CommitWriteResult,
+    message: str,
+) -> str:
+    return json.dumps(
+        {
+            "path": content_result.path,
+            "sha": content_result.sha,
+            "url": content_result.html_url,
+            "commit": {
+                "sha": commit_result.sha,
+                "message": message,
+                "url": commit_result.html_url,
+            },
+        },
+        indent=2,
+    )
+
+
 class GithubTools(Toolkit):
     """Native GitHub tools authenticated by explicit or requester-scoped OAuth credentials."""
 
@@ -1345,20 +1365,10 @@ class GithubTools(Toolkit):
             result = repo.create_file(path=path, message=message, content=content_bytes)
         else:
             result = repo.create_file(path=path, message=message, content=content_bytes, branch=branch)
-        content_result = cast("_ContentWriteResult", result["content"])
-        commit_result = cast("_CommitWriteResult", result["commit"])
-        return json.dumps(
-            {
-                "path": content_result.path,
-                "sha": content_result.sha,
-                "url": content_result.html_url,
-                "commit": {
-                    "sha": commit_result.sha,
-                    "message": message,
-                    "url": commit_result.html_url,
-                },
-            },
-            indent=2,
+        return _format_content_write_result(
+            cast("_ContentWriteResult", result["content"]),
+            cast("_CommitWriteResult", result["commit"]),
+            message,
         )
 
     def get_file_content(self, repo_name: str, path: str, ref: str | None = None) -> str:
@@ -1434,20 +1444,10 @@ class GithubTools(Toolkit):
                 sha=sha,
                 branch=branch,
             )
-        content_result = cast("_ContentWriteResult", result["content"])
-        commit_result = cast("_CommitWriteResult", result["commit"])
-        return json.dumps(
-            {
-                "path": content_result.path,
-                "sha": content_result.sha,
-                "url": content_result.html_url,
-                "commit": {
-                    "sha": commit_result.sha,
-                    "message": message,
-                    "url": commit_result.html_url,
-                },
-            },
-            indent=2,
+        return _format_content_write_result(
+            cast("_ContentWriteResult", result["content"]),
+            cast("_CommitWriteResult", result["commit"]),
+            message,
         )
 
     def delete_file(

@@ -13,10 +13,11 @@ from googleapiclient.http import build_http
 
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.google import google_service_scopes
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection, Iterable
 
     from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
@@ -89,7 +90,26 @@ def google_http_error_result(
     return json.dumps({"error": message})
 
 
-class ThreadLocalGoogleServiceMixin:
+def visible_google_function_map(
+    function_names: Collection[str],
+    base_names: Iterable[str],
+) -> dict[str, str]:
+    """Map base Google tool function names to offered names, including workspace prefixes."""
+    offered = list(function_names)
+    mapping: dict[str, str] = {}
+    for base in base_names:
+        if base in offered:
+            mapping[base] = base
+            continue
+        suffix = f"_{base}"
+        for name in offered:
+            if name.endswith(suffix):
+                mapping[base] = name
+                break
+    return mapping
+
+
+class _ThreadLocalGoogleServiceMixin:
     """Own Google credentials and service objects in one worker thread."""
 
     def _google_service_state(self) -> _GoogleServiceThreadState:
@@ -168,7 +188,7 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().user_email = value
 
 
-class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+class _GoogleOAuthToolkit(ScopedOAuthClientMixin, _ThreadLocalGoogleServiceMixin, Toolkit):
     """Google toolkit with scoped OAuth credentials and optional service-account fallback."""
 
     _require_delegated_user_for_service_account: ClassVar[bool] = False
@@ -219,6 +239,10 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             self.functions[name] = self._oauth_entrypoint(function)
             setattr(self, name, self.functions[name])
 
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return API scopes for service-account token minting, separate from user OAuth sign-in scopes."""
+        return google_service_scopes(self._oauth_provider)
+
     def _service_account_auth(self) -> Any:  # noqa: ANN401
         """Return Google credentials built from the configured service-account file."""
         from google.oauth2 import service_account  # noqa: PLC0415
@@ -229,15 +253,16 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
                 "requires GOOGLE_SERVICE_ACCOUNT_FILE"
             )
             raise RuntimeError(msg)
-        if self._require_delegated_user_for_service_account and not self.delegated_user:
+        delegated_user = self.delegated_user.strip() if self.delegated_user else None
+        if self._require_delegated_user_for_service_account and not delegated_user:
             msg = f"{self._oauth_provider.display_name} service-account authentication requires GOOGLE_DELEGATED_USER"
             raise RuntimeError(msg)
         creds = service_account.Credentials.from_service_account_file(
             self.service_account_path,
-            scopes=self._oauth_provider.scopes,
+            scopes=self._service_account_scopes(),
         )
-        if self.delegated_user:
-            creds = creds.with_subject(self.delegated_user)
+        if delegated_user:
+            creds = creds.with_subject(delegated_user)
         return creds
 
 

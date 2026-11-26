@@ -29,10 +29,11 @@ from mindroom.credentials.manager import (
 )
 from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
+from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.custom_tools.google_service import _ThreadLocalGoogleServiceMixin
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.custom_tools.google_tasks import GoogleTasksTools
 from mindroom.oauth import client as oauth_client_module
@@ -211,7 +212,7 @@ def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(google_service, "_GoogleServiceThreadState", RacingThreadState)
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -242,7 +243,7 @@ def test_google_account_cache_clears_when_credential_key_changes(
 ) -> None:
     """Account-derived identifiers must not survive a requester credential switch."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -259,7 +260,7 @@ def test_google_account_cache_clears_when_credential_key_changes(
 def test_google_refresh_revision_adoption_preserves_active_service_and_account_caches() -> None:
     """Same-account refresh must not invalidate service state midway through one tool call."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -287,7 +288,7 @@ def test_google_refresh_revision_adoption_preserves_active_service_and_account_c
 def test_google_account_cache_is_thread_local(cache_field: str, values: tuple[object, object]) -> None:
     """Concurrent requester workers must not share account-derived identifiers."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -2779,3 +2780,193 @@ def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_err
             creds=_valid_credentials(),
             max_read_size=max_read_size,
         )
+
+
+_GOOGLE_IDENTITY_SCOPES = frozenset(
+    {
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("toolkit_factory", "expected_scopes", "delegated_user"),
+    [
+        pytest.param(
+            lambda rp, cm: GoogleDriveTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/drive",),
+            None,
+            id="drive-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleDriveTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            ),
+            ("https://www.googleapis.com/auth/drive.readonly",),
+            None,
+            id="drive-explicit-scopes",
+        ),
+        pytest.param(
+            lambda rp, cm: GmailTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ),
+            "alice@example.com",
+            id="gmail-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GmailTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            ),
+            ("https://www.googleapis.com/auth/gmail.readonly",),
+            "alice@example.com",
+            id="gmail-explicit-scopes",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleSheetsTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/spreadsheets",
+            ),
+            None,
+            id="sheets-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleSheetsTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                read=True,
+                create=False,
+                update=False,
+            ),
+            ("https://www.googleapis.com/auth/spreadsheets.readonly",),
+            None,
+            id="sheets-read-only",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleCalendarTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/calendar",
+            ),
+            None,
+            id="calendar-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleDocsTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/documents",),
+            None,
+            id="docs-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleTasksTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/tasks",),
+            None,
+            id="tasks-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleBigQueryTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                dataset="analytics",
+                project="example-project",
+                location="US",
+            ),
+            ("https://www.googleapis.com/auth/cloud-platform.read-only",),
+            None,
+            id="bigquery-default",
+        ),
+    ],
+)
+def test_google_service_account_auth_requests_only_toolkit_api_scopes(
+    toolkit_factory: Callable[[RuntimePaths, CredentialsManager], google_service._GoogleOAuthToolkit],
+    expected_scopes: tuple[str, ...],
+    delegated_user: str | None,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service-account token minting must never request user OIDC sign-in scopes and must honor toolkit scopes."""
+    from google.oauth2 import service_account  # noqa: PLC0415
+
+    service_account_path = str(tmp_path / "service-account.json")
+    env_overrides: dict[str, str] = {"GOOGLE_SERVICE_ACCOUNT_FILE": service_account_path}
+    if delegated_user is not None:
+        env_overrides["GOOGLE_DELEGATED_USER"] = delegated_user
+    sa_runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, **env_overrides},
+    )
+
+    recorded: list[tuple[str, tuple[str, ...]]] = []
+    delegated_subjects: list[str] = []
+
+    class _FakeServiceAccountCreds:
+        valid = True
+
+        def with_subject(self, subject: str) -> _FakeServiceAccountCreds:
+            delegated_subjects.append(subject)
+            return self
+
+    def fake_from_file(path: str, *, scopes: tuple[str, ...]) -> _FakeServiceAccountCreds:
+        recorded.append((path, tuple(scopes)))
+        return _FakeServiceAccountCreds()
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_file", fake_from_file)
+    tool = toolkit_factory(sa_runtime_paths, CredentialsManager(tmp_path / "credentials"))
+
+    tool._authenticate()
+
+    assert recorded == [(service_account_path, expected_scopes)]
+    assert _GOOGLE_IDENTITY_SCOPES.isdisjoint(recorded[0][1])
+    if delegated_user is not None:
+        assert delegated_subjects == [delegated_user]
+    else:
+        assert delegated_subjects == []
+
+
+@pytest.mark.parametrize("delegated_user_env", [None, "", "   "])
+def test_gmail_service_account_auth_requires_delegated_user(
+    delegated_user_env: str | None,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gmail service-account auth must fail before minting credentials when GOOGLE_DELEGATED_USER is unset."""
+    from google.oauth2 import service_account  # noqa: PLC0415
+
+    process_env = {
+        **runtime_paths.process_env,
+        "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+    }
+    if delegated_user_env is not None:
+        process_env["GOOGLE_DELEGATED_USER"] = delegated_user_env
+    else:
+        process_env.pop("GOOGLE_DELEGATED_USER", None)
+    sa_runtime_paths = replace(runtime_paths, process_env=process_env)
+
+    called = False
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_file", fail_if_called)
+    tool = GmailTools(
+        runtime_paths=sa_runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    with pytest.raises(RuntimeError, match="GOOGLE_DELEGATED_USER"):
+        tool._authenticate()
+
+    assert called is False

@@ -27,7 +27,7 @@ from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
-from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, GOOGLE_DRIVE_WRITE_SCOPE, google_oauth_provider
 from mindroom.oauth.service import OAUTH_MISSING_WRITE_SCOPE_REASON, oauth_connection_required
 from mindroom.path_confinement import (
     open_directory_within_root,
@@ -37,7 +37,7 @@ from mindroom.tool_system.agno_toolkits import rename_toolkit_functions, toolkit
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
     from mindroom.config.models import FileAccess
@@ -247,6 +247,7 @@ class GoogleDriveTools(GoogleApiToolkit):
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
+        scopes: Sequence[str] | None = None,
         list_files: bool = True,
         search_files: bool = True,
         read_file: bool = True,
@@ -292,6 +293,7 @@ class GoogleDriveTools(GoogleApiToolkit):
         self.include_items_from_all_drives = include_items_from_all_drives
         self.drive_id = drive_id
         self.max_results = max_results
+        self.scopes = [GOOGLE_DRIVE_WRITE_SCOPE] if scopes is None else list(scopes)
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
 
@@ -321,6 +323,10 @@ class GoogleDriveTools(GoogleApiToolkit):
         self._wrap_write_scope_entrypoints()
         rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
         self._download_entrypoint = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])
+
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return Drive service-account scopes, defaulting to the Drive API scope."""
+        return tuple(self.scopes)
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""

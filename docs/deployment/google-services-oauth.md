@@ -116,7 +116,7 @@ To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
 Without `GOOGLE_DELEGATED_USER`, Google Cloud tools run as the service account itself, so grant it the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
-With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only` plus the OpenID, email, and profile identity scopes.
+With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only`.
 
 ## Production Verification Follow-up
 

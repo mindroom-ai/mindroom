@@ -5,19 +5,19 @@ from __future__ import annotations
 import datetime
 import json
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit
+from mindroom.custom_tools.google_service import GoogleApiToolkit, visible_google_function_map
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable, Collection, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -41,22 +41,6 @@ _CALENDAR_FUNCTION_NAMES = (
     "respond_to_event",
 )
 _VALID_RESPONSES = frozenset({"accepted", "declined", "tentative"})
-
-
-def _visible_function_map(function_names: Collection[str]) -> dict[str, str]:
-    """Map base calendar function names to the names offered to the agent (including workspace prefixes)."""
-    offered = list(function_names)
-    mapping: dict[str, str] = {}
-    for base in _CALENDAR_FUNCTION_NAMES:
-        if base in offered:
-            mapping[base] = base
-            continue
-        suffix = f"_{base}"
-        for name in offered:
-            if name.endswith(suffix):
-                mapping[base] = name
-                break
-    return mapping
 
 
 def _calendar_tips(visible: dict[str, str]) -> list[str]:
@@ -210,6 +194,11 @@ class GoogleCalendarTools(GoogleApiToolkit):
     _google_api_name = "calendar"
     _google_api_version = "v3"
 
+    default_scopes: ClassVar[list[str]] = [
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar",
+    ]
+
     def __init__(
         self,
         *,
@@ -217,6 +206,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
+        scopes: Sequence[str] | None = None,
         calendar_id: str = "primary",
         max_results: int = 20,
         expand_recurring: bool = True,
@@ -241,6 +231,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
         self.calendar_id = calendar_id
         self.max_results = max_results
         self.expand_recurring = expand_recurring
+        self.scopes = list(self.default_scopes) if scopes is None else list(scopes)
         self._custom_instructions = instructions
 
         writes_allowed = allow_update is True
@@ -263,7 +254,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             (respond_to_event, self.respond_to_event),
         )
         tools: list[Callable[..., str]] = [method for enabled, method in read_toggles if enabled]
-        tools.extend(method for flag, method in write_toggles if (writes_allowed if flag is None else flag))
+        tools.extend(method for flag, method in write_toggles if writes_allowed and (flag is None or flag))
 
         super().__init__(
             name="google_calendar",
@@ -275,6 +266,10 @@ class GoogleCalendarTools(GoogleApiToolkit):
             **kwargs,
         )
 
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return Calendar service-account scopes, honoring explicit constructor scopes."""
+        return tuple(self.scopes)
+
     @property
     def instructions(self) -> str:  # ty: ignore[incompatible-property-override]
         """Return instructions scoped to the currently registered calendar functions."""
@@ -284,7 +279,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
         """Return Google Calendar guidance naming only the functions offered in ``function_names``."""
         if self._custom_instructions is not None:
             return self._custom_instructions
-        visible = _visible_function_map(function_names)
+        visible = visible_google_function_map(function_names, _CALENDAR_FUNCTION_NAMES)
         if not visible:
             return ""
 

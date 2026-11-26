@@ -181,3 +181,30 @@ def test_google_calendar_instructions_name_only_offered_functions(tmp_path: Path
     assert "update_event" not in instructions
     assert "delete_event" not in instructions
     assert "quick_add_event" not in instructions
+
+
+def test_google_calendar_allow_update_false_overrides_explicit_write_flags(tmp_path: Path) -> None:
+    tool = GoogleCalendarTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        allow_update=False,
+        create_event=True,
+        update_event=True,
+        delete_event=True,
+        quick_add_event=True,
+        move_event=True,
+        respond_to_event=True,
+    )
+
+    for write_tool in (
+        "create_event",
+        "update_event",
+        "delete_event",
+        "quick_add_event",
+        "move_event",
+        "respond_to_event",
+    ):
+        assert write_tool not in tool.functions
+    assert "list_events" in tool.functions
+    assert "get_event" in tool.functions
