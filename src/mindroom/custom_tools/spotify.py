@@ -374,7 +374,7 @@ class SpotifyTools(Toolkit):
             "url": result.get("external_urls", {}).get("spotify"),
         }
         if include_tracks:
-            item_limit = max(1, min(limit, 100))
+            item_limit = max(1, min(limit, 50))
             item_offset = max(0, offset)
             items_res = self._make_request(
                 f"playlists/{safe_id}/items",

@@ -513,6 +513,8 @@ def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
     toolkit = SpotifyTools(runtime_paths=paths, credentials_manager=manager, worker_target=None)
     monkeypatch.setattr(toolkit, "_current_access_token", lambda: "tok-123")
 
+    item_queries: list[tuple[str | None, str | None]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/playlists/pub1":
             return httpx.Response(
@@ -541,10 +543,9 @@ def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
                 },
             )
         if request.url.path == "/v1/playlists/big1/items":
+            item_queries.append((request.url.params.get("limit"), request.url.params.get("offset")))
             req_offset = int(request.url.params.get("offset", "0"))
-            req_limit = int(request.url.params.get("limit", "20"))
             if req_offset == 20:
-                assert req_limit == 20
                 return httpx.Response(
                     200,
                     json={
@@ -598,8 +599,9 @@ def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
     assert big_pl["tracks_truncated"] is True
 
     page2 = json.loads(
-        toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True, limit=20, offset=20),
+        toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True, limit=100, offset=20),
     )
     assert [t["id"] for t in page2["tracks"]] == ["t21"]
     assert page2["total_tracks"] == 21
     assert page2["tracks_truncated"] is False
+    assert item_queries == [("20", "0"), ("50", "20")]
