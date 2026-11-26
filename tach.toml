@@ -1528,6 +1528,7 @@ depends_on = [
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
+    "mindroom.response_attempt",
     "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.teams",
@@ -4108,6 +4109,7 @@ depends_on = [
     "mindroom.reply_turn.enrichment",
     "mindroom.response_activity",
     "mindroom.response_admission",
+    "mindroom.response_attempt",
     "mindroom.response_sources",
     "mindroom.response_turn",
     "mindroom.room_activity.note",
@@ -4194,7 +4196,11 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.streaming",
 ]
-visibility = ["mindroom.reply_turn.locked_turn"]
+visibility = [
+    "mindroom.approval.continuation_runner",
+    "mindroom.reply_turn.locked_turn",
+    "mindroom.response_runner",
+]
 
 [[modules]]
 path = "mindroom.responder_availability"

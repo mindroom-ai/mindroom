@@ -122,6 +122,7 @@ from mindroom.reply_turn.request import (
     reply_authorization_entity_names,
     response_typing_indicator,
 )
+from mindroom.response_attempt import run_cancellable_span_work
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
@@ -956,7 +957,8 @@ class ApprovalContinuationRunner:
             else nullcontext()
         )
         async with lease_cm:
-            await self.locked.refresh_mid_turn_context_for_approval(request)
+            if (cancelled := await self._refresh_approval_context(claimed, request, target=target)) is not None:
+                return cancelled
             # The resume writes into the reply it continues from its first step.
             progress = TurnProgress(delivery_started=True)
             lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
@@ -1005,25 +1007,68 @@ class ApprovalContinuationRunner:
             )
             ending = progress.ending
             assert ending is not None, "a settled resume has its ending"
-            match ending:
-                case Completed():
-                    step = next_step(await self._facts(post_effect_continuation, recover=True), Resumed("completed"))
-                    if not await self._run_step(post_effect_continuation, step, target=target):
-                        msg = "Approval continuation final delivery was not durably acknowledged"
-                        raise RuntimeError(msg)
-                case Cancelled() | Failed() | Suppressed():
-                    # A hook's suppression of a resumed answer fails the approval, as an error does.
-                    step = next_step(
-                        await self._facts(post_effect_continuation, recover=True),
-                        Resumed("failed", approval_failure(ending)),
-                    )
-                    await self._run_step(
-                        post_effect_continuation,
-                        step,
-                        target=continuation_target(post_effect_continuation),
-                    )
-                case AwaitingApproval() | Owed():
-                    pass
+            await self._settle_claimed_resume_ending(post_effect_continuation, ending, target=target)
+        return ending
+
+    async def _settle_claimed_resume_ending(
+        self,
+        continuation: ApprovalContinuation,
+        ending: TurnEnding,
+        *,
+        target: MessageTarget,
+    ) -> None:
+        """Apply the post-lifecycle continuation step for one claimed resume ending."""
+        match ending:
+            case Completed():
+                step = next_step(await self._facts(continuation, recover=True), Resumed("completed"))
+                if not await self._run_step(continuation, step, target=target):
+                    msg = "Approval continuation final delivery was not durably acknowledged"
+                    raise RuntimeError(msg)
+            case Cancelled() | Failed() | Suppressed():
+                # A hook's suppression of a resumed answer fails the approval, as an error does.
+                step = next_step(
+                    await self._facts(continuation, recover=True),
+                    Resumed("failed", approval_failure(ending)),
+                )
+                await self._run_step(
+                    continuation,
+                    step,
+                    target=continuation_target(continuation),
+                )
+            case AwaitingApproval() | Owed():
+                pass
+
+    async def _refresh_approval_context(
+        self,
+        claimed: ApprovalContinuation,
+        request: ResponseRequest,
+        *,
+        target: MessageTarget,
+    ) -> Cancelled | None:
+        """Refresh mid-turn approval context in a span-registered task; settle on span cancel."""
+        handle = current_span()
+        if handle is None:
+            await self.locked.refresh_mid_turn_context_for_approval(request)
+            return None
+        refreshed = await run_cancellable_span_work(
+            register=partial(handle.runtime.spans.register, handle.span_id),
+            coroutine=self.locked.refresh_mid_turn_context_for_approval(request),
+            logger=self.deps.logger,
+        )
+        if not isinstance(refreshed, Cancelled):
+            return None
+        ending = refreshed
+        if not handle.exited:
+            noted = await self.deps.delivery_gateway.end_interrupted_span(
+                handle,
+                target,
+                ending=refreshed,
+                delivery_started=True,
+                contact_turn=request.contact is not None,
+            )
+            if noted is not None and isinstance(noted.ending, Cancelled):
+                ending = noted.ending
+        await self._settle_claimed_resume_ending(claimed, ending, target=target)
         return ending
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
