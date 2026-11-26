@@ -406,6 +406,26 @@ def test_appcast_metadata_no_diff_same_tag_marks_not_superseded(tmp_path: Path, 
     assert not any(call.startswith(("pr edit", "pr create")) for call in res.gh_calls)
 
 
+def test_appcast_metadata_no_diff_when_remote_branch_newer_marks_superseded(
+    tmp_path: Path,
+    release_workflow: str,
+) -> None:
+    """A no-diff rerun still marks superseded when release-metadata/mindroom already has a newer release."""
+    res = _run_metadata_step(
+        tmp_path,
+        release_workflow,
+        tag_name="v2026.11.621",
+        main_versions=("2026.11.621", "2026.11.620"),
+        local_versions=("2026.11.621", "2026.11.620"),
+        remote_branch_versions=("2026.11.622", "2026.11.620"),
+    )
+    assert res.proc.returncode == 0, res.proc.stderr
+    assert res.outputs == {"superseded": "true"}
+    assert res.push_attempts == 0
+    assert "2026.11.622" in res.remote_appcast
+    assert not any(call.startswith(("pr edit", "pr create")) for call in res.gh_calls)
+
+
 def test_appcast_metadata_skips_pr_update_when_branch_moves_after_push(tmp_path: Path, release_workflow: str) -> None:
     """If another run advances the branch after push succeeds, this run skips editing the PR and marks superseded."""
     res = _run_metadata_step(

@@ -245,9 +245,16 @@ jobs:
           }
 
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          RELEASE_METADATA_BRANCH="release-metadata/mindroom"
           skip_if_newer "HEAD" "main"
 
           if git diff --quiet -- macos/appcast.xml; then
+            git update-ref -d "refs/remotes/origin/${RELEASE_METADATA_BRANCH}" 2>/dev/null || true
+            git fetch "$REPO_URL" \
+              "+refs/heads/${RELEASE_METADATA_BRANCH}:refs/remotes/origin/${RELEASE_METADATA_BRANCH}" || true
+            if REMOTE_RELEASE_METADATA_SHA=$(git rev-parse --verify --quiet "refs/remotes/origin/${RELEASE_METADATA_BRANCH}"); then
+              skip_if_newer "$REMOTE_RELEASE_METADATA_SHA" "$RELEASE_METADATA_BRANCH"
+            fi
             echo "macos/appcast.xml is already up to date."
             echo "superseded=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -261,7 +268,6 @@ jobs:
           skip_if_newer "FETCH_HEAD" "main"
           git rebase FETCH_HEAD
 
-          RELEASE_METADATA_BRANCH="release-metadata/mindroom"
           PUSHED=0
           for attempt in 1 2 3 4 5; do
             if [[ "$attempt" -gt 1 ]]; then
