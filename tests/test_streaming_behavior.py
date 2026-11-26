@@ -1532,7 +1532,7 @@ class TestStreamingBehavior:
             await first_send_seen.wait()
             yield ToolCompleted(call=tool.call)
 
-        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.5, 100.5, 100.5]):
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.0, 100.5, 100.5, 100.5]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
