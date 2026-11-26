@@ -325,6 +325,12 @@ class ShellRunResult:
     execution_error: bool = False
     return_code: int | None = None
     """The exit status of a command that ended within the call; None when it did not start or still runs."""
+    timed_out: bool = False
+
+    @property
+    def failed(self) -> bool:
+        """Return whether the command exited non-zero, timed out, or hit an execution error."""
+        return self.execution_error or self.timed_out or (self.return_code is not None and self.return_code != 0)
 
 
 def default_run_timeout_seconds() -> float:
@@ -422,11 +428,17 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
     _sweep_stale_records(registry)
     if handle is not None:
         if _CALLER_HANDLE_RE.fullmatch(handle) is None:
-            return ShellRunResult(message="Error: Invalid caller-supplied shell handle.")
+            return ShellRunResult(message="Error: Invalid caller-supplied shell handle.", execution_error=True)
         if handle in registry or (handle_reservations is not None and handle in handle_reservations):
-            return ShellRunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+            return ShellRunResult(
+                message=f"Error: Shell handle '{handle}' is already registered.",
+                execution_error=True,
+            )
         if handle_reservations is None:
-            return ShellRunResult(message="Error: Caller-supplied shell handle reservations are unavailable.")
+            return ShellRunResult(
+                message="Error: Caller-supplied shell handle reservations are unavailable.",
+                execution_error=True,
+            )
         handle_reservations.add(handle)
 
     try:
@@ -793,7 +805,7 @@ async def _stop_timed_out_process(
         no_output_file=output_capture is not None,
     )
     if output_capture is None:
-        return ShellRunResult(message=message, return_code=process.returncode)
+        return ShellRunResult(message=message, return_code=process.returncode, timed_out=True)
     output_capture.incomplete = True
     output_capture.interruption = message
     try:
@@ -801,6 +813,7 @@ async def _stop_timed_out_process(
             message=output_capture.publish(process.returncode),
             output_file_handled=True,
             return_code=process.returncode,
+            timed_out=True,
         )
     finally:
         output_capture.close()
@@ -966,7 +979,7 @@ async def _background_process(
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return ShellRunResult(message=rejection, output_file_handled=had_capture)
+        return ShellRunResult(message=rejection, output_file_handled=had_capture, execution_error=True)
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
@@ -998,7 +1011,11 @@ async def _background_process(
         raise
     if active_scope is not None and active_scope.records is registry and active_scope.closed:
         discard_background_record(registry, handle)
-        return ShellRunResult(message="Error: Shell turn already ended.", output_file_handled=had_capture)
+        return ShellRunResult(
+            message="Error: Shell turn already ended.",
+            output_file_handled=had_capture,
+            execution_error=True,
+        )
     message = (
         _format_auto_background_message(
             pid=process.pid,
@@ -1493,10 +1510,13 @@ def _launch_failure(
         return None
     return_code, said = failure
     if capture is None:
-        return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
+        return ShellRunResult(
+            message=format_shell_completion("", said, return_code=return_code),
+            return_code=return_code,
+        )
     capture.stderr.append(f"{said}\n")
     capture.stdout.reached_eof = capture.stderr.reached_eof = True
-    return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
+    return ShellRunResult(message=capture.publish(return_code), output_file_handled=True, return_code=return_code)
 
 
 def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> _IdleLaunch:

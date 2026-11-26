@@ -2799,6 +2799,7 @@ def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
         "shell_backgrounded": False,
     }
     assert retried.json()["ok"] is True
@@ -2858,6 +2859,7 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
         "shell_backgrounded": False,
     }
     assert not failures
@@ -2900,6 +2902,7 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
         "shell_backgrounded": False,
     }
     assert spawned == []
@@ -3342,6 +3345,7 @@ def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
         "result": "from the snapshot",
         "error": None,
         "failure_kind": None,
+        "is_error": False,
         "shell_backgrounded": False,
     }
 
@@ -3877,6 +3881,7 @@ def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mod
         "result": "Stopped after 1s.\nOutput:\nstarted",
         "error": None,
         "failure_kind": None,
+        "is_error": True,
         "shell_backgrounded": False,
     }
 
@@ -4686,6 +4691,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         "result": "ok",
         "error": None,
         "failure_kind": None,
+        "is_error": False,
         "shell_backgrounded": False,
     }
     assert prepare_calls == 1

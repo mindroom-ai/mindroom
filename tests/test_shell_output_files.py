@@ -23,6 +23,7 @@ from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, tool
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
 from tests.api.sandbox_runner_support import execute_call
@@ -161,7 +162,9 @@ async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) 
     result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
 
     assert result.status == "success"
-    assert str(result.result).splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert result.result.content.splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
 
 
 @pytest.mark.asyncio
@@ -214,7 +217,9 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
     )
 
     assert result.status == "success"
-    assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content)["mindroom_tool_output"]["exit_code"] == 3
     assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
 
@@ -269,7 +274,9 @@ async def test_capture_limit_error_keeps_the_exit_code(tmp_path: Path) -> None:
         },
     )
 
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Redirected shell output exceeds the 60000 byte limit.",
@@ -286,7 +293,9 @@ async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: AnyT
     destination.write_text("keep existing")
     result = await _run(shell_toolkit, {"args": "echo building; kill -KILL $$", "mindroom_output_path": "killed.txt"})
 
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Shell command or output capture was interrupted; no complete output file was saved.",
@@ -368,7 +377,9 @@ async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: A
             "mindroom_output_path": "killed.txt",
         },
     )
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Stopped after 1s. No output file was saved.\nOutput:\ncompiling\nStderr:\nerror: missing header",

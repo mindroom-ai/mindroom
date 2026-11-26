@@ -35,9 +35,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #     /execute/{request_id}/stdin writes the command's stdin.
 # 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
 # 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
+# 13: ExecuteResponse carries `is_error` so failed tool outcomes cross the worker boundary without raising.
 # A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
 # `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 12
+WORKER_PROTOCOL_VERSION = 13
 
 FailureKind = Literal["tool", "worker"]
 
@@ -186,6 +187,7 @@ class ExecuteResponse(_WireModel):
     result: Any | None = None
     error: str | None = None
     failure_kind: FailureKind | None = None
+    is_error: bool = False
     shell_backgrounded: bool = False
     # What the tool reported about a structured result, such as a command's exit status.
     metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)

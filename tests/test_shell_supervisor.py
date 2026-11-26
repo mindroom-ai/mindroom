@@ -44,6 +44,7 @@ from mindroom.shell.supervisor import (
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolOutcome
 from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_shell_async import _get_toolkit, _make_runtime_paths
@@ -262,7 +263,10 @@ async def test_a_launch_failure_exits_as_a_shell_reports_it_only_for_a_caller_th
     async with _running_server({}) as socket_path:
         asked, unasked = await run(launch_failure_exits=True), await run()
 
-    assert asked == ShellRunResult(message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory")
+    assert asked == ShellRunResult(
+        message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory",
+        return_code=127,
+    )
     assert unasked.execution_error
     assert unasked.message.startswith("Error: [Errno 2]")
 
@@ -1201,7 +1205,7 @@ async def test_toolkit_stops_a_supervised_command_past_its_timeout(
 
     result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=1)
 
-    assert result == "Stopped after 1s.\nOutput:\nclient-mode"
+    assert result == ToolOutcome(content="Stopped after 1s.\nOutput:\nclient-mode", is_error=True)
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1218,9 @@ async def test_toolkit_reports_unavailable_supervisor(
     tool = _get_toolkit(tmp_path)
     run_fn = tool.functions["run_shell_command"]
     result = await run_fn(["echo", "hi"])
-    assert result.startswith("Error: Shell supervisor is unavailable")
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert result.content.startswith("Error: Shell supervisor is unavailable")
 
 
 # ---------------------------------------------------------------------------

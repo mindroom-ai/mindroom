@@ -140,10 +140,13 @@ class CallResult:
 
 
 def _call_result(value: object) -> CallResult:
-    if isinstance(value, ToolOutcome) and value.refused_by is not None:
-        return CallResult("declined" if value.refused_by == "plugin_hook" else "denied", value)
-    if isinstance(value, ToolOutcome) and value.is_error:
-        return CallResult("failed", value)
+    if isinstance(value, ToolOutcome):
+        if value.refused_by == "plugin_hook":
+            return CallResult("declined", value)
+        if value.refused_by == "approval":
+            return CallResult("denied", value)
+        if value.is_error:
+            return CallResult("failed", value)
     if is_oauth_connection_required_result(value.content if isinstance(value, ToolValue) else value):
         return CallResult("connection_required", value)
     return CallResult("ok", value)
@@ -334,6 +337,8 @@ def client_tool_result(result: object) -> object:
         return result
     attachments = [media_reference(kind, item) for kind, item in result.media()]
     if not attachments:
+        if isinstance(result, ToolOutcome) and result.saved_output is not None:
+            return result.saved_output
         return result.content
     return {"content": result.content, "attachments": attachments}
 
@@ -357,11 +362,16 @@ async def execute_tool_call(
     if result.error is not None:
         return ToolOutcome(content=result.failure_text, stop_after_call=function.stop_after_call, is_error=True)
     value = result.value if isinstance(result.value, ToolValue) else ToolValue(content=str(result.value))
+    saved_output = (
+        value.saved_output
+        if isinstance(value, ToolOutcome) and value.saved_output is not None
+        else saved_output_envelope(result.value)
+    )
     return tool_outcome(
         value,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
         is_error=isinstance(value, ToolOutcome) and value.is_error,
-        saved_output=saved_output_envelope(result.value),
+        saved_output=saved_output,
     )
 
 

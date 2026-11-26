@@ -2049,3 +2049,138 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
             await owner.close()
             await asyncio.gather(task, return_exceptions=True)
     assert effects == (["exact\nvalue"] if approved else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_minimal_bash_propagates_shell_is_error_and_keeps_success_and_background_clean(
+    tmp_path: Path,
+) -> None:
+    """Minimal-mode execute_bash sets is_error on non-zero exit, timeout, and refusal, not exit 0 or auto-bg."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    from mindroom.config.agent import AgentConfig  # noqa: PLC0415
+    from mindroom.config.main import Config  # noqa: PLC0415
+    from mindroom.config.models import DefaultsConfig  # noqa: PLC0415
+    from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
+    from mindroom.session_storage.agent_storage import create_agent_state_storage  # noqa: PLC0415
+    from mindroom.shell.background_scope import shell_background_scope  # noqa: PLC0415
+    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome  # noqa: PLC0415
+
+    def build_shell(allow_without_worker: bool) -> AdaptedToolkit:
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        )
+        config = Config(
+            defaults=DefaultsConfig(allow_shell_without_worker=allow_without_worker),
+            agents={"code": AgentConfig(display_name="Code", tools=["shell"])},
+        )
+        toolkit = get_tool_by_name(
+            "shell",
+            runtime_paths,
+            runs_in_worker=False,
+            worker_target=None,
+            runtime_config=config,
+            tool_init_overrides={"base_dir": str(tmp_path)},
+            tools=builtin_tool_registry(),
+        )
+        return replace(adapt_toolkit(toolkit, key="shell"), name="shell")
+
+    async def authorize(_key: object, _arguments: object) -> None:
+        return None
+
+    async def run_bash(allow_without_worker: bool, call_id: str, arguments: dict[str, object]) -> ToolOutcome:
+        catalog = await _catalog(tmp_path, [build_shell(allow_without_worker)])
+        catalog.store = create_agent_state_storage("helper", tmp_path)
+        owner = live_turn_tools_for_test(
+            CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+            catalog=catalog,
+            authorize=authorize,
+            output_file_policy=ToolOutputFilePolicy(tmp_path),
+        )
+        owner.shell_env = _SHELL_ENV
+        try:
+            async with response_cli_lifetime():
+                await capture_bash_batch(owner, (call_id, {"command": str(arguments.get("args", ""))}))
+                return await owner.execute_bash(ToolKey("shell", "run_shell_command"), arguments, call_id)
+        finally:
+            await owner.close()
+
+    failed = await run_bash(True, "bash-fail", {"args": "echo bad >&2; exit 4"})
+    assert failed.is_error is True
+    assert failed.content == "Exit code 4\nStderr:\nbad"
+
+    timed = await run_bash(True, "bash-timeout", {"args": "echo slow; sleep 30", "timeout": 1})
+    assert timed.is_error is True
+    assert timed.content == "Stopped after 1s.\nOutput:\nslow"
+
+    refused = await run_bash(False, "bash-refused", {"args": "echo hi"})
+    assert refused.is_error is True
+    assert "Shell commands run only in a worker" in refused.content
+
+    ok = await run_bash(True, "bash-ok", {"args": "echo hi; echo note >&2"})
+    assert ok.is_error is False
+    assert ok.content == "hi\nStderr:\nnote"
+
+    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+        async with shell_background_scope():
+            bg = await run_bash(True, "bash-bg", {"args": "echo bg; sleep 30"})
+            assert bg.is_error is False
+            assert "moved to the background" in bg.content
+
+
+@pytest.mark.asyncio
+async def test_native_shell_with_cli_media_preserves_failed_tool_outcome_fields(tmp_path: Path) -> None:
+    """run_native_shell preserves ToolOutcome(is_error=True, stop_after_call, saved_output) when attaching CLI media."""
+    from mindroom.session_storage.agent_storage import create_agent_state_storage  # noqa: PLC0415
+    from mindroom.tool_system.tool_function import ToolOutcome  # noqa: PLC0415
+
+    async def produce() -> ToolResult:
+        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+
+    catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
+    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    (tmp_path / "workspace").mkdir()
+
+    async def authorize(_key: object, _arguments: object) -> None:
+        return None
+
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+    saved: dict[str, object] = {"mindroom_tool_output": {"status": "saved_to_file", "path": "out.txt"}}
+
+    async def failing_command() -> ToolOutcome:
+        queued = await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
+        )
+        receipt = await settled_receipt(owner, queued["call_id"])
+        assert receipt["status"] == "completed", receipt
+        return ToolOutcome(
+            content="Exit code 2\nStderr:\nboom",
+            is_error=True,
+            stop_after_call=True,
+            saved_output=saved,
+        )
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        result = await owner.run_native_shell(failing_command)
+
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error is True
+    assert result.stop_after_call is True
+    assert result.saved_output == saved
+    assert result.content == "Exit code 2\nStderr:\nboom"
+    assert [image.content for image in result.images] == [b"png"]
+    await owner.close()

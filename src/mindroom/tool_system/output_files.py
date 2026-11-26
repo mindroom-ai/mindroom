@@ -22,6 +22,7 @@ from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DE
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.progress import structured_result_requested
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -606,9 +607,19 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
     """Apply the shared explicit redirect or large-result policy after execution."""
     if isinstance(result, ToolOutputFileHandled):
         return result.result
-    if request.path is None:
-        return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
-    return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    finalized = (
+        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+        if request.path is None
+        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    )
+    if isinstance(result, ToolOutcome) and result.is_error and finalized is not result:
+        return ToolOutcome(
+            content=str(finalized),
+            is_error=True,
+            stop_after_call=result.stop_after_call,
+            saved_output=saved_output_envelope(finalized),
+        )
+    return finalized
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:

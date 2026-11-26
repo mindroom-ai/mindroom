@@ -997,3 +997,57 @@ async def test_cancel_revokes_attempt_and_keeps_completed_nodes(stack: WorkflowS
     await asyncio.sleep(0)
     assert stack.counting_tool.lines == ["a"]
     assert await stack.engine.cancel(stack.run_id, reason="Again.") == run
+
+
+@pytest.mark.asyncio
+async def test_workflow_shell_launch_failure_127_completes_with_exit_code_and_withheld_failure_is_indeterminate(
+    stack: WorkflowStack,
+) -> None:
+    """Workflow shell() gets COMPLETED + exit_code=127 on launch failure, while withheld failed output is INDETERMINATE."""
+    from dataclasses import replace as dc_replace  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.config.plugin import PluginEntryConfig  # noqa: PLC0415
+    from mindroom.hooks import (  # noqa: PLC0415
+        EVENT_TOOL_RESULT_TRANSFORM,
+        HookBindings,
+        HookRegistry,
+        ToolResultTransformContext,
+        hook,
+    )
+
+    runner_paths = dc_replace(
+        stack.resolver.context.runtime_paths,
+        process_env={**stack.resolver.context.runtime_paths.process_env, "MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    stack.resolver.context = dc_replace(stack.resolver.context, runtime_paths=runner_paths)
+    launch_result = await stack.result(
+        "@0",
+        "tool",
+        tool_args("shell", "run_shell_command", args=["/nonexistent-workflow-binary-xyz"], worker="build", timeout=30),
+    )
+    assert isinstance(launch_result, dict)
+    assert launch_result["exit_code"] == 127
+    assert "/nonexistent-workflow-binary-xyz" in str(launch_result["output"])
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def withhold(_ctx: ToolResultTransformContext) -> None:
+        msg = "injection detected in failed shell output"
+        raise RuntimeError(msg)
+
+    plugin = SimpleNamespace(
+        name="guard",
+        discovered_hooks=(withhold,),
+        discovered_automations=(),
+        entry_config=PluginEntryConfig(path="./plugins/guard", settings={}),
+        plugin_order=0,
+    )
+    registry = HookRegistry.from_plugins([plugin])
+    stack.resolver.context = dc_replace(stack.resolver.context, hooks=HookBindings(registry=registry))
+
+    with pytest.raises(NodeFailed) as exc_info:
+        await stack.result("@1", "tool", tool_args("shell", "run_shell_command", args="echo evil; exit 2", timeout=30))
+
+    assert exc_info.value.kind == "indeterminate"
+    _, nodes = stack.status(stack.run_id)
+    assert nodes[-1].state is WorkflowNodeState.INDETERMINATE

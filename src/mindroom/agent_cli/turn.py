@@ -147,12 +147,24 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
 
 def _with_media(content: object, media_results: list[ToolValue]) -> ToolValue:
     """Attach media that CLI calls returned during one shell command to its text result."""
+    images = tuple(item for media in media_results for item in media.images)
+    audios = tuple(item for media in media_results for item in media.audios)
+    videos = tuple(item for media in media_results for item in media.videos)
+    files = tuple(item for media in media_results for item in media.files)
+    if isinstance(content, ToolValue):
+        return replace(
+            content,
+            images=(*content.images, *images),
+            audios=(*content.audios, *audios),
+            videos=(*content.videos, *videos),
+            files=(*content.files, *files),
+        )
     return ToolValue(
         content=str(content),
-        images=tuple(item for media in media_results for item in media.images),
-        audios=tuple(item for media in media_results for item in media.audios),
-        videos=tuple(item for media in media_results for item in media.videos),
-        files=tuple(item for media in media_results for item in media.files),
+        images=images,
+        audios=audios,
+        videos=videos,
+        files=files,
     )
 
 
@@ -635,11 +647,13 @@ class LiveTurnTools(TurnToolBridge):
             media_results = []
             async with closing_async_stream(events):
                 terminal = None
+                saved_output = None
                 async for event in events:
                     if isinstance(event, AgentToolCallMedia):
                         media_results.append(event.media)
                     elif isinstance(event, AgentToolCallStep):
                         terminal = event.call
+                        saved_output = event.saved_output
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
@@ -649,6 +663,7 @@ class LiveTurnTools(TurnToolBridge):
                 _with_media(str(terminal.result or ""), media_results),
                 stop_after_call=bool(self.control_calls),
                 is_error=bool(terminal.is_error),
+                saved_output=saved_output,
             )
             self.checkpoint.complete(call_id, outcome)
             return outcome

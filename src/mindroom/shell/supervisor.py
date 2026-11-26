@@ -275,7 +275,7 @@ async def _handle_connection(
             killed = kill_namespace_records(registry, namespace=str(payload["namespace"]))
             result = ShellRunResult(message=f"Killed {killed}.")
         else:
-            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
+            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -458,6 +458,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
         execution_error = payload.get("execution_error", False)
         return_code = payload.get("return_code")
+        timed_out = payload.get("timed_out", False)
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
         return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}", execution_error=True)
     if (
@@ -466,6 +467,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         or not isinstance(output_file_handled, bool)
         or not isinstance(execution_error, bool)
         or (return_code is not None and not isinstance(return_code, int))
+        or not isinstance(timed_out, bool)
     ):
         return ShellRunResult(
             message="Error: Invalid shell supervisor response: invalid result fields.",
@@ -477,6 +479,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         output_file_handled=output_file_handled,
         execution_error=execution_error,
         return_code=return_code,
+        timed_out=timed_out,
     )
 
 

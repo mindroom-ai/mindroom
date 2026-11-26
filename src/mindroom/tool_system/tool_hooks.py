@@ -441,17 +441,16 @@ def _checked_results(
     arguments: dict[str, Any],
     tool_name: str,
 ) -> Callable[..., Awaitable[_ToolHookResult]]:
-    """Return ``func`` with each successful result as the result-transform hooks leave its text, or withheld.
+    """Return ``func`` with each returned result (including failed tool outcomes) checked by result-transform hooks.
 
     The call's record then gets only the checked result. A value with media keeps its media and flags; any other
-    value stays itself unless a hook replaced its text. A control result, an OAuth connection prompt or an outcome
-    that stops the run, is read after the call, so a hook can keep or withhold it but not rewrite it.
+    value stays itself unless a hook replaced its text (clearing any stale ``saved_output`` on ``ToolOutcome``).
+    A control result, an OAuth connection prompt or an outcome that stops the run, is read after the call, so a hook
+    can keep or withhold it but not rewrite it.
     """
 
     async def checked(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
         result = await func(**kwargs)
-        if _answered_failure(result):
-            return result
         text = result.content if isinstance(result, ToolValue) else str(result)
         stops = isinstance(result, ToolOutcome) and result.stop_after_call
         control = stops or is_oauth_connection_required_result(text if isinstance(result, ToolValue) else result)
@@ -460,9 +459,11 @@ def _checked_results(
         transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context, rewritable=not control)
         if transformed is None:
             withheld = _WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name)
-            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
+            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops, refused_by="result_transform")
         if transformed == text:
             return result
+        if isinstance(result, ToolOutcome):
+            return replace(result, content=transformed, saved_output=None)
         return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
 
     return checked
@@ -815,6 +816,22 @@ async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, st
     return given
 
 
+def _mask_result_values(result: object, mask_text: Callable[[str], str]) -> object:
+    if isinstance(result, str):
+        return mask_text(result)
+    if isinstance(result, ToolOutcome) and result.saved_output is not None:
+        masked_saved = {key: _mask_result_values(item, mask_text) for key, item in result.saved_output.items()}
+        return replace(result, content=mask_text(result.content), saved_output=masked_saved)
+    if isinstance(result, ToolValue):
+        # A result with media beside its text, as a shell command that used the agent CLI returns.
+        return replace(result, content=mask_text(result.content))
+    if isinstance(result, dict):
+        return {key: _mask_result_values(item, mask_text) for key, item in result.items()}
+    if isinstance(result, list):
+        return [_mask_result_values(item, mask_text) for item in result]
+    return result
+
+
 def _without_given_secrets(
     func: Callable[..., Awaitable[_ToolHookResult]],
     given: Mapping[str, str],
@@ -837,22 +854,10 @@ def _without_given_secrets(
             text = text.replace(value, REDACTED)
         return text
 
-    def masked(result: object) -> object:
-        if isinstance(result, str):
-            return masked_text(result)
-        if isinstance(result, ToolValue):
-            # A result with media beside its text, as a shell command that used the agent CLI returns.
-            return replace(result, content=masked_text(result.content))
-        if isinstance(result, dict):
-            return {key: masked(item) for key, item in result.items()}
-        if isinstance(result, list):
-            return [masked(item) for item in result]
-        return result
-
     async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
         with tool_progress_through(masked_text):
             result = await func(**arguments)
-        return masked(result)
+        return _mask_result_values(result, masked_text)
 
     return without_given_secrets
 

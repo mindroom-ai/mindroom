@@ -540,7 +540,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
     monkeypatch: pytest.MonkeyPatch,
     managed: bool,
 ) -> None:
-    """A non-zero exit is the command's returned result, so its job completes; its exit code leads the summary."""
+    """A non-zero exit fails the call inline and fails its managed job; its exit code leads the summary."""
     reply_returned = _hold_job_outcomes(monkeypatch) if managed else threading.Event()
     paths = _runtime_paths(tmp_path)
     config = Config(
@@ -574,18 +574,19 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
                 assert record.tools is not None
                 tool = record.tools[0]
                 if not managed:
-                    assert not tool.is_error, tool.result
+                    assert tool.is_error, tool.result
                     assert str(tool.result).splitlines() == expected
                     return
                 job_id = json.loads(str(tool.result))["job_id"]
                 reply_returned.set()
                 waited = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
                 listed = job_summary(waited.job)
-                assert listed["status"] == "completed"
+                assert listed["status"] == "failed"
                 assert listed["summary"].splitlines()[:2] == expected[:2]
                 payload = await read_result_payload(runtime, waited.job)
-                assert payload.error is None
-                assert str(payload.value).splitlines() == expected
+                assert payload.value is None
+                assert payload.error is not None
+                assert payload.error.splitlines() == expected
     finally:
         await runtime.shutdown()
 
@@ -1930,3 +1931,67 @@ async def test_non_job_owned_turn_auto_backgrounds_shell_and_cleans_up_on_exit(
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert "[MindRoom: stopped when turn ended]" in (workspace / rel_log).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_managed_shell_job_returns_is_error_both_inline_and_on_job_wait(tmp_path: Path) -> None:
+    """Managed shell failures surface is_error=True on inline wait and when retrieved via job(action="wait")."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    toolkit = get_tool_by_name(
+        "shell",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
+    )
+    expected = ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    shell_args = "echo partial; echo broken >&2; exit 7"
+    actor = job_actor(
+        *toolkit_job_tools(toolkit, authored_name="shell").values(),
+        *toolkit_job_tools(_job_controls(context), authored_name="job").values(),
+    )
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                inline_model = ScriptedModel(
+                    [calls(tool_call("run_shell_command", "shell-inline", args=shell_args)), answer("done")],
+                )
+                inline_record = await run_job_turn(actor, inline_model, "inline", session_id=context.session_id)
+                assert inline_record.tools is not None
+                assert inline_record.tools[0].is_error is True
+                assert str(inline_record.tools[0].result).splitlines() == expected
+
+                bg_model = ScriptedModel(
+                    [
+                        calls(
+                            tool_call("run_shell_command", "shell-bg", args=shell_args, background_after=0),
+                        ),
+                        answer("started"),
+                    ],
+                )
+                bg_record = await run_job_turn(actor, bg_model, "bg", session_id=context.session_id)
+                assert bg_record.tools is not None
+                assert bg_record.tools[0].is_error is not True
+                job_id = json.loads(str(bg_record.tools[0].result))["job_id"]
+                await wait_for_status(runtime, job_id, "failed")
+
+                wait_model = ScriptedModel(
+                    [calls(tool_call("job", "wait-call", action="wait", job_id=job_id)), answer("read")],
+                )
+                wait_record = await run_job_turn(actor, wait_model, "wait", session_id=context.session_id)
+                assert wait_record.tools is not None
+                assert wait_record.tools[0].is_error is True
+                assert str(wait_record.tools[0].result).splitlines() == expected
+                assert [job.status for job in await runtime.list_jobs(owner=owner, depth=0)] == ["failed", "failed"]
+    finally:
+        await runtime.shutdown()

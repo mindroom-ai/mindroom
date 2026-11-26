@@ -115,7 +115,7 @@ async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
             timeout=1,
             args="echo $$ > started; while [ ! -f release ]; do sleep 0.01; done; printf 'native result'",
         )
-        assert not stopped.is_error, stopped.result
+        assert stopped.is_error, stopped.result
         assert str(stopped.result).endswith("Stopped after 1s.")
         with pytest.raises(ProcessLookupError):
             os.kill(int((tmp_path / "started").read_text()), 0)

@@ -32,6 +32,7 @@ from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     pinned_worker_kind,
@@ -1113,13 +1114,24 @@ async def test_a_cli_call_reads_saved_output_from_its_named_worker(
         worker_target=None,
     )
     result = await _offered_entrypoint(runner_shell, "run_shell_command")(command, worker="shard")
+    is_error = isinstance(result, ToolOutcome) and result.is_error
+    assert is_error is bool(exit_code)
+    wire_result = (
+        (result.saved_output if result.saved_output is not None else result.content)
+        if isinstance(result, ToolOutcome)
+        else result
+    )
     saved_path = None
     if threshold != _NEVER_SAVED:
-        receipt = result["mindroom_tool_output"]
+        receipt = wire_result["mindroom_tool_output"]
         assert receipt["auto_saved"] is True
         saved_path = receipt["path"]
         assert printed.strip() in (tmp_path / saved_path).read_text()
-    _route_through(monkeypatch, backend, responder=lambda _url, _payload: {"ok": True, "result": result})
+    _route_through(
+        monkeypatch,
+        backend,
+        responder=lambda _url, _payload: {"ok": True, "result": wire_result, "is_error": is_error},
+    )
     shell, _target = _shell(runtime_paths)
 
     async def run_shell_command(args: list[str], worker: str) -> object:
@@ -1153,7 +1165,7 @@ async def test_a_cli_call_reads_saved_output_from_its_named_worker(
     await owner.close()
 
     # `workers run` streams its command's output instead, so only a `tools call` reads a result the runner formatted.
-    assert cli_receipt["status"] == "completed"
+    assert cli_receipt["status"] == ("failed" if exit_code else "completed")
     outcome = cli_receipt["outcome"]
     if saved_path is not None:
         saved_to = outcome["mindroom_tool_output"]
@@ -1442,8 +1454,13 @@ async def test_a_shell_outside_a_worker_refuses_to_name_one(tmp_path: Path) -> N
 
     entrypoint = _offered_entrypoint(shell, "run_shell_command")
     result = await entrypoint("true", worker="e2e-0")
-    assert result.startswith("Error: `worker` and `resource_profile` need a shell that runs in a worker")
-    assert (await entrypoint("true", sandbox=True)).startswith(
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert result.content.startswith("Error: `worker` and `resource_profile` need a shell that runs in a worker")
+    sandbox_result = await entrypoint("true", sandbox=True)
+    assert isinstance(sandbox_result, ToolOutcome)
+    assert sandbox_result.is_error
+    assert sandbox_result.content.startswith(
         "Error: `worker` and `resource_profile` need a shell that runs in a worker",
     )
     # Models filling default false booleans without worker still run as an ordinary local shell call.
@@ -1506,15 +1523,21 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
     command = ["definitely-not-a-binary-xyz", "arg"]
     if supervised:
         diagnostic = "Shell supervisor is unavailable"
-        assert diagnostic in await call(command)
+        unscoped = await call(command)
+        assert isinstance(unscoped, ToolOutcome)
+        assert unscoped.is_error
+        assert diagnostic in unscoped.content
         with pytest.raises(ValueError, match=diagnostic):
             await call(command, worker="build")
     else:
-        assert "definitely-not-a-binary-xyz" in await call(command)
+        unscoped = await call(command)
+        assert isinstance(unscoped, ToolOutcome)
+        assert unscoped.is_error
+        assert "definitely-not-a-binary-xyz" in unscoped.content
         # A program that cannot start ends as a command that printed a shell's words and exited with its code.
         said = "definitely-not-a-binary-xyz: command not found"
         failed = await call(command, worker="build")
-        assert failed == f"Exit code 127\nStderr:\n{said}"
+        assert failed == ToolOutcome(content=f"Exit code 127\nStderr:\n{said}", is_error=True)
         assert failed == await call(["bash", "-c", f"echo '{said}' >&2; exit 127"], worker="build")
         assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
 
@@ -1540,9 +1563,15 @@ async def test_a_named_launch_failure_saves_to_an_output_path_as_a_failed_comman
     for name in ("launch.txt", "failed.txt"):
         (tmp_path / name).write_text("previous contents")
 
-    launch = json.loads(await call([_MISSING], worker="build", mindroom_output_path="launch.txt"))
+    launch_outcome = await call([_MISSING], worker="build", mindroom_output_path="launch.txt")
+    assert isinstance(launch_outcome, ToolOutcome)
+    assert launch_outcome.is_error
+    launch = json.loads(launch_outcome.content)
     command = ["bash", "-c", f"echo '{said}' >&2; exit 127"]
-    failed = json.loads(await call(command, worker="build", mindroom_output_path="failed.txt"))
+    failed_outcome = await call(command, worker="build", mindroom_output_path="failed.txt")
+    assert isinstance(failed_outcome, ToolOutcome)
+    assert failed_outcome.is_error
+    failed = json.loads(failed_outcome.content)
 
     assert launch["mindroom_tool_output"] == {**failed["mindroom_tool_output"], "path": "launch.txt"}
     assert launch["mindroom_tool_output"]["exit_code"] == 127

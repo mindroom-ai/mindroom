@@ -44,7 +44,7 @@ from mindroom.tool_system.runtime_context import (
     note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.worker_proxy_client import (
     STOP_CONFIRMATION_SECONDS,
     WorkerCallCancellation,
@@ -907,19 +907,12 @@ def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str
     return f"{mount_dir}/{normalized}"
 
 
-def _format_named_worker_result(
-    result: object,
+def _format_saved_output_receipt(
+    result: dict[str, object],
     *,
     header: str,
     admitted_sandbox: WorkerSandboxConfig | None,
-) -> object:
-    """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
-    if isinstance(result, str):
-        return f"{header}\n{result}"
-    # The runner can save its shell result before it gets here. The preview has the same exit line,
-    # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
-    if not isinstance(result, dict):
-        return result
+) -> dict[str, object]:
     saved = result.get("mindroom_tool_output")
     if not (isinstance(saved, dict) and saved.get("status") == "saved_to_file"):
         return result
@@ -933,6 +926,33 @@ def _format_named_worker_result(
             updated_saved["path"] = _sandbox_agent_workspace_output_path(saved_path, admitted_sandbox.mount_dir)
     if updated_saved != saved:
         return {**result, "mindroom_tool_output": updated_saved}
+    return result
+
+
+def _format_named_worker_result(
+    result: object,
+    *,
+    header: str,
+    admitted_sandbox: WorkerSandboxConfig | None,
+) -> object:
+    """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
+    if isinstance(result, ToolOutcome):
+        if result.saved_output is not None:
+            updated = _format_saved_output_receipt(
+                result.saved_output,
+                header=header,
+                admitted_sandbox=admitted_sandbox,
+            )
+            if updated is not result.saved_output:
+                return replace(result, content=str(updated), saved_output=updated)
+            return result
+        return replace(result, content=f"{header}\n{result.content}")
+    if isinstance(result, str):
+        return f"{header}\n{result}"
+    # The runner can save its shell result before it gets here. The preview has the same exit line,
+    # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
+    if isinstance(result, dict):
+        return _format_saved_output_receipt(result, header=header, admitted_sandbox=admitted_sandbox)
     return result
 
 
@@ -1160,7 +1180,10 @@ def _call_proxy_sync(
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
 
-        if tool_name == "browser_mcp" or is_media_result_envelope(result):
+        if isinstance(result, ToolValue):
+            if any(result.media()):
+                return finalize_tool_media(result)
+        elif tool_name == "browser_mcp" or is_media_result_envelope(result):
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         if named is not None and worker_handle is not None:

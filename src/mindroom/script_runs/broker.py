@@ -56,7 +56,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
-from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
@@ -530,7 +530,7 @@ class ScriptToolBroker:
                 )
             return await self._execute_claimed_call_serialized(durable_run, call, arguments)
 
-    async def _execute_claimed_call_serialized(  # noqa: PLR0911
+    async def _execute_claimed_call_serialized(
         self,
         run: ScriptRunRecord,
         call: ScriptCallRecord,
@@ -562,27 +562,7 @@ class ScriptToolBroker:
             if run.workflow_run_id is not None:
                 # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
                 await hold("before_receipt")
-            if not result.succeeded:
-                error = {
-                    "kind": "approval_denied" if result.status == "denied" else "tool_failure",
-                    "message": sanitize_failure_text(result.failure_text),
-                    "retryable": False,
-                }
-                if metadata and metadata.get("not_started"):
-                    # The call's own word that it never left for its tool: all that makes a workflow run it again.
-                    error["not_started"] = True
-                return await self._publish_async(
-                    call,
-                    state=ScriptCallState.FAILED,
-                    error=error,
-                )
-            value = _strict_json_result(result.value)
-            return await self._publish_async(
-                call,
-                state=ScriptCallState.COMPLETED,
-                result=value,
-                metadata=metadata or None,
-            )
+            return await self._publish_call_outcome(run, call, result, metadata)
         except asyncio.CancelledError:
             raise
         except _CurrentGrantRevokedError:
@@ -750,6 +730,42 @@ class ScriptToolBroker:
         """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
         if requires_connect(toolkit):
             asyncio.run(run_toolkit_lifecycle(toolkit.close))
+
+    async def _publish_call_outcome(
+        self,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        result: CallResult,
+        metadata: dict[str, object] | None,
+    ) -> ScriptCallRecord:
+        if (shell_output := _workflow_shell_exit_output(run, call, result, metadata)) is not None:
+            return await self._publish_async(
+                call,
+                state=ScriptCallState.COMPLETED,
+                result=_strict_json_result(shell_output),
+                metadata=metadata,
+            )
+        if not result.succeeded:
+            error = {
+                "kind": "approval_denied" if result.status == "denied" else "tool_failure",
+                "message": sanitize_failure_text(result.failure_text),
+                "retryable": False,
+            }
+            if metadata and metadata.get("not_started"):
+                # The call's own word that it never left for its tool: all that makes a workflow run it again.
+                error["not_started"] = True
+            return await self._publish_async(
+                call,
+                state=ScriptCallState.FAILED,
+                error=error,
+            )
+        value = _strict_json_result(result.value)
+        return await self._publish_async(
+            call,
+            state=ScriptCallState.COMPLETED,
+            result=value,
+            metadata=metadata or None,
+        )
 
     async def _publish_async(
         self,
@@ -986,6 +1002,27 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
     for grant in run.grants:
         owners.setdefault(grant.function_name, set()).add(grant.toolkit_name)
     return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
+
+
+def _workflow_shell_exit_output(
+    run: ScriptRunRecord,
+    call: ScriptCallRecord,
+    result: CallResult,
+    metadata: dict[str, object] | None,
+) -> str | None:
+    """Return a failed workflow shell command's output when it exited with an integer status and was not withheld."""
+    if (
+        run.workflow_run_id is not None
+        and call.grant == ScriptToolGrant("shell", "run_shell_command")
+        and result.status == "failed"
+        and isinstance(result.value, ToolOutcome)
+        and result.value.refused_by is None
+        and metadata is not None
+        and isinstance(metadata.get("exit_code"), int)
+        and not isinstance(metadata.get("exit_code"), bool)
+    ):
+        return result.value.content
+    return None
 
 
 def _strict_json_result(result: object) -> object:

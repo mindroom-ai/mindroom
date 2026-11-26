@@ -287,7 +287,7 @@ async def test_a_check_nested_too_deeply_withholds_the_result() -> None:
 
 @pytest.mark.asyncio
 async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
-    """A raised call, an answered failure, an OAuth prompt, and a declined call keep their own results."""
+    """A raised call, an OAuth prompt, and a declined call skip the hook; a failed ToolOutcome is still checked."""
     seen: list[str] = []
 
     @hook(EVENT_TOOL_RESULT_TRANSFORM)
@@ -301,7 +301,7 @@ async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
             ctx.decline("not this one")
 
     bridge = tool_policy(_registry(check, decline_blocked))
-    failure = ToolOutcome(content="it failed", is_error=True)
+    failure = ToolOutcome(content="it failed", is_error=True, saved_output={"mindroom_tool_output": {"path": "x"}})
 
     async def raises(**_kwargs: object) -> object:
         msg = "boom"
@@ -319,7 +319,6 @@ async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
 
     with pytest.raises(ValueError, match="boom"):
         await bridge("raises", raises, {})
-    assert await bridge("answers_failure", answers_failure, {}) is failure
     oauth = await bridge("needs_oauth", needs_oauth, {})
     assert isinstance(oauth, dict)
     assert oauth["oauth_connection_required"] is True
@@ -327,6 +326,10 @@ async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
     assert isinstance(declined, ToolOutcome)
     assert declined.refused_by == "plugin_hook"
     assert seen == []
+
+    rewritten = await bridge("answers_failure", answers_failure, {})
+    assert rewritten == ToolOutcome(content="replaced", is_error=True, saved_output=None)
+    assert seen == ["it failed"]
 
 
 @pytest.mark.asyncio
