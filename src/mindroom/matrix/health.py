@@ -9,6 +9,14 @@ from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from mindroom.connectivity import (
+    note_matrix_sync_cleared,
+    note_matrix_sync_failed,
+    note_matrix_sync_started,
+    note_matrix_sync_succeeded,
+    reset_connectivity_state,
+)
+
 if TYPE_CHECKING:
     import httpx
 
@@ -105,6 +113,12 @@ def mark_matrix_sync_loop_started(entity_name: str) -> None:
         state.running = True
         if state.loop_started_time is None:
             state.loop_started_time = _normalize_sync_time(datetime.now(UTC))
+    note_matrix_sync_started(entity_name)
+
+
+def mark_matrix_sync_failure(entity_name: str) -> None:
+    """Record an immediate Matrix sync transport failure or stall for one entity."""
+    note_matrix_sync_failed(entity_name)
 
 
 def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None) -> datetime:
@@ -116,6 +130,7 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
         state.last_sync_time = resolved_sync_time
         state.ingestion_progress_started_monotonic = None
         state.ingestion_progress_advanced_monotonic = None
+    note_matrix_sync_succeeded(entity_name)
     return resolved_sync_time
 
 
@@ -152,6 +167,7 @@ def clear_matrix_sync_state(entity_name: str) -> None:
     """Remove one entity from the shared Matrix sync-health registry."""
     with _matrix_sync_lock:
         _matrix_sync_state.pop(entity_name, None)
+    note_matrix_sync_cleared(entity_name)
 
 
 def get_matrix_sync_health_snapshot(
@@ -249,3 +265,4 @@ def reset_matrix_sync_health() -> None:
     """Clear all shared Matrix sync-health state."""
     with _matrix_sync_lock:
         _matrix_sync_state.clear()
+    reset_connectivity_state()

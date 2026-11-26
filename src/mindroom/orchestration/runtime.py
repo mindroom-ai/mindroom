@@ -24,6 +24,7 @@ from mindroom.cancellation import (
     current_task_is_process_shutdown,
     request_task_cancel,
 )
+from mindroom.connectivity import register_matrix_homeserver
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import maybe_ssl_context
 from mindroom.matrix.health import (
@@ -32,6 +33,7 @@ from mindroom.matrix.health import (
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,
     get_matrix_ingestion_progress,
     mark_matrix_ingestion_progress,
+    mark_matrix_sync_failure,
     matrix_versions_url,
     response_has_matrix_versions,
 )
@@ -573,6 +575,10 @@ async def wait_for_matrix_homeserver(
     if timeout_seconds is None:
         timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+    register_matrix_homeserver(
+        homeserver,
+        ssl_verify=maybe_ssl_context(homeserver, runtime_paths, shared=False) or True,
+    )
     versions_url = matrix_versions_url(homeserver)
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
     loop = asyncio.get_running_loop()
@@ -647,11 +653,20 @@ async def run_shutdown_step[Result](shutdown_phase: str, operation: Awaitable[Re
 
 async def sync_forever_with_restart(bot: AgentBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
+    runtime_paths = getattr(bot, "runtime_paths", None)
+    if isinstance(runtime_paths, constants.RuntimePaths):
+        homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+        register_matrix_homeserver(
+            homeserver,
+            ssl_verify=maybe_ssl_context(homeserver, runtime_paths, shared=False) or True,
+        )
     retry_count = 0
     while _matrix_sync_receive_loop_active(bot) and (max_retries < 0 or retry_count < max_retries):
         outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
         if outcome.restart_reason_category is None or not _matrix_sync_receive_loop_active(bot):
             break
+        if outcome.restart_reason_category in {"sync_failure", "watchdog_stall"}:
+            mark_matrix_sync_failure(bot.agent_name)
         bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries

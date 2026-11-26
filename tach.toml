@@ -46,6 +46,10 @@ path = "mindroom.bounded_bytes"
 depends_on = []
 
 [[modules]]
+path = "mindroom.connectivity"
+depends_on = []
+
+[[modules]]
 path = "mindroom.integrations"
 depends_on = ["mindroom.slack.integration"]
 
@@ -3872,7 +3876,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.orchestration.runtime"
-depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants"]
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.connectivity",
+    "mindroom.constants",
+    "mindroom.matrix.client_session",
+]
 
 [[modules]]
 path = "mindroom.orchestration.script_runtime"
@@ -6972,6 +6981,7 @@ visibility = ["mindroom.streaming"]
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.ai_run_metadata",
+    "mindroom.connectivity",
     "mindroom.constants",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.legacy_streaming",
@@ -7274,6 +7284,7 @@ depends_on = [
 path = "mindroom.providers.pipeline"
 depends_on = [
     "mindroom.bounded_bytes",
+    "mindroom.connectivity",
     "mindroom.constants",
     "mindroom.llm",
     "mindroom.model_usage",

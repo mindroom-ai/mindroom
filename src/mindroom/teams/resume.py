@@ -28,7 +28,7 @@ from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
 from mindroom.hooks import render_system_enrichment_block
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, pause_without_approval_error, paused_attempt_from_response
@@ -441,7 +441,15 @@ async def continue_paused_team_run(
                     checkpoints=False,
                 ),
             ),
-            request_template=with_native_history(ModelRequest(messages=()), native),
+            request_template=with_native_history(
+                ModelRequest(
+                    messages=(),
+                    overrides=RequestOverrides(
+                        wait_for_connectivity=execution_identity.channel not in ("openai_compat", "headless"),
+                    ),
+                ),
+                native,
+            ),
             model_name=model_name,
         )
         resume = TeamResume(

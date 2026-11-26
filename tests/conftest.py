@@ -102,6 +102,7 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
+from mindroom.connectivity import reset_connectivity_state
 from mindroom.constants import ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
@@ -4410,6 +4411,14 @@ def _reset_runtime_paths() -> Generator[None]:
 def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
     """Separate each test's pinned instances; tests still own shutdown of live resources."""
     monkeypatch.setattr(tool_jobs_instances, "_instances", {})
+
+
+@pytest.fixture(autouse=True)
+def _reset_connectivity_state() -> Generator[None]:
+    """Keep process-global Matrix/provider connectivity state isolated per test."""
+    reset_connectivity_state()
+    yield
+    reset_connectivity_state()
 
 
 @pytest.fixture(autouse=True)

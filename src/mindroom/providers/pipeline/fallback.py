@@ -25,6 +25,7 @@ from mindroom.llm.provider import (
     json_output_prompt,
 )
 from mindroom.logging_config import get_logger
+from mindroom.providers.pipeline.connectivity import CONNECTIVITY_ERROR_CODES
 from mindroom.providers.pipeline.wrapped import commits_attempt
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -126,6 +127,20 @@ def _clear_cooldown(key: str, seen_until: float | None) -> None:
         _COOLDOWN_UNTIL.pop(key, None)
 
 
+def _is_connectivity_error(error: ProviderError) -> bool:
+    return isinstance(error, ProviderUnavailable) and error.code in CONNECTIVITY_ERROR_CODES
+
+
+def _restore_cooldowns(touched: dict[str, float | None], *, all_connectivity_errors: bool) -> None:
+    if not all_connectivity_errors:
+        return
+    for key, prior_until in touched.items():
+        if prior_until is None:
+            _COOLDOWN_UNTIL.pop(key, None)
+        else:
+            _COOLDOWN_UNTIL[key] = prior_until
+
+
 def _log_fallback(failure: tuple[str, ProviderError] | None, *, to_model: str) -> None:
     if failure is None:
         return
@@ -222,6 +237,8 @@ async def fallback_stream(
     members = _in_turn(primary, chain, allow_fallback=allow_fallback)
     # A success clears only the cooldown this request saw, not one a concurrent request set since.
     seen = {member.cooldown_key: _COOLDOWN_UNTIL.get(member.cooldown_key) for member in members}
+    touched: dict[str, float | None] = {}
+    all_connectivity_errors = True
     failure: tuple[str, ProviderError] | None = None
     for member in members:
         is_fallback = member is not primary
@@ -255,9 +272,11 @@ async def fallback_stream(
             defer_transient = request.overrides.transient_retries == "caller" and error.retryable
             can_fail_over = fails_over(error) and not defer_transient
             if can_fail_over:
+                touched.setdefault(member.cooldown_key, seen[member.cooldown_key])
                 _remember_reset(member.cooldown_key, error, committed=committed)
             if committed or not can_fail_over:
                 raise
+            all_connectivity_errors = all_connectivity_errors and _is_connectivity_error(error)
             failure = (member.name, error)
         else:
             _clear_cooldown(member.cooldown_key, seen[member.cooldown_key])
@@ -266,4 +285,5 @@ async def fallback_stream(
             yield report
     # The request's own model is never skipped, so a failure ends the chain.
     assert failure is not None
+    _restore_cooldowns(touched, all_connectivity_errors=all_connectivity_errors)
     raise failure[1]

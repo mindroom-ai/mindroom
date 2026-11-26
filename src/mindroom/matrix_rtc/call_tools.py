@@ -909,8 +909,15 @@ def _call_agent_run_state(
 
 
 def _spoken(build: AgentBuild) -> AgentBuild:
-    """Return ``build`` without the chat's Markdown output format: a call speaks its replies."""
-    return replace(build, prompt=replace(build.prompt, markdown=False))
+    """Return ``build`` without Markdown formatting or connectivity waits: a call speaks live."""
+    return replace(
+        build,
+        prompt=replace(build.prompt, markdown=False),
+        request_template=replace(
+            build.request_template,
+            overrides=replace(build.request_template.overrides, wait_for_connectivity=False),
+        ),
+    )
 
 
 async def _call_room_instructions_item(
