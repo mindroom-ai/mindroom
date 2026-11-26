@@ -76,7 +76,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import current_internal_sender_ids
-from mindroom.error_handling import ReplyErrorInfo
+from mindroom.error_handling import _ReplyErrorInfo
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalCardReservation,
@@ -2494,7 +2494,7 @@ async def test_preparation_failure_note_describes_the_proximate_error_not_its_ca
     proximate_error.__cause__ = underlying_error
 
     friendly_error = MagicMock(
-        return_value=ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="setup failed"),
+        return_value=_ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="setup failed"),
     )
 
     with (

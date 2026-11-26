@@ -242,12 +242,10 @@ def clean_partial_reply_text(text: str) -> str:
     cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
     while True:
-        for marker in _PARTIAL_REPLY_NOTES:
-            if cleaned.endswith(marker):
-                cleaned = cleaned[: -len(marker)].rstrip()
-                break
-        else:
+        matched = next((marker for marker in _PARTIAL_REPLY_NOTES if cleaned.endswith(marker)), None)
+        if matched is None:
             break
+        cleaned = cleaned[: -len(matched)].rstrip()
 
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()

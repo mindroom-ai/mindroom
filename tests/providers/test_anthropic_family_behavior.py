@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error
 from mindroom.llm.errors import (
     MISSING_API_KEY,
     AuthenticationFailed,
@@ -477,7 +477,7 @@ async def test_a_direct_route_without_any_credential_fails_as_a_missing_key(tmp_
             await claude_turn(provider, ModelRequest(messages=_user()))
 
     assert (raised.value.code, raised.value.provider, wire.requests) == (MISSING_API_KEY, "Anthropic", [])
-    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
+    assert "Connect your AI provider" in describe_reply_error(raised.value).plain_text
 
 
 @pytest.mark.asyncio
@@ -2244,7 +2244,7 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     assert raised.value.status_code == status_code
     assert raised.value.__cause__ is failure
     assert wire.requests == []
-    assert get_user_friendly_error_message(raised.value).startswith(final_message)
+    assert describe_reply_error(raised.value).plain_text.startswith(final_message)
 
 
 def _markers(payload: object) -> list[dict[str, Any]]:

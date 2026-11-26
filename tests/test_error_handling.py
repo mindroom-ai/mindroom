@@ -9,10 +9,10 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.error_handling import (
-    ReplyErrorInfo,
+    _ReplyErrorInfo,
     describe_reply_error,
     empty_response_error_info,
-    get_user_friendly_error_message,
+    log_reply_error,
     minimal_mode_failure_message,
     model_error_labels,
 )
@@ -52,17 +52,17 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 )
 def test_an_error_that_is_not_a_provider_error_shows_its_own_text(text: str) -> None:
     """Only a provider error's type reads as a provider failure; any other error's wording is shown, not classified."""
-    assert get_user_friendly_error_message(RuntimeError(text), "assistant") == f"[assistant] ⚠️ {text}"
+    assert describe_reply_error(RuntimeError(text)).plain_text == f"⚠️ {text}"
 
 
 def test_an_error_reply_redacts_secrets() -> None:
     """Error text is redacted before it becomes Matrix-visible reply text or structured error metadata."""
     error = AuthenticationFailed("Incorrect API key provided: sk-test-secret", provider="OpenAI Chat", status_code=401)
 
-    message = get_user_friendly_error_message(error, "assistant")
     info = describe_reply_error(error)
+    message = info.plain_text
 
-    assert message.startswith("[assistant] ❌ Authentication failed (OpenAI Chat): ")
+    assert message.startswith("❌ Authentication failed (OpenAI Chat): ")
     assert "[redacted]" in message
     assert "***redacted***" not in message
     assert "[redacted]" in info.summary
@@ -76,10 +76,10 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     """An explicit safeguard stop should not look like an empty model response."""
     error = ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
 
-    message = get_user_friendly_error_message(error, "mind")
+    message = describe_reply_error(error).plain_text
 
     assert message == (
-        "[mind] ⚠️ Blocked by model safeguards — The model's safeguards blocked this request. "
+        "⚠️ Blocked by model safeguards — The model's safeguards blocked this request. "
         "Choose another model (/model list) or revise the prompt."
     )
     assert "stop_reason" not in message
@@ -89,11 +89,10 @@ def test_model_safeguard_refusal_includes_provider_code_when_present() -> None:
     """A safeguard refusal carrying a native provider code names that code in the user-facing message."""
     error = ModelSafeguardRefusal(provider="openrouter", usage=MessageMetrics(), provider_code="RECITATION")
 
-    message = get_user_friendly_error_message(error, "mind", model_label="Neon")
     info = describe_reply_error(error, model_label="Neon")
 
-    assert message == (
-        "[mind] ⚠️ Blocked by model safeguards — Neon's safeguards blocked this request (RECITATION). "
+    assert info.plain_text == (
+        "⚠️ Blocked by model safeguards — Neon's safeguards blocked this request (RECITATION). "
         "Choose another model (/model list) or revise the prompt."
     )
     assert info.kind == "safeguard_refusal"
@@ -107,7 +106,7 @@ def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
     """An error that merely carries the refusal's text is no refusal, since every refusal reaches the reply typed."""
     error = RuntimeError(MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
-    assert get_user_friendly_error_message(error) == f"⚠️ {MODEL_SAFEGUARD_REFUSAL_MESSAGE}"
+    assert describe_reply_error(error).plain_text == f"⚠️ {MODEL_SAFEGUARD_REFUSAL_MESSAGE}"
 
 
 _NETWORK_ERROR_MESSAGE = (
@@ -202,27 +201,27 @@ _OAUTH_HOST_UNREACHABLE = (
 )
 def test_a_provider_error_is_reported_by_its_type_alone(error: Exception, expected: str) -> None:
     """A provider error's message follows its type, which its classification already took from status and wording."""
-    assert get_user_friendly_error_message(error) == expected
+    assert describe_reply_error(error).plain_text == expected
 
 
 def test_generic_error() -> None:
     """Test generic error shows actual error message."""
     error = ValueError("Something went wrong")
-    message = get_user_friendly_error_message(error)
+    message = describe_reply_error(error).plain_text
     assert message == "⚠️ Something went wrong"
 
 
 def test_an_error_without_text_is_reported_by_its_type_name() -> None:
     """An exception without text, such as one an operation raises bare, names its type instead of nothing."""
-    assert get_user_friendly_error_message(ConnectionResetError(), "bot") == "[bot] ⚠️ ConnectionResetError"
+    assert describe_reply_error(ConnectionResetError()).plain_text == "⚠️ ConnectionResetError"
 
 
 @pytest.mark.parametrize("error", [TimeoutError(), TimeoutError("lock wait expired")])
 def test_a_timeout_reads_as_a_timeout_by_its_type(error: TimeoutError) -> None:
     """A timeout is recognized by its type, with or without text."""
     assert (
-        get_user_friendly_error_message(error, "bot")
-        == "[bot] ⏰ Request timed out — The model timed out waiting for a response. Try again shortly."
+        describe_reply_error(error).plain_text
+        == "⏰ Request timed out — The model timed out waiting for a response. Try again shortly."
     )
 
 
@@ -236,11 +235,10 @@ def test_missing_provider_key_points_to_dashboard_setup(tmp_path: Path) -> None:
 
     error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
 
-    message = get_user_friendly_error_message(error, "mind", runtime_paths=runtime_paths)
     info = describe_reply_error(error, runtime_paths=runtime_paths)
 
-    assert message == (
-        "[mind] 🔑 No AI provider key is set up yet, so I can't reply. "
+    assert info.plain_text == (
+        "🔑 No AI provider key is set up yet, so I can't reply. "
         "Open the MindRoom dashboard (https://42.mindroom.chat), choose Connect your AI provider, "
         "paste your key, then send your message again."
     )
@@ -255,7 +253,7 @@ def test_missing_provider_key_without_public_url_names_dashboard() -> None:
     """Without a known dashboard URL the message still points at the dashboard setup step."""
     error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
 
-    message = get_user_friendly_error_message(error)
+    message = describe_reply_error(error).plain_text
 
     assert "Open the MindRoom dashboard, choose Connect your AI provider" in message
     assert "OPENROUTER_API_KEY" not in message
@@ -281,7 +279,7 @@ def test_headless_missing_key_reply_keeps_the_error_its_own_sentence(tmp_path: P
         code=MISSING_API_KEY,
     )
     with detached_tool_scope(identity):
-        message = get_user_friendly_error_message(error, runtime_paths=runtime_paths)
+        message = describe_reply_error(error, runtime_paths=runtime_paths).plain_text
 
     assert f"azure_ad_token_provider. A `.env` file at {tmp_path / '.env'} works too." in message
 
@@ -290,7 +288,7 @@ def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
     """A configured but invalid key is not reported as a missing key."""
     error = AuthenticationFailed("Incorrect API key provided", provider="OpenAI Chat", status_code=401)
 
-    message = get_user_friendly_error_message(error, "assistant")
+    message = describe_reply_error(error).plain_text
 
     assert "Authentication failed" in message
     assert "Connect your AI provider" not in message
@@ -336,10 +334,10 @@ def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
 ) -> None:
     """A provider refusing for lack of credit gets one plain reply, not its own text and billing links."""
     error = classify_provider_error(message, provider="openrouter", status_code=status_code, code=code)
-    reply = get_user_friendly_error_message(error, "assistant")
     info = describe_reply_error(error)
+    reply = info.plain_text
     assert reply == (
-        "[assistant] 💳 Account quota reached — "
+        "💳 Account quota reached — "
         "OpenRouter rejected this request because the account's quota or credits are exhausted. "
         "Add credit, renew the plan, or raise the spending limit, then try again."
     )
@@ -399,7 +397,7 @@ def test_stream_stalled_formats_duration_and_model_label(error_text: str, expect
 
 
 def test_describe_reply_error_covers_every_kind_and_omits_empty_wire_fields() -> None:
-    """Every ReplyErrorInfo kind carries its exact retryable/action contract and omits None/empty keys."""
+    """Every _ReplyErrorInfo kind carries its exact retryable/action contract and omits None/empty keys."""
     cases: list[tuple[Exception, str, bool, str | None]] = [
         (ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics()), "safeguard_refusal", False, None),
         (missing_api_key_error("OPENAI_API_KEY", provider="OpenAI"), "missing_api_key", False, None),
@@ -441,7 +439,7 @@ def test_describe_reply_error_covers_every_kind_and_omits_empty_wire_fields() ->
     for error, kind, retryable, action in cases:
         info = describe_reply_error(error, model_label="Neon", provider="openrouter")
         wire = info.to_wire()
-        assert isinstance(info, ReplyErrorInfo)
+        assert isinstance(info, _ReplyErrorInfo)
         assert wire["kind"] == kind
         assert wire["retryable"] is retryable
         assert wire.get("action") == action
@@ -466,8 +464,8 @@ def test_describe_reply_error_covers_every_kind_and_omits_empty_wire_fields() ->
     assert "***redacted***" not in wire["detail"]
 
 
-def test_include_agent_prefix_false_omits_prefix_while_preserving_structured_logging() -> None:
-    """Own-user replies drop the redundant [agent_name] prefix while still logging agent=<agent_name>."""
+def test_log_reply_error_returns_unprefixed_plain_text_and_logs_structured_fields() -> None:
+    """log_reply_error emits structured agent_error fields and unprefixed plain_text."""
     error = ProviderUnavailable(
         "Model stream stalled: no provider event for 300s",
         provider="OpenRouter",
@@ -475,15 +473,14 @@ def test_include_agent_prefix_false_omits_prefix_while_preserving_structured_log
         code=STREAM_STALLED,
     )
     with capture_logs() as logs:
-        message = get_user_friendly_error_message(
+        info = log_reply_error(
             error,
             "mindroom_dev",
             model_label="Neon",
-            include_agent_prefix=False,
         )
 
-    assert message == "⚠️ Neon stopped responding — OpenRouter sent no data for 5 min."
-    assert not message.startswith("[mindroom_dev]")
+    assert info.plain_text == "⚠️ Neon stopped responding — OpenRouter sent no data for 5 min."
+    assert not info.plain_text.startswith("[mindroom_dev]")
     [entry] = [log for log in logs if log["event"] == "agent_error"]
     assert entry["agent"] == "mindroom_dev"
     assert entry["error_code"] == STREAM_STALLED
@@ -614,7 +611,7 @@ def test_transport_provider_unavailable_says_provider_could_not_be_reached(code:
     error = ProviderUnavailable("Request timed out.", provider="OpenAI", code=code)
     info = describe_reply_error(error, model_label="GPT-6")
 
-    assert get_user_friendly_error_message(error, model_label="GPT-6") == _NETWORK_ERROR_MESSAGE
+    assert info.plain_text == _NETWORK_ERROR_MESSAGE
     assert info.to_wire() == {
         "kind": "timeout",
         "title": "Network error or timeout",
@@ -634,20 +631,24 @@ def test_transport_provider_unavailable_says_provider_could_not_be_reached(code:
 
 def test_non_transport_provider_unavailable_keeps_provider_unavailable_message() -> None:
     """Server 5xx failures, bare google-auth transport errors, and stalled streams keep non-network copy."""
-    server_503 = classify_provider_error("Service Unavailable", provider="OpenAI", status_code=503)
+    server_503_info = describe_reply_error(
+        classify_provider_error("Service Unavailable", provider="OpenAI", status_code=503),
+    )
     assert (
-        get_user_friendly_error_message(server_503)
+        server_503_info.plain_text
         == "⚠️ OpenAI unavailable (503) — The model could not complete the reply. Try again shortly."
     )
-    assert describe_reply_error(server_503).kind == "provider_unavailable"
+    assert server_503_info.kind == "provider_unavailable"
 
-    bare_google_transport = ProviderUnavailable("503 Service Unavailable", provider="VertexAI")
+    bare_google_info = describe_reply_error(ProviderUnavailable("503 Service Unavailable", provider="VertexAI"))
     assert (
-        get_user_friendly_error_message(bare_google_transport)
+        bare_google_info.plain_text
         == "⚠️ VertexAI unavailable — The model could not complete the reply. Try again shortly."
     )
-    assert describe_reply_error(bare_google_transport).kind == "provider_unavailable"
+    assert bare_google_info.kind == "provider_unavailable"
 
-    stalled = ProviderUnavailable("Model stream stalled", provider="OpenAI", status_code=504, code=STREAM_STALLED)
-    assert get_user_friendly_error_message(stalled) == "⚠️ The model stopped responding — OpenAI stopped sending data."
-    assert describe_reply_error(stalled).kind == "stream_stalled"
+    stalled_info = describe_reply_error(
+        ProviderUnavailable("Model stream stalled", provider="OpenAI", status_code=504, code=STREAM_STALLED),
+    )
+    assert stalled_info.plain_text == "⚠️ The model stopped responding — OpenAI stopped sending data."
+    assert stalled_info.kind == "stream_stalled"

@@ -29,7 +29,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error
 from mindroom.history.request_size import RequestSizer
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
@@ -1632,7 +1632,7 @@ async def test_a_stream_error_event_reads_as_the_status_its_code_names(
     with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert get_user_friendly_error_message(info.value) == user_message
+    assert describe_reply_error(info.value).plain_text == user_message
     assert type(info.value) is error_type
 
 

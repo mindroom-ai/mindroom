@@ -42,7 +42,7 @@ _MAX_ERROR_DETAIL_CHARS = 2_000
 _MAX_ERROR_CODE_CHARS = 200
 _USER_REDACTED = "[redacted]"
 
-type ReplyErrorKind = Literal[
+type _ReplyErrorKind = Literal[
     "safeguard_refusal",
     "missing_api_key",
     "quota_exhausted",
@@ -55,9 +55,9 @@ type ReplyErrorKind = Literal[
     "timeout",
     "runtime_error",
 ]
-type ReplyErrorAction = Literal["continue", "retry", "compact"]
+type _ReplyErrorAction = Literal["continue", "retry", "compact"]
 
-_PLAIN_TEXT_ICONS: dict[ReplyErrorKind, str] = {
+_PLAIN_TEXT_ICONS: dict[_ReplyErrorKind, str] = {
     "quota_exhausted": "💳",
     "rate_limited": "⏱️",
     "timeout": "⏰",
@@ -65,10 +65,10 @@ _PLAIN_TEXT_ICONS: dict[ReplyErrorKind, str] = {
 
 
 @dataclass(frozen=True, slots=True)
-class ReplyErrorInfo:
+class _ReplyErrorInfo:
     """Structured classification of a reply failure for ``io.mindroom.ai_run.error`` and plain-text fallback."""
 
-    kind: ReplyErrorKind
+    kind: _ReplyErrorKind
     title: str
     summary: str
     detail: str | None = None
@@ -76,7 +76,7 @@ class ReplyErrorInfo:
     status_code: int | None = None
     provider: str | None = None
     retryable: bool = False
-    action: ReplyErrorAction | None = None
+    action: _ReplyErrorAction | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Return the wire object published at ``io.mindroom.ai_run["error"]``."""
@@ -183,7 +183,7 @@ def empty_response_error_info(
     """Return structured ``io.mindroom.ai_run["error"]`` metadata for an exhausted empty model response."""
     resolved_model = model_label.strip() if model_label and model_label.strip() else None
     resolved_provider = _display_provider_name(provider)
-    return ReplyErrorInfo(
+    return _ReplyErrorInfo(
         kind="provider_unavailable",
         title=f"{resolved_model} returned an empty response" if resolved_model else "Empty response",
         summary=summary.removeprefix("⚠️ ").strip(),
@@ -216,7 +216,7 @@ def _classify_provider_error(  # noqa: PLR0911 - one return per provider error k
     safe_summary: str,
     resolved_model: str | None,
     resolved_provider: str | None,
-) -> tuple[ReplyErrorKind, str, str, bool, ReplyErrorAction | None]:
+) -> tuple[_ReplyErrorKind, str, str, bool, _ReplyErrorAction | None]:
     model_text = resolved_model or "The model"
     model_inline = resolved_model or "the model"
     provider_text = resolved_provider or "The model provider"
@@ -299,7 +299,7 @@ def describe_reply_error(
     runtime_paths: RuntimePaths | None = None,
     model_label: str | None = None,
     provider: str | None = None,
-) -> ReplyErrorInfo:
+) -> _ReplyErrorInfo:
     """Classify ``error`` into structured wire metadata and clean plain-text copy.
 
     An error's type alone decides its classification: a provider error was classified from the provider's status and
@@ -321,7 +321,7 @@ def describe_reply_error(
     )
 
     retryable = False
-    action: ReplyErrorAction | None = None
+    action: _ReplyErrorAction | None = None
     if isinstance(error, ModelSafeguardRefusal):
         safe_provider_code = (
             _redact_user_error_text(error.provider_code, max_length=_MAX_ERROR_CODE_CHARS)
@@ -329,7 +329,7 @@ def describe_reply_error(
             else None
         )
         reason_hint = f" ({safe_provider_code})" if safe_provider_code else ""
-        kind: ReplyErrorKind = "safeguard_refusal"
+        kind: _ReplyErrorKind = "safeguard_refusal"
         title = "Blocked by model safeguards"
         summary = (
             f"{model_text}'s safeguards blocked this request{reason_hint}. "
@@ -360,7 +360,7 @@ def describe_reply_error(
         title = "Reply failed"
         summary = safe_summary
 
-    return ReplyErrorInfo(
+    return _ReplyErrorInfo(
         kind=kind,
         title=title,
         summary=summary,
@@ -380,8 +380,8 @@ def log_reply_error(
     runtime_paths: RuntimePaths | None = None,
     model_label: str | None = None,
     provider: str | None = None,
-) -> ReplyErrorInfo:
-    """Log ``error`` as ``agent_error`` and return its structured ``ReplyErrorInfo`` classification."""
+) -> _ReplyErrorInfo:
+    """Log ``error`` as ``agent_error`` and return its structured ``_ReplyErrorInfo`` classification."""
     provider_error = error if isinstance(error, ProviderError) else None
 
     logger.error(
@@ -400,32 +400,6 @@ def log_reply_error(
         model_label=model_label,
         provider=provider,
     )
-
-
-def get_user_friendly_error_message(
-    error: Exception,
-    agent_name: str | None = None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    model_label: str | None = None,
-    provider: str | None = None,
-    include_agent_prefix: bool | None = None,
-) -> str:
-    """Return the reply that reports ``error``, optionally prefixed with ``[agent_name]``.
-
-    ``runtime_paths`` points a missing-key reply at the dashboard URL, or in a headless run at its `.env` file.
-    Pass ``include_agent_prefix=False`` when the Matrix sender is already the agent itself, while still passing
-    ``agent_name`` for structured error logging.
-    """
-    info = log_reply_error(
-        error,
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        model_label=model_label,
-        provider=provider,
-    )
-    use_prefix = bool(agent_name) if include_agent_prefix is None else (include_agent_prefix and bool(agent_name))
-    return f"[{agent_name}] {info.plain_text}" if use_prefix else info.plain_text
 
 
 def needs_provider_key(error: Exception) -> bool:

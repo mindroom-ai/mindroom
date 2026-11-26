@@ -45,7 +45,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.error_handling import ReplyErrorInfo, get_user_friendly_error_message
+from mindroom.error_handling import _ReplyErrorInfo, describe_reply_error
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.request_messages import TurnMessages
@@ -1630,11 +1630,12 @@ class TestUserIdPassthrough:
             runtime_paths,
         )
 
-        assert response.text == get_user_friendly_error_message(
-            error,
-            "general",
-            runtime_paths=runtime_paths,
-            include_agent_prefix=False,
+        assert (
+            response.text
+            == describe_reply_error(
+                error,
+                runtime_paths=runtime_paths,
+            ).plain_text
         )
         [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
@@ -1645,7 +1646,7 @@ class TestUserIdPassthrough:
         """Generic ai helpers should reject configured team names explicitly."""
         with patch(
             "mindroom.ai.log_reply_error",
-            return_value=ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
+            return_value=_ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
         ) as mock_friendly_error:
             response = await ai_response(
                 replace(make_turn_context("ultimate", session_id="session1"), prompt="test"),
@@ -1664,7 +1665,7 @@ class TestUserIdPassthrough:
         """Streaming agent helpers should reject configured team names explicitly."""
         with patch(
             "mindroom.ai.log_reply_error",
-            return_value=ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
+            return_value=_ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
         ) as mock_friendly_error:
             chunks = [
                 chunk

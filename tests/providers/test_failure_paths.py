@@ -29,7 +29,7 @@ from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import run_agent
-from mindroom.error_handling import describe_reply_error, get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     CONNECTION_ERROR,
@@ -95,8 +95,8 @@ QUOTA_EXHAUSTED_REPLY = "💳 Account quota reached — "
 
 
 def _assert_friendly_error(error: ProviderError, expected: str) -> None:
-    message = get_user_friendly_error_message(error)
     info = describe_reply_error(error)
+    message = info.plain_text
     if expected == UNAVAILABLE:
         if error.code == STREAM_STALLED:
             assert info.kind == "stream_stalled"
