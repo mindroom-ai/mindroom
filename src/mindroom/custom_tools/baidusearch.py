@@ -64,7 +64,10 @@ class BaiduSearchTools(Toolkit):
             str: A JSON formatted string containing the search results.
 
         """
-        effective_max_results = self.fixed_max_results or max_results
+        effective_max_results = self.fixed_max_results if self.fixed_max_results is not None else max_results
+        if effective_max_results <= 0:
+            return "[]"
+
         effective_language = _normalize_language(self.fixed_language or language)
 
         logger.debug("Searching Baidu", language=effective_language, query=query)

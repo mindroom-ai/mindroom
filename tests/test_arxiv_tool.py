@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -12,6 +14,7 @@ import pytest
 import requests
 from reportlab.pdfgen import canvas
 
+from mindroom.custom_tools import arxiv as arxiv_module
 from mindroom.custom_tools.arxiv import _download_pdf
 from mindroom.tools.arxiv import arxiv_tools
 
@@ -110,9 +113,19 @@ def test_read_arxiv_papers_downloads_and_reads_the_pdf(arxiv_http: list[str], tm
     assert [path.name for path in tmp_path.iterdir()] == ["math_0211159v1.The_entropy_formula__for_the_Ricci_flow.pdf"]
 
 
-def test_search_and_page_bounds(arxiv_http: list[str], tmp_path: Path) -> None:
-    """Search serializes article metadata and read_arxiv_papers honors None and 0 page limits."""
+@pytest.mark.parametrize(("page_size", "expected_api_limit"), [(100, "3"), (2, "2")])
+def test_search_and_page_bounds(
+    arxiv_http: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_size: int,
+    expected_api_limit: str,
+) -> None:
+    """Search bounds the request size, and subsequent searches and reads obey the same rate limit."""
+    delays: list[float] = []
+    monkeypatch.setattr(arxiv, "time", SimpleNamespace(sleep=delays.append))
     toolkit = arxiv_tools()(download_dir=tmp_path)
+    toolkit.client.page_size = page_size
 
     assert json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=0)) == []
     assert arxiv_http == []
@@ -121,13 +134,35 @@ def test_search_and_page_bounds(arxiv_http: list[str], tmp_path: Path) -> None:
     assert len(search_articles) == 1
     assert search_articles[0]["id"] == "math/0211159v1"
     assert "content" not in search_articles[0]
-    assert parse_qs(urlparse(arxiv_http[0]).query)["max_results"] == ["3"]
+    assert parse_qs(urlparse(arxiv_http[0]).query)["max_results"] == [expected_api_limit]
+    assert delays == []
+
+    assert json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=3)) == search_articles
+    assert len(delays) == 1
 
     all_pages = json.loads(toolkit.read_arxiv_papers(["math/0211159v1"]))
     assert [page["page"] for page in all_pages[0]["content"]] == [1, 2]
+    assert len(delays) == 2
 
     zero_pages = json.loads(toolkit.read_arxiv_papers(["math/0211159v1"], pages_to_read=0))
     assert zero_pages[0]["content"] == []
+
+
+@pytest.mark.usefixtures("arxiv_http")
+def test_default_downloads_use_a_temporary_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without download_dir PDFs are read from writable scratch space and cleaned up."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    def download(result: arxiv.Result, directory: Path) -> Path:
+        assert directory.is_relative_to(tmp_path)
+        return _download_pdf(result, directory)
+
+    monkeypatch.setattr(arxiv_module, "_download_pdf", download)
+
+    articles = json.loads(arxiv_tools()().read_arxiv_papers(["math/0211159v1"], pages_to_read=1))
+
+    assert articles[0]["content"] == [{"page": 1, "text": "First page text\n"}]
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_download_pdf_guards_missing_url_scheme_host_and_symlinks(

@@ -155,7 +155,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem]
 ```
 
 ```python

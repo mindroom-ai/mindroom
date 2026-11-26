@@ -87,7 +87,7 @@ async def _read_final_response(client: httpx.AsyncClient, response: httpx.Respon
     return json.dumps(result, indent=2)
 
 
-class CustomApiTools(Toolkit):
+class _CustomApiTools(Toolkit):
     """Native custom API toolkit with MindRoom destination-policy and transport protections."""
 
     name = "api_tools"
@@ -265,6 +265,6 @@ class CustomApiTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#custom_api",
     function_names=("make_request",),
 )
-def custom_api_tools() -> type[CustomApiTools]:
+def custom_api_tools() -> type[_CustomApiTools]:
     """Return Custom API tools for making HTTP requests to external APIs."""
-    return CustomApiTools
+    return _CustomApiTools

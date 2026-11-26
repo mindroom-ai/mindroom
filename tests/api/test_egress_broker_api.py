@@ -16,14 +16,12 @@ from mindroom.api import auth, egress_status, oauth
 from mindroom.api import egress_broker as egress_broker_api
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import EgressService
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker import env, secrets
+from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.oauth_source import resolve_oauth_token
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.egress_broker.user_services import save_user_service
-from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
 from tests.api.conftest import (
     trusted_upstream_env,
@@ -286,7 +284,7 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool or without the `egress_credentials` tool.
+    without shell or without the `egress_credentials` tool.
     Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
@@ -301,28 +299,13 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
             "notes": _keys_agent(["calculator"]),
             "coder": _agent(["shell"]),
             "host_shell": _keys_agent(["shell"], worker_scope="shared", worker_tools=[]),
+            "worker_shell": _keys_agent(["shell"], worker_scope="shared"),
         },
     )
 
-    assert _key_targets(client) == (["host_shell", "preset_team"], False)
-    assert _key_targets(client, "preset_team") == (["host_shell", "preset_team"], False)
-
-
-def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environment(
-    egress_config_file: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent with `egress_credentials` uses the broker when it has any tool the sandbox proxy gives the broker env.
-
-    Both read one list, so a tool added there makes its agents eligible without a second edit.
-    """
-    assert env.EXECUTION_ENV_TOOL_NAMES is sandbox_proxy.EXECUTION_ENV_TOOL_NAMES
-    assert "shell" in EXECUTION_ENV_TOOL_NAMES
-    tools = ["calculator", "shell"]
-    monkeypatch.setattr(env, "EXECUTION_ENV_TOOL_NAMES", frozenset(tools))
-    agents = {f"{tool}_team": _keys_agent([tool], worker_scope="shared") for tool in tools}
-
-    assert _key_targets(_client_with_agents(egress_config_file, agents)) == (sorted(agents), False)
+    expected = (["host_shell", "preset_team", "worker_shell"], False)
+    assert _key_targets(client) == expected
+    assert _key_targets(client, "preset_team") == expected
 
 
 @pytest.mark.parametrize(

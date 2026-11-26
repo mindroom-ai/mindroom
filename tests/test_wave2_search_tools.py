@@ -5,15 +5,16 @@ from __future__ import annotations
 import inspect
 import json
 from typing import Any
+from unittest.mock import MagicMock
 from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
 import serpapi
+from ddgs.exceptions import DDGSException, TimeoutException
 
 from mindroom.custom_tools import baidusearch as baidusearch_module
 from mindroom.custom_tools import ddgs_search as ddgs_search_module
-from mindroom.custom_tools.ddgs_search import DDGSSearchTools
 from mindroom.tool_system.authoring import Toolkit, authored_description
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters
 from mindroom.tools.baidusearch import baidusearch_tools
@@ -48,16 +49,12 @@ def test_wave2_search_toolkits_are_native_with_preserved_names_and_order(
 
 
 def test_duckduckgo_and_googlesearch_share_one_ddgs_implementation() -> None:
-    """DuckDuckGo and Google Search reuse DDGSSearchTools without duplicating search methods."""
+    """DuckDuckGo and Google Search share their web and news search methods."""
     ddg_cls = duckduckgo_tools()
     google_cls = googlesearch_tools()
 
-    assert issubclass(ddg_cls, DDGSSearchTools)
-    assert issubclass(google_cls, DDGSSearchTools)
-    assert ddg_cls.web_search is DDGSSearchTools.web_search
-    assert google_cls.web_search is DDGSSearchTools.web_search
-    assert ddg_cls.search_news is DDGSSearchTools.search_news
-    assert google_cls.search_news is DDGSSearchTools.search_news
+    assert ddg_cls.web_search is google_cls.web_search
+    assert ddg_cls.search_news is google_cls.search_news
 
 
 def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
@@ -84,7 +81,7 @@ def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
 
 
 def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """DDGS search forwards client config, backend choice, and web-only query modifier."""
+    """DDGS search forwards client config, backend choice, and one modifier for each query."""
     client_inits: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -153,7 +150,7 @@ def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.Mon
         (
             "news",
             {
-                "query": "coffee",
+                "query": "site:example.com coffee",
                 "max_results": 3,
                 "backend": "duckduckgo",
                 "timelimit": "w",
@@ -169,6 +166,41 @@ def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.Mon
     assert "backend" not in inspect.signature(google_cls).parameters
     with pytest.raises(TypeError, match="backend"):
         google_cls(backend="bing")
+
+
+@pytest.mark.parametrize(("fixed_limit", "requested_limit"), [(0, 5), (None, 0), (None, -1)])
+def test_search_tools_skip_the_sdk_for_nonpositive_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    fixed_limit: int | None,
+    requested_limit: int,
+) -> None:
+    """A nonpositive effective limit returns no results without touching either search SDK."""
+
+    def unexpected_search(**_kwargs: object) -> None:
+        pytest.fail("search SDK called with a nonpositive limit")
+
+    monkeypatch.setattr(ddgs_search_module, "DDGS", unexpected_search)
+    monkeypatch.setattr(baidusearch_module, "search", unexpected_search)
+    ddg = duckduckgo_tools()(fixed_max_results=fixed_limit)
+    baidu = baidusearch_tools()(fixed_max_results=fixed_limit)
+
+    assert ddg.web_search("coffee", max_results=requested_limit) == "[]"
+    assert ddg.search_news("coffee", max_results=requested_limit) == "[]"
+    assert baidu.baidu_search("coffee", max_results=requested_limit) == "[]"
+
+
+@pytest.mark.parametrize("error", [DDGSException("No results found."), TimeoutException("Backend timed out")])
+def test_ddgs_search_returns_structured_backend_errors(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Backend errors keep the same JSON shape and effective query for both tools."""
+    sdk = MagicMock()
+    sdk.__enter__.return_value.text.side_effect = error
+    sdk.__enter__.return_value.news.side_effect = error
+    monkeypatch.setattr(ddgs_search_module, "DDGS", lambda **_kwargs: sdk)
+    ddg = duckduckgo_tools()(modifier="site:example.com")
+    expected = {"error": type(error).__name__, "message": str(error), "query": "site:example.com coffee", "results": []}
+
+    assert json.loads(ddg.web_search("coffee")) == expected
+    assert json.loads(ddg.search_news("coffee")) == expected
 
 
 def test_ddgs_search_tools_validation_and_toggles() -> None:

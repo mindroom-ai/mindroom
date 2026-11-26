@@ -12,7 +12,7 @@ from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tools import custom_api as custom_api_module
-from mindroom.tools.custom_api import CustomApiTools, custom_api_tools
+from mindroom.tools.custom_api import custom_api_tools
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,7 +22,7 @@ def _install_transport(
     monkeypatch: pytest.MonkeyPatch,
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> list[httpx.Request]:
-    """Route CustomApiTools transport calls through an in-memory HTTPX MockTransport."""
+    """Route the custom API tool's transport calls through an in-memory HTTPX MockTransport."""
     sent: list[httpx.Request] = []
 
     def record(request: httpx.Request) -> httpx.Response:
@@ -39,11 +39,10 @@ def _install_transport(
 
 
 def test_custom_api_toolkit_is_native_and_respects_enable_switches() -> None:
-    """The custom_api factory returns the native CustomApiTools class honoring enable switches."""
+    """The custom_api factory returns a native toolkit honoring enable switches."""
     tool_class = custom_api_tools()
 
-    assert tool_class is CustomApiTools
-    assert issubclass(tool_class, Toolkit)
+    assert isinstance(tool_class(), Toolkit)
     assert tool_class().name == "api_tools"
     assert list(tool_class().functions) == ["make_request"]
     assert list(tool_class(enable_make_request=False).functions) == []
@@ -66,7 +65,11 @@ def test_custom_api_handles_json_text_non_2xx_and_transport_errors(monkeypatch: 
         raise httpx.ConnectError(msg, request=request)
 
     sent = _install_transport(monkeypatch, respond)
-    toolkit = CustomApiTools(base_url="https://api.example.com/v1", api_key="sk-test", headers={"X-App": "mindroom"})
+    toolkit = custom_api_tools()(
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        headers={"X-App": "mindroom"},
+    )
 
     created = json.loads(
         toolkit.make_request(
@@ -106,15 +109,20 @@ def test_custom_api_enforces_defensive_destination_and_credential_policies(monke
         ),
     )
 
+    tool_class = custom_api_tools()
     with pytest.raises(ServerFetchUrlError):
-        CustomApiTools().make_request("http://127.0.0.1:8080/private")
+        tool_class().make_request("http://127.0.0.1:8080/private")
 
-    unanchored = json.loads(CustomApiTools(api_key="sk-test").make_request("https://example.com/data"))
+    unanchored = json.loads(tool_class(api_key="sk-test").make_request("https://example.com/data"))
     assert "base_url" in unanchored["error"]
     assert sent == []
 
     redirected = json.loads(
-        CustomApiTools(base_url="https://api.example.com", api_key="sk-test", headers={"X-Key": "secret"}).make_request(
+        tool_class(
+            base_url="https://api.example.com",
+            api_key="sk-test",
+            headers={"X-Key": "secret"},
+        ).make_request(
             "start",
             headers={"Host": "other.example", "X-Trace": "keep"},
         ),

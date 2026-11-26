@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 _VALID_TIMELIMITS = frozenset({"d", "w", "m", "y"})
 
 
-class DDGSSearchTools(Toolkit):
+class _DDGSSearchTools(Toolkit):
     """Shared DDGS web and news search toolkit parameterized by backend."""
 
     name = "websearch"
@@ -54,7 +54,12 @@ class DDGSSearchTools(Toolkit):
 
     def _run_search(self, category: Literal["text", "news"], query: str, max_results: int) -> str:
         """Execute a DDGS text or news search and return pretty-printed UTF-8 JSON."""
-        actual_max_results = self.fixed_max_results or max_results
+        actual_max_results = self.fixed_max_results if self.fixed_max_results is not None else max_results
+        if actual_max_results <= 0:
+            return "[]"
+
+        search_query = f"{self.modifier} {query}" if self.modifier else query
+        logger.debug("Searching DDGS", category=category, query=search_query, backend=self.backend)
         search_kwargs: dict[str, Any] = {
             "max_results": actual_max_results,
             "backend": self.backend,
@@ -64,13 +69,18 @@ class DDGSSearchTools(Toolkit):
         if self.region is not None:
             search_kwargs["region"] = self.region
 
-        with DDGS(proxy=self.proxy, timeout=self.timeout, verify=self.verify_ssl) as ddgs:
-            results = (
-                ddgs.text(query=query, **search_kwargs)
-                if category == "text"
-                else ddgs.news(query=query, **search_kwargs)
+        try:
+            with DDGS(proxy=self.proxy, timeout=self.timeout, verify=self.verify_ssl) as ddgs:
+                search = ddgs.text if category == "text" else ddgs.news
+                results = search(query=search_query, **search_kwargs)
+            return json.dumps(results, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            logger.exception("DDGS search failed", category=category, query=search_query, backend=self.backend)
+            return json.dumps(
+                {"error": type(exc).__name__, "message": str(exc), "query": search_query, "results": []},
+                indent=2,
+                ensure_ascii=False,
             )
-        return json.dumps(results, indent=2, ensure_ascii=False)
 
     @tool
     def web_search(self, query: str, max_results: int = 5) -> str:
@@ -84,9 +94,7 @@ class DDGSSearchTools(Toolkit):
             The search results from the web.
 
         """
-        search_query = f"{self.modifier} {query}" if self.modifier else query
-        logger.debug("Searching web", query=search_query, backend=self.backend)
-        return self._run_search("text", search_query, max_results)
+        return self._run_search("text", query, max_results)
 
     @tool
     def search_news(self, query: str, max_results: int = 5) -> str:
@@ -100,11 +108,10 @@ class DDGSSearchTools(Toolkit):
             The latest news from the web.
 
         """
-        logger.debug("Searching web news", query=query, backend=self.backend)
         return self._run_search("news", query, max_results)
 
 
-class DuckDuckGoTools(DDGSSearchTools):
+class DuckDuckGoTools(_DDGSSearchTools):
     """DDGS web and news search toolkit defaulting to the DuckDuckGo backend."""
 
     def __init__(
@@ -134,7 +141,7 @@ class DuckDuckGoTools(DDGSSearchTools):
         )
 
 
-class GoogleSearchTools(DDGSSearchTools):
+class GoogleSearchTools(_DDGSSearchTools):
     """DDGS web and news search toolkit requesting the Google backend."""
 
     def __init__(

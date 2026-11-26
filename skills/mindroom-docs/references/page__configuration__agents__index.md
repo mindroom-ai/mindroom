@@ -311,7 +311,7 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 defaults:
   tools: [scheduler]
   max_tool_calls_per_turn: 200
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   enable_streaming: true
   max_preload_file_chars: 30000
 ```

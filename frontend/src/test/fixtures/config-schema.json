@@ -3832,7 +3832,7 @@
             }
           ],
           "default": null,
-          "description": "Optional dashboard icon name, such as SiConfluence or Calendar",
+          "description": "Optional dashboard icon name, such as SiAtlassian or Calendar",
           "title": "Icon"
         },
         "description": {

@@ -14410,8 +14410,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_wikipedia",
-        "search_wikipedia_and_update_knowledge_base"
+        "search_wikipedia"
       ],
       "helper_text": null,
       "icon": "SiWikipedia",

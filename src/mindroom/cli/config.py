@@ -1467,7 +1467,7 @@ defaults:
   # Execution tools (shell, filesystem, python, docker) run directly in the
   # MindRoom process. For isolation, run them in a sandboxed worker instead:
   # deploy the sandbox runner (Docker Compose or Kubernetes) and remove this
-  # line — or replace [] with the tools to route, e.g. [shell, filesystem, python].
+  # line — or replace [] with the tools to route, e.g. [shell, filesystem].
   # See https://docs.mindroom.chat/deployment/sandbox-proxy/
   worker_tools: []
   # Lets the shell run in the MindRoom process while it has no worker.
