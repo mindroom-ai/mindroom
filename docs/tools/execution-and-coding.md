@@ -188,16 +188,23 @@ agents:
             - /opt/custom/bin
 ```
 
+```python
+run_shell_command("git status --short", tail=50)
+run_shell_command(["git", "status", "--short"], tail=50)
+run_shell_command(["bash", "-lc", "make test"], timeout=900)
+run_shell_command("nohup npm run dev > dev.log 2>&1 &")
+```
+
 ### Linux resource isolation
 
-On Linux, MindRoom starts shell commands at `SCHED_IDLE` CPU priority (`chrt -i 0`, falling back to moving the process tree after spawn) and idle disk I/O priority (`ionice -c 3`, which takes effect on BFQ-scheduled disks and fails open when unavailable).
+On Linux, MindRoom starts shell commands at `SCHED_IDLE` CPU priority (`chrt -i 0`, falling back to moving the process tree after spawn) and idle disk I/O priority (`ionice -c 3`, which takes effect when the disk scheduler honors I/O priorities such as BFQ, and fails open when unavailable).
 
 Deployments that route `shell` to Docker or Kubernetes workers already isolate commands in their worker containers.
 When running `shell` directly in the MindRoom process on a Linux systemd host (`defaults.allow_shell_without_worker: true`), spawned commands inherit MindRoom's own service cgroup by default, so heavy builds or test suites can compete with MindRoom for RAM and swap.
 
 To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
-MindRoom probes `systemd-run --user --scope` together with `env` once per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)` and fails open when unavailable (including on older systemd releases without `--expand-environment=no`).
-When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's exact environment.
+MindRoom probes `systemd-run --user --scope` together with `env` once per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)` and caches the result for the process lifetime, failing open when unavailable (including on older systemd releases without `--expand-environment=no`).
+When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
 
 Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
 
@@ -240,13 +247,6 @@ Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<u
    ```
 
    In cgroup v2, `MemoryMin` and `MemoryLow` are bounded by ancestor cgroups, so set matching values on `system.slice` (and on the container cgroup when running inside LXC/Incus).
-
-```python
-run_shell_command("git status --short", tail=50)
-run_shell_command(["git", "status", "--short"], tail=50)
-run_shell_command(["bash", "-lc", "make test"], timeout=900)
-run_shell_command("nohup npm run dev > dev.log 2>&1 &")
-```
 
 ### Named workers
 
