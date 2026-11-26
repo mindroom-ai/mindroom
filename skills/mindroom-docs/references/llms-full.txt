@@ -3880,11 +3880,11 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 
 | Backend | What it does | Use it when |
 |---|---|---|
-| `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
+| `mem0` (default) | Vector memory: relevant memories are retrieved before each standard-mode reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
-Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+In standard mode, before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt (in minimal mode, agents read memory files or call the `memory` tool on demand instead).
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
 With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](https://docs.mindroom.chat/knowledge/#reranking), a reranker chooses the semantic matches instead.
 `memory(action="search", ...)` returns up to its own `limit` in every mode.
@@ -3943,7 +3943,7 @@ A `file` member of a team that uses Mem0 does not see that team's Mem0 memories 
 
 ## Backend: `mem0`
 
-Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
+Before each standard-mode reply, Mem0 retrieves memories relevant to the message and adds them to the prompt (in minimal mode, automatic recall is skipped; on-demand recall uses the `memory` tool when configured).
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
@@ -4091,7 +4091,7 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+Before each standard-mode reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message (in minimal mode, agents read `MEMORY.md` and `memory/` or call the `memory` tool on demand instead).
 An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
@@ -4138,8 +4138,8 @@ Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker
 With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `memory(action="search", ...)` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
-A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
-So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every standard-mode reply.
+So with an `openai_decisions` or `typesafe` reranker, every standard-mode reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false` (minimal turns skip automatic recall; explicit memory and knowledge searches can still rerank).
 With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.

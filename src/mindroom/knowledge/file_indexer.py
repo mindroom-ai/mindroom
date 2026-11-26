@@ -131,8 +131,8 @@ class _InMemoryTextReader(TextReader):
 class _MemoryEntryChunking(SafeFixedSizeChunking):
     """Make each memory entry its own chunk, with its whitespace collapsed as in fixed-size chunks.
 
-    An entry over the chunk size is split at whitespace into pieces of at most that size. A file without entries,
-    such as a lone heading, is chunked at the fixed size instead, so it still indexes.
+    An entry over the chunk size is split into balanced pieces along natural boundaries of at most that size. A file
+    without entries, such as a lone heading, is chunked at the fixed size instead, so it still indexes.
     """
 
     def chunk(self, document: Document) -> list[Document]:

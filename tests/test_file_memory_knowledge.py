@@ -21,6 +21,7 @@ from mindroom.knowledge.indexing_config import (
     indexing_settings_key,
     published_index_settings_compatible,
 )
+from mindroom.knowledge.memory_entries import MEMORY_ENTRIES_STRATEGY_ID
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -347,11 +348,19 @@ def test_chunk_strategy_is_part_of_the_index_settings(tmp_path: Path) -> None:
     unrecorded = fixed.to_metadata()
     del unrecorded["chunk_strategy"]
 
+    v1_metadata = {**entries.to_metadata(), "chunk_strategy": "memory_entries"}
+    v1_entries = IndexingSettings.from_metadata(v1_metadata)
+
     assert base_config.chunk_strategy == "memory_entries"
+    assert entries.chunk_strategy == MEMORY_ENTRIES_STRATEGY_ID == "memory_entries:v2"
     assert entries != fixed
     assert IndexingSettings.from_metadata(entries.to_metadata()) == entries
     assert IndexingSettings.from_metadata(unrecorded) == fixed
     assert published_index_settings_compatible(fixed, entries)
+    assert v1_entries is not None
+    assert v1_entries.chunk_strategy == "memory_entries"
+    assert v1_entries != entries
+    assert published_index_settings_compatible(v1_entries, entries)
 
 
 def test_rerank_flag_keeps_index_signature(tmp_path: Path) -> None:

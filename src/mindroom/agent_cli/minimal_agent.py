@@ -125,7 +125,8 @@ def minimal_turn(
     required = [item for item in system_enrichment if item.minimal_required]
     turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(required) if required else None))
     documents = minimal_context_documents(build)
-    documents["memory"] = render_transient_context((session_preamble, transient_memory))
+    if memory := render_transient_context((session_preamble, transient_memory)):
+        documents["memory"] = memory
     documents["enrichment"] = render_enrichment_block([*system_enrichment, *transient_enrichment])
     return MinimalTurn(
         system_messages=tuple(Message(role="system", content=text) for text in (bootstrap, turn) if text),
