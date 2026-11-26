@@ -56,7 +56,11 @@ def _config(tmp_path: Path, *, enabled: bool = True, **raw: Any) -> tuple[Config
             (True, 7 * _DAY),
             id="later-auto-approve",
         ),
-        pytest.param([{"match": "*", "script": "check.py"}], (True, 7 * _DAY), id="script-rule"),
+        pytest.param(
+            [{"match": "scheduler", "script": "check.py"}, {"match": "*", "script": "check.py"}],
+            (True, 7 * _DAY),
+            id="script-rule",
+        ),
     ],
 )
 async def test_request_network_access_always_needs_approval_while_the_switch_is_on(

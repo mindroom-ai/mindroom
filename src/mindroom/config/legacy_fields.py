@@ -555,9 +555,15 @@ def _retired_approval_pair_error(
         default=default,
         default_timeout_days=default_timeout_days,
     )
-    if old_decision == new_decision:
+    if old_decision == new_decision and old_decision[1] is None:
         return None
     if first_old is not None:
+        if old_decision == new_decision and old_decision[1] is not None:
+            return (
+                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs script "
+                f"{old_decision[1]!r} for {old}; {old} is now {new}, so the script receives "
+                f"{new!r} instead of {old!r}; update the script and add an explicit rule for {new}."
+            )
         return (
             f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
             f"{old} is now {new}, which now gets a different approval decision; "

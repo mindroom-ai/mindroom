@@ -535,9 +535,10 @@ def _bound_by_annotation(hint: object) -> InjectedValue:
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
-# with those types, and the agent loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
-# DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
-# SuperserveTools also do. That attribute is the Agno agent's own state, not the run's stored session state, and
+# with those types, and the agent loop has no Agno agent to inject. Remaining Agno toolkits registered by MindRoom
+# (such as media and browser toolkits) still accept ``agent`` / ``team`` parameters, and Agno toolkits that read the
+# parameter read and write ``agent.session_state`` (as Agno's AntigravityTools and SuperserveTools do). That attribute
+# is the Agno agent's own state, not the run's stored session state, and
 # MindRoom built one agent per reply, so the stand-in carries the adapted toolkit's ``actor_state``, which is never
 # stored. MindRoom's own tools read their caller from the tool runtime context.
 # Upstream issue: Tracking gap; Agno defines no contract for what a toolkit may read from the injected agent, so a
