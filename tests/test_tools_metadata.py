@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
-import agno.tools.crawl4ai as agno_crawl4ai
+import crawl4ai
 import httpcore
 import httpx
 import pytest
@@ -803,7 +803,7 @@ async def test_crawl4ai_returns_filtered_markdown_before_raw_markdown(
             del url, config
             return _crawl_result("raw text", fit_markdown=fit_markdown)
 
-    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    monkeypatch.setattr(crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
 
     assert await crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)._async_crawl("https://example.com") == expected
 
@@ -917,7 +917,7 @@ async def test_crawl4ai_browser_dials_through_destination_proxy_and_guards_conte
             unsafe_route.continue_.assert_not_called()
             return _crawl_result("public content")
 
-    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    monkeypatch.setattr(crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
     tool = crawl4ai_tools()(runtime_paths=_CRAWL4AI_RUNTIME_PATHS)
 
     try:
@@ -996,7 +996,7 @@ async def test_crawl4ai_browser_egress_route(
             del url, config
             return _crawl_result("public content")
 
-    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    monkeypatch.setattr(crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
     monkeypatch.setattr(crawl4ai_module, "BrowserDestinationProxy", RecordingRelay)
     runtime_paths = resolve_runtime_paths(
         config_path=Path("config.yaml"),

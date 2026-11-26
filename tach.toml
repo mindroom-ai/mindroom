@@ -9846,7 +9846,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser_mcp", "mindroom.egress_broker", "mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.browser_mcp", "mindroom.egress_broker", "mindroom.tools.agentql", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
@@ -9873,19 +9873,6 @@ visibility = ["mindroom.tools.modelslabs"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_modelslabs"]
 expose = ["ModelsLabCompletionTools"]
-
-[[modules]]
-path = "mindroom.tools.trafilatura"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_trafilatura"]
-
-[[modules]]
-path = "mindroom.tools.agno_compat_trafilatura"
-depends_on = []
-visibility = ["mindroom.tools.trafilatura"]
-
-[[interfaces]]
-from = ["mindroom.tools.agno_compat_trafilatura"]
-expose = ["TimeLimitedTrafilaturaTools", "install_server_fetch_guard"]
 
 [[modules]]
 path = "mindroom.tools.file_generation"
@@ -9927,19 +9914,6 @@ from = ["mindroom.tools.agno_compat_mem0"]
 expose = ["UserFilterMem0Tools"]
 
 [[modules]]
-path = "mindroom.tools.newspaper4k"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
-
-[[modules]]
-path = "mindroom.tools.agno_compat_newspaper4k"
-depends_on = []
-visibility = ["mindroom.tools.newspaper4k"]
-
-[[interfaces]]
-from = ["mindroom.tools.agno_compat_newspaper4k"]
-expose = ["install_server_fetch_guard"]
-
-[[modules]]
 path = "mindroom.tools.browser_mcp"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 
@@ -9949,16 +9923,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.tools.agentql"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.custom_tools.agno_compat_agentql"]
-
-[[modules]]
-path = "mindroom.custom_tools.agno_compat_agentql"
-depends_on = ["mindroom.worker_computer.browser_proxy"]
-visibility = ["mindroom.tools.agentql"]
-
-[[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_agentql"]
-expose = ["MindRoomAgentQLTools"]
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.tools.replicate"

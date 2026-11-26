@@ -99,14 +99,14 @@ def _native_modules(tool_name: str) -> set[str]:
         toolkit_class = factory()
     except ImportError:
         registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
-        return {
+        imported = {
             node.module
             for node in ast.walk(registration)
             if isinstance(node, ast.ImportFrom)
             and node.module is not None
-            and node.module.startswith("mindroom.")
-            and node.module != "mindroom.tool_system.authoring"
+            and node.module.startswith(("mindroom.tools.", "mindroom.custom_tools."))
         }
+        return {factory.__module__, *imported}
     return {
         klass.__module__
         for klass in inspect.getmro(toolkit_class)

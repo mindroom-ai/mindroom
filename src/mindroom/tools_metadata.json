@@ -11280,10 +11280,6 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "aclose_session",
-        "aget_page_content",
-        "anavigate_to",
-        "ascreenshot",
         "close_session",
         "get_page_content",
         "navigate_to",
