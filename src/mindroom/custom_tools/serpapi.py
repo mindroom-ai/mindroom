@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, quote_plus
 
@@ -43,7 +42,7 @@ class SerpApiTools(Toolkit):
         enable_search_youtube: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key or os.getenv("SERP_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.warning("No Serpapi API key provided")
 

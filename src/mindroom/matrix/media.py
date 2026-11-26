@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 import nio
 from aiohttp import ClientConnectionError, ClientResponse
@@ -48,6 +49,7 @@ _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+_MAX_UPLOAD_SIZE_CACHE: WeakKeyDictionary[nio.AsyncClient, int] = WeakKeyDictionary()
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -142,6 +144,50 @@ def upload_content_uri(upload_result: object) -> str | None:
     upload_response = upload_result[0] if isinstance(upload_result, tuple) else upload_result
     if isinstance(upload_response, nio.UploadResponse) and upload_response.content_uri:
         return str(upload_response.content_uri)
+    return None
+
+
+def format_byte_size(size_bytes: int) -> str:
+    """Return a concise, byte-stable human-readable byte size."""
+    for unit, threshold in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if size_bytes >= threshold:
+            return f"{size_bytes / threshold:.1f} {unit}"
+    return f"{size_bytes} B"
+
+
+def cached_homeserver_max_upload_size(client: nio.AsyncClient) -> int | None:
+    """Return the cached ``m.upload.size`` limit for ``client``, if known."""
+    return _MAX_UPLOAD_SIZE_CACHE.get(client)
+
+
+async def homeserver_max_upload_size(client: nio.AsyncClient, *, force_refresh: bool = False) -> int | None:
+    """Return the homeserver's advertised ``m.upload.size`` limit in bytes, cached per client.
+
+    Pass ``force_refresh=True`` to bypass and refresh or evict any cached limit before rejecting an upload.
+    Fails open to ``None`` when the homeserver omits the limit, returns an error, or the client
+    cannot query the content repository configuration. Failures are not cached so transient errors recover.
+    """
+    if force_refresh:
+        _MAX_UPLOAD_SIZE_CACHE.pop(client, None)
+    elif (cached := _MAX_UPLOAD_SIZE_CACHE.get(client)) is not None:
+        return cached
+
+    try:
+        response = await client.content_repository_config()
+    except Exception as error:
+        logger.debug("homeserver_upload_limit_fetch_failed", error=str(error))
+        return None
+
+    if (
+        isinstance(response, nio.ContentRepositoryConfigResponse)
+        and isinstance(response.upload_size, int)
+        and response.upload_size > 0
+    ):
+        _MAX_UPLOAD_SIZE_CACHE[client] = response.upload_size
+        return response.upload_size
+
+    if isinstance(response, nio.ContentRepositoryConfigError):
+        logger.debug("homeserver_upload_limit_error_response", error=str(response))
     return None
 
 

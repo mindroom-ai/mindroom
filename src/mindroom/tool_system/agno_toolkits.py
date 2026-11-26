@@ -219,7 +219,7 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 
 
 # AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
-# Reason: Agno 3.2.1's ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
+# Reason: Agno 3.2.1's ZepTools and DaytonaTools build default
 # instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
 # construction can remove any named function, so the prompt would tell the model to call a function it does not have.
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
@@ -240,18 +240,6 @@ _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
             "run_shell_command",
         },
     ),
-    "agno.tools.google.calendar.GoogleCalendarTools": frozenset(
-        {
-            "check_availability",
-            "delete_event",
-            "get_event",
-            "list_events",
-            "quick_add_event",
-            "search_events",
-            "update_event",
-        },
-    ),
-    "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
     "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
 }
 

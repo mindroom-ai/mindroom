@@ -34,6 +34,7 @@ from mindroom.matrix.media import (
     FileOrVideoMessageEvent,
     ImageMessageEvent,
     download_media_bytes,
+    format_byte_size,
     is_audio_message_event,
     is_file_or_video_message_event,
     is_image_message_event,
@@ -319,14 +320,6 @@ def _file_byte_size(file: File) -> int | None:
     return file.size
 
 
-def _format_byte_size(size_bytes: int) -> str:
-    """Return a concise, byte-stable human-readable byte size."""
-    for unit, threshold in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
-        if size_bytes >= threshold:
-            return f"{size_bytes / threshold:.1f} {unit}"
-    return f"{size_bytes} B"
-
-
 def format_omitted_inline_files_note(omitted_files: Sequence[File]) -> str:
     """Return a concise, byte-stable sanitized note naming files omitted from inline prompt media."""
     labels: list[str] = []
@@ -338,7 +331,7 @@ def format_omitted_inline_files_note(omitted_files: Sequence[File]) -> str:
         has_attachment_id = has_attachment_id or is_attachment
         details = [
             *([rendered_label(file.id)] if is_attachment else []),
-            *([_format_byte_size(size)] if (size := _file_byte_size(file)) is not None else []),
+            *([format_byte_size(size)] if (size := _file_byte_size(file)) is not None else []),
         ]
         labels.append(f"{label} ({', '.join(details)})" if details else label)
     guidance = _OMITTED_INLINE_FILES_BASE_GUIDANCE + (

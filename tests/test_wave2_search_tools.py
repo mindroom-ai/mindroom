@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from urllib.parse import quote, quote_plus
 
@@ -13,15 +13,46 @@ import pytest
 import serpapi
 from ddgs.exceptions import DDGSException, TimeoutException
 
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import baidusearch as baidusearch_module
 from mindroom.custom_tools import ddgs_search as ddgs_search_module
 from mindroom.tool_system.authoring import Toolkit, authored_description
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters
 from mindroom.tools.baidusearch import baidusearch_tools
 from mindroom.tools.duckduckgo import duckduckgo_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _build_env_configured_tool(
+    tmp_path: Path,
+    tool_name: str,
+    *,
+    process_env: dict[str, str],
+    overrides: dict[str, object] | None = None,
+) -> Any:  # noqa: ANN401
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", **process_env},
+    )
+    return get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides=overrides,
+        runs_in_worker=False,
+        worker_target=None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -256,8 +287,11 @@ def test_baidusearch_enable_flags_and_all() -> None:
     assert list(tool_class(enable_baidu_search=False, all=True).functions) == ["baidu_search"]
 
 
-def test_serper_all_endpoints_headers_payload_and_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Serper posts to all four endpoints over httpx with expected headers, payload, and env key fallback."""
+def test_serper_all_endpoints_headers_payload_and_env_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serper posts to all four endpoints over httpx with expected headers, payload, and metadata env fallback."""
     captured: list[tuple[str, dict[str, str], dict[str, Any], dict[str, Any]]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -265,10 +299,16 @@ def test_serper_all_endpoints_headers_payload_and_env_fallback(monkeypatch: pyte
         captured.append((str(request.url), dict(request.headers), body, dict(request.extensions["timeout"])))
         return httpx.Response(200, text=json.dumps({"endpoint": request.url.path, "received": body}))
 
-    monkeypatch.setenv("SERPER_API_KEY", "serper-env-key")
+    monkeypatch.setenv("SERPER_API_KEY", "host-env-must-not-leak")
+    assert serper_tools()().api_key is None
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(httpx, "post", client.post)
-        toolkit = serper_tools()(location="nl", language="nl", num_results=7, date_range="qdr:w", timeout=15)
+        toolkit = _build_env_configured_tool(
+            tmp_path,
+            "serper",
+            process_env={"SERPER_API_KEY": "serper-env-key"},
+            overrides={"location": "nl", "language": "nl", "num_results": 7, "date_range": "qdr:w", "timeout": 15},
+        )
 
         web = json.loads(toolkit.search_web("python"))
         news = json.loads(toolkit.search_news("ai", num_results=3))
@@ -338,8 +378,11 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
     assert list(all_enabled.functions) == ["search_web", "search_news", "search_scholar", "scrape_webpage"]
 
 
-def test_serpapi_google_youtube_env_fallback_and_key_redaction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SerpApi filters Google and YouTube results, handles validation, and redacts API keys on error."""
+def test_serpapi_google_youtube_env_fallback_and_key_redaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SerpApi filters Google and YouTube results, handles metadata env fallback, and redacts API keys on error."""
     google_params: list[dict[str, Any]] = []
     youtube_params: list[dict[str, Any]] = []
 
@@ -371,15 +414,20 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(monkeypatch: pyte
 
     monkeypatch.setattr(serpapi, "GoogleSearch", FakeGoogleSearch)
     monkeypatch.setattr(serpapi, "YoutubeSearch", FakeYoutubeSearch)
-    monkeypatch.delenv("SERP_API_KEY", raising=False)
+    monkeypatch.setenv("SERP_API_KEY", "host-env-must-not-leak")
 
     no_key = serpapi_tools()()
+    assert no_key.api_key is None
     assert no_key.search_google("mindroom") == "Please provide an API key"
     assert no_key.search_youtube("mindroom") == "Please provide an API key"
 
     test_key = "serp key+1/2"
-    monkeypatch.setenv("SERP_API_KEY", test_key)
-    toolkit = serpapi_tools()(enable_search_youtube=True)
+    toolkit = _build_env_configured_tool(
+        tmp_path,
+        "serpapi",
+        process_env={"SERP_API_KEY": test_key},
+        overrides={"enable_search_youtube": True},
+    )
 
     assert toolkit.search_google("") == "Please provide a query to search for"
     assert toolkit.search_youtube("") == "Please provide a query to search for"

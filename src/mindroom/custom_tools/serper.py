@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Optional
 
 import httpx
@@ -41,7 +40,7 @@ class SerperTools(Toolkit):
         all: bool = False,  # noqa: A002
         timeout: int = 30,
     ) -> None:
-        self.api_key = api_key or os.getenv("SERPER_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.debug("No Serper API key provided")
 

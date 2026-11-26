@@ -379,6 +379,11 @@ def google_oauth_provider(provider_id: str) -> OAuthProvider:
     )
 
 
+def google_service_scopes(provider: OAuthProvider) -> tuple[str, ...]:
+    """Return a Google provider's API scopes without user sign-in identity scopes."""
+    return tuple(scope for scope in provider.scopes if scope not in _GOOGLE_IDENTITY_SCOPES)
+
+
 def google_oauth_providers() -> tuple[OAuthProvider, ...]:
     """Return every built-in Google provider."""
     return tuple(google_oauth_provider(provider_id) for provider_id in _GOOGLE_PROVIDERS)

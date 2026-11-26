@@ -1692,7 +1692,7 @@ async def test_a_file_that_could_not_be_uploaded_says_nothing_was_sent(
 ) -> None:
     """A file whose upload failed never became an event, so nothing was sent."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
-    homeserver.answers[UPLOAD_PATH] = matrix_error(413, "M_TOO_LARGE", "Too large")
+    homeserver.answers[UPLOAD_PATH] = matrix_error(500, "M_UNKNOWN", "Upload failed")
 
     result = await _write(
         config,
@@ -1708,4 +1708,47 @@ async def test_a_file_that_could_not_be_uploaded_says_nothing_was_sent(
         "send",
         f"Nothing was sent: attachment {record.attachment_id} could not be uploaded.",
     )
+    assert _sent(homeserver) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_config_limit", "expected_fragment"),
+    [
+        (10, "exceeds the homeserver upload limit of 10 B (M_TOO_LARGE)"),
+        (None, "was rejected by the homeserver as too large (M_TOO_LARGE)"),
+    ],
+    ids=["preflight-m-upload-size", "server-413-m-too-large"],
+)
+async def test_an_oversized_file_surfaces_payload_too_large_detail(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    media_config_limit: int | None,
+    expected_fragment: str,
+) -> None:
+    """An oversized attachment reports M_TOO_LARGE details and proves nothing was sent."""
+    record = _notes(paths, tmp_path, mime_type="text/plain")
+    if media_config_limit is not None:
+        homeserver.answers["/_matrix/client/v1/media/config"] = {"m.upload.size": media_config_limit}
+    else:
+        homeserver.answers[UPLOAD_PATH] = matrix_error(413, "M_TOO_LARGE", "Too large")
+
+    result = await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        action="send",
+        room_id=ROOM,
+        attachment=record.attachment_id,
+    )
+
+    assert result["status"] == "error"
+    assert result["message"].startswith("Nothing was sent: Attachment 'notes.txt' (17 B) ")
+    assert expected_fragment in result["message"]
+    assert "Compress it" in result["message"]
+    if media_config_limit is not None:
+        assert homeserver.requests_to(UPLOAD_PATH) == []
     assert _sent(homeserver) == []

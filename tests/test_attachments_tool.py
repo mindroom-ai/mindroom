@@ -24,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
@@ -46,7 +47,13 @@ from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_event,
+    make_latest_thread_event_id_mock,
+    make_relation_lookup,
+    patch_send_file_outcome,
+)
 from tests.test_media_delivery import image_bytes
 
 if TYPE_CHECKING:
@@ -1030,10 +1037,7 @@ async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -
 
     context = _tool_context(tmp_path, attachment_ids=("att_upload",))
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
@@ -1073,7 +1077,7 @@ async def test_matrix_message_attachments_tell_receivers_to_ignore_mentions_in_f
     context.client.room_send = AsyncMock(side_effect=capture_send)
     with (
         patch(
-            "mindroom.matrix.client_delivery._upload_file_as_mxc",
+            "mindroom.matrix.client_delivery._upload_file_as_mxc_outcome",
             new=AsyncMock(return_value=("mxc://localhost/file", {"info": {"size": 7, "mimetype": "text/plain"}})),
         ),
         tool_runtime_context(context),
@@ -1106,7 +1110,7 @@ async def test_matrix_message_attachments_reuses_ephemeral_encrypted_media(tmp_p
             "mindroom.custom_tools.attachments.send_runtime_encrypted_media_message",
             new=AsyncMock(return_value="$image_evt"),
         ) as send_runtime_media,
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock()) as send_file,
+        patch("mindroom.custom_tools.attachments.send_file_message_outcome", new=AsyncMock()) as send_file,
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment.attachment_id]))
@@ -1209,8 +1213,10 @@ async def test_matrix_message_attachments_reuses_latest_thread_event_id_for_mult
 
     with (
         patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(
+                side_effect=[delivered_matrix_event("$file_evt_1"), delivered_matrix_event("$file_evt_2")],
+            ),
         ) as mock_send,
         tool_runtime_context(context),
     ):
@@ -1260,10 +1266,7 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(
@@ -1372,7 +1375,7 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")) as send_file,
+        patch_send_file_outcome("$file") as send_file,
     ):
         attachment_id = json.loads(await tool.register_attachment("notes.txt"))["attachment_id"]
         notes.unlink()
@@ -1570,7 +1573,7 @@ async def test_matrix_message_attachments_reject_paths_outside_workspace(
     with (
         tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
@@ -1593,7 +1596,7 @@ async def test_matrix_message_attachments_require_a_workspace(tmp_path: Path) ->
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
 
@@ -1625,10 +1628,7 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
     )
 
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
@@ -1653,7 +1653,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         register_payload = json.loads(await tool.register_attachment(str(generated_file)))
         current_context = get_tool_runtime_context()
@@ -1717,7 +1717,7 @@ async def test_attachments_tool_register_attachment_available_after_task_boundar
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         register_payload = json.loads(await asyncio.create_task(tool.register_attachment(str(generated_file))))
         current_context = get_tool_runtime_context()
@@ -1750,7 +1750,7 @@ async def test_matrix_message_attachments_cross_room_send_requires_authorization
 
     with (
         patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(
@@ -1771,7 +1771,7 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -1867,10 +1867,14 @@ async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) ->
     assert record is not None
     context = _tool_context(tmp_path, attachment_ids=() if case == "out-of-context" else (record.attachment_id,))
     context.client.rooms[context.room_id].encrypted = case == "encrypted-room"
-    upload_result = (None, None) if case == "upload-failure" else ("mxc://hs/abc", {"file": {"key": "secret"}})
+    upload_result = (
+        MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, "upload error")
+        if case == "upload-failure"
+        else ("mxc://hs/abc", {"file": {"key": "secret"}})
+    )
     with (
         patch(
-            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome",
             new=AsyncMock(return_value=upload_result),
         ) as upload,
         patch("mindroom.custom_tools.attachments.MAX_SOURCE_BYTES", 1 if case == "read-limit" else 20 * 1024 * 1024),
@@ -1895,7 +1899,7 @@ async def test_inline_image_rejects_non_image_bytes(tmp_path: Path) -> None:
     context.client.rooms[context.room_id].encrypted = False
     with (
         patch(
-            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome",
             new=AsyncMock(return_value=("mxc://hs/abc", {"url": "mxc://hs/abc"})),
         ) as upload,
         tool_runtime_context(context),
@@ -1975,3 +1979,97 @@ async def test_inline_image_requires_context() -> None:
     """Roomless tool calls fail without uploading."""
     payload = json.loads(await AttachmentTools().inline_image("cat.png"))
     assert payload["status"] == "error"
+
+
+def _configure_upload_limit(
+    context: ToolRuntimeContext,
+    *,
+    config_limit: int | None,
+    upload_error: nio.UploadError | None,
+) -> None:
+    context.client.rooms[context.room_id].encrypted = False
+    context.client.content_repository_config = AsyncMock(
+        return_value=(
+            nio.ContentRepositoryConfigResponse(upload_size=config_limit)
+            if config_limit is not None
+            else nio.ContentRepositoryConfigError("unsupported")
+        ),
+    )
+    context.client.upload = AsyncMock(return_value=(upload_error, None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_limit", "upload_error", "expected_limit_fragment"),
+    [
+        (1024, None, "exceeds the homeserver upload limit of 1.0 KiB (M_TOO_LARGE)"),
+        (
+            None,
+            nio.UploadError("Too large", status_code="M_TOO_LARGE", http_status=413),
+            "was rejected by the homeserver as too large (M_TOO_LARGE)",
+        ),
+    ],
+    ids=["preflight-config-limit", "server-side-m-too-large"],
+)
+async def test_matrix_message_attachments_surfaces_payload_too_large(
+    tmp_path: Path,
+    config_limit: int | None,
+    upload_error: nio.UploadError | None,
+    expected_limit_fragment: str,
+) -> None:
+    """matrix_message(attachments=...) reports size, limit, M_TOO_LARGE, and compress/split guidance."""
+    oversized = tmp_path / "report.log"
+    oversized.write_bytes(b"a" * 2048)
+    record = register_local_attachment(tmp_path, oversized, kind="file", attachment_id="att_big")
+    assert record is not None
+
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    _configure_upload_limit(context, config_limit=config_limit, upload_error=upload_error)
+    context.client.room_send = AsyncMock()
+
+    with tool_runtime_context(context):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=[record.attachment_id]))
+
+    assert result["status"] == "error"
+    assert "report.log" in result["message"]
+    assert "2.0 KiB" in result["message"]
+    assert expected_limit_fragment in result["message"]
+    assert "Compress it" in result["message"]
+    assert "split it" in result["message"]
+    if config_limit is not None:
+        context.client.upload.assert_not_awaited()
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_limit", "upload_error"),
+    [
+        (10, None),
+        (None, nio.UploadError("Too large", http_status=413)),
+    ],
+    ids=["preflight-limit", "server-413"],
+)
+async def test_inline_image_surfaces_payload_too_large(
+    tmp_path: Path,
+    config_limit: int | None,
+    upload_error: nio.UploadError | None,
+) -> None:
+    """inline_image returns the actionable PAYLOAD_TOO_LARGE message instead of a generic upload error."""
+    source = tmp_path / "chart.png"
+    source.write_bytes(image_bytes())
+    record = register_local_attachment(tmp_path, source, kind="image", mime_type="image/png")
+    assert record is not None
+
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    _configure_upload_limit(context, config_limit=config_limit, upload_error=upload_error)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))
+
+    assert payload["status"] == "error"
+    assert "chart.png" in payload["message"]
+    assert "M_TOO_LARGE" in payload["message"]
+    assert "Compress it" in payload["message"]
+    if config_limit is not None:
+        context.client.upload.assert_not_awaited()
