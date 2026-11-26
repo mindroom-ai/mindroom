@@ -1,14 +1,175 @@
-"""Twilio tool configuration."""
+"""Twilio toolkit."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+import re
+from dataclasses import replace
+from os import getenv
+from typing import TYPE_CHECKING, Literal
 
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.twilio import TwilioTools
+    from twilio.rest import Client
+
+    from mindroom.tool_system.tool_function import ToolFunction
+
+_ReadAction = Literal["get_call_details", "list_messages"]
+_PHONE = re.compile(r"\+[1-9]\d{1,14}", re.ASCII)
+
+
+class TwilioTools(Toolkit):
+    """Send SMS and read calls or messages via Twilio."""
+
+    name = "twilio"
+
+    def __init__(
+        self,
+        account_sid: str | None = None,
+        auth_token: str | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        region: str | None = None,
+        edge: str | None = None,
+        debug: bool = False,
+        enable_send_sms: bool = True,
+        enable_get_call_details: bool = True,
+        enable_list_messages: bool = True,
+        all: bool = False,  # noqa: A002 - public config field
+    ) -> None:
+        self._account_sid = account_sid or getenv("TWILIO_ACCOUNT_SID")
+        self._auth_token = auth_token or getenv("TWILIO_AUTH_TOKEN")
+        self._api_key = api_key or getenv("TWILIO_API_KEY")
+        self._api_secret = api_secret or getenv("TWILIO_API_SECRET")
+        self._region = region or getenv("TWILIO_REGION")
+        self._edge = edge or getenv("TWILIO_EDGE")
+        self._debug = debug
+        self._read_actions: dict[_ReadAction, bool] = {
+            "get_call_details": all or enable_get_call_details,
+            "list_messages": all or enable_list_messages,
+        }
+        super().__init__()
+        if not (all or enable_send_sms):
+            self.functions.pop("send_sms")
+        if not any(self._read_actions.values()):
+            self.functions.pop("twilio_read")
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Advertise only the enabled read actions."""
+        if function.name != "twilio_read" or all(self._read_actions.values()):
+            return function
+        properties = dict(function.parameters["properties"])
+        properties["action"] = {
+            **properties["action"],
+            "enum": [a for a, enabled in self._read_actions.items() if enabled],
+        }
+        return replace(function, parameters={**function.parameters, "properties": properties})
+
+    def _client(self) -> Client:
+        from twilio.rest import Client
+
+        if not self._account_sid:
+            msg = "Configure a Twilio account SID."
+            raise ValueError(msg)
+        if self._api_key and self._api_secret:
+            username, password = self._api_key, self._api_secret
+        elif self._auth_token:
+            username, password = self._account_sid, self._auth_token
+        else:
+            msg = "Configure a Twilio auth token or API key and secret."
+            raise ValueError(msg)
+        client = Client(username, password, self._account_sid, region=self._region, edge=self._edge)
+        if self._debug:
+            client.http_client.logger.setLevel(logging.INFO)
+        return client
+
+    @tool
+    def send_sms(self, to: str, from_: str, body: str) -> str:
+        """Send an SMS via Twilio.
+
+        Args:
+            to: Recipient number in E.164 format.
+            from_: Twilio sender number in E.164 format.
+            body: Non-empty message text.
+
+        """
+        if not (_PHONE.fullmatch(to) and _PHONE.fullmatch(from_)):
+            return "Use E.164 format for both phone numbers."
+        if not body.strip():
+            return "Provide a non-empty message."
+        from twilio.base.exceptions import TwilioRestException
+
+        try:
+            message = self._client().messages.create(to=to, from_=from_, body=body)
+        except ValueError:
+            return "Twilio credentials or settings are invalid."
+        except TwilioRestException as exc:
+            return f"Twilio rejected the SMS (HTTP {exc.status})."
+        return f"SMS sent. SID: {message.sid}"
+
+    @tool
+    def twilio_read(
+        self,
+        action: _ReadAction,
+        call_sid: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, object] | list[dict[str, object]]:
+        """Read Twilio calls or recent SMS.
+
+        - get_call_details: requires call_sid.
+        - list_messages: no required arguments.
+
+        Args:
+            action: Read operation.
+            call_sid: Call SID.
+            limit: Maximum SMS records; positive.
+
+        """
+        if not self._read_actions.get(action):
+            return {"error": "Twilio read action is disabled."}
+        if invalid := (
+            "Provide call_sid."
+            if action == "get_call_details" and not call_sid
+            else "Use a positive message limit."
+            if action == "list_messages" and limit < 1
+            else None
+        ):
+            return {"error": invalid}
+        from twilio.base.exceptions import TwilioRestException
+
+        try:
+            client = self._client()
+            if action == "get_call_details":
+                assert call_sid
+                call = client.calls(call_sid).fetch()
+                return {
+                    "to": call.to,
+                    "from": call._from,
+                    "status": call.status,
+                    "duration": call.duration,
+                    "direction": call.direction,
+                    "price": call.price,
+                    "start_time": str(call.start_time),
+                    "end_time": str(call.end_time),
+                }
+            return [
+                {
+                    "sid": message.sid,
+                    "to": message.to,
+                    "from": message.from_,
+                    "body": message.body,
+                    "status": message.status,
+                    "date_sent": str(message.date_sent),
+                }
+                for message in client.messages.list(limit=limit)
+            ]
+        except ValueError:
+            return {"error": "Twilio credentials or settings are invalid."}
+        except TwilioRestException as exc:
+            return {"error": f"Twilio read failed (HTTP {exc.status})."}
 
 
 @register_tool_with_metadata(
@@ -108,10 +269,8 @@ if TYPE_CHECKING:
     ],
     dependencies=["twilio"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
-    function_names=("get_call_details", "list_messages", "send_sms"),
+    function_names=("send_sms", "twilio_read"),
 )
 def twilio_tools() -> type[TwilioTools]:
-    """Return Twilio tools for SMS messaging and voice communication."""
-    from agno.tools.twilio import TwilioTools
-
+    """Return the native twilio toolkit."""
     return TwilioTools
