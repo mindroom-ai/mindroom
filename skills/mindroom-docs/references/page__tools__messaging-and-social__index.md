@@ -38,9 +38,15 @@ Connect the account through the `google_gmail` OAuth provider; when no usable co
 To use a Google Workspace service account instead, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the key file path and `GOOGLE_DELEGATED_USER` to the mailbox to impersonate through domain-wide delegation.
 `gmail` always runs in the primary MindRoom runtime, even for agents whose other tools run in a worker, so workers never receive Google credentials.
 
-Its functions are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
-Archiving, trashing, attachment downloads, and sending existing drafts are not available.
-`send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
+Its functions are grouped by risk boundary:
+
+- `gmail_read(action, ...)`: `latest`, `from_user`, `unread`, `starred`, `by_context`, `by_date`, `by_thread`, `search_emails`, `get_message`, `get_thread`, `search_threads`, `get_draft`, `list_drafts`, and `list_custom_labels`.
+- `gmail_draft(action, ...)`: `create` and `update` drafts without sending.
+- `gmail_send(action, ...)`: `send` and `reply` to external recipients immediately.
+- `gmail_send_to_self(subject, body)`: always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `gmail_send`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
+- `gmail_manage(action, ...)`: `mark_read`, `mark_unread`, `star`, `unstar`, `apply_label`, `remove_label`, and `delete_custom_label`.
+
+Archiving, trashing, and sending existing drafts are not available.
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
 Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
@@ -48,20 +54,20 @@ With `unrestricted`, any file MindRoom can read is allowed.
 Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
-Each option below defaults to `true`, and setting it to `false` removes the matching function.
+Each option below defaults to `true`, and setting it to `false` disables the matching action (and removes the parent function once all of its actions are disabled).
 
 | Option | Type | Default | Controls |
 | --- | --- | --- | --- |
-| `get_latest_emails` | `boolean` | `true` | `get_latest_emails()` |
-| `get_emails_from_user` | `boolean` | `true` | `get_emails_from_user()` |
-| `get_unread_emails` | `boolean` | `true` | `get_unread_emails()` |
-| `get_starred_emails` | `boolean` | `true` | `get_starred_emails()` |
-| `search_emails` | `boolean` | `true` | `search_emails()` |
-| `create_draft_email` | `boolean` | `true` | `create_draft_email()` |
-| `send_email` | `boolean` | `true` | `send_email()` |
-| `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
+| `get_latest_emails` | `boolean` | `true` | `gmail_read(action="latest")` |
+| `get_emails_from_user` | `boolean` | `true` | `gmail_read(action="from_user")` |
+| `get_unread_emails` | `boolean` | `true` | `gmail_read(action="unread")` |
+| `get_starred_emails` | `boolean` | `true` | `gmail_read(action="starred")` |
+| `search_emails` | `boolean` | `true` | `gmail_read(action="search_emails")` |
+| `create_draft_email` | `boolean` | `true` | `gmail_draft(action="create")` |
+| `send_email` | `boolean` | `true` | `gmail_send(action="send")` |
+| `send_email_reply` | `boolean` | `true` | `gmail_send(action="reply")` |
 
-Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
+Use [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules matching `gmail_send`, `gmail_draft`, or `gmail_manage` to gate writes and sends separately from `gmail_read` and `gmail_send_to_self`.
 
 ## [`discord`]
 

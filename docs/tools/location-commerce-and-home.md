@@ -133,10 +133,10 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
   <source src="https://github.com/user-attachments/assets/30f0c744-ecaf-4fbe-9c95-08576425ab3f" type="video/mp4">
 </video>
 
-`homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
-`list_entities()` returns at most 50 entities, so pass a domain such as `light` or `sensor` to narrow it.
-`set_brightness()` takes `0` to `255`, `set_color()` takes RGB channels in the same range, and `call_service()` takes extra service data as a JSON string.
-`set_temperature()` uses the temperature unit configured in Home Assistant.
+`homeassistant` exposes two risk-scoped functions: `homeassistant_read(action, ...)` (`list_entities`, `get_state`) and `homeassistant_control(action, ...)` (`turn_on`, `turn_off`, `toggle`, `set_brightness`, `set_color`, `set_temperature`, `activate_scene`, `trigger_automation`, `call_service`).
+`homeassistant_read(action="list_entities", ...)` returns at most 50 entities, so pass a `domain` such as `light` or `sensor` to narrow it.
+`set_brightness` takes `0` to `255`, `set_color` takes `rgb_color` channels in the same range, and `call_service` takes extra service `data` as a dict or JSON string.
+`set_temperature` uses the temperature unit configured in Home Assistant.
 
 `homeassistant` requires `worker_scope` unset or `shared` (see [Shared-only integrations](../deployment/sandbox-proxy.md#shared-only-integrations)).
 
@@ -148,11 +148,11 @@ agents:
 ```
 
 ```python
-list_entities("light")
-get_entity_state("climate.thermostat")
-set_brightness("light.living_room", 128)
-activate_scene("scene.movie_time")
-call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
+homeassistant_read(action="list_entities", domain="light")
+homeassistant_read(action="get_state", entity_id="climate.thermostat")
+homeassistant_control(action="set_brightness", entity_id="light.living_room", brightness=128)
+homeassistant_control(action="activate_scene", entity_id="scene.movie_time")
+homeassistant_control(action="call_service", domain="notify", service="send_message", data='{"message": "Dinner is ready"}')
 ```
 
 ### Connecting Home Assistant

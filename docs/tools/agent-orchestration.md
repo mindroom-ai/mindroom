@@ -190,7 +190,7 @@ Errors:
 ### Authored Subagents
 
 An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
-Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
+Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.gmail_read`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](../knowledge.md) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
 Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](../memory.md#searching-file-memory) and [knowledge graph](../knowledge-graph.md) through `search_knowledge_base`.

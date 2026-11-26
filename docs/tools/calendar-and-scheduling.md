@@ -26,15 +26,19 @@ If an agent calls either tool before the account is connected, the tool returns 
   <source src="https://github.com/user-attachments/assets/108f8f22-6752-414e-93dd-38154715981c" type="video/mp4">
 </video>
 
-`google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
-`find_available_slots()` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
+`google_calendar` exposes two risk-scoped functions:
+
+- `google_calendar_read(action, ...)`: `list_events`, `get_event`, `fetch_all_events`, `search_events`, `get_event_attendees`, `list_calendars`, `check_availability`, and `find_available_slots`.
+- `google_calendar_write(action, ...)`: `create_event`, `update_event`, `delete_event`, `quick_add_event`, `move_event`, and `respond_to_event`.
+
+`google_calendar_read(action="find_available_slots", ...)` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
 It reads dates and working hours in the calendar's own timezone and returns ISO timestamps with that timezone's offset, falling back to UTC only when the calendar's timezone cannot be loaded; the result's `timezone` field names the one used.
-`list_calendars()` returns the IDs of the other calendars the connected account can use.
+`google_calendar_read(action="list_calendars")` returns the IDs of the other calendars the connected account can use.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `true` | Expose `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`; set `false` for a read-only agent. |
+| `allow_update` | `boolean` | `no` | `true` | Expose `google_calendar_write()`; set `false` for a read-only agent. |
 
 ```yaml
 agents:
@@ -46,9 +50,10 @@ agents:
 ```
 
 ```python
-list_events(limit=5)
-find_available_slots(start_date="2026-04-01", end_date="2026-04-03", duration_minutes=30)
-create_event(
+google_calendar_read(action="list_events", limit=5)
+google_calendar_read(action="find_available_slots", start_date="2026-04-01", end_date="2026-04-03", duration_minutes=30)
+google_calendar_write(
+    action="create_event",
     start_date="2026-04-02T15:00:00",
     end_date="2026-04-02T15:30:00",
     timezone="America/Los_Angeles",
@@ -59,8 +64,8 @@ create_event(
 )
 ```
 
-`create_event()` reads times without an offset in its `timezone` argument, which defaults to UTC rather than MindRoom's configured `timezone`, so pass the user's IANA timezone or include an offset.
-`create_event()` emails invitations to attendees only when called with `notify_attendees=True`; by default guests are added without an email.
+`google_calendar_write(action="create_event", ...)` reads times without an offset in its `timezone` argument, which defaults to UTC rather than MindRoom's configured `timezone`, so pass the user's IANA timezone or include an offset.
+`google_calendar_write(action="create_event", ...)` emails invitations to attendees only when called with `notify_attendees=True`; by default guests are added without an email.
 
 If the Google Calendar connection lacks any required Calendar permission, the tool stays unavailable until the user reconnects and grants it.
 
