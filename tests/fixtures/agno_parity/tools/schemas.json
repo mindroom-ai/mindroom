@@ -10465,23 +10465,23 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query keywords."
+              "description": "The search query keywords."
             },
             "sort": {
               "type": "string",
-              "description": "(str) The field to sort results by. Can be 'stars', 'forks', or 'updated'. Defaults to 'stars'."
+              "description": "The field to sort results by ('stars', 'forks', or 'updated'). Defaults to 'stars'."
             },
             "order": {
               "type": "string",
-              "description": "(str) The order of results. Can be 'asc' or 'desc'. Defaults to 'desc'."
+              "description": "The order of results ('asc' or 'desc'). Defaults to 'desc'."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number of results to return, counting from 1. Defaults to 1."
+              "description": "Page number of results to return, counting from 1. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Max 100. Defaults to 30."
+              "description": "Number of results per page. Max 100. Defaults to 30."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10537,7 +10537,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10568,11 +10568,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10604,11 +10604,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10640,15 +10640,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "title": {
               "type": "string",
-              "description": "(str) The title of the issue."
+              "description": "The title of the issue."
             },
             "body": {
-              "type": "string",
-              "description": "(str) The body content of the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The body content of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10680,23 +10687,37 @@
           "properties": {
             "name": {
               "type": "string",
-              "description": "(str) The name of the repository."
+              "description": "The name of the repository."
             },
             "private": {
               "type": "boolean",
-              "description": "(bool) Whether the repository is private. Defaults to False."
+              "description": "Whether the repository is private. Defaults to False."
             },
             "description": {
-              "type": "string",
-              "description": "(str) A short description of the repository."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A short description of the repository."
             },
             "auto_init": {
               "type": "boolean",
-              "description": "(bool) Whether to initialize the repository with a README. Defaults to False."
+              "description": "Whether to initialize the repository with a README. Defaults to False."
             },
             "organization": {
-              "type": "string",
-              "description": "(str) Name of organization to create repo in. If None, creates in user account."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Name of organization to create repo in. If None, creates in user account."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10721,12 +10742,13 @@
       },
       {
         "name": "delete_repository",
-        "description": "Delete a repository (requires admin permissions).\nArgs:\n        repo_name (str): The full name of the repository to delete (e.g., 'owner/repo').",
+        "description": "Delete a repository (requires admin permissions).",
         "parameters": {
           "type": "object",
           "properties": {
             "repo_name": {
-              "type": "string"
+              "type": "string",
+              "description": "Full repository name (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10757,7 +10779,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) Full repository name (e.g., 'owner/repo')."
+              "description": "Full repository name (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10788,7 +10810,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10819,23 +10841,44 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'."
+              "description": "The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'."
             },
             "author": {
-              "type": "string",
-              "description": "(str) Filter PRs by author username."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by author username."
             },
             "base": {
-              "type": "string",
-              "description": "(str) Filter PRs by base branch name."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by base branch name."
             },
             "head": {
-              "type": "string",
-              "description": "(str) Filter PRs by head branch name."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by head branch name."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10866,7 +10909,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10897,23 +10940,23 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) State of the PRs to retrieve. Can be 'open', 'closed', or 'all'. Defaults to 'open'."
+              "description": "State of the PRs to retrieve ('open', 'closed', or 'all'). Defaults to 'open'."
             },
             "sort": {
               "type": "string",
-              "description": "(str) What to sort results by. Can be 'created', 'updated', 'popularity', 'long-running'. Defaults to 'created'."
+              "description": "Sort field ('created', 'updated', 'popularity', 'long-running'). Defaults to 'created'."
             },
             "direction": {
               "type": "string",
-              "description": "(str) The direction of the sort. Can be 'asc' or 'desc'. Defaults to 'desc'."
+              "description": "Sort direction ('asc' or 'desc'). Defaults to 'desc'."
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The maximum number of pull requests to return. Defaults to 50."
+              "description": "Maximum number of pull requests to return. Defaults to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10944,15 +10987,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "include_issue_comments": {
               "type": "boolean",
-              "description": "(bool) Whether to include general PR comments. Defaults to True."
+              "description": "Whether to include general PR comments. Defaults to True."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10984,27 +11027,27 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "body": {
               "type": "string",
-              "description": "(str) The text of the comment."
+              "description": "The text of the comment."
             },
             "commit_id": {
               "type": "string",
-              "description": "(str) The SHA of the commit to comment on."
+              "description": "The SHA of the commit to comment on."
             },
             "path": {
               "type": "string",
-              "description": "(str) The relative path to the file to comment on."
+              "description": "The relative path to the file to comment on."
             },
             "position": {
               "type": "integer",
-              "description": "(int) The line index in the diff to comment on."
+              "description": "The line index in the diff to comment on."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11040,15 +11083,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "comment_id": {
               "type": "integer",
-              "description": "(int) The id of the comment to edit."
+              "description": "The id of the comment to edit."
             },
             "body": {
               "type": "string",
-              "description": "(str) The new text of the comment."
+              "description": "The new text of the comment."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11081,11 +11124,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11117,7 +11160,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11148,19 +11191,19 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'."
+              "description": "The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number of results to return, counting from 1. Defaults to 1."
+              "description": "Page number of results to return, counting from 1. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Defaults to 20."
+              "description": "Number of results per page. Defaults to 20."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11191,11 +11234,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11227,15 +11270,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "comment_body": {
               "type": "string",
-              "description": "(str) The content of the comment."
+              "description": "The content of the comment."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11268,11 +11311,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11304,11 +11347,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11340,18 +11383,18 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "assignees": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) A list of usernames to assign."
+              "description": "A list of usernames to assign."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11384,18 +11427,18 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "labels": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) A list of label names to add."
+              "description": "A list of label names to add."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11428,11 +11471,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11464,19 +11507,33 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "title": {
-              "type": "string",
-              "description": "(str) The new title for the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new title for the issue."
             },
             "body": {
-              "type": "string",
-              "description": "(str) The new body content for the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new body content for the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11508,31 +11565,31 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "title": {
               "type": "string",
-              "description": "(str) The title of the pull request."
+              "description": "The title of the pull request."
             },
             "body": {
               "type": "string",
-              "description": "(str) The body text of the pull request."
+              "description": "The body text of the pull request."
             },
             "head": {
               "type": "string",
-              "description": "(str) The name of the branch where your changes are implemented."
+              "description": "The name of the branch where your changes are implemented."
             },
             "base": {
               "type": "string",
-              "description": "(str) The name of the branch you want the changes pulled into."
+              "description": "The name of the branch you want the changes pulled into."
             },
             "draft": {
               "type": "boolean",
-              "description": "(bool) Whether the pull request is a draft. Defaults to False."
+              "description": "Whether the pull request is a draft. Defaults to False."
             },
             "maintainer_can_modify": {
               "type": "boolean",
-              "description": "(bool) Whether maintainers can modify the PR. Defaults to True."
+              "description": "Whether maintainers can modify the PR. Defaults to True."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11567,23 +11624,30 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "content": {
               "type": "string",
-              "description": "(str) The content of the file."
+              "description": "The content of the file."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11617,15 +11681,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "ref": {
-              "type": "string",
-              "description": "(str) The name of the commit/branch/tag. Defaults to the repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The name of the commit/branch/tag. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11657,27 +11728,34 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "content": {
               "type": "string",
-              "description": "(str) The new content of the file."
+              "description": "The new content of the file."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "sha": {
               "type": "string",
-              "description": "(str) The blob SHA of the file being replaced."
+              "description": "The blob SHA of the file being replaced."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11712,23 +11790,30 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "sha": {
               "type": "string",
-              "description": "(str) The blob SHA of the file being deleted."
+              "description": "The blob SHA of the file being deleted."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11762,15 +11847,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the directory in the repository. Use empty string for root."
+              "description": "The path to the directory in the repository. Use empty string for root."
             },
             "ref": {
-              "type": "string",
-              "description": "(str) The name of the commit/branch/tag. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The name of the commit/branch/tag. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11802,11 +11894,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch": {
               "type": "string",
-              "description": "(str) The branch name. Defaults to \"main\"."
+              "description": "The branch name. Defaults to \"main\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11837,15 +11929,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch_name": {
               "type": "string",
-              "description": "(str) The name of the new branch."
+              "description": "The name of the new branch."
             },
             "source_branch": {
-              "type": "string",
-              "description": "(str) The source branch to create from. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The source branch to create from. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11877,11 +11976,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch_name": {
               "type": "string",
-              "description": "(str) The name of the branch to set as default."
+              "description": "The name of the branch to set as default."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11913,27 +12012,62 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query."
+              "description": "The search query."
             },
             "language": {
-              "type": "string",
-              "description": "(str) Filter by language. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by language. Defaults to None."
             },
             "repo": {
-              "type": "string",
-              "description": "(str) Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
             },
             "user": {
-              "type": "string",
-              "description": "(str) Filter by user or organization. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user or organization. Defaults to None."
             },
             "path": {
-              "type": "string",
-              "description": "(str) Filter by file path. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by file path. Defaults to None."
             },
             "filename": {
-              "type": "string",
-              "description": "(str) Filter by filename. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by filename. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11964,43 +12098,78 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query."
+              "description": "The search query."
             },
             "state": {
-              "type": "string",
-              "description": "(str) Filter by state ('open', 'closed'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by state ('open', 'closed'). Defaults to None."
             },
             "type_filter": {
-              "type": "string",
-              "description": "(str) Filter by type ('issue', 'pr'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by type ('issue', 'pr'). Defaults to None."
             },
             "repo": {
-              "type": "string",
-              "description": "(str) Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
             },
             "user": {
-              "type": "string",
-              "description": "(str) Filter by user or organization. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user or organization. Defaults to None."
             },
             "label": {
-              "type": "string",
-              "description": "(str) Filter by label. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by label. Defaults to None."
             },
             "sort": {
               "type": "string",
-              "description": "(str) Sort results by ('created', 'updated', 'comments'). Defaults to \"created\"."
+              "description": "Sort results by ('created', 'updated', 'comments'). Defaults to \"created\"."
             },
             "order": {
               "type": "string",
-              "description": "(str) Sort order ('asc', 'desc'). Defaults to \"desc\"."
+              "description": "Sort order ('asc', 'desc'). Defaults to \"desc\"."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number for pagination. Defaults to 1."
+              "description": "Page number for pagination. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Defaults to 30."
+              "description": "Number of results per page. Defaults to 30."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12031,25 +12200,32 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "reviewers": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) List of user logins that will be requested to review."
+              "description": "List of user logins that will be requested to review."
             },
             "team_reviewers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) List of team slugs that will be requested to review. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "List of team slugs that will be requested to review. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12088,11 +12264,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Number of latest emails to retrieve"
+              "description": "Number of latest emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12121,15 +12304,22 @@
           "properties": {
             "user": {
               "type": "string",
-              "description": "(str) Name or email address of the sender"
+              "description": "Name or email address of the sender."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to retrieve"
+              "description": "Maximum number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12158,11 +12348,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of unread emails to retrieve"
+              "description": "Maximum number of unread emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12191,11 +12388,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of starred emails to retrieve"
+              "description": "Maximum number of starred emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12224,15 +12428,22 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Search term or context to match in emails"
+              "description": "Search term or context to match in emails."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to retrieve"
+              "description": "Maximum number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12261,19 +12472,40 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date in YYYY/MM/DD format (e.g. \"2026/03/01\")."
+              "description": "Start date in YYYY/MM/DD format (e.g. \"2026/03/01\")."
             },
             "range_in_days": {
-              "type": "integer",
-              "description": "(Optional[int]) Number of days to include in the range (default: None, meaning all emails after start_date)."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Number of days to include in the range (default: None, meaning all emails after start_date)."
             },
             "num_emails": {
-              "type": "integer",
-              "description": "(Optional[int]) Maximum number of emails to retrieve (default: 10)."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Maximum number of emails to retrieve (default: 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12302,7 +12534,7 @@
           "properties": {
             "thread_id": {
               "type": "string",
-              "description": "(str) The ID of the email thread."
+              "description": "The ID of the email thread."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12331,15 +12563,22 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Natural language query to search for"
+              "description": "Natural language query to search for."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Number of emails to retrieve"
+              "description": "Number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12362,13 +12601,13 @@
       },
       {
         "name": "mark_email_as_read",
-        "description": "Mark a specific email as read by removing the 'UNREAD' label.\nThis is crucial for long polling scenarios to prevent processing the same email multiple times.",
+        "description": "Mark a specific email as read by removing the 'UNREAD' label.",
         "parameters": {
           "type": "object",
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to mark as read"
+              "description": "The ID of the message to mark as read."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12391,13 +12630,13 @@
       },
       {
         "name": "mark_email_as_unread",
-        "description": "Mark a specific email as unread by adding the 'UNREAD' label.\nThis is useful for flagging emails that need attention or re-processing.",
+        "description": "Mark a specific email as unread by adding the 'UNREAD' label.",
         "parameters": {
           "type": "object",
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to mark as unread"
+              "description": "The ID of the message to mark as unread."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12426,7 +12665,7 @@
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to star."
+              "description": "The ID of the message to star."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12455,7 +12694,7 @@
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to unstar."
+              "description": "The ID of the message to unstar."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12478,29 +12717,43 @@
       },
       {
         "name": "create_draft_email",
-        "description": "Create and save a draft email. To reply to a thread, provide thread_id and message_id.\nto, cc and bcc are comma separated string of email ids.",
+        "description": "Create and save a draft email.",
         "parameters": {
           "type": "object",
           "properties": {
             "to": {
               "type": "string",
-              "description": "(str) Comma separated string of recipient email addresses"
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject"
+              "description": "Email subject."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content"
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of CC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of BCC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -12517,15 +12770,29 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
-              "description": "(Optional[str]) Thread ID to reply to (optional, makes this a reply draft)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread ID for reply drafts (optional)."
             },
             "message_id": {
-              "type": "string",
-              "description": "(Optional[str]) Message ID being replied to (optional, used with thread_id)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12548,29 +12815,43 @@
       },
       {
         "name": "send_email",
-        "description": "Send an email immediately. To reply to a thread, provide thread_id and message_id.\nto, cc and bcc are comma separated string of email ids.",
+        "description": "Send an email immediately.",
         "parameters": {
           "type": "object",
           "properties": {
             "to": {
               "type": "string",
-              "description": "(str) Comma separated string of recipient email addresses"
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject"
+              "description": "Email subject."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content"
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of CC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of BCC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -12587,15 +12868,29 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
-              "description": "(Optional[str]) Thread ID to reply to (optional, makes this a reply)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread ID to send as a reply (optional)."
             },
             "message_id": {
-              "type": "string",
-              "description": "(Optional[str]) Message ID being replied to (optional, used with thread_id)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12624,27 +12919,34 @@
           "properties": {
             "thread_id": {
               "type": "string",
-              "description": "(str) The ID of the email thread to reply to."
+              "description": "The ID of the email thread to reply to."
             },
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the email being replied to."
+              "description": "The ID of the email being replied to."
             },
             "to": {
               "type": "string",
-              "description": "(str) Comma-separated recipient email addresses."
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject (prefixed with \"Re:\" if not already)."
+              "description": "Email subject (prefixed with \"Re:\" if not already)."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content."
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma-separated CC email addresses (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -12661,7 +12963,7 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12715,15 +13017,15 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Gmail search query (e.g., 'is:unread category:promotions')"
+              "description": "Gmail search query (e.g., 'is:unread category:promotions')."
             },
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to apply"
+              "description": "Name of the label to apply."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to process"
+              "description": "Maximum number of emails to process."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12752,15 +13054,15 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Gmail search query (e.g., 'is:unread category:promotions')"
+              "description": "Gmail search query."
             },
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to remove"
+              "description": "Name of the label to remove."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to process"
+              "description": "Maximum number of emails to process."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12789,11 +13091,11 @@
           "properties": {
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to delete"
+              "description": "Name of the label to delete."
             },
             "confirm": {
               "type": "boolean",
-              "description": "(bool) Must be True to actually delete the label"
+              "description": "Must be True to actually delete the label."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12878,7 +13180,7 @@
       },
       {
         "name": "search_threads",
-        "description": "Search Gmail threads using Gmail query syntax. Returns thread IDs and snippets, not full message content.",
+        "description": "Search Gmail threads using Gmail query syntax.\nReturns thread IDs and snippets, not full message content.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -12891,7 +13193,14 @@
               "description": "Maximum number of threads to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
@@ -12953,7 +13262,14 @@
               "description": "Maximum number of drafts to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
@@ -12998,11 +13314,25 @@
               "description": "Email body content."
             },
             "cc": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
@@ -13023,11 +13353,25 @@
               "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Thread ID for reply drafts (optional)."
             },
             "message_id": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
@@ -13192,19 +13536,40 @@
           "properties": {
             "limit": {
               "type": "integer",
-              "description": "(int) Number of events to return (default: 10)"
+              "description": "Number of events to return (default: 10)."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End date in ISO format. Only events starting before this are returned."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End date in ISO format. Only events starting before this are returned."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13233,7 +13598,7 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) The unique identifier of the event"
+              "description": "The unique identifier of the event."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13262,15 +13627,29 @@
           "properties": {
             "max_results": {
               "type": "integer",
-              "description": "(int) Number of events to fetch per page (default: 10, max: 100)"
+              "description": "Number of events to fetch per page (default: 10, max: 100)."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start of range in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End of range in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13299,15 +13678,15 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date in ISO format (YYYY-MM-DD)"
+              "description": "Start date in ISO format (YYYY-MM-DD)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End date in ISO format (YYYY-MM-DD)"
+              "description": "End date in ISO format (YYYY-MM-DD)."
             },
             "duration_minutes": {
               "type": "integer",
-              "description": "(int) Length of the desired slot in minutes (default: 30)"
+              "description": "Length of the desired slot in minutes (default: 30)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13335,8 +13714,15 @@
           "type": "object",
           "properties": {
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13365,22 +13751,36 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "attendee_emails": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) Email addresses to check availability for. Defaults to the authenticated user's calendar if not provided. Use \"me\" for the authenticated user alongside other emails."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Email addresses to check availability for. Defaults to the authenticated user's calendar\nif not provided. Use \"me\" for the authenticated user alongside other emails."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) Timezone for the query (default: UTC)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Timezone for the query (default: UTC)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13409,7 +13809,7 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event"
+              "description": "ID of the event."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13438,23 +13838,44 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Free-text search terms"
+              "description": "Free-text search terms."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start of search window in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of search window in ISO format."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End of search window in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of search window in ISO format."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Maximum number of events to return (default: 10)"
+              "description": "Maximum number of events to return (default: 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13483,42 +13904,91 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "title": {
-              "type": "string",
-              "description": "(Optional[str]) Title/summary of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Title/summary of the event."
             },
             "description": {
-              "type": "string",
-              "description": "(Optional[str]) Detailed description of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Detailed description of the event."
             },
             "location": {
-              "type": "string",
-              "description": "(Optional[str]) Location of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Location of the event."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) Timezone for the event (default: UTC)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Timezone for the event (default: UTC)."
             },
             "attendees": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) List of attendee email addresses"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "List of attendee email addresses."
             },
             "add_google_meet_link": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to add a Google Meet video link"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to add a Google Meet video link."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send email notifications to attendees"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send email notifications to attendees."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13547,42 +14017,98 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to update"
+              "description": "ID of the event to update."
             },
             "title": {
-              "type": "string",
-              "description": "(Optional[str]) New title/summary"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New title/summary."
             },
             "description": {
-              "type": "string",
-              "description": "(Optional[str]) New description"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New description."
             },
             "location": {
-              "type": "string",
-              "description": "(Optional[str]) New location"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New location."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) New start date/time in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New start date/time in ISO format."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) New end date/time in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New end date/time in ISO format."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) New timezone"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New timezone."
             },
             "attendees": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) Updated list of attendee email addresses"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Updated list of attendee email addresses."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send email notifications"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send email notifications."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13611,11 +14137,18 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to delete"
+              "description": "ID of the event to delete."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send notifications to attendees (default: True)"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send notifications to attendees (default: True)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13638,13 +14171,13 @@
       },
       {
         "name": "quick_add_event",
-        "description": "Create a Google Calendar event from a natural language description.\nExamples: \"Meeting with John tomorrow 3pm\", \"Lunch at noon on Friday\"",
+        "description": "Create a Google Calendar event from a natural language description.\nExamples: \"Meeting with John tomorrow 3pm\", \"Lunch at noon on Friday\".",
         "parameters": {
           "type": "object",
           "properties": {
             "text": {
               "type": "string",
-              "description": "(str) Natural language description of the event including date, time, and title"
+              "description": "Natural language description of the event including date, time, and title."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13673,15 +14206,22 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to move"
+              "description": "ID of the event to move."
             },
             "destination_calendar_id": {
               "type": "string",
-              "description": "(str) ID of the target calendar"
+              "description": "ID of the target calendar."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to notify attendees of the move"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to notify attendees of the move."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13710,11 +14250,11 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event"
+              "description": "ID of the event."
             },
             "response": {
               "type": "string",
-              "description": "(str) Response status - one of \"accepted\", \"declined\", or \"tentative\""
+              "description": "Response status - one of \"accepted\", \"declined\", or \"tentative\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13991,16 +14531,30 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) Optional Drive query to filter results"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Drive query to filter results."
             },
             "page_size": {
               "type": "integer",
-              "description": "(int) Number of files to return (default 10)"
+              "description": "Number of files to return (default 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(str) Token from a previous response to fetch the next page"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14028,16 +14582,30 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) Drive query expression (see instructions for syntax)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Drive query expression (see instructions for syntax)."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Number of files to return (default 10)"
+              "description": "Number of files to return (default 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(str) Token from a previous response to fetch the next page"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14772,12 +15340,26 @@
           "type": "object",
           "properties": {
             "spreadsheet_id": {
-              "type": "string",
-              "description": "Fallback spreadsheet ID if instance attribute is None"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fallback spreadsheet ID if instance attribute is None."
             },
             "spreadsheet_range": {
-              "type": "string",
-              "description": "Fallback range if instance attribute is None"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fallback range if instance attribute is None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14806,7 +15388,7 @@
           "properties": {
             "title": {
               "type": "string",
-              "description": "The title of the Google Sheet"
+              "description": "The title of the Google Sheet."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14831,7 +15413,7 @@
       },
       {
         "name": "update_sheet",
-        "description": "Updates a Google Sheet with the provided data.\nNote: This function can overwrite existing data in the sheet.\nUser needs to ensure that the provided range correctly matches the data that needs to be updated.",
+        "description": "Update a Google Sheet with the provided data.\nNote: This function can overwrite existing data in the sheet.\nUser needs to ensure that the provided range correctly matches the data that needs to be updated.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14841,15 +15423,29 @@
                 "type": "array",
                 "items": {}
               },
-              "description": "The data to update the sheet with"
+              "description": "The data to update the sheet with."
             },
             "spreadsheet_id": {
-              "type": "string",
-              "description": "The ID of the Google Sheet"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The ID of the Google Sheet."
             },
             "range_name": {
-              "type": "string",
-              "description": "The range of the Google Sheet to update"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The range of the Google Sheet to update."
             },
             "mindroom_output_path": {
               "anyOf": [

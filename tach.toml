@@ -9950,25 +9950,6 @@ from = ["mindroom.custom_tools.agno_compat_replicate"]
 expose = ["MindRoomReplicateTools"]
 
 [[modules]]
-path = "mindroom.custom_tools.agno_compat_github_errors"
-depends_on = []
-visibility = []
-
-[[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_github_errors"]
-expose = ["record_provider_failure", "call_with_provider_failure_capture", "is_provider_detail_log", "install_provider_log_filter"]
-
-
-[[modules]]
-path = "mindroom.oauth.agno_compat_google_auth"
-depends_on = []
-visibility = []
-
-[[interfaces]]
-from = ["mindroom.oauth.agno_compat_google_auth"]
-expose = ["AgnoGoogleAuthBindingMixin"]
-
-[[modules]]
 path = "mindroom.delegation.background"
 depends_on = [
     "mindroom.delegation.sessions",
