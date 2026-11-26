@@ -434,6 +434,11 @@ async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode
         ),
         (
             "OpenRouter",
+            {"raw": json.dumps([{"error": {"message": "Unsupported MIME type: image/webp"}}])},
+            "Provider returned error: Unsupported MIME type: image/webp",
+        ),
+        (
+            "OpenRouter",
             {"raw": "  Upstream rejected image/webp  "},
             "Provider returned error: Upstream rejected image/webp",
         ),
@@ -450,7 +455,16 @@ async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode
         ("OpenRouter", {"raw": "   "}, "Provider returned error"),
         ("OpenRouter", None, "Provider returned error"),
     ],
-    ids=["json-error-message", "json-message", "plain-text", "unrecognized-json", "non-openrouter", "blank", "absent"],
+    ids=[
+        "json-error-message",
+        "json-message",
+        "json-single-element-list",
+        "plain-text",
+        "unrecognized-json",
+        "non-openrouter",
+        "blank",
+        "absent",
+    ],
 )
 def test_openrouter_upstream_error_detail_is_surfaced(
     provider: str,
@@ -475,6 +489,72 @@ def test_openrouter_upstream_error_detail_redacts_before_truncation() -> None:
     assert text.startswith("Provider returned error: ")
     assert credential not in text
     assert len(text) <= len("Provider returned error: ") + 500
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_upstream_webp_rejection_transcodes_on_responses_wire(
+    tmp_path: Path,
+) -> None:
+    """OpenRouter Responses (``provider=openai`` + OpenRouter ``base_url``) surfaces ``metadata.raw`` and transcodes."""
+    spec = replace(
+        FAMILIES["openai_responses"],
+        config={
+            "provider": "openai",
+            "api": "responses",
+            "id": "x-ai/grok-4",
+            "api_key": "test-key",
+            "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1"},
+        },
+    )
+    webp = _webp_photo()
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}})},
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    turn = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[webp])]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert wire.requests[0].url.path.endswith("/responses")
+    assert user_parts(wire.body(0))[1]["image_url"].startswith("data:image/webp;base64,")
+    retry_url = user_parts(wire.body(1))[1]["image_url"]
+    assert retry_url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(retry_url.split(",", 1)[1])) == "png"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_webp_url_download_timeout_beside_local_webp_does_not_transcode(
+    tmp_path: Path,
+) -> None:
+    """A ``.webp`` URL download timeout on OpenRouter does not transcode a local WebP or learn WebP unsupported."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "x-ai/grok-4", "api_key": "test-key"},
+    )
+    webp = _webp_photo()
+    fetched = Image(id="att_map", url="https://media.test/map.webp")
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"raw": "Timeout while downloading https://media.test/map.webp"},
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp, fetched])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert wire.body(1)["messages"][-1]["content"] == f"{_PROMPT}\n\n{_NOTE}"
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
 
 
 # --- OpenAI Responses ---------------------------------------------------------------------------------------------

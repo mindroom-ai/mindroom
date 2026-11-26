@@ -238,7 +238,9 @@ class ResponsesAdapter:
                 async for event in events:
                     yield event
         except sdk_failures() as error:
-            failure = self._marked(provider_error(error, provider=self.identity.provider))
+            failure = self._marked(
+                provider_error(error, provider=self.identity.provider, endpoint=self.identity.endpoint),
+            )
             # A request that continues a stored response sends only the messages after it.
             replay = request_replay(self.wire, request)
             failure.rejected_media = rejected_media(
@@ -247,6 +249,7 @@ class ResponsesAdapter:
                 replay.history[replay.sent_from :],
                 chat=False,
                 provider=self.identity.provider,
+                endpoint=self.identity.endpoint,
             )
             raise failure from error
         except ProviderError as failure:

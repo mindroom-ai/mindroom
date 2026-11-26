@@ -1468,6 +1468,26 @@ async def test_webp_transcode_is_preserved_across_subsequent_file_rejection() ->
 
 
 @pytest.mark.asyncio
+async def test_post_transcode_413_drops_only_images_and_preserves_pdf() -> None:
+    webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp")
+    webp_error = classify_provider_error("Unsupported MIME type: image/webp", provider="Scripted", status_code=400)
+    too_large = classify_provider_error("Payload too large", provider="Scripted", status_code=413)
+    inner = _ScriptedProvider(
+        [[webp_error], [too_large], [_turn()]],
+        identity=replace(_IDENTITY, endpoint="http://webp-413/v1"),
+    )
+    request = ModelRequest(messages=[_user(_PROMPT, images=[webp], files=[_REPORT])])
+
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    assert image_format(_first_image(inner.requests[1].messages[0]).content or b"") == "png"
+    final_msg = inner.requests[2].messages[0]
+    assert (final_msg.images, final_msg.files) == (None, [_REPORT])
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
 async def test_oversized_transparent_webp_skips_transcode_and_preserves_pdf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

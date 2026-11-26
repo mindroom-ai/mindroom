@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import ProviderError
+from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
 from mindroom.providers.errors import (
     classify_provider_error,
     media_ids,
@@ -78,6 +79,10 @@ def sdk_failures() -> type[Exception]:
     return openai.OpenAIError
 
 
+def _is_openrouter(provider: str, endpoint: str | None) -> bool:
+    return provider.casefold() == "openrouter" or (endpoint or "").rstrip("/") == OPENROUTER_BASE_URL_DEFAULT
+
+
 def _upstream_error_detail(metadata: object) -> str | None:
     """Extract a redacted, concise upstream error detail from OpenRouter's ``metadata.raw`` payload."""
     if (
@@ -93,6 +98,8 @@ def _upstream_error_detail(metadata: object) -> str | None:
         pass
     else:
         detail = None
+        if isinstance(parsed, list) and len(parsed) == 1:
+            parsed = parsed[0]
         if isinstance(parsed, Mapping):
             nested = parsed.get("error")
             for candidate in (
@@ -137,13 +144,13 @@ def body_retry_after(body: object) -> float | None:
     return None
 
 
-def provider_error(error: Exception, *, provider: str) -> ProviderError:
+def provider_error(error: Exception, *, provider: str, endpoint: str | None = None) -> ProviderError:
     """Return the normalized error for one SDK or transport failure; ``provider`` is the route's provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
-    openrouter = provider.casefold() == "openrouter"
+    openrouter = _is_openrouter(provider, endpoint)
     if isinstance(error, openai.APIStatusError):
         message, code, error_type = _error_fields(error.body, openrouter=openrouter)
         if message is None:
@@ -177,6 +184,7 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
     *,
     chat: bool,
     provider: str = "",
+    endpoint: str | None = None,
 ) -> frozenset[str]:
     """Return the ids of the attachments an SDK rejection names, among ``messages``, the ones the request ``body`` sent.
 
@@ -195,7 +203,7 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
 
     if not isinstance(error, openai.APIError):
         return frozenset()
-    message, code, _error_type = _error_fields(error.body, openrouter=provider.casefold() == "openrouter")
+    message, code, _error_type = _error_fields(error.body, openrouter=_is_openrouter(provider, endpoint))
     text = message or ""
     lowered = text.casefold()
     if isinstance(error.param, str):

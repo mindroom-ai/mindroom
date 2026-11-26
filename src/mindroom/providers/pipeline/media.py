@@ -315,7 +315,12 @@ def _narrowed_removal(
     remaining: frozenset[MediaKind],
     fallback_prompt: str,
     log: Callable[..., Any],
+    *,
+    transcoded_webp: bool,
 ) -> tuple[list[Message], frozenset[MediaKind], bool] | None:
+    if transcoded_webp and error.status_code == _PAYLOAD_TOO_LARGE_STATUS and remaining != _IMAGES:
+        log("Retrying model request without images after transcoded payload exceeded size limit")
+        return _without_media(base, known | _IMAGES, frozenset(), fallback_prompt), _IMAGES, True
     if not isinstance(error, InvalidRequest):
         return None
     # Only a rejected request body can name its parts; a request too large for the window shrinks as a whole.
@@ -391,7 +396,18 @@ async def media_fallback_stream(
                 return Retry(replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt)))
         if failure is None:
             failure = error
-            if (narrowed := _narrowed_removal(error, base, sent, known, remaining, fallback_prompt, log)) is not None:
+            if (
+                narrowed := _narrowed_removal(
+                    error,
+                    base,
+                    sent,
+                    known,
+                    remaining,
+                    fallback_prompt,
+                    log,
+                    transcoded_webp=transcoded_webp,
+                )
+            ) is not None:
                 messages, removed_kinds, narrowed_stripped = narrowed
                 stripped_image = stripped_image or narrowed_stripped
                 return Retry(replace(request, messages=messages))

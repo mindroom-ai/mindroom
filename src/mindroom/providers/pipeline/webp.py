@@ -39,7 +39,8 @@ _MAX_WEBP_EDGE = 2048
 _MAX_WEBP_OUTPUT_BYTES = 5 * 1024 * 1024
 _INVALID_IMAGE_URL_CODE = "invalid_image_url"
 _WEBP_TRANSCODE_ERROR_CODES = frozenset({"invalid_image_format", "image_parse_error", "invalid_image"})
-# Standalone png/jpeg/jpg tokens (never .png/.jpg inside filenames/URLs, while still allowing image/png).
+# Standalone format tokens (never .webp/.png/.jpg inside filenames/URLs, while still allowing image/<fmt>).
+_STANDALONE_WEBP_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\bwebp\b")
 _STANDALONE_IMAGE_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\b(?:png|jpe?g)\b")
 _FORMAT_LIST_CONTEXT_MARKERS = (
     "supported",
@@ -98,7 +99,10 @@ def _read_local_webp_bytes(image: Image) -> bytes | None:
     if not image.filepath:
         return None
     try:
-        with Path(image.filepath).open("rb") as handle:
+        file_path = Path(image.filepath)
+        if not file_path.is_file():
+            return None
+        with file_path.open("rb") as handle:
             header = handle.read(IMAGE_HEADER_BYTES)
             if image_format(header) != "webp" or os.fstat(handle.fileno()).st_size > _MAX_WEBP_SOURCE_BYTES:
                 return None
@@ -200,9 +204,9 @@ def is_webp_transcode_candidate(
     if named and not (named & local_images):
         return False
     text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
-    if "download" in text and "webp" not in text:
+    if "download" in text:
         return False
-    if "webp" in text or error.provider_code in _WEBP_TRANSCODE_ERROR_CODES:
+    if _STANDALONE_WEBP_FORMAT.search(text) or error.provider_code in _WEBP_TRANSCODE_ERROR_CODES:
         return True
     if _STANDALONE_IMAGE_FORMAT.search(text) and any(marker in text for marker in _FORMAT_LIST_CONTEXT_MARKERS):
         return True

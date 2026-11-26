@@ -197,7 +197,7 @@ class ChatAdapter:
                 # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
                 return
         except sdk_failures() as error:
-            failure = provider_error(error, provider=self.identity.provider)
+            failure = provider_error(error, provider=self.identity.provider, endpoint=self.identity.endpoint)
             # OpenRouter's rejections index the body its upstream received, which it rewrote, so they name nothing here.
             if self.wire.route != "openrouter":
                 failure.rejected_media = rejected_media(
@@ -206,6 +206,7 @@ class ChatAdapter:
                     request.messages,
                     chat=True,
                     provider=self.identity.provider,
+                    endpoint=self.identity.endpoint,
                 )
             raise failure from error
         parts = accumulator.parts
