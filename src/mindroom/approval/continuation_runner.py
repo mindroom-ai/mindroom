@@ -122,7 +122,6 @@ from mindroom.reply_turn.request import (
     reply_authorization_entity_names,
     response_typing_indicator,
 )
-from mindroom.response_attempt import run_cancellable_span_work
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
@@ -957,10 +956,17 @@ class ApprovalContinuationRunner:
             else nullcontext()
         )
         async with lease_cm:
-            if (cancelled := await self._refresh_approval_context(claimed, request, target=target)) is not None:
-                return cancelled
             # The resume writes into the reply it continues from its first step.
             progress = TurnProgress(delivery_started=True)
+            refreshed = await self.locked.run_stoppable(
+                request,
+                self.locked.refresh_mid_turn_context_for_approval(request),
+                delivery_started=progress.delivery_started,
+                target=target,
+            )
+            if isinstance(refreshed, FinalDeliveryOutcome):
+                await self._settle_claimed_resume_ending(claimed, refreshed.ending, target=target)
+                return refreshed.ending
             lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
             post_effect_continuation = claimed
             # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
@@ -1037,39 +1043,6 @@ class ApprovalContinuationRunner:
                 )
             case AwaitingApproval() | Owed():
                 pass
-
-    async def _refresh_approval_context(
-        self,
-        claimed: ApprovalContinuation,
-        request: ResponseRequest,
-        *,
-        target: MessageTarget,
-    ) -> Cancelled | None:
-        """Refresh mid-turn approval context in a span-registered task; settle on span cancel."""
-        handle = current_span()
-        if handle is None:
-            await self.locked.refresh_mid_turn_context_for_approval(request)
-            return None
-        refreshed = await run_cancellable_span_work(
-            register=partial(handle.runtime.spans.register, handle.span_id),
-            coroutine=self.locked.refresh_mid_turn_context_for_approval(request),
-            logger=self.deps.logger,
-        )
-        if not isinstance(refreshed, Cancelled):
-            return None
-        ending = refreshed
-        if not handle.exited:
-            noted = await self.deps.delivery_gateway.end_interrupted_span(
-                handle,
-                target,
-                ending=refreshed,
-                delivery_started=True,
-                contact_turn=request.contact is not None,
-            )
-            if noted is not None and isinstance(noted.ending, Cancelled):
-                ending = noted.ending
-        await self._settle_claimed_resume_ending(claimed, ending, target=target)
-        return ending
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL and the reply it answered."""

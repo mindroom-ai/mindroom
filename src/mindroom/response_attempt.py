@@ -72,6 +72,7 @@ async def _forward_cancel_to_attempt_task(
     forwarded too and raised once the attempt exited.
     """
     if task.done():
+        _log_attempt_unwind_failure(task, logger=logger)
         return
     request_task_cancel(
         task,
@@ -116,29 +117,45 @@ async def run_cancellable_span_work[T](
     original cancel source preserved. Cancelling the awaiting outer task (such as sync restart or
     process shutdown) forwards cancellation to the child, waits for it to unwind, and re-raises.
     """
-    current = asyncio.current_task()
-    cancelling_before = current.cancelling() if current is not None else 0
     task: asyncio.Task[T] = asyncio.create_task(coroutine)
     register(task)
-    ended_before_awaited = task.done()
     try:
-        return await asyncio.shield(task)
+        await asyncio.wait({task})
     except asyncio.CancelledError as caught_cancellation:
-        if (current is not None and current.cancelling() > cancelling_before) or current_task_is_process_shutdown():
-            await _forward_cancel_to_attempt_task(task, caught_cancellation, logger=logger)
-            raise
-        cancellation = caught_cancellation
-        if task.done() and task.cancelled() and not ended_before_awaited:
-            try:
-                task.result()
-            except asyncio.CancelledError as child_cancellation:
-                cancellation = child_cancellation
-        await _forward_cancel_to_attempt_task(task, cancellation, logger=logger)
+        await _forward_cancel_to_attempt_task(task, caught_cancellation, logger=logger)
+        raise
+    try:
+        return task.result()
+    except asyncio.CancelledError as child_cancellation:
         if current_task_is_process_shutdown():
             raise
-        if task.done() and not task.cancelled() and task.exception() is None:
-            return task.result()
-        return Cancelled(classify_cancel_source(cancellation))
+        return Cancelled(classify_cancel_source(child_cancellation))
+
+
+async def add_stop_button_if_wanted(
+    *,
+    client: nio.AsyncClient,
+    logger: structlog.stdlib.BoundLogger,
+    show_stop_button: bool,
+    user_id: str | None,
+    message_id: str,
+    add_stop_button: Callable[[str], Awaitable[None]],
+) -> None:
+    """Show the Stop button on ``message_id`` when configured and the requester is online."""
+    if not show_stop_button:
+        return
+    if user_id is not None:
+        user_is_online = await is_user_online(client, user_id)
+        logger.info(
+            "Stop button decision",
+            message_id=message_id,
+            user_online=user_is_online,
+            show_button=user_is_online,
+        )
+        if not user_is_online:
+            return
+    logger.info("Adding stop button", message_id=message_id)
+    await add_stop_button(message_id)
 
 
 @dataclass(frozen=True)
@@ -188,22 +205,6 @@ class ResponseAttemptRunner:
 
     deps: ResponseAttemptDeps
 
-    async def _should_show_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> bool:
-        show_stop_button = self.deps.show_stop_button()
-        if not show_stop_button or request.user_id is None:
-            return show_stop_button
-        user_is_online = await is_user_online(self.deps.client, request.user_id)
-        self.deps.logger.info(
-            "Stop button decision",
-            message_id=message_id,
-            user_online=user_is_online,
-            show_button=user_is_online,
-        )
-        return user_is_online
-
-    async def _forward_cancel_to_attempt_task(self, task: asyncio.Task[Any], exc: asyncio.CancelledError) -> None:
-        await _forward_cancel_to_attempt_task(task, exc, logger=self.deps.logger)
-
     async def run[T](self, request: ResponseAttemptRequest[T]) -> T | Cancelled:
         """Run one response coroutine as its reply span's attempt; return its result, or how a cancellation ended it.
 
@@ -218,7 +219,14 @@ class ResponseAttemptRunner:
             try:
                 button_event_id = await self._reply_event_while_running(request, task)
                 if button_event_id is not None:
-                    await self._add_stop_button(request, button_event_id)
+                    await add_stop_button_if_wanted(
+                        client=self.deps.client,
+                        logger=self.deps.logger,
+                        show_stop_button=self.deps.show_stop_button(),
+                        user_id=request.user_id,
+                        message_id=button_event_id,
+                        add_stop_button=request.span.add_stop_button,
+                    )
 
                 ended_before_awaited = task.done()
                 return await asyncio.shield(task)
@@ -231,7 +239,7 @@ class ResponseAttemptRunner:
                         task.result()
                     except asyncio.CancelledError as child_cancellation:
                         cancellation = child_cancellation
-                await self._forward_cancel_to_attempt_task(task, cancellation)
+                await _forward_cancel_to_attempt_task(task, cancellation, logger=self.deps.logger)
                 log_cancelled_response(
                     self.deps.logger,
                     exc=cancellation,
@@ -252,7 +260,7 @@ class ResponseAttemptRunner:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 # What failed around the attempt, such as recording its Stop button, must not leave the attempt
                 # running after its span ends, where a Stop no longer reaches it.
-                await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
+                await _forward_cancel_to_attempt_task(task, asyncio.CancelledError(), logger=self.deps.logger)
                 raise
 
     async def _reply_event_while_running(
@@ -274,18 +282,12 @@ class ResponseAttemptRunner:
             shown.cancel()
         return None if task.done() else shown.result()
 
-    async def _add_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> None:
-        """Show the Stop button on the reply's event when wanted; the reply records it and redacts it."""
-        if not await self._should_show_stop_button(request, message_id):
-            return
-        self.deps.logger.info("Adding stop button", message_id=message_id)
-        await request.span.add_stop_button(message_id)
-
 
 __all__ = [
     "ResponseAttemptDeps",
     "ResponseAttemptRequest",
     "ResponseAttemptRunner",
     "SpanAttempt",
+    "add_stop_button_if_wanted",
     "run_cancellable_span_work",
 ]

@@ -3,22 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.stop import SpanRegistry
 
+if TYPE_CHECKING:
+    from mindroom.cancellation import TaskCancelSource
+
 
 @pytest.mark.asyncio
-async def test_a_span_stopped_before_its_task_registers_is_cancelled_when_it_does() -> None:
-    """A Stop between a span's claim and its task's registration cancels the task as it registers."""
+@pytest.mark.parametrize(
+    ("cancel_sources", "with_done_predecessor"),
+    [
+        pytest.param(("user_stop",), False, id="first_stop"),
+        pytest.param(("user_stop", None), False, id="stop_then_untagged"),
+        pytest.param((None, "user_stop"), False, id="untagged_then_stop"),
+        pytest.param(("user_stop",), True, id="after_done_predecessor"),
+    ],
+)
+async def test_a_span_stopped_before_its_task_registers_is_cancelled_when_it_does(
+    cancel_sources: tuple[TaskCancelSource | None, ...],
+    with_done_predecessor: bool,
+) -> None:
+    """A latched Stop cancels the next registered task with ``USER_STOP_CANCEL_MSG`` across handoff and priority cases."""
     registry = SpanRegistry()
     registry.expect("span-1")
-    assert not registry.cancel("span-1", cancel_source="user_stop")
+    if with_done_predecessor:
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+        # Registering an already-done task schedules forget_finished on the next loop tick, reproducing handoff.
+        registry.register("span-1", done_task)
+    for source in cancel_sources:
+        assert registry.cancel("span-1", cancel_source=source) is False
     task = asyncio.create_task(asyncio.Event().wait())
     registry.register("span-1", task)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
         await task
 
 
@@ -109,41 +131,3 @@ async def test_a_second_stop_does_not_cancel_the_unwinding_task_again() -> None:
     with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
         await task
     assert unwound.is_set()
-
-
-@pytest.mark.asyncio
-async def test_stop_between_sequential_span_tasks_cancels_next_task_on_register() -> None:
-    """A Stop arriving after task1 completes (before its done callback removes it) cancels task2 on registration."""
-    registry = SpanRegistry()
-    registry.expect("span-1")
-    task1 = asyncio.create_task(asyncio.sleep(0))
-    await task1
-    # Registering an already-done task schedules forget_finished on the next loop tick, reproducing the handoff race.
-    registry.register("span-1", task1)
-    assert registry.cancel("span-1", cancel_source="user_stop") is False
-
-    task2 = asyncio.create_task(asyncio.Event().wait())
-    registry.register("span-1", task2)
-    with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-        await task2
-
-
-@pytest.mark.asyncio
-async def test_user_stop_takes_priority_over_untagged_cancel_before_registration() -> None:
-    """An untagged cancel must not downgrade a queued user_stop, and a user_stop upgrades a queued untagged cancel."""
-    registry = SpanRegistry()
-    registry.expect("span-1")
-    assert registry.cancel("span-1", cancel_source="user_stop") is False
-    assert registry.cancel("span-1", cancel_source=None) is False
-    task1 = asyncio.create_task(asyncio.Event().wait())
-    registry.register("span-1", task1)
-    with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-        await task1
-
-    registry.expect("span-2")
-    assert registry.cancel("span-2", cancel_source=None) is False
-    assert registry.cancel("span-2", cancel_source="user_stop") is False
-    task2 = asyncio.create_task(asyncio.Event().wait())
-    registry.register("span-2", task2)
-    with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-        await task2

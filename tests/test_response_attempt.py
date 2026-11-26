@@ -17,7 +17,15 @@ from mindroom.cancellation import (
 )
 from mindroom.final_delivery import Cancelled
 from mindroom.message_target import MessageTarget
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
+from mindroom.response_attempt import (
+    ResponseAttemptDeps,
+    ResponseAttemptRequest,
+    ResponseAttemptRunner,
+    SpanAttempt,
+    _forward_cancel_to_attempt_task,
+    run_cancellable_span_work,
+)
+from mindroom.stop import SpanRegistry
 
 
 @dataclass
@@ -460,7 +468,11 @@ async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> N
 
     task = asyncio.create_task(misbehaving_attempt())
     await inner_started.wait()
-    await runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))
+    await _forward_cancel_to_attempt_task(
+        task,
+        asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG),
+        logger=runner.deps.logger,
+    )
 
     error_calls = runner.deps.logger.error.call_args_list
     assert len(error_calls) == 1
@@ -494,7 +506,11 @@ async def test_a_straggling_attempt_is_waited_out_after_a_forwarded_cancel(
     task = asyncio.create_task(stubborn_attempt())
     await inner_started.wait()
     forward = asyncio.create_task(
-        runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+        _forward_cancel_to_attempt_task(
+            task,
+            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG),
+            logger=runner.deps.logger,
+        ),
     )
     while not runner.deps.logger.warning.called:  # noqa: ASYNC110
         await asyncio.sleep(0.005)
@@ -532,7 +548,11 @@ async def test_a_repeated_cancel_while_the_attempt_unwinds_propagates_once_it_ex
     task = asyncio.create_task(attempt())
     await inner_started.wait()
     forward = asyncio.create_task(
-        runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+        _forward_cancel_to_attempt_task(
+            task,
+            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG),
+            logger=runner.deps.logger,
+        ),
     )
     while cancels < 1:  # noqa: ASYNC110
         await asyncio.sleep(0)
@@ -580,3 +600,54 @@ async def test_response_attempt_cancellation_returns_its_cancellation_and_logs_p
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message
     assert log_call.kwargs["message_id"] == "$existing"
+
+
+@pytest.mark.asyncio
+async def test_run_cancellable_span_work_preserves_user_stop_provenance() -> None:
+    """Cancelling a span-registered child task via ``SpanRegistry`` returns ``Cancelled('user_stop')``."""
+    registry = SpanRegistry()
+    registry.expect("span-1")
+    started = asyncio.Event()
+
+    async def work() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    outer = asyncio.create_task(
+        run_cancellable_span_work(
+            register=lambda task: registry.register("span-1", task),
+            coroutine=work(),
+            logger=MagicMock(),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert registry.cancel("span-1", cancel_source="user_stop") is True
+    assert await asyncio.wait_for(outer, timeout=1) == Cancelled("user_stop")
+
+
+@pytest.mark.asyncio
+async def test_run_cancellable_span_work_forwards_preexisting_outer_cancel_and_reraises() -> None:
+    """An outer cancellation already pending on entry forwards to the child and re-raises instead of returning."""
+    registered: list[asyncio.Task[object]] = []
+
+    async def work() -> str:
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def outer() -> str | Cancelled:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel(SYNC_RESTART_CANCEL_MSG)
+        return await run_cancellable_span_work(
+            register=registered.append,
+            coroutine=work(),
+            logger=MagicMock(),
+        )
+
+    with pytest.raises(asyncio.CancelledError, match=SYNC_RESTART_CANCEL_MSG):
+        await asyncio.create_task(outer())
+    assert len(registered) == 1
+    assert registered[0].cancelled()
+    with pytest.raises(asyncio.CancelledError, match=SYNC_RESTART_CANCEL_MSG):
+        registered[0].result()

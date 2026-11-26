@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -120,7 +120,6 @@ from mindroom.reply_turn.request import (
     requester_remains_authorized,
     response_typing_indicator,
 )
-from mindroom.response_attempt import run_cancellable_span_work
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     PausedAttempt,
@@ -392,6 +391,23 @@ def _raise_if_process_shutdown() -> None:
     """Restore process cancellation when generation code consumed it."""
     if current_task_is_process_shutdown():
         raise asyncio.CancelledError
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalClaimedSource:
+    """Signal that a claimed turn's source became terminal inside a registered child task."""
+
+    source_deleted: bool
+
+
+def _reraise_post_placeholder_error(error: Exception, *, has_placeholder: bool) -> NoReturn:
+    """Wrap post-placeholder preparation errors so the claimed reply shows and settles them."""
+    if not has_placeholder or isinstance(
+        error,
+        (ReplyMembershipPendingError, RevisionSnapshotChangedError, _PostLockRequestPreparationError),
+    ):
+        raise error
+    raise _PostLockRequestPreparationError from error
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1285,7 @@ class ResponseRunner:
             request.on_lifecycle_lock_acquired()
         prepared = await self._prepare_locked_source(request)
         if not isinstance(prepared, ResponseRequest):
+            assert not isinstance(prepared, _TerminalClaimedSource)
             return prepared
         claimed = await self._claim_reply_span(prepared, history_scope=history_scope)
         if not isinstance(claimed, ResponseRequest):
@@ -1358,7 +1375,10 @@ class ResponseRunner:
         )
         return replace(request, model_prompt=model_prompt)
 
-    async def _prepare_locked_source(self, request: ResponseRequest) -> ResponseRequest | SourceFate:
+    async def _prepare_locked_source(
+        self,
+        request: ResponseRequest,
+    ) -> ResponseRequest | SourceFate | _TerminalClaimedSource:
         """Apply the owner gate to this exact request history, before and after refresh.
 
         A source deleted or answered elsewhere while the request waited ends it.
@@ -1384,11 +1404,7 @@ class ResponseRunner:
         )
         source_deleted = await self._sources_deleted(request)
         if handle is not None and not handle.exited:
-            await self.deps.delivery_gateway.end_reply_span(
-                handle,
-                terminal_source_decision(source_deleted=source_deleted),
-            )
-            return Owned()
+            return _TerminalClaimedSource(source_deleted=source_deleted)
         if await self.deps.delivery_gateway.settle_unclaimed_reply(
             (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
             source_deleted=source_deleted,
@@ -1460,7 +1476,7 @@ class ResponseRunner:
         placeholder_event_id: str | None,
         history_scope: HistoryScope | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> ResponseRequest | SourceFate:
+    ) -> ResponseRequest | SourceFate | _TerminalClaimedSource:
         """Refresh a claimed turn's history and payload, gate its sources again, and tell it what an earlier attempt did.
 
         ``history_scope`` is the scope the turn's runs store in, as ``execution_identity``; a turn that runs nothing
@@ -1481,43 +1497,43 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
 
+    async def _finalize_unanswered(
+        self,
+        request: ResponseRequest,
+        outcome: FinalDeliveryOutcome,
+        *,
+        response_kind: str,
+        post_response_outcome: ResponseOutcome | None = None,
+    ) -> None:
+        """Finalize one locked turn that ended without running its response lifecycle."""
+        final_post_outcome = post_response_outcome or ResponseOutcome()
+        await self.locked.build_lifecycle(request, response_kind=response_kind).finalize(
+            outcome,
+            build_post_response_outcome=lambda _final_outcome: final_post_outcome,
+            post_response_deps=lambda: self.locked.post_response_deps(request),
+        )
+
     async def _run_cancellable_preparation[T](
         self,
         request: ResponseRequest,
         *,
         response_kind: str,
-        coroutine: Coroutine[Any, Any, T],
+        coroutine: Coroutine[Any, Any, T | _TerminalClaimedSource],
     ) -> T | Owned:
         """Run post-placeholder turn preparation inside a span-registered task; settle cleanly on span cancel."""
-        handle = current_span()
-        if handle is None:
-            return await coroutine
-        result = await run_cancellable_span_work(
-            register=partial(handle.runtime.spans.register, handle.span_id),
-            coroutine=coroutine,
-            logger=self.deps.logger,
-        )
-        if not isinstance(result, Cancelled):
-            return result
-        if current_task_is_process_shutdown():
-            raise asyncio.CancelledError
-        target = request.response_envelope.target
-        noted: FinalDeliveryOutcome | None = None
-        if not handle.exited:
-            noted = await self.deps.delivery_gateway.end_interrupted_span(
-                handle,
-                target,
-                ending=result,
-                delivery_started=False,
-                contact_turn=request.contact is not None,
-            )
-        lifecycle = self.locked.build_lifecycle(request, response_kind=response_kind)
-        await lifecycle.finalize(
-            noted or FinalDeliveryOutcome(ending=result),
-            build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-            post_response_deps=lambda: self.locked.post_response_deps(request),
-        )
-        return Owned()
+        result = await self.locked.run_stoppable(request, coroutine, delivery_started=False)
+        if isinstance(result, _TerminalClaimedSource):
+            handle = current_span()
+            if handle is not None and not handle.exited:
+                await self.deps.delivery_gateway.end_reply_span(
+                    handle,
+                    terminal_source_decision(source_deleted=result.source_deleted),
+                )
+            return Owned()
+        if isinstance(result, FinalDeliveryOutcome):
+            await self._finalize_unanswered(request, result, response_kind=response_kind)
+            return Owned()
+        return result
 
     async def _begin_locked_turn(
         self,
@@ -1588,11 +1604,11 @@ class ResponseRunner:
         else:
             claimed = True
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-        lifecycle = self.locked.build_lifecycle(request, response_kind=response_kind)
-        await lifecycle.finalize(
+        await self._finalize_unanswered(
+            request,
             outcome,
-            build_post_response_outcome=lambda _final_outcome: post_response_outcome,
-            post_response_deps=lambda: self.locked.post_response_deps(request),
+            response_kind=response_kind,
+            post_response_outcome=post_response_outcome,
         )
         return claimed
 
@@ -1774,6 +1790,7 @@ class ResponseRunner:
         """
         target = request.response_envelope.target
         execution_identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id)
+        response_kind = "ai" if team is None else "team"
         member_names = () if team is None else team.member_names
         request = replace(request, participating_agent_names=member_names or (self.deps.agent_name,))
         history_scope = (
@@ -1787,7 +1804,7 @@ class ResponseRunner:
         if (suppression := self._runs_nothing(request)) is not None:
             return await self._finalize_without_running_locked(
                 request,
-                response_kind="ai" if team is None else "team",
+                response_kind=response_kind,
                 history_scope=history_scope,
                 reply_entity_names=member_names,
                 suppression=suppression,
@@ -1800,6 +1817,8 @@ class ResponseRunner:
         if not isinstance(admitted, ResponseRequest):
             return admitted
         request, participation = await _normalize_late_stopped_reply(admitted, participation)
+        runtime_model: TurnModel | None = None
+        team_models: TeamTurnModelSelection | None = None
         if team is None:
             _approve_continued_reply(participation, request)
             # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
@@ -1851,20 +1870,47 @@ class ResponseRunner:
                 else TEAM_PLACEHOLDER
             ),
         )
+        self.locked.start_stop_button(request, placeholder_event_id or existing_event_id(request))
+
+        async def prepare_turn() -> _LockedTurn | ResponseRequest | SourceFate | _TerminalClaimedSource:
+            try:
+                prepared = await self._prepare_claimed_request(
+                    request,
+                    placeholder_event_id=placeholder_event_id,
+                    history_scope=history_scope,
+                    execution_identity=execution_identity,
+                )
+                if not isinstance(prepared, ResponseRequest):
+                    return prepared
+                prepared = await self.deps.request_preparer.with_system_enrichment(
+                    prepared,
+                    target_member_names=member_names or None,
+                )
+                if team is None:
+                    assert runtime_model is not None
+                    return await self._prepare_agent_turn(
+                        prepared,
+                        runtime_model=runtime_model,
+                        history_scope=history_scope,
+                        execution_identity=execution_identity,
+                        participation=participation,
+                    )
+                if team.rejection_message is None:
+                    assert team_models is not None
+                    return await self._prepare_team_turn(
+                        prepared,
+                        team=team,
+                        team_models=team_models,
+                        history_scope=history_scope,
+                    )
+            except Exception as error:
+                _reraise_post_placeholder_error(error, has_placeholder=placeholder_event_id is not None)
+            return prepared
+
         prepared_turn = await self._run_cancellable_preparation(
             request,
-            response_kind="ai" if team is None else "team",
-            coroutine=self._prepare_post_placeholder_turn(
-                request,
-                placeholder_event_id=placeholder_event_id,
-                history_scope=history_scope,
-                execution_identity=execution_identity,
-                member_names=member_names,
-                team=team,
-                runtime_model=runtime_model if team is None else None,
-                team_models=team_models if team is not None else None,
-                participation=participation,
-            ),
+            response_kind=response_kind,
+            coroutine=prepare_turn(),
         )
         if isinstance(prepared_turn, ResponseRequest):
             assert team is not None
@@ -1873,58 +1919,6 @@ class ResponseRunner:
             await self._settle_team_rejection(prepared_turn, team.rejection_message)
             return Owned()
         return prepared_turn
-
-    async def _prepare_post_placeholder_turn(
-        self,
-        request: ResponseRequest,
-        *,
-        placeholder_event_id: str | None,
-        history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
-        member_names: tuple[str, ...],
-        team: _TeamResponseRequest | None,
-        runtime_model: TurnModel | None,
-        team_models: TeamTurnModelSelection | None,
-        participation: ParticipationGate | None,
-    ) -> _LockedTurn | ResponseRequest | SourceFate:
-        """Run cancellable post-placeholder preparation for one agent or team turn."""
-        try:
-            prepared = await self._prepare_claimed_request(
-                request,
-                placeholder_event_id=placeholder_event_id,
-                history_scope=history_scope,
-                execution_identity=execution_identity,
-            )
-            if not isinstance(prepared, ResponseRequest):
-                return prepared
-            prepared = await self.deps.request_preparer.with_system_enrichment(
-                prepared,
-                target_member_names=member_names or None,
-            )
-            if team is None:
-                assert runtime_model is not None
-                return await self._prepare_agent_turn(
-                    prepared,
-                    runtime_model=runtime_model,
-                    history_scope=history_scope,
-                    execution_identity=execution_identity,
-                    participation=participation,
-                )
-            if team.rejection_message is None:
-                assert team_models is not None
-                return await self._prepare_team_turn(
-                    prepared,
-                    team=team,
-                    team_models=team_models,
-                    history_scope=history_scope,
-                )
-        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, _PostLockRequestPreparationError):
-            raise
-        except Exception as error:
-            if placeholder_event_id is None:
-                raise
-            raise _PostLockRequestPreparationError from error
-        return prepared
 
     async def _settle_team_rejection(self, request: ResponseRequest, reason: str) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
@@ -2096,10 +2090,8 @@ class ResponseRunner:
         """Generate a prepared turn's reply, streamed or delivered whole, and settle its lifecycle once."""
         request = turn.request
         # A quiet turn never streams. Otherwise a resumed reply streams below what its stopped attempt showed.
-        if request.quiet:
-            use_streaming = False
-        elif _resumed_reply() is not None:
-            use_streaming = True
+        if request.quiet or _resumed_reply() is not None:
+            use_streaming = not request.quiet
         else:
             streaming_decision = await self._run_cancellable_preparation(
                 request,

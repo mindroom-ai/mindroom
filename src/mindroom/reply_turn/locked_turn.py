@@ -46,7 +46,14 @@ from mindroom.reply_turn.request import (
     reply_authorization_entity_names,
     requester_remains_authorized,
 )
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
+from mindroom.response_attempt import (
+    ResponseAttemptDeps,
+    ResponseAttemptRequest,
+    ResponseAttemptRunner,
+    SpanAttempt,
+    add_stop_button_if_wanted,
+    run_cancellable_span_work,
+)
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
@@ -636,6 +643,59 @@ class LockedTurns:
             pipeline_timing=request.pipeline_timing,
         )
 
+    async def run_stoppable[T](
+        self,
+        request: ResponseRequest,
+        coroutine: Coroutine[Any, Any, T],
+        *,
+        delivery_started: bool,
+        target: MessageTarget | None = None,
+    ) -> T | FinalDeliveryOutcome:
+        """Run span-owned non-attempt work in a registered task; on span Stop, end the span and return its outcome."""
+        handle = current_span()
+        if handle is None:
+            return await coroutine
+        result = await run_cancellable_span_work(register=handle.register, coroutine=coroutine, logger=self.deps.logger)
+        if not isinstance(result, Cancelled):
+            return result
+        outcome = FinalDeliveryOutcome(ending=result)
+        if handle.exited:
+            return outcome
+        return await self._end_span_after_outcome(
+            handle,
+            outcome,
+            target=target or request.response_envelope.target,
+            delivery_started=delivery_started,
+            contact_turn=request.contact is not None,
+        )
+
+    def start_stop_button(self, request: ResponseRequest, message_id: str | None) -> None:
+        """Start showing the Stop button concurrently with preparation and generation."""
+        handle = current_span()
+        if (
+            message_id is None
+            or handle is None
+            or handle.stop_button_started
+            or handle.reply.stop_button_event_id is not None
+            or not handle.reply.running
+            or request.quiet
+            or not self.deps.runtime.config.defaults.show_stop_button
+        ):
+            return
+        handle.stop_button_started = True
+        create_background_task(
+            add_stop_button_if_wanted(
+                client=self.client(),
+                logger=self.deps.logger,
+                show_stop_button=True,
+                user_id=request.user_id,
+                message_id=message_id,
+                add_stop_button=partial(self.deps.delivery_gateway.add_reply_stop_button, handle),
+            ),
+            name=f"stop_button:{handle.span_id}",
+            owner=self.deps.runtime,
+        )
+
     async def _run_cancellable_response(
         self,
         *,
@@ -646,11 +706,18 @@ class LockedTurns:
         show_stop_button: bool,
     ) -> FinalDeliveryOutcome | Cancelled:
         """Run one response-generation attempt with cancellation support; return what it delivered, or its cancellation."""
+        handle = current_span()
+        assert handle is not None, "every response attempt runs in a reply span"
         return await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self.client(),
                 logger=self.deps.logger,
-                show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
+                show_stop_button=lambda: (
+                    show_stop_button
+                    and not handle.stop_button_started
+                    and handle.reply.stop_button_event_id is None
+                    and self.deps.runtime.config.defaults.show_stop_button
+                ),
             ),
         ).run(
             ResponseAttemptRequest[FinalDeliveryOutcome](
@@ -658,21 +725,19 @@ class LockedTurns:
                 response_function=response_function,
                 existing_event_id=existing_event_id,
                 user_id=user_id,
-                span=self._span_attempt(),
+                span=self._span_attempt(handle),
             ),
         )
 
-    def _span_attempt(self) -> SpanAttempt:
+    def _span_attempt(self, handle: SpanHandle) -> SpanAttempt:
         """Return the current reply span's ownership of an attempt: its Stop and its Stop button."""
-        handle = current_span()
-        assert handle is not None, "every response attempt runs in a reply span"
 
         async def reply_event() -> str | None:
             await handle.reply_shown.wait()
             return handle.reply.event_id
 
         return SpanAttempt(
-            register=partial(handle.runtime.spans.register, handle.span_id),
-            add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
+            register=handle.register,
+            add_stop_button=partial(self.deps.delivery_gateway.add_reply_stop_button, handle),
             reply_event=reply_event,
         )

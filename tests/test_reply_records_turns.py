@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, BinaryIO
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -50,6 +50,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
 from mindroom.participation import ParticipationDecision
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
+from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import skip_unapproved_attempt
@@ -78,7 +79,7 @@ from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target, streamed_answer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -2738,35 +2739,57 @@ async def test_a_regeneration_that_waits_for_earlier_writes_keeps_its_edit(tmp_p
     assert await _span_outcomes(bot, await _reply(bot)) == [rl.SpanOutcome.COMPLETED]
 
 
+@asynccontextmanager
+async def _blocked_preparation(
+    bot: AgentBot,
+    *,
+    on_cancel: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncIterator[tuple[asyncio.Task[SourceFate], AsyncMock]]:
+    """Run one turn whose post-placeholder ``_prepare_claimed_request`` blocks until cancelled."""
+    preparing = asyncio.Event()
+    model = AsyncMock(return_value="Never.")
+
+    async def hung_prepare(*_args: object, **_kwargs: object) -> object:
+        preparing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if on_cancel is not None:
+                await on_cancel()
+            raise
+        raise AssertionError
+
+    with patch.object(ResponseRunner, "_prepare_claimed_request", new=hung_prepare):
+        response = asyncio.create_task(_answer(bot, _plain_request(_target()), model))
+        try:
+            await asyncio.wait_for(preparing.wait(), timeout=5)
+            yield response, model
+        finally:
+            if not response.done():
+                response.cancel()
+                with suppress(asyncio.CancelledError):
+                    await response
+
+
 async def test_stop_during_post_placeholder_preparation_cancels_settles_and_unblocks_next_turn(
     tmp_path: Path,
 ) -> None:
     """A live Stop during post-placeholder preparation cancels it, settles the placeholder, and releases the lock."""
     bot = await _streaming_bot(tmp_path)
-    preparing = asyncio.Event()
     unwinding = asyncio.Event()
     allow_unwind = asyncio.Event()
     unwind_interrupted = False
 
-    async def hung_prepare(*_args: object, **_kwargs: object) -> object:
+    async def slow_unwind() -> None:
         nonlocal unwind_interrupted
-        preparing.set()
+        unwinding.set()
         try:
-            await asyncio.Event().wait()
+            await allow_unwind.wait()
         except asyncio.CancelledError:
-            unwinding.set()
-            try:
-                await allow_unwind.wait()
-            except asyncio.CancelledError:
-                unwind_interrupted = True
-                raise
+            unwind_interrupted = True
             raise
-        raise AssertionError
 
-    model = AsyncMock(return_value="Never.")
-    with patch.object(ResponseRunner, "_prepare_claimed_request", new=hung_prepare):
-        response = asyncio.create_task(_answer(bot, _plain_request(_target()), model))
-        await asyncio.wait_for(preparing.wait(), timeout=5)
+    async with _blocked_preparation(bot, on_cancel=slow_unwind) as (response, model):
         reply = await _reply(bot)
         assert reply.event_id == "$sent1"
         assert reply.current_span_id is not None
@@ -2812,24 +2835,125 @@ async def test_stop_during_post_placeholder_preparation_cancels_settles_and_unbl
     assert _sent_bodies(bot)[-1] == "Follow-up."
 
 
+async def test_stop_button_appears_during_post_placeholder_preparation_and_redacts_on_stop(
+    tmp_path: Path,
+) -> None:
+    """An online requester sees the 🛑 Stop button on the placeholder during prep, and Stop cancels and redacts it."""
+    bot = await _streaming_bot(tmp_path)
+    with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
+        async with _blocked_preparation(bot) as (response, model):
+
+            async def recorded_button() -> tuple[str, str]:
+                while (current := await _reply(bot)).stop_button_event_id is None:  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
+                assert current.event_id is not None
+                return current.event_id, current.stop_button_event_id
+
+            placeholder_id, button_id = await asyncio.wait_for(recorded_button(), timeout=5)
+            buttons = [
+                (f"$sent{index}", call.kwargs["content"])
+                for index, call in enumerate(bot.client.room_send.await_args_list, start=1)
+                if call.kwargs["message_type"] == "m.reaction"
+            ]
+            assert len(buttons) == 1
+            assert buttons[0][0] == button_id
+            assert buttons[0][1]["m.relates_to"]["key"] == "🛑"
+            assert buttons[0][1]["m.relates_to"]["event_id"] == placeholder_id
+
+            stop = await _stop(bot, placeholder_id, 5)
+            assert await asyncio.wait_for(response, timeout=5) == Owned()
+            assert await asyncio.wait_for(stop, timeout=5) is True
+
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+    model.assert_not_awaited()
+    settled = await _reply(bot)
+    assert settled.state is rl.ReplyState.CANCELLED
+    assert settled.stop_button_event_id is None
+    assert settled.redaction_pending == ()
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
+
+
+async def test_terminal_driving_edit_redaction_during_preparation_settles_without_cancelled_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """Redacting a driving edit between admission and post-placeholder source check ends the span without cancel settlement."""
+    bot = await _streaming_bot(tmp_path)
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == Owned()
+    room_id = _target().room_id
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id=room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+    redaction = nio.Event.parse_event(
+        {
+            "event_id": "$redaction_edit",
+            "type": "m.room.redaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 3,
+            "redacts": "$edit",
+            "content": {},
+        },
+    )
+    assert isinstance(redaction, nio.RedactionEvent)
+
+    checks = 0
+    button_id: str | None = None
+
+    async def edit_redacted_after_claim(_history: object) -> SourcePreparation:
+        nonlocal checks, button_id
+        checks += 1
+        if checks == 1:
+            return SourcePreparation(surviving=("$edit",))
+        while (shown := (await _reply(bot)).stop_button_event_id) is None:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        button_id = shown
+        await bot.journal_principal().admit(
+            _inbound_event(room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(room_id, redaction, EventKind.REDACTION, self_sender=bot.matrix_id.full_id),
+        )
+        return SourcePreparation(invalid=("$edit",))
+
+    model = AsyncMock(return_value="Unreachable.")
+    request = replace(
+        _regeneration(answer_event_id="$sent1", edit_event_id="$edit"),
+        prepare_source_turn=edit_redacted_after_claim,
+    )
+    with (
+        patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)),
+        patch.object(ResponseLifecycle, "finalize", new=AsyncMock()) as lifecycle_finalize,
+    ):
+        assert await _answer(bot, request, model) == Owned()
+
+    assert button_id is not None
+    model.assert_not_awaited()
+    lifecycle_finalize.assert_not_awaited()
+    settled = await _reply(bot)
+    assert settled.state is rl.ReplyState.COMPLETED
+    assert settled.current_span_id is None
+    assert settled.stop_button_event_id is None
+    assert settled.redaction_pending == ()
+    assert await _span_outcomes(bot, settled) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RESTORED]
+    assert not await bot._reply_runtime.store.is_pending("$edit")
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
+
+
 async def test_untagged_span_cancel_during_preparation_exits_cleanly_without_unended_span(tmp_path: Path) -> None:
     """An untagged span cancel during preparation settles without logging ``reply_span_left_unended`` or leaking."""
     bot = await _streaming_bot(tmp_path)
-    preparing = asyncio.Event()
-
-    async def hung_prepare(*_args: object, **_kwargs: object) -> object:
-        preparing.set()
-        await asyncio.Event().wait()
-        raise AssertionError
-
-    model = AsyncMock(return_value="Never.")
-    with capture_logs() as logs, patch.object(ResponseRunner, "_prepare_claimed_request", new=hung_prepare):
-        response = asyncio.create_task(_answer(bot, _plain_request(_target()), model))
-        await asyncio.wait_for(preparing.wait(), timeout=5)
-        span_id = (await _reply(bot)).current_span_id
-        assert span_id is not None
-        assert bot._reply_runtime.spans.cancel(span_id, cancel_source=None) is True
-        assert await asyncio.wait_for(response, timeout=5) == Owned()
+    with capture_logs() as logs:
+        async with _blocked_preparation(bot) as (response, model):
+            span_id = (await _reply(bot)).current_span_id
+            assert span_id is not None
+            assert bot._reply_runtime.spans.cancel(span_id, cancel_source=None) is True
+            assert await asyncio.wait_for(response, timeout=5) == Owned()
 
     model.assert_not_awaited()
     assert (await _reply(bot)).current_span_id is None
@@ -2839,22 +2963,13 @@ async def test_untagged_span_cancel_during_preparation_exits_cleanly_without_une
 async def test_outer_cancellation_during_preparation_unwinds_and_reraises(tmp_path: Path) -> None:
     """Cancelling the outer turn task during preparation forwards cancel to the child, unwinds it, and re-raises."""
     bot = await _streaming_bot(tmp_path)
-    preparing = asyncio.Event()
     unwound = asyncio.Event()
 
-    async def hung_prepare(*_args: object, **_kwargs: object) -> object:
-        preparing.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await asyncio.sleep(0)
-            unwound.set()
-            raise
-        raise AssertionError
+    async def mark_unwound() -> None:
+        await asyncio.sleep(0)
+        unwound.set()
 
-    with patch.object(ResponseRunner, "_prepare_claimed_request", new=hung_prepare):
-        response = asyncio.create_task(_answer(bot, _plain_request(_target()), AsyncMock(return_value="Never.")))
-        await asyncio.wait_for(preparing.wait(), timeout=5)
+    async with _blocked_preparation(bot, on_cancel=mark_unwound) as (response, _model):
         response.cancel("sync_restart")
         with pytest.raises(asyncio.CancelledError, match="sync_restart"):
             await asyncio.wait_for(response, timeout=5)

@@ -1180,6 +1180,27 @@ async def _local_raw_http_server(
         await server.wait_closed()
 
 
+@asynccontextmanager
+async def _timeout_test_client(
+    base_url: str,
+    *,
+    request_timeout: float = 0.15,
+    access_token: str | None = None,
+) -> AsyncIterator[MindRoomAsyncClient]:
+    """Yield one ``MindRoomAsyncClient`` configured for local timeout tests and close it on exit."""
+    client = MindRoomAsyncClient(
+        base_url,
+        "@agent:localhost",
+        config=nio.AsyncClientConfig(request_timeout=request_timeout, max_timeouts=0),
+    )
+    if access_token is not None:
+        client.access_token = access_token
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stall_mode", ["headers", "body"])
 async def test_send_timeout_zero_bounds_stalled_headers_and_body_and_retries_cleanly(
@@ -1203,34 +1224,28 @@ async def test_send_timeout_zero_bounds_stalled_headers_and_body_and_retries_cle
         await writer.drain()
 
     monkeypatch.setattr("nio.durable.transport.asyncio.sleep", AsyncMock())
-    async with _local_raw_http_server(handler) as base_url:
-        client = MindRoomAsyncClient(
-            base_url,
-            "@agent:localhost",
-            config=nio.AsyncClientConfig(request_timeout=0.15, max_timeouts=0),
+    async with (
+        _local_raw_http_server(handler) as base_url,
+        _timeout_test_client(base_url, access_token="tok") as client,  # noqa: S106
+    ):
+
+        async def read_stalled() -> bytes:
+            response = await client.send("GET", "/stall", None, None, None, 0)
+            try:
+                return await response.read()
+            finally:
+                response.release()
+
+        # Connection 1: positional timeout=0 hits SocketTimeoutError (TimeoutError) on headers or body.
+        with pytest.raises(aiohttp.SocketTimeoutError):
+            await read_stalled()
+        # Connections 2 -> 3: keyword timeout=0 via Transport times out on dead socket and retries on a fresh one.
+        payload = await asyncio.wait_for(
+            Transport(client, max_bytes=1024).request("GET", "/media", request_timeout=0),
+            timeout=3.0,
         )
-        client.access_token = "tok"  # noqa: S105
-        try:
-
-            async def read_stalled() -> bytes:
-                response = await client.send("GET", "/stall", None, None, None, 0)
-                try:
-                    return await response.read()
-                finally:
-                    response.release()
-
-            # Connection 1: positional timeout=0 hits SocketTimeoutError (TimeoutError) on headers or body.
-            with pytest.raises(aiohttp.SocketTimeoutError):
-                await read_stalled()
-            # Connections 2 -> 3: keyword timeout=0 via Transport times out on dead socket and retries on a fresh one.
-            payload = await asyncio.wait_for(
-                Transport(client, max_bytes=1024).request("GET", "/media", request_timeout=0),
-                timeout=3.0,
-            )
-            assert payload == b"payload"
-            assert connections == 3
-        finally:
-            await client.close()
+        assert payload == b"payload"
+        assert connections == 3
 
 
 @pytest.mark.asyncio
@@ -1246,20 +1261,12 @@ async def test_send_timeout_zero_allows_slow_trickle_past_request_timeout() -> N
             writer.write(chunk)
             await writer.drain()
 
-    async with _local_raw_http_server(handler) as base_url:
-        client = MindRoomAsyncClient(
-            base_url,
-            "@agent:localhost",
-            config=nio.AsyncClientConfig(request_timeout=0.15, max_timeouts=0),
-        )
+    async with _local_raw_http_server(handler) as base_url, _timeout_test_client(base_url) as client:
+        response = await client.send("GET", "/trickle", None, None, None, 0)
         try:
-            response = await client.send("GET", "/trickle", None, None, None, 0)
-            try:
-                assert await response.read() == b"aaabbbcccddd"
-            finally:
-                response.release()
+            assert await response.read() == b"aaabbbcccddd"
         finally:
-            await client.close()
+            response.release()
 
 
 @pytest.mark.asyncio
