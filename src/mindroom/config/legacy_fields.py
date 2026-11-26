@@ -373,6 +373,48 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "apply_template": "todo",
         "list_templates": "todo",
     },
+    "linear": {
+        "get_user_details": "linear_read",
+        "get_teams_details": "linear_read",
+        "get_issue_details": "linear_read",
+        "get_user_assigned_issues": "linear_read",
+        "get_workflow_issues": "linear_read",
+        "get_high_priority_issues": "linear_read",
+        "create_issue": "linear_write",
+        "update_issue": "linear_write",
+    },
+    "notion": {
+        "search_pages": "notion_search",
+        "create_page": "notion_write",
+        "update_page": "notion_write",
+    },
+    "todoist": {
+        "get_task": "todoist_read",
+        "get_active_tasks": "todoist_read",
+        "get_projects": "todoist_read",
+        "create_task": "todoist_write",
+        "update_task": "todoist_write",
+        "close_task": "todoist_write",
+        "delete_task": "todoist_write",
+    },
+    "clickup": {
+        "list_spaces": "clickup_read",
+        "list_lists": "clickup_read",
+        "list_tasks": "clickup_read",
+        "get_task": "clickup_read",
+        "create_task": "clickup_write",
+        "update_task": "clickup_write",
+        "delete_task": "clickup_write",
+    },
+    "trello": {
+        "list_boards": "trello_read",
+        "get_board_lists": "trello_read",
+        "get_cards": "trello_read",
+        "create_board": "trello_write",
+        "create_list": "trello_write",
+        "create_card": "trello_write",
+        "move_card": "trello_write",
+    },
 }
 
 
