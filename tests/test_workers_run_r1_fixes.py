@@ -252,6 +252,8 @@ async def test_r3_program_that_is_found_but_cannot_run_is_reported_by_its_spawn_
     """A script whose interpreter is missing, or without the execute bit, is reported from its spawn error alone."""
     # Where the idle policy is refused, a command starts directly, so its spawn error is the one that is reported.
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     script = tmp_path / "script-xyz"
     script.write_text(f"{first_line}echo hi\n")
     script.chmod(mode)
@@ -278,6 +280,8 @@ async def test_r4_program_with_a_trailing_slash_keeps_it_and_is_never_opened(
 ) -> None:
     """A file named as a directory is reported under the name it was given, and what it holds is never read."""
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     program = tmp_path / "script-xyz"
     line = b"#!/bin/sh\n"
     if fifo:
