@@ -21,8 +21,6 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 import httpx
 import httpx2
 import pytest
-from agno.knowledge.document.base import Document
-from agno.knowledge.reader.markdown_reader import MarkdownReader
 from openai import APIStatusError, InternalServerError, RateLimitError
 from structlog.testing import capture_logs
 
@@ -60,6 +58,7 @@ from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile, max_conc
 from mindroom.knowledge.index_metadata import load_publication, publication_path
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.readers import Document, MarkdownReader
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess
