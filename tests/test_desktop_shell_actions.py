@@ -875,3 +875,58 @@ async def test_kill_shell_accepts_handle_or_request_id_mutually_exclusively(tmp_
         await asyncio.wait_for(run_task, timeout=2)
     assert not marker.exists()
     await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tmp_path: Path) -> None:
+    """run_shell validates max_runtime_seconds, emits timed_out only on timeout, and preserves legacy payloads."""
+    shell = _local_shell()
+    shell.grant(60)
+
+    for idx, bad_value in enumerate((0, -2.5, True, float("nan"), float("inf"), "5", None)):
+        with pytest.raises(DesktopProtocolError, match="max_runtime_seconds"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-max-{idx}",
+                    parameters={"command": "echo hi", "cwd": str(tmp_path), "max_runtime_seconds": bad_value},
+                ),
+            )
+
+    normal = await _execute(
+        shell,
+        _run_shell("printf 'ok'", tmp_path, request_id="normal-1", timeout_seconds=5, max_runtime_seconds=5.0),
+    )
+    assert normal["state"] == "completed"
+    assert normal["output"] == "ok"
+    assert "timed_out" not in normal
+
+    started = await _execute(
+        shell,
+        _run_shell(
+            "printf 'partial\n'; sleep 30",
+            tmp_path,
+            request_id="timeout-1",
+            timeout_seconds=10,
+            separate_stderr=True,
+            max_runtime_seconds=0.3,
+        ),
+    )
+    payload = started
+    if payload["state"] == "running":
+        assert "timed_out" not in payload
+        handle = payload["handle"]
+        assert isinstance(handle, str)
+        for seq in range(2, 60):
+            await asyncio.sleep(0.05)
+            payload = await _execute(
+                shell,
+                _handle_command("check_shell", handle, sequence=seq, offset=0, stderr_offset=0),
+            )
+            if payload["state"] != "running":
+                break
+    assert payload["state"] == "killed"
+    assert payload["timed_out"] is True
+    assert payload["output"] == "partial\n"
+    await shell.close()

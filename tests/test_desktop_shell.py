@@ -30,6 +30,7 @@ def request(
     agent_name: str = AGENT,
     lifetime_ms: int = 60_000,
     separate_stderr: bool = False,
+    max_runtime_seconds: float | None = None,
 ) -> DesktopShellRequest:
     """Build one short-lived request for real subprocess tests."""
     return DesktopShellRequest(
@@ -41,6 +42,7 @@ def request(
         int(time.time() * 1000) + lifetime_ms,
         timeout,
         separate_stderr=separate_stderr,
+        max_runtime_seconds=max_runtime_seconds,
     )
 
 
@@ -1157,4 +1159,52 @@ async def test_cancel_request_dismisses_pending_approval_and_kills_handle(tmp_pa
     finished = await check_until_finished(shell, running.handle)
     assert finished.state == "killed"
     assert finished.exit_code == -signal.SIGKILL
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_max_runtime_seconds_enforced_locally_and_kills_process_group(tmp_path: Path, pids: Path) -> None:
+    """DesktopShell validates max_runtime_seconds, enforces it locally, kills the process group, and sets timed_out."""
+    shell = local_shell()
+    shell.grant(60)
+
+    for idx, bad_value in enumerate((0, -1, True, float("nan"), float("inf"), "5")):
+        with pytest.raises(DesktopShellError, match="max_runtime_seconds"):
+            await shell.execute(
+                request("echo nope", tmp_path, request_id=f"bad-{idx}", max_runtime_seconds=bad_value),  # type: ignore[arg-type]
+            )
+
+    fast = await shell.execute(
+        request("printf 'fast'", tmp_path, request_id="fast-ok", timeout=5, max_runtime_seconds=5.0),
+    )
+    assert fast.state == "completed"
+    assert fast.timed_out is False
+    assert fast.output.read() == b"fast"
+    shell.hand_over(fast)
+
+    child_pid_file = pids / "child.pid"
+    command = f"sleep 30 & echo $! > {shlex.quote(str(child_pid_file))}; printf 'before\n'; wait"
+    started_at = time.monotonic()
+    result = await shell.execute(
+        request(command, tmp_path, request_id="timed-out", timeout=30, max_runtime_seconds=0.35),
+    )
+    assert time.monotonic() - started_at < 5.0
+    assert result.handle is not None
+    finished = result if result.state != "running" else await check_until_finished(shell, result.handle)
+    assert finished.state == "killed"
+    assert finished.timed_out is True
+    assert finished.output.read() == b"before\n"
+    shell.hand_over(finished)
+
+    # Child process in the same process group must be gone.
+    child_pid = int(child_pid_file.read_text().strip())
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
     await shell.close()

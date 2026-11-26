@@ -19,9 +19,10 @@ from mindroom.custom_tools import desktop_shell as desktop_shell_mod
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.media import DesktopMediaError
-from mindroom.desktop.protocol import DesktopCommand, DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError, DesktopResponse, EncryptedDesktopMedia
 from mindroom.desktop.shell import DesktopShell
 from mindroom.desktop.shell_actions import execute_shell
+from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.shell.execution import shell_job_wait_seconds
 from mindroom.tool_jobs.control import JobControl, current_job_id, job_control_context
 from mindroom.tool_jobs.execution import _default_wait, project_definitions
@@ -35,15 +36,8 @@ from mindroom.tools.desktop import desktop_tools
 from tests.desktop_helpers import ALICE
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
-
-
-@pytest.fixture(autouse=True)
-def _clear_legacy_stderr_cache() -> Iterator[None]:
-    desktop_shell_mod._LEGACY_COMBINED_STDERR_TARGETS.clear()
-    yield
-    desktop_shell_mod._LEGACY_COMBINED_STDERR_TARGETS.clear()
 
 
 def _target() -> ResolvedWorkerTarget:
@@ -164,6 +158,7 @@ def _setup_tool(
 def _fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(desktop_shell_mod, "_POLL_BACKOFF_SECONDS", (0.01, 0.01))
     monkeypatch.setattr(desktop_shell_mod, "_TIMEOUT_KILL_GRACE_DELAYS", (0.0, 0.01, 0.01))
+    monkeypatch.setattr(desktop_shell_mod, "_BOUNDED_KILL_GRACE_DELAY_SECONDS", 0.01)
     monkeypatch.setattr(desktop_shell_mod, "_FORCE_KILL_DRAIN_DELAY_SECONDS", 0.01)
     monkeypatch.setattr(desktop_shell_mod, "_RECOVERY_DELAYS_SECONDS", (0.01, 0.01, 0.01, 0.01))
     monkeypatch.setattr(desktop_shell_mod, "_CANCEL_STATUS_RETRY_DELAY_SECONDS", 0.01)
@@ -270,6 +265,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         "cwd": "/Users/me/repo",
         "timeout_seconds": 2,
         "separate_stderr": True,
+        "max_runtime_seconds": 120,
     }
     assert recorded[0][1] == 120.0
 
@@ -278,17 +274,32 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         res2 = await tool.run_desktop_shell("make test", tail=1, timeout=1)
     assert res2 == "Exit code 2\nOutput:\npartial\nStderr:\nboom\ndetail"
     assert meta2 == {"exit_code": 2}
-    assert recorded[1][0].parameters == {"command": "make test", "timeout_seconds": 1, "separate_stderr": True}
+    assert recorded[1][0].parameters == {
+        "command": "make test",
+        "timeout_seconds": 1,
+        "separate_stderr": True,
+        "max_runtime_seconds": 1.0,
+    }
 
     # Exit 0 with state="killed" (killed locally on Mac) prefixes killed notice.
     res3 = await tool.run_desktop_shell(["echo hi && pwd"])
     assert res3 == "Command was killed on the desktop.\ncleaned up"
-    assert recorded[2][0].parameters == {"command": "echo hi && pwd", "timeout_seconds": 2, "separate_stderr": True}
+    assert recorded[2][0].parameters == {
+        "command": "echo hi && pwd",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+        "max_runtime_seconds": 120,
+    }
 
     # JSON-encoded argv string is also normalized.
     res4 = await tool.run_desktop_shell('["ls", "-la"]')
     assert res4 == "ok"
-    assert recorded[3][0].parameters == {"command": "ls -la", "timeout_seconds": 2, "separate_stderr": True}
+    assert recorded[3][0].parameters == {
+        "command": "ls -la",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+        "max_runtime_seconds": 120,
+    }
 
 
 @pytest.mark.asyncio
@@ -376,16 +387,21 @@ async def test_slow_command_polling_tail_reset_progress_and_finished_page_draini
 
 @pytest.mark.asyncio
 async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An older helper rejecting separate_stderr is cached, retried once with a fresh request_id, and polled legacy."""
+    """Older helpers rejecting separate_stderr/max_runtime_seconds retry cleanly without caching stale legacy state."""
     _fast_timers(monkeypatch)
+    upgraded = False
 
     def handler(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
-        if cmd.action == "run_shell" and "separate_stderr" in cmd.parameters:
+        if (
+            not upgraded
+            and cmd.action == "run_shell"
+            and ({"separate_stderr", "max_runtime_seconds"} & set(cmd.parameters))
+        ):
             return DesktopResponse(
                 cmd.request_id,
                 cmd.session_id,
                 False,
-                error="Unexpected desktop parameters: separate_stderr.",
+                error="Unexpected desktop parameters: max_runtime_seconds, separate_stderr.",
             )
         if cmd.action == "run_shell" and cmd.parameters["command"] == "legacy-cmd":
             return _shell_reply(
@@ -416,24 +432,35 @@ async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkey
         return _shell_reply(
             request_id=cmd.request_id,
             session_id=cmd.session_id,
-            legacy=True,
-            output="second\n",
+            output="out\n",
+            stderr="err\n",
         )
 
     tool, recorded = _setup_tool(monkeypatch, handler)
     result = await tool.run_desktop_shell("legacy-cmd")
 
     assert result == "part1\npart2"
-    assert recorded[0][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2, "separate_stderr": True}
+    assert recorded[0][0].parameters == {
+        "command": "legacy-cmd",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+        "max_runtime_seconds": 120,
+    }
     assert recorded[1][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2}
     assert recorded[1][0].request_id != recorded[0][0].request_id
     assert recorded[2][0].parameters == {"handle": "shell:legacy", "offset": 6}
     assert "stderr_offset" not in recorded[2][0].parameters
 
-    # Second call against the same cached legacy target skips separate_stderr immediately.
-    result2 = await tool.run_desktop_shell("second-cmd")
-    assert result2 == "second"
-    assert recorded[3][0].parameters == {"command": "second-cmd", "timeout_seconds": 2}
+    # Once the helper is upgraded, the next call immediately sends separate_stderr and max_runtime_seconds again.
+    upgraded = True
+    result2 = await tool.run_desktop_shell("upgraded-cmd", timeout=15)
+    assert result2 == "out\nStderr:\nerr"
+    assert recorded[3][0].parameters == {
+        "command": "upgraded-cmd",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+        "max_runtime_seconds": 15.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -1129,3 +1156,273 @@ async def test_router_conflict_on_run_shell_reports_not_started(monkeypatch: pyt
     assert isinstance(res3, str)
     assert res3.startswith("Error:")
     assert "not_started" not in meta3
+
+
+@pytest.mark.asyncio
+async def test_pre_start_errors_do_not_overwrite_mindroom_output_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pre-start errors (unpaired desktop, missing context, invalid args) never overwrite mindroom_output_path."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "existing.txt"
+    existing.write_text("original-contents")
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+
+    def _wrapped(tool: DesktopTools) -> Callable[..., Any]:
+        fn = next(fn for fn in adapt_toolkit(tool).functions if fn.name == "run_desktop_shell")
+        return with_output_files(fn, policy).entrypoint
+
+    # 1. Unpaired desktop leaves existing file untouched and returns the error string (not saved_to_file).
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.get_tool_runtime_context",
+        lambda: SimpleNamespace(requester_id=ALICE, agent_name="computer", client=object()),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.load_desktop_credentials", lambda *_a, **_kw: None)
+    unpaired_tool = DesktopTools(credentials_manager=MagicMock(spec=CredentialsManager), worker_target=_target())
+    with structured_tool_result() as meta_unpaired:
+        res_unpaired = await _wrapped(unpaired_tool)(args="echo hi", mindroom_output_path="existing.txt")
+    assert isinstance(res_unpaired, str)
+    assert res_unpaired.startswith("Error:")
+    assert "/desktop setup" in res_unpaired
+    assert "saved_to_file" not in res_unpaired
+    assert meta_unpaired == {"not_started": True}
+    assert existing.read_text() == "original-contents"
+
+    # 2. Invalid args leave existing file untouched and return the error string (not saved_to_file).
+    ready_tool, recorded = _setup_tool(monkeypatch, lambda *_args: _shell_reply())
+    with structured_tool_result() as meta_invalid:
+        res_invalid = await _wrapped(ready_tool)(args="echo hi", tail=-1, mindroom_output_path="existing.txt")
+    assert isinstance(res_invalid, str)
+    assert res_invalid.startswith("Error:")
+    assert "tail must be a non-negative integer" in res_invalid
+    assert "saved_to_file" not in res_invalid
+    assert meta_invalid == {"not_started": True}
+    assert recorded == []
+    assert existing.read_text() == "original-contents"
+
+    # 3. Missing live runtime context leaves existing file untouched and returns the error string.
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: None)
+    with structured_tool_result() as meta_no_ctx:
+        res_no_ctx = await _wrapped(ready_tool)(args="echo hi", mindroom_output_path="existing.txt")
+    assert isinstance(res_no_ctx, str)
+    assert res_no_ctx.startswith("Error:")
+    assert "saved_to_file" not in res_no_ctx
+    assert meta_no_ctx == {"not_started": True}
+    assert existing.read_text() == "original-contents"
+
+
+@pytest.mark.asyncio
+async def test_helper_enforced_timeout_formats_like_native_and_saves_no_output_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Helper-enforced max_runtime_seconds timeouts format identically to native timeouts and save no output file."""
+    _fast_timers(monkeypatch)
+
+    # Managed job without explicit timeout omits max_runtime_seconds.
+    tool_job, recorded_job = _setup_tool(monkeypatch, lambda *_a: _shell_reply(output="done\n"))
+    with job_control_context(JobControl(job_id="job-9")):
+        assert await tool_job.run_desktop_shell("long-job") == "done"
+    assert recorded_job[0][0].parameters == {
+        "command": "long-job",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+    }
+
+    # Helper returns state="killed", timed_out=True across a paged drain -> matches native timeout formatting.
+    def helper_timeout_handler(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell":
+            return _shell_reply(
+                state="running",
+                handle="shell:ht",
+                exit_code=None,
+                output="line1\n",
+                stderr="err1\n",
+            )
+        if cmd.action == "check_shell" and cmd.parameters["offset"] == 6:
+            return _shell_reply(
+                state="killed",
+                handle="shell:ht",
+                exit_code=-15,
+                timed_out=True,
+                output="line2\n",
+                output_start=6,
+                next_offset=12,
+                output_bytes=18,
+                output_truncated=True,
+                stderr="",
+                stderr_start=5,
+                stderr_next_offset=5,
+                stderr_bytes=5,
+            )
+        return _shell_reply(
+            state="killed",
+            handle="shell:ht",
+            exit_code=-15,
+            timed_out=True,
+            output="line3\n",
+            output_start=12,
+            next_offset=18,
+            output_bytes=18,
+            output_truncated=False,
+            stderr="",
+            stderr_start=5,
+            stderr_next_offset=5,
+            stderr_bytes=5,
+        )
+
+    tool, recorded = _setup_tool(monkeypatch, helper_timeout_handler)
+    with structured_tool_result() as meta:
+        res = await tool.run_desktop_shell("sleep 30", timeout=5)
+    assert res == "Stopped after 5s.\nOutput:\nline1\nline2\nline3\nStderr:\nerr1"
+    assert meta == {"exit_code": -15}
+    assert recorded[0][0].parameters["max_runtime_seconds"] == 5.0
+    assert not any(cmd.action == "kill_shell" for cmd, _ in recorded)
+
+    # With mindroom_output_path, helper timeout leaves existing file untouched and returns an error receipt.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "out.txt"
+    existing.write_text("keep-me")
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    tool_file, _ = _setup_tool(
+        monkeypatch,
+        lambda _t, cmd, _to: (
+            _shell_reply(state="running", handle="shell:ht2", exit_code=None, output="part\n")
+            if cmd.action == "run_shell"
+            else _shell_reply(
+                state="killed",
+                handle="shell:ht2",
+                exit_code=-15,
+                timed_out=True,
+                output="",
+                output_start=5,
+                next_offset=5,
+                output_bytes=5,
+            )
+        ),
+    )
+    fn = next(fn for fn in adapt_toolkit(tool_file).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="sleep 30", timeout=5, mindroom_output_path="out.txt"),
+    )["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    assert receipt["error"] == "Stopped after 5s. No output file was saved.\nOutput:\npart"
+    assert existing.read_text() == "keep-me"
+
+    # Legacy helper that accepts separate_stderr but rejects max_runtime_seconds retries cleanly omitting both.
+    def reject_max_runtime(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell" and "max_runtime_seconds" in cmd.parameters:
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                False,
+                error="Unexpected desktop parameters: max_runtime_seconds.",
+            )
+        return _shell_reply(request_id=cmd.request_id, session_id=cmd.session_id, legacy=True, output="ok\n")
+
+    tool_legacy, recorded_legacy = _setup_tool(monkeypatch, reject_max_runtime)
+    assert await tool_legacy.run_desktop_shell("echo ok", timeout=5) == "ok"
+    assert recorded_legacy[0][0].parameters == {
+        "command": "echo ok",
+        "timeout_seconds": 2,
+        "separate_stderr": True,
+        "max_runtime_seconds": 5.0,
+    }
+    assert recorded_legacy[1][0].parameters == {"command": "echo ok", "timeout_seconds": 2}
+    assert recorded_legacy[1][0].request_id != recorded_legacy[0][0].request_id
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_poll_error_stops_running_handle_and_reports_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When polling fails on a running handle and bounded stop succeeds, report it stopped and save no output file."""
+    _fast_timers(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    stopped_on_desktop = False
+
+    def poll_fails_stop_succeeds(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        nonlocal stopped_on_desktop
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:err1", exit_code=None)
+        if cmd.action == "kill_shell":
+            stopped_on_desktop = True
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                True,
+                result={"state": "killed", "handle": "shell:err1"},
+            )
+        if stopped_on_desktop:
+            return _shell_reply(state="killed", handle="shell:err1", exit_code=-15)
+        msg = "olm session broken"
+        raise OlmToDeviceError(msg)
+
+    tool, recorded = _setup_tool(monkeypatch, poll_fails_stop_succeeds)
+    result = await tool.run_desktop_shell("sleep 60")
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+    assert "olm session broken" in result
+    assert "The remote command was stopped." in result
+    assert any(cmd.action == "kill_shell" and cmd.parameters == {"handle": "shell:err1"} for cmd, _ in recorded)
+
+    existing = workspace / "err1.txt"
+    existing.write_text("keep-1")
+    stopped_on_desktop = False
+    tool_file, _ = _setup_tool(monkeypatch, poll_fails_stop_succeeds)
+    fn = next(fn for fn in adapt_toolkit(tool_file).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="sleep 60", mindroom_output_path="err1.txt"),
+    )["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    assert "The remote command was stopped." in receipt["error"]
+    assert existing.read_text() == "keep-1"
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_poll_error_reports_when_stop_cannot_be_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When polling fails and bounded stop cannot be confirmed, report the command may still be running."""
+    _fast_timers(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+
+    def poll_and_stop_fail(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:err2", exit_code=None)
+        if cmd.action == "kill_shell":
+            msg = "device unreachable"
+            raise OlmToDeviceError(msg)
+        msg = "malformed check payload"
+        raise DesktopProtocolError(msg)
+
+    tool, recorded = _setup_tool(monkeypatch, poll_and_stop_fail)
+    result = await tool.run_desktop_shell("sleep 60")
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+    assert "malformed check payload" in result
+    assert "Stopping the remote command could not be confirmed; it may still be running on the desktop." in result
+    assert [cmd.parameters for cmd, _ in recorded if cmd.action == "kill_shell"] == [
+        {"handle": "shell:err2"},
+        {"handle": "shell:err2", "force": True},
+    ]
+
+    existing = workspace / "err2.txt"
+    existing.write_text("keep-2")
+    tool_file, _ = _setup_tool(monkeypatch, poll_and_stop_fail)
+    fn = next(fn for fn in adapt_toolkit(tool_file).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="sleep 60", mindroom_output_path="err2.txt"),
+    )["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    assert "may still be running on the desktop" in receipt["error"]
+    assert existing.read_text() == "keep-2"

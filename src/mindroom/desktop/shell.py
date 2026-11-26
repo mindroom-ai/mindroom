@@ -77,6 +77,7 @@ class DesktopShellRequest:
     timeout_seconds: int = 30
     controller_key: str = ""
     separate_stderr: bool = False
+    max_runtime_seconds: float | None = None
 
 
 class DesktopShellOutput(ShellOutputCapture):
@@ -178,7 +179,8 @@ class DesktopShellOutput(ShellOutputCapture):
 class DesktopShellResult:
     """One command's state; a finished result's output stays behind its handle until ``DesktopShell.hand_over``.
 
-    ``killed`` means ``kill_shell`` stopped the command; ``completed`` means it exited on its own.
+    ``killed`` means ``kill_shell`` or ``max_runtime_seconds`` stopped the command; ``completed`` means it exited on
+    its own.
     """
 
     state: Literal["completed", "killed", "running"]
@@ -186,6 +188,7 @@ class DesktopShellResult:
     exit_code: int | None
     output: DesktopShellOutput
     separate_stderr: bool = False
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,7 +206,15 @@ class _ShellHandle:
     def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
         if not record.finished:
             return "running"
-        return "killed" if self.killed else "completed"
+        return "killed" if (self.killed or record.timed_out) else "completed"
+
+
+def _validate_max_runtime_seconds(value: object) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0
+    ):
+        message = "Shell max_runtime_seconds must be a positive finite number."
+        raise DesktopShellError(message)
 
 
 def _validate_command(command: object) -> None:
@@ -298,6 +309,7 @@ class DesktopShell:
         if not isinstance(request.separate_stderr, bool):
             message = "Shell separate_stderr flag must be boolean."
             raise DesktopShellError(message)
+        _validate_max_runtime_seconds(request.max_runtime_seconds)
         if not isinstance(request.expires_at_ms, int) or isinstance(request.expires_at_ms, bool):
             message = "Shell approval expiry is invalid."
             raise DesktopShellError(message)
@@ -584,6 +596,8 @@ class DesktopShell:
             self._finished.set()
 
     async def _run(self, request: DesktopShellRequest, inline_wait: float) -> DesktopShellResult:
+        if request.max_runtime_seconds is not None:
+            inline_wait = min(inline_wait, request.max_runtime_seconds)
         output = DesktopShellOutput(self._spool_directory())
         started_at = time.monotonic()
         run = asyncio.create_task(
@@ -602,6 +616,7 @@ class DesktopShell:
                 kill_group_after_exit=True,
                 # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
                 register_finished=True,
+                max_runtime_seconds=request.max_runtime_seconds,
             ),
         )
         cancelled = asyncio.create_task(self._cancel_event.wait())
@@ -652,6 +667,7 @@ class DesktopShell:
             record.return_code,
             output,
             separate_stderr=entry.separate_stderr,
+            timed_out=record.finished and record.timed_out,
         )
 
     def check(
@@ -686,6 +702,7 @@ class DesktopShell:
             record.return_code,
             entry.output,
             separate_stderr=entry.separate_stderr,
+            timed_out=record.timed_out,
         )
 
     def hand_over(self, result: DesktopShellResult) -> None:
@@ -777,7 +794,7 @@ class DesktopShell:
         if record.process.returncode is None and signal_record(record, force=force):
             self._handles[handle] = replace(self._handles[handle], killed=True)
         # An earlier kill stays the reason it ended, matching what the next check reports.
-        return "killed" if self._handles[handle].killed else "completed"
+        return "killed" if (self._handles[handle].killed or record.timed_out) else "completed"
 
     def _caller_record(
         self,

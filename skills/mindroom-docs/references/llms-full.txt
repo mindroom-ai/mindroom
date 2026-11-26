@@ -11508,7 +11508,7 @@ The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, c
 - `timeout` stops the remote command after N seconds and returns output so far; calls without `background_after` wait up to 120 seconds inline and then continue as a managed `job` (with live progress updates and `job cancel` stopping the remote command).
 - `mindroom_output_path` saves the full command output into a workspace file on completion (stopped or truncated commands save no file).
 
-Under the hood, `run_desktop_shell` manages remote handles, polling, encrypted output transfers, and `request_status` recovery automatically over the bridge's internal `run_shell`, `check_shell`, and `kill_shell` wire actions.
+`run_desktop_shell` automatically tracks long-running commands, transfers large output over encrypted attachments, and recovers uncertain replies without re-running the command.
 
 Commands or working directories padded with long runs of whitespace, invisible characters, blank lines, or combining marks are refused before approval, because padding could hide part of the request from the approver.
 
@@ -11550,7 +11550,7 @@ The bridge's own credentials are never passed to commands.
 
 Each call runs in a fresh non-interactive `/bin/sh`, so directory changes and variables never carry over.
 Commands have no terminal and read standard input from `/dev/null`, so they cannot answer password prompts.
-Standard output and standard error are captured separately (each up to 10 MiB per command; older bridges fall back cleanly to combined output).
+Standard output and standard error are captured separately (each up to 10 MiB per command).
 Large output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
 MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
 
@@ -11602,7 +11602,7 @@ tool_approval:
 
 Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
 Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
-Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule. Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 

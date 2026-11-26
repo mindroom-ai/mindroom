@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -31,6 +32,17 @@ logger = get_logger(__name__)
 _MAX_WARNING_DETAIL = 500
 _STDOUT_SLICE_KEYS = ("output", "output_truncated", "output_start", "next_offset")
 _STDERR_SLICE_KEYS = ("stderr", "stderr_truncated", "stderr_start", "stderr_next_offset")
+
+
+def _optional_positive_number_parameter(parameters: dict[str, object], key: str) -> float | None:
+    """Return the positive finite numeric parameter ``key``, or ``None`` when absent."""
+    if key not in parameters:
+        return None
+    value = parameters[key]
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+        msg = f"Desktop parameter {key} must be a positive finite number."
+        raise DesktopProtocolError(msg)
+    return float(value)
 
 
 def shell_status(
@@ -129,10 +141,11 @@ async def execute_shell(
         }
     reject_unexpected_parameters(
         parameters,
-        allowed=frozenset({"command", "cwd", "timeout_seconds", "separate_stderr"}),
+        allowed=frozenset({"command", "cwd", "timeout_seconds", "separate_stderr", "max_runtime_seconds"}),
     )
     timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
     separate_stderr = optional_bool_parameter(parameters, "separate_stderr")
+    max_runtime_seconds = _optional_positive_number_parameter(parameters, "max_runtime_seconds")
     request = DesktopShellRequest(
         request_id=command.request_id,
         requester_id=command.requester_id,
@@ -143,6 +156,7 @@ async def execute_shell(
         timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         controller_key=controller_key,
         separate_stderr=separate_stderr,
+        max_runtime_seconds=max_runtime_seconds,
     )
     return await _shell_result(client, command, shell, await shell.execute(request))
 
@@ -207,6 +221,8 @@ async def _shell_result(
         "output_start": offset or 0,
         "next_offset": size,
     }
+    if result.timed_out:
+        payload["timed_out"] = True
     if result.separate_stderr:
         stderr_size = output.stderr_size
         payload.update(
