@@ -22,23 +22,22 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 ## `google_maps`
 
-`google_maps` provides `search_places()`, `get_directions()`, `validate_address()`, `geocode_address()`, `reverse_geocode()`, `get_distance_matrix()`, `get_elevation()`, and `get_timezone()`.
-`search_places()` returns place details including name, address, rating, reviews, phone number, website, and opening hours.
+`google_maps` provides `google_maps_places()` (`search_places`, `geocode`, `reverse_geocode`, `validate_address`, `elevation`, `timezone`) and `google_maps_routes()` (`directions`, `distance_matrix`).
+`search_places` returns place details including name, address, rating, reviews, phone number, website, and opening hours.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
-| `search_places` | `boolean` | `true` | Enable `search_places()`. |
-| `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
-| `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
-| `geocode_address` | `boolean` | `true` | Enable `geocode_address()`. |
-| `reverse_geocode` | `boolean` | `true` | Enable `reverse_geocode()`. |
-| `get_distance_matrix` | `boolean` | `true` | Enable `get_distance_matrix()`. |
-| `get_elevation` | `boolean` | `true` | Enable `get_elevation()`. |
-| `get_timezone` | `boolean` | `true` | Enable `get_timezone()`. |
+| `search_places` | `boolean` | `true` | Enable `google_maps_places(action="search_places")`. |
+| `get_directions` | `boolean` | `true` | Enable `google_maps_routes(action="directions")`. |
+| `validate_address` | `boolean` | `true` | Enable `google_maps_places(action="validate_address")`. |
+| `geocode_address` | `boolean` | `true` | Enable `google_maps_places(action="geocode")`. |
+| `reverse_geocode` | `boolean` | `true` | Enable `google_maps_places(action="reverse_geocode")`. |
+| `get_distance_matrix` | `boolean` | `true` | Enable `google_maps_routes(action="distance_matrix")`. |
+| `get_elevation` | `boolean` | `true` | Enable `google_maps_places(action="elevation")`. |
+| `get_timezone` | `boolean` | `true` | Enable `google_maps_places(action="timezone")`. |
 
-The toolkit needs Google Application Default Credentials for place search in addition to the API key, so configure both.
-`validate_address()` uses Google's Address Validation API, which must be enabled in the same Google Cloud project as the key.
+Enable the Places API and Address Validation API in the same Google Cloud project as the API key when using `search_places` or `validate_address`.
 
 ```yaml
 agents:
@@ -48,10 +47,10 @@ agents:
 ```
 
 ```python
-search_places("coffee shops near Pike Place Market")
-get_directions("Seattle, WA", "Portland, OR", mode="driving")
-reverse_geocode(47.6205, -122.3493)
-validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
+google_maps_places(action="search_places", query="coffee shops near Pike Place Market")
+google_maps_routes(action="directions", origin="Seattle, WA", destination="Portland, OR", mode="driving")
+google_maps_places(action="reverse_geocode", lat=47.6205, lng=-122.3493)
+google_maps_places(action="validate_address", address="1600 Amphitheatre Pkwy, Mountain View, CA", region="US")
 ```
 
 ## `openweather`
@@ -88,7 +87,7 @@ openweather_get("geocode", "Reykjavik", limit=3)
 
 ## `shopify`
 
-`shopify` provides `get_shop_info()`, `get_products()`, `get_orders()`, `get_top_selling_products()`, `get_products_bought_together()`, `get_sales_by_date_range()`, `get_order_analytics()`, `get_product_sales_breakdown()`, `get_customer_order_history()`, `get_inventory_levels()`, `get_low_stock_products()`, `get_sales_trends()`, `get_average_order_value()`, and `get_repeat_customers()`.
+`shopify` provides `shopify_store()` (`shop_info`, `products`, `orders`, `inventory_levels`, `low_stock`) and `shopify_analytics()` (`top_selling`, `bought_together`, `sales_by_date`, `order_analytics`, `product_breakdown`, `customer_orders`, `sales_trends`, `average_order_value`, `repeat_customers`).
 List functions return at most 250 products or orders per call.
 Analytics such as sales totals, trends, and average order value use at most 250 matching orders per query, so results for a busy store or a long date range can be incomplete.
 Date filters such as `created_after` and `created_before` take `YYYY-MM-DD`.
@@ -120,10 +119,10 @@ agents:
 ```
 
 ```python
-get_products(max_results=25, status="ACTIVE")
-get_orders(max_results=50, created_after="2026-03-01", created_before="2026-03-31")
-get_low_stock_products(threshold=10)
-get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
+shopify_store(action="products", max_results=25, status="ACTIVE")
+shopify_store(action="orders", max_results=50, created_after="2026-03-01", created_before="2026-03-31")
+shopify_store(action="low_stock", threshold=10)
+shopify_analytics(action="average_order_value", group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
 ## `homeassistant`

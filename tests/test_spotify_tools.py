@@ -105,7 +105,7 @@ def test_tool_sends_the_refreshed_oauth_token(tmp_path: Path, monkeypatch: pytes
         httpx2.Response(200, json={"access_token": "renewed-token", "token_type": "Bearer", "expires_in": 3600}),
     )
 
-    result = json.loads(_tool(paths, manager).get_current_user())
+    result = json.loads(_tool(paths, manager).spotify_library(action="current_user"))
 
     assert result["display_name"] == "Listener"
     basic = "Basic " + base64.b64encode(b"spotify-client:spotify-secret").decode()
@@ -120,7 +120,7 @@ def test_tool_without_a_connection_asks_to_connect(tmp_path: Path) -> None:
     paths, manager = _runtime(tmp_path)
 
     with pytest.raises(OAuthConnectionRequired):
-        _tool(paths, manager).get_current_user()
+        _tool(paths, manager).spotify_library(action="current_user")
 
 
 def test_tool_whose_refresh_spotify_rejects_asks_to_reconnect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +130,7 @@ def test_tool_whose_refresh_spotify_rejects_asks_to_reconnect(tmp_path: Path, mo
     _serve_spotify(monkeypatch, httpx2.Response(400, json={"error": "invalid_grant"}))
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
-        _tool(paths, manager).get_current_user()
+        _tool(paths, manager).spotify_library(action="current_user")
 
     assert exc_info.value.reason == OAUTH_REFRESH_REJECTED_REASON
 
@@ -145,7 +145,7 @@ def test_tool_whose_refresh_fails_for_now_reports_a_retryable_error(
     _serve_spotify(monkeypatch, httpx2.Response(503, json={"error": "temporarily_unavailable"}))
 
     with pytest.raises(OAuthProviderError, match="Spotify authorization could not be refreshed") as exc_info:
-        _tool(paths, manager).get_current_user()
+        _tool(paths, manager).spotify_library(action="current_user")
 
     assert not isinstance(exc_info.value, OAuthConnectionRequired)
 
@@ -158,6 +158,6 @@ def test_tool_with_an_unreadable_connection_asks_for_a_reset(tmp_path: Path) -> 
     corrupt_oauth_credential_payload(database, b"not a credential payload")
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
-        _tool(paths, manager).get_current_user()
+        _tool(paths, manager).spotify_library(action="current_user")
 
     assert exc_info.value.reason == OAUTH_RESET_REQUIRED_REASON

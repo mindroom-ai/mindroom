@@ -41,9 +41,7 @@ def test_reasoning_instructions_scope_to_offered_functions_and_few_shot_options(
 
     narrowed = ReasoningTools(enable_think=False)
     assert narrowed.instructions == ""
-    assert (
-        with_offered_instructions(narrowed, adapt_toolkit(narrowed), authored_instructions=False).instructions is None
-    )
+    assert with_offered_instructions(narrowed, adapt_toolkit(narrowed)).instructions is None
 
     with_default_examples = ReasoningTools(add_few_shot=True)
     assert ReasoningTools.FEW_SHOT_EXAMPLES in with_default_examples.instructions
@@ -54,7 +52,7 @@ def test_reasoning_instructions_scope_to_offered_functions_and_few_shot_options(
     assert custom.instructions == "Use analyze carefully."
     assert custom.instructions_for(["analyze"]) == "Use analyze carefully."
     assert custom.instructions_for([]) == ""
-    adapted = with_offered_instructions(custom, adapt_toolkit(custom), authored_instructions=True)
+    adapted = with_offered_instructions(custom, adapt_toolkit(custom))
     assert adapted.instructions == adapted.guidance == "Use analyze carefully."
 
 

@@ -1065,19 +1065,6 @@ wheels = [
 ]
 
 [[package]]
-name = "composio-agno"
-version = "0.7.20"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "agno" },
-    { name = "composio-core" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/1c/b9cc55331e02c12cd2d4fb474782f60894b31ca279ec56fba621f526ca09/composio_agno-0.7.20.tar.gz", hash = "sha256:2774fffd55855de1fcd52165420210abf7a88aab72fdff19b5370e3c4dbe947a", size = 3881, upload-time = "2025-07-03T08:49:50.615Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/49/a514bbfd6886fb1fb6a299313e734dfbfdc126f4a4c093a3f5a8cd1c1317/composio_agno-0.7.20-py3-none-any.whl", hash = "sha256:0482696fc3e19b98ef8b03cb1f0805054fb0538fe1cc4e995e8866b566f53d2d", size = 4160, upload-time = "2025-07-03T08:49:29.963Z" },
-]
-
-[[package]]
 name = "composio-core"
 version = "0.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -4085,7 +4072,7 @@ clickup = [
     { name = "requests" },
 ]
 composio = [
-    { name = "composio-agno" },
+    { name = "composio-core" },
 ]
 config-manager = [
     { name = "pydantic" },
@@ -4443,10 +4430,10 @@ requires-dist = [
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.8" },
     { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.181" },
     { name = "click", specifier = "<8.5" },
-    { name = "composio-agno", marker = "extra == 'composio'" },
+    { name = "composio-core", marker = "extra == 'composio'" },
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
     { name = "cron-descriptor", specifier = ">=1.4.5" },
-    { name = "croniter", specifier = ">=7.0.0" },
+    { name = "croniter", specifier = ">=7" },
     { name = "cryptography", specifier = ">=47" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "<1" },
     { name = "ddgs", marker = "extra == 'duckduckgo'" },

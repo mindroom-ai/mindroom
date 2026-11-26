@@ -125,12 +125,7 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "zep": {"api_key": _KEY},
 }
 # SDK clients that contact their service while a toolkit is constructed, replaced so it registers its functions offline.
-OFFLINE_CLIENTS = {
-    # Its Places client looks for Google Cloud credentials, retrying the metadata server for many seconds.
-    "google_maps": "agno.tools.google.maps.places_v1",
-    "mem0": "agno.tools.mem0.MemoryClient",
-    "zep": "agno.tools.zep.Zep",
-}
+OFFLINE_CLIENTS: dict[str, str] = {}
 # HTTP requests a toolkit sends while constructed, refused before they dial; the goldens record the refused outcome.
 REFUSED_REQUESTS = {
     # Its instructions report the PyPI release check, which fails offline.

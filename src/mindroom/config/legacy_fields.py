@@ -302,13 +302,15 @@ _RETIRED_FILE_SETTINGS = {
 #   list_files, search_files, or search_content, the functions of Agno's FileTools.
 # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
 #   edit_file, read_file, ls, find_files, and grep.
-# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
-#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
-#   replacement, so the rule that decided a call still decides it.
+# Handling: When the config enables `filesystem`, reject the rules when the first one matching a retired name is
+#   not the first one matching its replacement, unless another registered toolkit still offers the retired name,
+#   naming that rule and the replacement, so the rule that decided a call still decides it.
 # Coverage:
 #   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
 #   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
-#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
+#   tests/test_filesystem_tool_config.py::test_approval_rules_for_a_retired_file_name_offered_elsewhere_load,
+#   tests/test_filesystem_tool_config.py::test_retired_file_approval_check_skips_configs_without_filesystem_and_checks_presets.
 def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
     """Return the rule that decided a retired file function but not its replacement, as text, or None."""
     for old, new in _RETIRED_FILE_FUNCTIONS.items():
@@ -354,10 +356,11 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 5 native toolkits (file_generation, visualization, unsplash),
 #   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
-#   openweather, docker, e2b, daytona), and Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
-#   zoom, x) previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Wave 5-7: v2026.11.623-v2026.11.625 / unreleased); replacement: unreleased;
+#   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
+#   zoom, x), and Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify,
+#   spotify, reddit, google_maps, brandfetch, mem0, zep) previously exposed individual per-operation function names
+#   that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Waves 5-8: v2026.11.623-v2026.11.625 / unreleased); replacement: unreleased;
 #   consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
@@ -611,6 +614,138 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_post": "x_write",
         "reply_to_post": "x_write",
         "send_dm": "x_write",
+    },
+    "linear": {
+        "get_user_details": "linear_read",
+        "get_teams_details": "linear_read",
+        "get_issue_details": "linear_read",
+        "get_user_assigned_issues": "linear_read",
+        "get_workflow_issues": "linear_read",
+        "get_high_priority_issues": "linear_read",
+        "create_issue": "linear_write",
+        "update_issue": "linear_write",
+    },
+    "notion": {
+        "search_pages": "notion_search",
+        "create_page": "notion_write",
+        "update_page": "notion_write",
+    },
+    "todoist": {
+        "get_task": "todoist_read",
+        "get_active_tasks": "todoist_read",
+        "get_projects": "todoist_read",
+        "create_task": "todoist_write",
+        "update_task": "todoist_write",
+        "close_task": "todoist_write",
+        "delete_task": "todoist_write",
+    },
+    "clickup": {
+        "list_spaces": "clickup_read",
+        "list_lists": "clickup_read",
+        "list_tasks": "clickup_read",
+        "get_task": "clickup_read",
+        "create_task": "clickup_write",
+        "update_task": "clickup_write",
+        "delete_task": "clickup_write",
+    },
+    "trello": {
+        "list_boards": "trello_read",
+        "get_board_lists": "trello_read",
+        "get_cards": "trello_read",
+        "create_board": "trello_write",
+        "create_list": "trello_write",
+        "create_card": "trello_write",
+        "move_card": "trello_write",
+    },
+    "bitbucket": {
+        "list_repositories": "bitbucket_read",
+        "get_repository_details": "bitbucket_read",
+        "list_repository_commits": "bitbucket_read",
+        "list_all_pull_requests": "bitbucket_read",
+        "get_pull_request_details": "bitbucket_read",
+        "get_pull_request_changes": "bitbucket_read",
+        "list_issues": "bitbucket_read",
+        "create_repository": "bitbucket_create_repository",
+    },
+    "cal_com": {
+        "get_available_slots": "cal_com_read",
+        "get_upcoming_bookings": "cal_com_read",
+        "create_booking": "cal_com_write",
+        "reschedule_booking": "cal_com_write",
+        "cancel_booking": "cal_com_write",
+    },
+    "shopify": {
+        "get_shop_info": "shopify_store",
+        "get_products": "shopify_store",
+        "get_orders": "shopify_store",
+        "get_inventory_levels": "shopify_store",
+        "get_low_stock_products": "shopify_store",
+        "get_top_selling_products": "shopify_analytics",
+        "get_products_bought_together": "shopify_analytics",
+        "get_sales_by_date_range": "shopify_analytics",
+        "get_order_analytics": "shopify_analytics",
+        "get_product_sales_breakdown": "shopify_analytics",
+        "get_customer_order_history": "shopify_analytics",
+        "get_sales_trends": "shopify_analytics",
+        "get_average_order_value": "shopify_analytics",
+        "get_repeat_customers": "shopify_analytics",
+    },
+    "spotify": {
+        "search_tracks": "spotify_search",
+        "search_playlists": "spotify_search",
+        "search_artists": "spotify_search",
+        "search_albums": "spotify_search",
+        "get_track_recommendations": "spotify_search",
+        "get_artist_top_tracks": "spotify_search",
+        "get_album_tracks": "spotify_search",
+        "get_current_user": "spotify_library",
+        "get_currently_playing": "spotify_library",
+        "get_user_playlists": "spotify_library",
+        "get_playlist": "spotify_library",
+        "get_my_top_tracks": "spotify_library",
+        "get_my_top_artists": "spotify_library",
+        "create_playlist": "spotify_playlist_write",
+        "add_tracks_to_playlist": "spotify_playlist_write",
+        "update_playlist_details": "spotify_playlist_write",
+        "remove_tracks_from_playlist": "spotify_playlist_write",
+        "play_track": "spotify_play",
+    },
+    "reddit": {
+        "get_user_info": "reddit_read",
+        "get_top_posts": "reddit_read",
+        "get_subreddit_info": "reddit_read",
+        "get_trending_subreddits": "reddit_read",
+        "get_subreddit_stats": "reddit_read",
+        "create_post": "reddit_write",
+        "reply_to_post": "reddit_write",
+        "reply_to_comment": "reddit_write",
+    },
+    "google_maps": {
+        "search_places": "google_maps_places",
+        "geocode_address": "google_maps_places",
+        "reverse_geocode": "google_maps_places",
+        "validate_address": "google_maps_places",
+        "get_elevation": "google_maps_places",
+        "get_timezone": "google_maps_places",
+        "get_directions": "google_maps_routes",
+        "get_distance_matrix": "google_maps_routes",
+    },
+    "brandfetch": {
+        "search_by_identifier": "brandfetch_lookup",
+        "asearch_by_identifier": "brandfetch_lookup",
+        "search_by_brand": "brandfetch_lookup",
+        "asearch_by_brand": "brandfetch_lookup",
+    },
+    "mem0": {
+        "search_memory": "mem0_read",
+        "get_all_memories": "mem0_read",
+        "add_memory": "mem0_add",
+        "delete_all_memories": "mem0_delete_all",
+    },
+    "zep": {
+        "get_zep_memory": "zep_read",
+        "search_zep_memory": "zep_read",
+        "add_zep_message": "zep_add_message",
     },
 }
 

@@ -13,7 +13,7 @@ API keys are `password` fields, so set them in the dashboard or through the envi
 
 ## [`mem0`]
 
-`mem0` gives the agent `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()` backed by the `mem0ai` client.
+`mem0` gives the agent `mem0_read()` (`search`, `get_all`), `mem0_add()`, and `mem0_delete_all()` backed by the `mem0ai` client.
 With an API key, it uses the hosted Mem0 Platform; without one, it uses Mem0's default setup, which stores memories locally but calls OpenAI for embeddings and memory extraction.
 That default setup requires `OPENAI_API_KEY` in the process environment, not the `.env`, even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
 Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `history.db` in Mem0's directory (`~/.mem0/`, or `MEM0_DIR` when set), so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
@@ -29,10 +29,10 @@ Set `user_id` to share one memory store across all users; without it, each call 
 | `org_id` | `text` | `null` | Mem0 Platform organization ID; also read from `MEM0_ORG_ID`. |
 | `project_id` | `text` | `null` | Mem0 Platform project ID; also read from `MEM0_PROJECT_ID`. |
 | `infer` | `boolean` | `true` | Let Mem0 infer facts from added content. |
-| `enable_add_memory` | `boolean` | `true` | Enable `add_memory()`. |
-| `enable_search_memory` | `boolean` | `true` | Enable `search_memory()`. |
-| `enable_get_all_memories` | `boolean` | `true` | Enable `get_all_memories()`. |
-| `enable_delete_all_memories` | `boolean` | `true` | Enable `delete_all_memories()`. |
+| `enable_add_memory` | `boolean` | `true` | Enable `mem0_add()`. |
+| `enable_search_memory` | `boolean` | `true` | Enable `mem0_read(action="search")`. |
+| `enable_get_all_memories` | `boolean` | `true` | Enable `mem0_read(action="get_all")`. |
+| `enable_delete_all_memories` | `boolean` | `true` | Enable `mem0_delete_all()`. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml
@@ -49,14 +49,14 @@ agents:
 `zep` connects the agent to Zep Cloud for conversation memory and user-graph search.
 It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agent runs without the `zep` tool and logs `Could not load tool for agent construction`.
 
-- `add_zep_message(role, content)` adds a message to the Zep thread.
-- `get_zep_memory(memory_type="context")` returns the thread's context summary, or the raw message history with `memory_type="messages"`.
-- `search_zep_memory(query, search_scope="edges")` searches the user graph and returns facts, or node summaries with `search_scope="nodes"`.
+- `zep_add_message(role, content)` adds a message to the Zep thread.
+- `zep_read(action="context" | "messages")` returns the thread's context summary or raw message history.
+- `zep_read(action="search", query=..., search_scope="edges" | "nodes")` searches the user graph for facts or node summaries.
 
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
-The agent's prompt includes the default Zep usage instructions only while all three functions are enabled; instructions you set with `instructions` are always included.
+Custom instructions you set with `instructions` are always included in the agent's prompt.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -64,10 +64,10 @@ The agent's prompt includes the default Zep usage instructions only while all th
 | `user_id` | `text` | `null` | Stable Zep user ID; a new user is generated and created when unset. |
 | `api_key` | `password` | `null` | Zep API key; also read from `ZEP_API_KEY`. |
 | `ignore_assistant_messages` | `boolean` | `false` | Exclude assistant-role messages from graph-memory extraction; they are still stored in the Zep thread. |
-| `enable_add_zep_message` | `boolean` | `true` | Enable `add_zep_message()`. |
-| `enable_get_zep_memory` | `boolean` | `true` | Enable `get_zep_memory()`. |
-| `enable_search_zep_memory` | `boolean` | `true` | Enable `search_zep_memory()`. |
-| `instructions` | `text` | `null` | Replace the default Zep usage instructions. |
+| `enable_add_zep_message` | `boolean` | `true` | Enable `zep_add_message()`. |
+| `enable_get_zep_memory` | `boolean` | `true` | Enable `zep_read(action="context" | "messages")`. |
+| `enable_search_zep_memory` | `boolean` | `true` | Enable `zep_read(action="search")`. |
+| `instructions` | `text` | `null` | Additional Zep usage instructions. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml
