@@ -537,8 +537,8 @@ def test_missing_credentials_return_requester_bound_connection_links(tmp_path: P
     alice = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
     bob = _build_tool(runtime_paths, manager, _worker_target("@bob:example.test"))
 
-    alice_result = json.loads(alice.list_repositories())
-    bob_result = json.loads(bob.list_repositories())
+    alice_result = json.loads(alice.github_read_repo(action="list_repositories"))
+    bob_result = json.loads(bob.github_read_repo(action="list_repositories"))
 
     assert alice_result["oauth_connection_required"] is True
     assert alice_result["provider"] == "github"
@@ -584,7 +584,7 @@ def test_unreadable_credentials_return_reset_required_payload(tmp_path: Path, un
         assert not credential_path.exists()
     tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
 
-    payload = json.loads(tool.list_repositories())
+    payload = json.loads(tool.github_read_repo(action="list_repositories"))
 
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
@@ -610,8 +610,8 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
     alice.authenticate = lambda: _FakeGithub()
     bob = _build_tool(runtime_paths, manager, bob_target)
 
-    assert json.loads(alice.list_repositories()) == ["example/project"]
-    assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+    assert json.loads(alice.github_read_repo(action="list_repositories")) == ["example/project"]
+    assert json.loads(bob.github_read_repo(action="list_repositories"))["oauth_connection_required"] is True
 
 
 def test_github_tool_reads_stored_token_only_in_a_calling_thread(
@@ -637,7 +637,7 @@ def test_github_tool_reads_stored_token_only_in_a_calling_thread(
     tool.authenticate = _FakeGithub
 
     def call() -> tuple[object, str | None]:
-        return json.loads(tool.list_repositories()), tool.access_token
+        return json.loads(tool.github_read_repo(action="list_repositories")), tool.access_token
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         repositories, access_token = executor.submit(call).result()
@@ -724,7 +724,7 @@ def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -
     tool.g = _FakeGithub()
 
     with detached_tool_scope(bob_target.execution_identity):
-        result = json.loads(tool.list_repositories())
+        result = json.loads(tool.github_read_repo(action="list_repositories"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "github"
@@ -751,8 +751,8 @@ def test_github_oauth_is_requester_scoped_when_agent_runtime_is_not(
     bob = _build_tool(runtime_paths, manager, bob_target)
     bob.authenticate = lambda: _FakeGithub()
 
-    assert json.loads(alice.list_repositories()) == ["example/project"]
-    assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+    assert json.loads(alice.github_read_repo(action="list_repositories")) == ["example/project"]
+    assert json.loads(bob.github_read_repo(action="list_repositories"))["oauth_connection_required"] is True
 
 
 def test_unscoped_agent_connection_links_are_requester_bound(tmp_path: Path) -> None:
@@ -769,8 +769,8 @@ def test_unscoped_agent_connection_links_are_requester_bound(tmp_path: Path) -> 
         _worker_target_for_scope("@bob:example.test", None),
     )
 
-    alice_result = json.loads(alice.list_repositories())
-    bob_result = json.loads(bob.list_repositories())
+    alice_result = json.loads(alice.github_read_repo(action="list_repositories"))
+    bob_result = json.loads(bob.github_read_repo(action="list_repositories"))
 
     assert "/api/oauth/github/authorize?connect_token=" in alice_result["connect_url"]
     assert bob_result["connect_url"] != alice_result["connect_url"]
@@ -789,7 +789,7 @@ def test_explicit_access_token_takes_precedence_over_scoped_oauth(tmp_path: Path
     tool = _build_tool(runtime_paths, manager, target, access_token=MANUAL_ACCESS_TOKEN)
     tool.g = _FakeGithub()
 
-    assert json.loads(tool.list_repositories()) == ["example/project"]
+    assert json.loads(tool.github_read_repo(action="list_repositories")) == ["example/project"]
     assert tool.access_token == MANUAL_ACCESS_TOKEN
 
 
@@ -805,7 +805,7 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
     )
     tool.g = _FakeGithub()
 
-    assert json.loads(tool.list_repositories()) == ["example/project"]
+    assert json.loads(tool.github_read_repo(action="list_repositories")) == ["example/project"]
     assert tool.access_token == ENV_ACCESS_TOKEN
 
 
@@ -847,7 +847,7 @@ def test_worker_github_config_cannot_redirect_primary_token(
         )
         assert isinstance(tool, GithubTools)
         try:
-            assert json.loads(tool.list_repositories()) == []
+            assert json.loads(tool.github_read_repo(action="list_repositories")) == []
             assert tool.g.requester.base_url == "https://api.github.com"
         finally:
             tool.g.close()
@@ -889,7 +889,7 @@ def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
     assert isinstance(tool, GithubTools)
     tool.authenticate = lambda: _FakeGithub()
 
-    assert json.loads(tool.list_repositories()) == ["example/project"]
+    assert json.loads(tool.github_read_repo(action="list_repositories")) == ["example/project"]
     assert tool.access_token == "oauth-access"  # noqa: S105
 
 
@@ -904,7 +904,7 @@ def test_whitespace_stored_oauth_token_requires_connection(tmp_path: Path) -> No
         worker_target=_oauth_target("@alice:example.test"),
     )
 
-    result = json.loads(_build_tool(runtime_paths, manager, target).list_repositories())
+    result = json.loads(_build_tool(runtime_paths, manager, target).github_read_repo(action="list_repositories"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "github"
@@ -929,7 +929,7 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
             worker_target=_worker_target("@alice:example.test"),
         )
 
-    assert json.loads(tool.list_repositories()) == ["example/project"]
+    assert json.loads(tool.github_read_repo(action="list_repositories")) == ["example/project"]
     assert captured["base_url"] == "https://github.example.test/api/v3"
 
 
@@ -993,8 +993,8 @@ def test_language_tools_drop_pygithub_injected_url_over_http(tmp_path: Path) -> 
         return _fake_github_http_response(request)
 
     with patch.object(HTTPAdapter, "send", send):
-        languages = json.loads(tool.get_repository_languages("example/project"))
-        stats = json.loads(tool.get_repository_with_stats("example/project"))
+        languages = json.loads(tool.github_read_repo(action="get_repository_languages", repo_name="example/project"))
+        stats = json.loads(tool.github_read_repo(action="get_repository_with_stats", repo_name="example/project"))
         raw_client = Github(auth=Auth.Token(MANUAL_ACCESS_TOKEN))
         try:
             raw_languages = raw_client.get_repo("example/project").get_languages()
@@ -1020,7 +1020,7 @@ def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> N
     )
     tool.g = _StatsGithub()
 
-    result = json.loads(tool.get_repository_with_stats("example/project"))
+    result = json.loads(tool.github_read_repo(action="get_repository_with_stats", repo_name="example/project"))
 
     assert result["languages"] == {"Python": 123}
     assert result["stargazers_count"] == 4
@@ -1045,7 +1045,7 @@ def test_github_partial_results_do_not_log_nested_provider_details(tmp_path: Pat
     sentinel = "provider-controlled-nested-secret"
     tool.g = _NestedProviderFailureGithub(sentinel)
     with capture_logs() as captured_logs:
-        result = tool.get_repository_with_stats("example/project")
+        result = tool.github_read_repo(action="get_repository_with_stats", repo_name="example/project")
 
     assert json.loads(result)["actual_open_issues"] is None
     assert sentinel not in result
@@ -1071,7 +1071,7 @@ def test_github_captured_nested_failure_preserves_partial_result(
     sentinel = f"provider-controlled-nested-secret-{status_code}"
     tool.authenticate = lambda: _CapturedNestedProviderFailureGithub(status_code, sentinel)
 
-    result = tool.get_repository_with_stats("example/project")
+    result = tool.github_read_repo(action="get_repository_with_stats", repo_name="example/project")
 
     payload = json.loads(result)
     assert payload["full_name"] == "example/project"
@@ -1092,7 +1092,7 @@ def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) 
     github = _SearchGithub()
     tool.g = github
 
-    result = json.loads(tool.search_issues_and_prs("created:&gt;=2026-08-07"))
+    result = json.loads(tool.github_read_issues_prs(action="search_issues_and_prs", query="created:&gt;=2026-08-07"))
 
     assert github.queries == ["created:>=2026-08-07"]
     assert result["query"] == "created:>=2026-08-07"
@@ -1111,8 +1111,18 @@ def test_issue_search_treats_all_state_as_no_state_filter(tmp_path: Path) -> Non
     github = _SearchGithub()
     tool.g = github
 
-    tool.search_issues_and_prs("narrowband", state="all", repo="example/project")
-    tool.search_issues_and_prs("narrowband", state="closed", repo="example/project")
+    tool.github_read_issues_prs(
+        action="search_issues_and_prs",
+        query="narrowband",
+        state="all",
+        repo_name="example/project",
+    )
+    tool.github_read_issues_prs(
+        action="search_issues_and_prs",
+        query="narrowband",
+        state="closed",
+        repo_name="example/project",
+    )
 
     assert github.queries == [
         "narrowband repo:example/project",
@@ -1133,7 +1143,8 @@ def test_update_file_reports_success_without_refetching_commit_details(tmp_path:
     tool.g = github
 
     result = json.loads(
-        tool.update_file(
+        tool.github_write_repo(
+            action="update_file",
             repo_name="example/project",
             path="notes.txt",
             content="updated notes",
@@ -1177,7 +1188,8 @@ def test_delete_file_reports_success_without_refetching_commit_details(tmp_path:
     tool.g = github
 
     result = json.loads(
-        tool.delete_file(
+        tool.github_write_repo(
+            action="delete_file",
             repo_name="example/project",
             path="notes.txt",
             message="Delete notes",
@@ -1217,7 +1229,8 @@ def test_edit_issue_omits_unspecified_fields(tmp_path: Path) -> None:
     tool.g = github
 
     result = json.loads(
-        tool.edit_issue(
+        tool.github_write_issues(
+            action="edit_issue",
             repo_name="example/project",
             issue_number=7,
             title="Updated title",
@@ -1240,7 +1253,7 @@ def test_edit_issue_rejects_empty_update(tmp_path: Path) -> None:
     github = _IssueAndPullGithub()
     tool.g = github
 
-    result = json.loads(tool.edit_issue(repo_name="example/project", issue_number=7))
+    result = json.loads(tool.github_write_issues(action="edit_issue", repo_name="example/project", issue_number=7))
 
     assert result == {"error": "Provide a title or body to update issue #7."}
     assert github.repo.issue.edit_calls == []
@@ -1258,7 +1271,9 @@ def test_pull_request_count_falls_back_when_total_count_is_missing(tmp_path: Pat
     github = _IssueAndPullGithub()
     tool.g = github
 
-    result = json.loads(tool.get_pull_request_count("example/project", state="open"))
+    result = json.loads(
+        tool.github_read_issues_prs(action="get_pull_request_count", repo_name="example/project", state="open"),
+    )
 
     assert result == {"count": 2}
     assert github.repo.pull_calls == [{"state": "open"}]
@@ -1291,7 +1306,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
             credentials_manager=manager,
             worker_target=target,
         )
-        result = json.loads(tool.list_repositories())
+        result = json.loads(tool.github_read_repo(action="list_repositories"))
 
     stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert result == ["example/project"]
@@ -1314,7 +1329,7 @@ def test_oauth_refresh_works_when_sync_tool_called_on_running_loop(tmp_path: Pat
     tool.authenticate = lambda: _FakeGithub()
 
     async def call_sync_tool_entrypoint() -> str:
-        return tool.list_repositories()
+        return tool.github_read_repo(action="list_repositories")
 
     result = asyncio.run(call_sync_tool_entrypoint())
 
@@ -1348,7 +1363,7 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
             credentials_manager=manager,
             worker_target=target,
         )
-        result = tool.list_repositories()
+        result = tool.github_read_repo(action="list_repositories")
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
@@ -1388,7 +1403,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
         ),
         pytest.raises(OAuthProviderError) as exc_info,
     ):
-        tool.list_repositories()
+        tool.github_read_repo(action="list_repositories")
 
     assert type(exc_info.value) is OAuthProviderError
     assert str(exc_info.value) == "OAuth credential refresh failed"
@@ -1412,7 +1427,7 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
     revoked_client = _RevokedTokenGithub()
     tool.authenticate = lambda: revoked_client
 
-    result = tool.list_repositories()
+    result = tool.github_read_repo(action="list_repositories")
     payload = json.loads(result)
 
     assert payload["oauth_connection_required"] is True
@@ -1459,17 +1474,40 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
     mindroom_logger = _CapturingLogger()
     with patch("mindroom.custom_tools.github.logger", mindroom_logger):
         if operation == "list_repositories":
-            result = tool.list_repositories()
+            result = tool.github_read_repo(action="list_repositories")
         elif operation == "update_file":
-            result = tool.update_file("example/project", "notes.txt", "body", "Update", "old-sha")
+            result = tool.github_write_repo(
+                action="update_file",
+                repo_name="example/project",
+                path="notes.txt",
+                content="body",
+                message="Update",
+                sha="old-sha",
+            )
         elif operation == "delete_file":
-            result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
+            result = tool.github_write_repo(
+                action="delete_file",
+                repo_name="example/project",
+                path="notes.txt",
+                message="Delete",
+                sha="old-sha",
+            )
         elif operation == "edit_issue":
-            result = tool.edit_issue("example/project", 7, title="Updated")
+            result = tool.github_write_issues(
+                action="edit_issue",
+                repo_name="example/project",
+                issue_number=7,
+                title="Updated",
+            )
         elif operation == "get_pull_request_count":
-            result = tool.get_pull_request_count("example/project")
+            result = tool.github_read_issues_prs(action="get_pull_request_count", repo_name="example/project")
         else:
-            result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
+            result = tool.github_read_repo(
+                action="get_file_content",
+                repo_name="example/project",
+                path="src/notes.txt",
+                ref="feature/notes",
+            )
 
     payload = json.loads(result)
     if status_code == 401:
@@ -1486,8 +1524,16 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
     )
     assert all(sentinel not in output and github_message not in output for output in captured_logs)
     assert sentinel not in result
+    expected_tool_name = {
+        "list_repositories": "github_read_repo",
+        "get_file_content": "github_read_repo",
+        "update_file": "github_write_repo",
+        "delete_file": "github_write_repo",
+        "edit_issue": "github_write_issues",
+        "get_pull_request_count": "github_read_issues_prs",
+    }[operation]
     assert any(
-        kwargs.get("status_code") == status_code and kwargs.get("tool_name") == operation
+        kwargs.get("status_code") == status_code and kwargs.get("tool_name") == expected_tool_name
         for _event, kwargs in mindroom_logger.warning_calls
     )
 
@@ -1508,7 +1554,14 @@ def _create_rejected_pull_request(
     tool.g = github
     mindroom_logger = _CapturingLogger()
     with patch("mindroom.custom_tools.github.logger", mindroom_logger):
-        result = tool.create_pull_request("example/project", "Add notes", "Body", "feature", "main")
+        result = tool.github_write_pr(
+            action="create_pull_request",
+            repo_name="example/project",
+            title="Add notes",
+            body="Body",
+            head="feature",
+            base="main",
+        )
     return result, mindroom_logger
 
 
@@ -1544,7 +1597,7 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
             "github_tool_call_failed",
             {
                 "provider_id": "github",
-                "tool_name": "create_pull_request",
+                "tool_name": "github_write_pr",
                 "error_type": "GithubException",
                 "status_code": 422,
             },
@@ -1627,7 +1680,7 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
     sentinel = "provider-controlled-secret-for-spoofing"
     tool.authenticate = lambda: _ProviderControlledFailureGithub(500, sentinel, "Bad credentials: 401 null")
 
-    result = tool.list_repositories()
+    result = tool.github_read_repo(action="list_repositories")
 
     assert json.loads(result) == {
         "error": "GitHub request failed with HTTP 500. GitHub said: Bad credentials: 401 null",
@@ -1667,8 +1720,18 @@ def test_github_provider_failure_reports_status_and_github_message(
     sentinel = "provider-controlled-secret-for-status"
     tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, "Not Found")
 
-    wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
-    owned_result = tool.edit_issue("example/project", 7, title="Updated")
+    wrapped_result = tool.github_read_repo(
+        action="get_file_content",
+        repo_name="example/project",
+        path="src/notes.txt",
+        ref="feature/notes",
+    )
+    owned_result = tool.github_write_issues(
+        action="edit_issue",
+        repo_name="example/project",
+        issue_number=7,
+        title="Updated",
+    )
 
     assert json.loads(wrapped_result) == {"error": expected_error}
     assert json.loads(owned_result) == {"error": expected_error}
@@ -1699,7 +1762,7 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
             json.dumps({"message": "Server Error", "documentation_url": f"https://docs.example.org/{sentinel}"}),
         ),
     ):
-        result = tool.list_repositories()
+        result = tool.github_read_repo(action="list_repositories")
 
     assert json.loads(result) == {"error": "GitHub request failed with HTTP 500. GitHub said: Server Error"}
     assert sentinel not in result
@@ -1724,7 +1787,7 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
     sentinel = "provider-controlled-retry-secret-with-logging-disabled"
     tool.authenticate = lambda: _RetryProviderFailureGithub(retry, sentinel)
 
-    result = tool.list_repositories()
+    result = tool.github_read_repo(action="list_repositories")
 
     assert json.loads(result)["error"].startswith("GitHub request failed with HTTP 403")
     assert sentinel not in result
@@ -1759,7 +1822,7 @@ def test_github_wrapper_preserves_local_validation_error(tmp_path: Path) -> None
     tool = _build_tool(runtime_paths, manager, target)
     tool.authenticate = lambda: _ValidationGithub()
 
-    result = tool.set_default_branch("example/project", "missing")
+    result = tool.github_write_repo(action="set_default_branch", repo_name="example/project", branch="missing")
 
     assert json.loads(result) == {"error": "Branch 'missing' does not exist"}
 
@@ -1783,7 +1846,7 @@ def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabl
         "requestJson",
         return_value=(401, {}, json.dumps({"message": "Bad credentials", "detail": sentinel})),
     ):
-        result = tool.list_repositories()
+        result = tool.github_read_repo(action="list_repositories")
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
@@ -1803,3 +1866,31 @@ def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) 
     )
 
     assert set(tool.functions) == set(builtin_tool_registry().entries["github"].function_names)
+
+
+def test_github_rejects_unsupported_actions(tmp_path: Path) -> None:
+    """All consolidated GitHub tools return explicit JSON errors for unknown actions."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+
+    assert json.loads(tool.github_read_repo(action="bogus")) == {
+        "error": "Unsupported GitHub repo read action: bogus",
+    }
+    assert json.loads(tool.github_read_issues_prs(action="bogus")) == {
+        "error": "Unsupported GitHub issue/PR read action: bogus",
+    }
+    assert json.loads(tool.github_write_issues(action="bogus", repo_name="example/project")) == {
+        "error": "Unsupported GitHub issue write action: bogus",
+    }
+    assert json.loads(tool.github_write_pr(action="bogus", repo_name="example/project")) == {
+        "error": "Unsupported GitHub PR write action: bogus",
+    }
+    assert json.loads(tool.github_write_repo(action="bogus")) == {
+        "error": "Unsupported GitHub repo write action: bogus",
+    }
