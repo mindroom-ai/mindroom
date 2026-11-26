@@ -619,14 +619,14 @@ async def post_external_event_source(
         body=body,
         runtime_paths=runtime_paths,
     )
-    matched_rules = await _fan_out_event_source_firings(
+    matched_rules, pr_nudged = await _fan_out_event_source_firings(
         source_id=source_id,
         source=source,
         event=event,
         config=config,
         runtime_paths=runtime_paths,
     )
-    if matched_rules > 0:
+    if matched_rules > 0 or pr_nudged:
         notify_reactive_event_loop(request.app, source_id=source_id, event_id=event.event_id)
     return ExternalEventSourceAcceptedResponse(
         accepted=True,
@@ -711,7 +711,13 @@ async def _fan_out_event_source_firings(
     event: TriggerEvent,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> int:
+) -> tuple[int, bool]:
+    pr_nudged = False
+
+    def _mark_pr_nudged() -> None:
+        nonlocal pr_nudged
+        pr_nudged = True
+
     def _enqueue() -> int:
         store = ReactiveTriggerStore(runtime_paths)
         return fan_out_external_event(
@@ -721,9 +727,10 @@ async def _fan_out_event_source_firings(
             store=store,
             config=config,
             runtime_paths=runtime_paths,
+            on_github_pr_nudged=_mark_pr_nudged,
         )
 
     try:
-        return await asyncio.to_thread(_enqueue)
+        return await asyncio.to_thread(_enqueue), pr_nudged
     except (ReactiveTriggerStoreError, sqlite3.Error) as exc:
         raise HTTPException(status_code=503, detail="Reactive trigger store is not available") from exc

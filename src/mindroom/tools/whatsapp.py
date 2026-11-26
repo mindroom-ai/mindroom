@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 
@@ -261,20 +260,18 @@ class _WhatsAppTools(Toolkit):
         all: bool = False,  # noqa: A002
         timeout: int = 30,
     ) -> None:
-        resolved_token = access_token or os.getenv("WHATSAPP_ACCESS_TOKEN")
-        if not resolved_token:
+        if not access_token:
             msg = "WHATSAPP_ACCESS_TOKEN is not set. Set the environment variable or pass access_token."
             raise ValueError(msg)
 
-        resolved_phone_id = phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-        if not resolved_phone_id:
+        if not phone_number_id:
             msg = "WHATSAPP_PHONE_NUMBER_ID is not set. Set the environment variable or pass phone_number_id."
             raise ValueError(msg)
 
-        self.access_token = resolved_token
-        self.phone_number_id = resolved_phone_id
-        self.default_recipient = recipient_waid or os.getenv("WHATSAPP_RECIPIENT_WAID")
-        self.version = version or os.getenv("WHATSAPP_VERSION") or "v22.0"
+        self.access_token = access_token
+        self.phone_number_id = phone_number_id
+        self.default_recipient = recipient_waid or None
+        self.version = version or "v22.0"
         self.base_url = _WHATSAPP_API_BASE
         self.timeout = timeout
 

@@ -29,7 +29,7 @@ Use [Web Search](https://docs.mindroom.chat/tools/web-search/) for broader web d
 | `enable_search_arxiv` | `boolean` | `true` | Enable `search_arxiv_and_return_articles(query, num_articles=10)`. |
 | `enable_read_arxiv_papers` | `boolean` | `true` | Enable `read_arxiv_papers(id_list, pages_to_read=None)`. |
 | `all` | `boolean` | `false` | Enable both functions. |
-| `download_dir` | `text` | unset | Directory where downloaded PDFs are stored; when unset, PDFs go to an `arxiv_pdfs` directory inside the installed Agno package. |
+| `download_dir` | `text` | unset | Directory that retains downloaded PDFs when set; when unset, PDFs use a writable temporary directory that is cleaned up after extraction. |
 
 Search returns JSON with each paper's title, ID, authors, categories, publish date, PDF URL, summary, and comment.
 `read_arxiv_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.

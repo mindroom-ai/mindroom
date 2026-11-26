@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from os import getenv
-
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -21,7 +19,7 @@ class _ResendTools(Toolkit):
         enable_send_email: bool = True,
         all: bool = False,  # noqa: A002 - public config field
     ) -> None:
-        self._api_key = api_key or getenv("RESEND_API_KEY")
+        self._api_key = api_key or None
         self._from_email = from_email
         super().__init__()
         if not (all or enable_send_email):

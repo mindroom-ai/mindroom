@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 
@@ -57,12 +56,11 @@ class _DiscordTools(Toolkit):
         all: bool = False,  # noqa: A002
         timeout: int = 30,
     ) -> None:
-        resolved_token = bot_token or os.getenv("DISCORD_BOT_TOKEN")
-        if not resolved_token:
+        if not bot_token:
             msg = "Discord bot token is required"
             raise ValueError(msg)
 
-        self.bot_token = resolved_token
+        self.bot_token = bot_token
         self.base_url = _DISCORD_API_BASE
         self.timeout = timeout
         self._allow_send = bool(all or enable_send_message)

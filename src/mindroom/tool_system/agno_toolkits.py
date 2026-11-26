@@ -139,13 +139,13 @@ def _aliased(functions: Mapping[str, Function], aliases: Mapping[str, str]) -> d
     return aliased
 
 
-def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit]:
-    """Whether ``toolkit`` holds a connection this process opens and closes around its calls, as Agno's Postgres does.
+def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit | authoring.Toolkit]:
+    """Whether ``toolkit`` holds a connection this process opens and closes around its calls, as Postgres and Redshift do.
 
     A toolkit whose calls go to a worker connects there instead, unless it keeps some of its calls here
     (``SupportsPrimaryCallPlacement``).
     """
-    if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
+    if not isinstance(toolkit, (Toolkit, authoring.Toolkit)) or not toolkit.requires_connect:
         return False
     return toolkit_worker_stand_ins(toolkit) is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
 
@@ -219,41 +219,16 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 
 
 # AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
-# Reason: Agno 3.2.1's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
+# Reason: Agno 3.2.1's ZepTools builds default
 # instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
 # construction can remove any named function, so the prompt would tell the model to call a function it does not have.
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
 # Upstream PR: No matching fix has been verified.
 # Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
 # the check in with_offered_instructions with the last row; instructions set in a tool's settings must still show.
-# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered,
-#   tests/agent_loop/test_agent_build.py::test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered.
+# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered.
 # Each toolkit class, by import path and including subclasses, maps to the functions its default instructions can name.
 _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
-    "agno.tools.daytona.DaytonaTools": frozenset(
-        {
-            "change_directory",
-            "create_file",
-            "delete_file",
-            "list_files",
-            "read_file",
-            "run_code",
-            "run_shell_command",
-        },
-    ),
-    "agno.tools.google.calendar.GoogleCalendarTools": frozenset(
-        {
-            "check_availability",
-            "delete_event",
-            "get_event",
-            "list_events",
-            "quick_add_event",
-            "search_events",
-            "update_event",
-        },
-    ),
-    "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
-    "agno.tools.reasoning.ReasoningTools": frozenset({"analyze", "think"}),
     "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
 }
 
@@ -546,9 +521,10 @@ def _bound_by_annotation(hint: object) -> InjectedValue:
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
-# with those types, and the agent loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
-# DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
-# SuperserveTools also do. That attribute is the Agno agent's own state, not the run's stored session state, and
+# with those types, and the agent loop has no Agno agent to inject. Remaining Agno toolkits registered by MindRoom
+# (such as media and browser toolkits) still accept ``agent`` / ``team`` parameters, and Agno toolkits that read the
+# parameter read and write ``agent.session_state`` (as Agno's AntigravityTools and SuperserveTools do). That attribute
+# is the Agno agent's own state, not the run's stored session state, and
 # MindRoom built one agent per reply, so the stand-in carries the adapted toolkit's ``actor_state``, which is never
 # stored. MindRoom's own tools read their caller from the tool runtime context.
 # Upstream issue: Tracking gap; Agno defines no contract for what a toolkit may read from the injected agent, so a

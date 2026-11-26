@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.pubmed import PubmedTools
+    from mindroom.custom_tools.pubmed import PubmedTools
 
 
 @register_tool_with_metadata(
@@ -71,15 +71,6 @@ if TYPE_CHECKING:
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""
-    from agno.tools.pubmed import PubmedTools
+    from mindroom.custom_tools.pubmed import PubmedTools
 
-    class MindRoomPubmedTools(PubmedTools):
-        """PubMed toolkit whose configured result limit is the call default."""
-
-        def search_pubmed(self, query: str, max_results: int | None = None) -> str:
-            """Search PubMed, using the configured max_results when the call omits it."""
-            if (self.max_results if max_results is None else max_results) == 0:
-                return "[]"
-            return super().search_pubmed(query, max_results=max_results)
-
-    return MindRoomPubmedTools
+    return PubmedTools

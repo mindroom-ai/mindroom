@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit, tool
@@ -33,11 +32,11 @@ class _XTools(Toolkit):
             msg = "`tweepy` not installed. Install with `pip install tweepy`."
             raise ImportError(msg) from exc
 
-        self.bearer_token = bearer_token or os.getenv("X_BEARER_TOKEN")
-        self.consumer_key = consumer_key or os.getenv("X_CONSUMER_KEY")
-        self.consumer_secret = consumer_secret or os.getenv("X_CONSUMER_SECRET")
-        self.access_token = access_token or os.getenv("X_ACCESS_TOKEN")
-        self.access_token_secret = access_token_secret or os.getenv("X_ACCESS_TOKEN_SECRET")
+        self.bearer_token = bearer_token or None
+        self.consumer_key = consumer_key or None
+        self.consumer_secret = consumer_secret or None
+        self.access_token = access_token or None
+        self.access_token_secret = access_token_secret or None
         self.include_post_metrics = include_post_metrics
         self.wait_on_rate_limit = wait_on_rate_limit
         self._http_error = tweepy.HTTPException

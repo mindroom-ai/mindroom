@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import quote
@@ -31,9 +30,9 @@ class _ZoomTools(Toolkit):
         client_secret: str | None = None,
         timeout: int = 30,
     ) -> None:
-        self.account_id = account_id or os.getenv("ZOOM_ACCOUNT_ID")
-        self.client_id = client_id or os.getenv("ZOOM_CLIENT_ID")
-        self.__client_secret = client_secret or os.getenv("ZOOM_CLIENT_SECRET")
+        self.account_id = account_id or None
+        self.client_id = client_id or None
+        self.__client_secret = client_secret or None
         self.timeout = timeout
         self.__access_token: str | None = None
         self.__token_expiry: datetime | None = None

@@ -498,7 +498,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to scrape"
+              "description": "URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -523,13 +523,13 @@
       },
       {
         "name": "get_screenshot",
-        "description": "Capture a screenshot of a webpage",
+        "description": "Capture a screenshot of a webpage.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to screenshot"
+              "description": "URL to screenshot."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -560,23 +560,37 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Search query"
+              "description": "Search query."
             },
             "engine": {
               "type": "string",
-              "description": "(str) Search engine - 'google', 'bing', or 'yandex'"
+              "description": "Search engine - 'google', 'bing', or 'yandex'."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return"
+              "description": "Number of results to return."
             },
             "language": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter language code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter language code."
             },
             "country_code": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter country code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter country code."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -607,15 +621,22 @@
           "properties": {
             "source_type": {
               "type": "string",
-              "description": "(str) Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')"
+              "description": "Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')."
             },
             "url": {
               "type": "string",
-              "description": "(str) URL of the web resource to retrieve data from"
+              "description": "URL of the web resource to retrieve data from."
             },
             "num_of_reviews": {
-              "type": "integer",
-              "description": "(Optional[int]) Number of reviews to retrieve"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Number of reviews to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -660,11 +681,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to navigate to"
+              "description": "The URL to navigate to."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -695,15 +723,22 @@
           "properties": {
             "path": {
               "type": "string",
-              "description": "(str) Where to save the screenshot"
+              "description": "Where to save the screenshot."
             },
             "full_page": {
               "type": "boolean",
-              "description": "(bool) Whether to capture the full page"
+              "description": "Whether to capture the full page."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -733,8 +768,15 @@
           "type": "object",
           "properties": {
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -991,29 +1033,44 @@
     "functions": [
       {
         "name": "localize_voice",
-        "description": "Create a new voice localized to a different language.",
+        "description": "Create a localized Cartesia voice in another language.",
         "parameters": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "(str) The desired name for the new localized voice."
+              "description": "Name for the new localized voice."
             },
             "description": {
               "type": "string",
-              "description": "(str) The description for the new localized voice."
+              "description": "Voice description."
             },
             "language": {
               "type": "string",
-              "description": "(str) The target language code (e.g., 'fr', 'es')."
+              "description": "Target language code (e.g. `fr`, `es`)."
             },
             "original_speaker_gender": {
               "type": "string",
-              "description": "(str) The gender of the original speaker (\"male\" or \"female\")."
+              "enum": [
+                "male",
+                "female"
+              ],
+              "description": "Gender of the base voice speaker."
+            },
+            "accent": {
+              "type": "string",
+              "description": "Cartesia catalog accent ID (e.g. `parisian`, `southern-us`, `general-american`)."
             },
             "voice_id": {
-              "type": "string",
-              "description": "(optional) The ID of an existing voice to use as the base. If None, uses the default voice ID configured in the tool. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Base voice ID; defaults to the configured `default_voice_id`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1032,7 +1089,8 @@
             "name",
             "description",
             "language",
-            "original_speaker_gender"
+            "original_speaker_gender",
+            "accent"
           ]
         },
         "strict": false,
@@ -1041,17 +1099,24 @@
       },
       {
         "name": "text_to_speech",
-        "description": "Convert text to speech.",
+        "description": "Synthesize MP3 speech audio from text using Cartesia.",
         "parameters": {
           "type": "object",
           "properties": {
             "transcript": {
               "type": "string",
-              "description": "The text to convert to speech"
+              "description": "Text to synthesize into speech."
             },
             "voice_id": {
-              "type": "string",
-              "description": "(optional) The ID of the voice to use for the text-to-speech. If None, uses the default voice ID configured in the tool. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional voice ID; defaults to the configured `default_voice_id`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1076,7 +1141,7 @@
       },
       {
         "name": "list_voices",
-        "description": "List available voices from Cartesia (first page).",
+        "description": "List available Cartesia voices (first page) as JSON.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1397,18 +1462,38 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_csv_file",
-        "description": "Use this function to read the contents of a csv file `name` without the extension.",
+        "name": "csv_inspect",
+        "description": "Inspect configured CSV files by filename stem.\nActions:\n- `list`: list available CSV names (stems).\n- `columns`: return column names for `csv_name`.\n- `read`: return rows of `csv_name` as JSON, capped by `row_limit` or configured default.",
         "parameters": {
           "type": "object",
           "properties": {
-            "csv_name": {
+            "action": {
               "type": "string",
-              "description": "(str) The name of the csv file to read without the extension."
+              "enum": [
+                "list",
+                "columns",
+                "read"
+              ]
+            },
+            "csv_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "row_limit": {
-              "type": "integer",
-              "description": "(Optional[int]) The number of rows to return. None returns all rows. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1424,63 +1509,7 @@
             }
           },
           "required": [
-            "csv_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_csv_files",
-        "description": "Returns a list of available csv files",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_columns",
-        "description": "Use this function to get the columns of the csv file `csv_name` without the extension.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "csv_name": {
-              "type": "string",
-              "description": "(str) The name of the csv file to get the columns from without the extension."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "csv_name"
+            "action"
           ]
         },
         "strict": false,
@@ -1489,17 +1518,15 @@
       },
       {
         "name": "query_csv_file",
-        "description": "Use this function to run a SQL query on csv file `csv_name` without the extension.\nThe Table name is the name of the csv file without the extension.\nThe SQL Query should be a valid DuckDB SQL query.\nAlways wrap column names with double quotes if they contain spaces or special characters\nRemember to escape the quotes in th e JSON string (use \")\nUse single quotes for string values",
+        "description": "Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`).",
         "parameters": {
           "type": "object",
           "properties": {
             "csv_name": {
-              "type": "string",
-              "description": "(str) The name of the csv file to query"
+              "type": "string"
             },
             "sql_query": {
-              "type": "string",
-              "description": "(str) The SQL Query to run on the csv file."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1871,7 +1898,7 @@
     "functions": [
       {
         "name": "get_voices",
-        "description": "Get all the voices available.",
+        "description": "List available ElevenLabs voices with ID, name, and description.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1896,17 +1923,24 @@
       },
       {
         "name": "generate_sound_effect",
-        "description": "Generate a sound effect from a text description.",
+        "description": "Generate a sound effect from a text prompt.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) Description of the sound effect"
+              "description": "Sound effect description."
             },
             "duration_seconds": {
-              "type": "number",
-              "description": "(Optional[float]) Duration in seconds to generate audio from. Has to be between 0.5 and 22."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional duration in seconds (0.5-22)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1931,13 +1965,13 @@
       },
       {
         "name": "text_to_speech",
-        "description": "Convert text to speech.",
+        "description": "Convert text to speech audio using ElevenLabs.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) Text to generate audio from."
+              "description": "Text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2026,15 +2060,22 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "description": "The query to search for."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return. Defaults to 5."
+              "description": "Number of results to return. Defaults to 5."
             },
             "category": {
-              "type": "string",
-              "description": "(Optional[str]) The category to filter search results.\nOptions are \"company\", \"research paper\", \"news\", \"pdf\", \"github\",\n\"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2068,7 +2109,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(list(str)) A list of URLs from which to fetch content."
+              "description": "A list of URLs from which to fetch content."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2099,11 +2140,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL for which to find similar links."
+              "description": "The URL for which to find similar links."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) The number of similar links to return. Defaults to 5."
+              "description": "The number of similar links to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2134,11 +2175,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The question or query to answer."
+              "description": "The question or query to answer."
             },
             "text": {
               "type": "boolean",
-              "description": "(bool) Include full text from citation. Default is False."
+              "description": "Include full text from citation. Default is False."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2169,15 +2210,22 @@
           "properties": {
             "instructions": {
               "type": "string",
-              "description": "(str) Research instructions."
+              "description": "Research instructions."
             },
             "output_schema": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "(Optional[Dict[str, Any]]) JSON schema for structured output. If not provided, the API will auto-infer an appropriate schema."
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "JSON schema for structured output. If not provided, the API will auto-infer a schema."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2213,13 +2261,13 @@
     "functions": [
       {
         "name": "generate_media",
-        "description": "Generate media with the configured Fal model.",
+        "description": "Generate an image or video with the configured Fal model.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text describing the media to generate."
+              "description": "Text description of the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2244,13 +2292,13 @@
       },
       {
         "name": "image_to_image",
-        "description": "Transform an input image according to a text prompt.",
+        "description": "Edit an input image according to a text prompt using Fal Flux 2.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text describing the desired changes."
+              "description": "Text describing the desired edits."
             },
             "image_url": {
               "anyOf": [
@@ -2261,7 +2309,7 @@
                   "type": "null"
                 }
               ],
-              "description": "URL of the image to edit."
+              "description": "URL of the source image to edit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2301,39 +2349,44 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_json_file",
-        "description": "Generate a JSON file from the provided data.",
+        "name": "generate_file",
+        "description": "Generate a file artifact in the requested format (and save it inside the workspace when configured).\n- `json`: `content` is a dict, list, or JSON string.\n- `csv`: `content` is a list of dicts, list of rows (optional `headers`), or CSV string.\n- `pdf` / `docx`: `content` is text split into paragraphs by blank lines; optional `title`.\n- `html` / `txt`: `content` is raw HTML5 or plain text.\n- `code`: `content` is source code; optional `language` (e.g. `python`, `typescript`, `go`) sets the extension.",
         "parameters": {
           "type": "object",
           "properties": {
-            "data": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv",
+                "pdf",
+                "docx",
+                "html",
+                "txt",
+                "code"
+              ],
+              "description": "Output file format."
+            },
+            "content": {
               "anyOf": [
+                {
+                  "type": "string"
+                },
                 {
                   "type": "object",
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "string"
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "string"
+                  "items": {}
                 }
               ],
-              "description": "The data to write to the JSON file. Can be a dictionary, list, or JSON string."
+              "description": "File payload matching `format`."
             },
             "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -2342,250 +2395,43 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_csv_file",
-        "description": "Generate a CSV file from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
+              "description": "Optional base filename; extension is appended when missing."
+            },
+            "title": {
               "anyOf": [
                 {
-                  "type": "array",
-                  "items": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
                   "type": "string"
+                },
+                {
+                  "type": "null"
                 }
               ],
-              "description": "The data to write to the CSV file. Can be a list of lists, list of dictionaries, or CSV string."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
+              "description": "Optional document title (`pdf`, `docx`)."
             },
             "headers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Optional headers for the CSV. Used when data is a list of lists."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_pdf_file",
-        "description": "Generate a PDF file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the PDF file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "title": {
-              "type": "string",
-              "description": "Optional title for the PDF document."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_docx_file",
-        "description": "Generate a DOCX file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the DOCX file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "title": {
-              "type": "string",
-              "description": "Optional title for the DOCX document."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_text_file",
-        "description": "Generate a text file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_html_file",
-        "description": "Generate an HTML file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "A complete, valid HTML5 document (including doctype, html, head, and body tags)."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_code_file",
-        "description": "Generate a source code file for any programming language.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "code": {
-              "type": "string",
-              "description": "The source code to write to the file."
+              "description": "Optional column headers (`csv` list-of-rows input)."
             },
             "language": {
-              "type": "string",
-              "description": "Programming language (e.g. \"python\", \"typescript\", \"go\"). Determines the\nfile extension. If not provided, the extension is taken from `filename` when\npresent; otherwise the file is written as plain text."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If it has no extension, the\nlanguage's extension is appended. If not provided, a UUID-based name is used."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional programming language (`code`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2601,7 +2447,8 @@
             }
           },
           "required": [
-            "code"
+            "format",
+            "content"
           ]
         },
         "strict": false,
@@ -2971,7 +2818,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2996,17 +2843,24 @@
       },
       {
         "name": "crawl_website",
-        "description": "Use this function to Crawls a website using Firecrawl.",
+        "description": "Use this function to crawl a website using Firecrawl.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to crawl."
+              "description": "The URL to crawl."
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The maximum number of pages to crawl. Defaults to the limit set on the toolkit."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of pages to crawl. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3031,13 +2885,13 @@
       },
       {
         "name": "map_website",
-        "description": "Use this function to Map a website using Firecrawl.",
+        "description": "Use this function to map a website using Firecrawl.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to map."
+              "description": "The URL to map."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3062,17 +2916,24 @@
       },
       {
         "name": "search_web",
-        "description": "Use this function to search for the web using Firecrawl.",
+        "description": "Use this function to search the web using Firecrawl.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "description": "The query to search for."
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to the limit set on the toolkit."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of results to return. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3113,7 +2974,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the image to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3138,13 +3000,13 @@
       },
       {
         "name": "generate_video",
-        "description": "Generate a video based on a text prompt.",
+        "description": "Generate a video from a text prompt using Vertex AI Veo.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) The text prompt to generate the video from."
+              "description": "Text description of the video to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3179,13 +3041,13 @@
     "functions": [
       {
         "name": "search_gifs",
-        "description": "Find a GIPHY gif",
+        "description": "Search Giphy for GIFs matching a query.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) A text description of the required gif."
+              "description": "Search text describing the GIF."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3398,13 +3260,13 @@
     "functions": [
       {
         "name": "transcribe_audio",
-        "description": "Transcribe audio file or URL using Groq's Whisper API.",
+        "description": "Transcribe audio from an http(s) URL or local file using Groq Whisper.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_source": {
               "type": "string",
-              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
+              "description": "http(s) URL or local audio path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3429,13 +3291,13 @@
       },
       {
         "name": "translate_audio",
-        "description": "Translate audio file or URL to English using Groq's Whisper API.",
+        "description": "Translate audio from an http(s) URL or local file into English using Groq Whisper.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_source": {
               "type": "string",
-              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
+              "description": "http(s) URL or local audio path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3460,13 +3322,13 @@
       },
       {
         "name": "generate_speech",
-        "description": "Generate speech from text using Groq's Text-to-Speech API.",
+        "description": "Synthesize speech audio from text using Groq TTS.",
         "parameters": {
           "type": "object",
           "properties": {
             "text_input": {
               "type": "string",
-              "description": "The text to synthesize into speech."
+              "description": "Text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3633,207 +3495,6 @@
       }
     ]
   },
-  "jira": {
-    "overrides": {
-      "all": true,
-      "enable_add_comment": true,
-      "enable_add_worklog": true,
-      "enable_create_issue": true,
-      "enable_get_issue": true,
-      "enable_search_issues": true
-    },
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "get_issue",
-        "description": "Retrieves issue details from Jira.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_issue",
-        "description": "Creates a new issue in Jira.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "project_key": {
-              "type": "string",
-              "description": "The key of the project in which to create the issue."
-            },
-            "summary": {
-              "type": "string",
-              "description": "The summary of the issue."
-            },
-            "description": {
-              "type": "string",
-              "description": "The description of the issue."
-            },
-            "issuetype": {
-              "type": "string",
-              "description": "The type of issue to create."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "project_key",
-            "summary",
-            "description"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_issues",
-        "description": "Searches for issues using a JQL query.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "jql_str": {
-              "type": "string",
-              "description": "The JQL query string."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "jql_str"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_comment",
-        "description": "Adds a comment to an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue."
-            },
-            "comment": {
-              "type": "string",
-              "description": "The comment text."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key",
-            "comment"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_worklog",
-        "description": "Adds a worklog entry to log time spent on a specific Jira issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue to log work against (e.g., 'PROJ-123')."
-            },
-            "time_spent": {
-              "type": "string",
-              "description": "The amount of time spent. Use Jira's format, e.g., '2h', '30m', '1d 4h'."
-            },
-            "comment": {
-              "type": "string",
-              "description": "An optional comment describing the work done."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key",
-            "time_spent"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
   "linkup": {
     "overrides": {
       "all": true,
@@ -3850,15 +3511,29 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "depth": {
-              "type": "string",
-              "description": "(str) (deep|standard) Depth of the search. Defaults to 'standard'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(deep|standard) Depth of the search. Defaults to 'standard'."
             },
             "output_type": {
-              "type": "string",
-              "description": "(str) (sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3894,15 +3569,17 @@
     "functions": [
       {
         "name": "generate_video",
-        "description": "Use this function to generate a video given a prompt.",
+        "description": "Generate a video from a text prompt and optional keyframes.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the desired video."
             },
             "loop": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Whether the video should loop seamlessly."
             },
             "aspect_ratio": {
               "type": "string",
@@ -3914,22 +3591,31 @@
                 "3:4",
                 "21:9",
                 "9:21"
-              ]
+              ],
+              "description": "Output aspect ratio."
             },
             "keyframes": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
                 },
-                "additionalProperties": {
-                  "type": "string"
+                {
+                  "type": "null"
                 }
-              }
+              ],
+              "description": "Optional raw keyframe mapping (e.g. `{\"frame0\": {\"type\": \"image\", \"url\": \"...\"}}`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3960,19 +3646,26 @@
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text description of the desired video"
+              "description": "Text description of the desired video."
             },
             "start_image_url": {
               "type": "string",
-              "description": "URL of the starting image"
+              "description": "URL of the starting image."
             },
             "end_image_url": {
-              "type": "string",
-              "description": "Optional URL of the ending image"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional URL of the ending image."
             },
             "loop": {
               "type": "boolean",
-              "description": "Whether the video should loop"
+              "description": "Whether the video should loop seamlessly."
             },
             "aspect_ratio": {
               "type": "string",
@@ -3985,7 +3678,7 @@
                 "21:9",
                 "9:21"
               ],
-              "description": "Aspect ratio of the output video"
+              "description": "Output aspect ratio."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4160,17 +3853,17 @@
     "functions": [
       {
         "name": "extract_audio",
-        "description": "Converts video to audio using MoviePy.",
+        "description": "Extract the audio track from a video file.",
         "parameters": {
           "type": "object",
           "properties": {
             "video_path": {
               "type": "string",
-              "description": "Path to the video file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input video path (confined to workspace unless `file_access: unrestricted`)."
             },
             "output_path": {
               "type": "string",
-              "description": "Path where the audio will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Destination audio path (e.g. `.wav` or `.mp3`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4196,17 +3889,17 @@
       },
       {
         "name": "create_srt",
-        "description": "Save transcription text to SRT formatted file.",
+        "description": "Write SRT-formatted subtitle text to a file.",
         "parameters": {
           "type": "object",
           "properties": {
             "transcription": {
               "type": "string",
-              "description": "Text transcription in SRT format"
+              "description": "SRT subtitle text."
             },
             "output_path": {
               "type": "string",
-              "description": "Path where the SRT file will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Destination `.srt` path."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4232,17 +3925,17 @@
       },
       {
         "name": "embed_captions",
-        "description": "Create a new video with embedded captions and word-level highlighting.",
+        "description": "Burn word-highlighted SRT captions onto a video.",
         "parameters": {
           "type": "object",
           "properties": {
             "video_path": {
               "type": "string",
-              "description": "Path to the input video file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input video path."
             },
             "srt_path": {
               "type": "string",
-              "description": "Path to the SRT caption file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input `.srt` subtitle path."
             },
             "output_path": {
               "anyOf": [
@@ -4253,23 +3946,23 @@
                   "type": "null"
                 }
               ],
-              "description": "Path for the output video (optional); with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Optional output video path (defaults to `<video_stem>_captioned.mp4` beside input)."
             },
             "font_size": {
               "type": "integer",
-              "description": "Size of caption text"
+              "description": "Caption font size in pixels."
             },
             "font_color": {
               "type": "string",
-              "description": "Color of caption text"
+              "description": "Base text color."
             },
             "stroke_color": {
               "type": "string",
-              "description": "Color of text outline"
+              "description": "Outline color."
             },
             "stroke_width": {
               "type": "integer",
-              "description": "Width of text outline"
+              "description": "Outline width in pixels."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4307,11 +4000,19 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_labels",
-        "description": "Retrieve all node labels present in the connected Neo4j database.",
+        "name": "neo4j_inspect",
+        "description": "Inspect Neo4j graph metadata and schema.\nActions:\n- `list_labels`: return all node labels.\n- `list_relationship_types`: return all relationship types.\n- `get_schema`: return graph schema visualization data.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_labels",
+                "list_relationship_types",
+                "get_schema"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -4325,57 +4026,9 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_relationship_types",
-        "description": "Retrieve all relationship types present in the connected Neo4j database.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_schema",
-        "description": "Retrieve a visualization of the database schema, including nodes and relationships.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -4383,13 +4036,12 @@
       },
       {
         "name": "run_cypher_query",
-        "description": "Execute an arbitrary Cypher query against the connected Neo4j database.",
+        "description": "Execute a Cypher query against the Neo4j database and return JSON records.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) The Cypher query string to execute."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4430,7 +4082,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the article."
+              "description": "The URL of the article."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4587,13 +4239,13 @@
     "functions": [
       {
         "name": "transcribe_audio",
-        "description": "Transcribe audio file using OpenAI's Whisper API.",
+        "description": "Transcribe an audio file using OpenAI speech-to-text.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_path": {
               "type": "string",
-              "description": "Path to the audio file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Local audio file path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4618,13 +4270,13 @@
       },
       {
         "name": "generate_image",
-        "description": "Generate images based on a text prompt.",
+        "description": "Generate an image from a text prompt using OpenAI.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) The text prompt to generate the image from."
+              "description": "Text description of the image to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4649,13 +4301,13 @@
       },
       {
         "name": "generate_speech",
-        "description": "Generate speech from text using OpenAI's Text-to-Speech API.",
+        "description": "Synthesize speech audio from text using OpenAI.",
         "parameters": {
           "type": "object",
           "properties": {
             "text_input": {
               "type": "string",
-              "description": "(str) The text to synthesize into speech."
+              "description": "Text to read aloud verbatim."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4693,16 +4345,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_stock_price",
-        "description": "Use this function to get the current stock price for a stock symbol or list of symbols.",
+        "name": "openbb_get",
+        "description": "Fetch equity data from the configured OpenBB provider.\n\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).\n- `search_symbol`: search ticker symbols matching `company_name`.\n- `company_news`: recent news for `symbol` (up to `num_stories`).\n- `company_profile`: company overview for `symbol`.\n- `price_targets`: consensus price targets and recommendations for `symbol`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "symbol": {
+            "action": {
               "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
+              "enum": [
+                "stock_price",
+                "search_symbol",
+                "company_news",
+                "company_profile",
+                "price_targets"
+              ]
             },
-            "mindroom_output_path": {
+            "symbol": {
               "anyOf": [
                 {
                   "type": "string"
@@ -4710,30 +4368,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_company_symbol",
-        "description": "Use this function to get a list of ticker symbols for a company.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
             "company_name": {
-              "type": "string",
-              "description": "(str) The name of the company."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -4741,32 +4378,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "company_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_news",
-        "description": "Use this function to get company news for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
+              ]
             },
             "num_stories": {
-              "type": "integer",
-              "description": "(int) The number of news stories to return. Defaults to 10."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4782,69 +4397,7 @@
             }
           },
           "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_profile",
-        "description": "Use this function to get company profile and overview for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_price_targets",
-        "description": "Use this function to get consensus price target and recommendations for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
+            "action"
           ]
         },
         "strict": false,
@@ -4865,115 +4418,28 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_current_weather",
-        "description": "Get current weather data for a location.",
+        "name": "openweather_get",
+        "description": "Query OpenWeatherMap for `location` (city, optionally with state/country).\nActions:\n- `current_weather`: current weather conditions.\n- `forecast`: 3-hour forecast entries for `days` (1-5).\n- `air_pollution`: current air pollution and AQI metrics.\n- `geocode`: resolve `location` to up to `limit` coordinate matches.",
         "parameters": {
           "type": "object",
           "properties": {
-            "location": {
+            "action": {
               "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "enum": [
+                "current_weather",
+                "forecast",
+                "air_pollution",
+                "geocode"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_forecast",
-        "description": "Get weather forecast for a location.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "type": "string"
             },
             "days": {
-              "type": "integer",
-              "description": "(int) Number of days for forecast (max 5). Default is 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_air_pollution",
-        "description": "Get current air pollution data for a location.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "geocode_location",
-        "description": "Convert a location name to geographic coordinates.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "type": "integer"
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) Maximum number of location results. Default is 1."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4989,6 +4455,7 @@
             }
           },
           "required": [
+            "action",
             "location"
           ]
         },
@@ -5009,25 +4476,29 @@
     "functions": [
       {
         "name": "create_pandas_dataframe",
-        "description": "Creates a pandas dataframe named `dataframe_name` by running a function `create_using_function` with the parameters `function_parameters`.\nReturns the created dataframe name as a string if successful, otherwise returns an error message.\n\nFor Example:\n- To create a dataframe `csv_data` by reading a CSV file, use: {\"dataframe_name\": \"csv_data\", \"create_using_function\": \"read_csv\", \"function_parameters\": {\"filepath_or_buffer\": \"data.csv\"}}\n- To create a dataframe `csv_data` by reading a JSON file, use: {\"dataframe_name\": \"json_data\", \"create_using_function\": \"read_json\", \"function_parameters\": {\"path_or_buf\": \"data.json\"}}",
+        "description": "Create and store a DataFrame under `dataframe_name` via `pandas.<create_using_function>(**function_parameters)`.",
         "parameters": {
           "type": "object",
           "properties": {
             "dataframe_name": {
-              "type": "string",
-              "description": "The name of the dataframe to create."
+              "type": "string"
             },
             "create_using_function": {
-              "type": "string",
-              "description": "The function to use to create the dataframe."
+              "type": "string"
             },
             "function_parameters": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "The parameters to pass to the function."
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5044,8 +4515,7 @@
           },
           "required": [
             "dataframe_name",
-            "create_using_function",
-            "function_parameters"
+            "create_using_function"
           ]
         },
         "strict": false,
@@ -5054,25 +4524,29 @@
       },
       {
         "name": "run_dataframe_operation",
-        "description": "Runs an operation `operation` on a dataframe `dataframe_name` with the parameters `operation_parameters`.\nReturns the result of the operation as a string if successful, otherwise returns an error message.\n\nFor Example:\n- To get the first 5 rows of a dataframe `csv_data`, use: {\"dataframe_name\": \"csv_data\", \"operation\": \"head\", \"operation_parameters\": {\"n\": 5}}\n- To get the last 5 rows of a dataframe `csv_data`, use: {\"dataframe_name\": \"csv_data\", \"operation\": \"tail\", \"operation_parameters\": {\"n\": 5}}",
+        "description": "Run `operation` on stored DataFrame `dataframe_name` with optional `operation_parameters`.",
         "parameters": {
           "type": "object",
           "properties": {
             "dataframe_name": {
-              "type": "string",
-              "description": "The name of the dataframe to run the operation on."
+              "type": "string"
             },
             "operation": {
-              "type": "string",
-              "description": "The operation to run on the dataframe."
+              "type": "string"
             },
             "operation_parameters": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "The parameters to pass to the operation."
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5089,8 +4563,7 @@
           },
           "required": [
             "dataframe_name",
-            "operation",
-            "operation_parameters"
+            "operation"
           ]
         },
         "strict": false,
@@ -5269,7 +4742,7 @@
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text describing the media to generate."
+              "description": "Text description of the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5365,11 +4838,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "prompt": {
               "type": "string",
-              "description": "(str) Natural language prompt describing what to extract."
+              "description": "Natural language prompt describing what to extract."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5401,7 +4874,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to convert."
+              "description": "The URL to convert."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5432,7 +4905,7 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query."
+              "description": "The search query."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5457,17 +4930,17 @@
       },
       {
         "name": "crawl",
-        "description": "Crawl a website and extract structured data across multiple pages.\nStarts a crawl job upstream and polls until it completes or `crawl_max_wait` elapses.",
+        "description": "Crawl a website and extract structured data across multiple pages.\nStarts a crawl job upstream and polls until it completes or ``crawl_max_wait`` elapses.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to crawl."
+              "description": "The URL to crawl."
             },
             "prompt": {
               "type": "string",
-              "description": "(str) Natural language prompt describing what to extract."
+              "description": "Natural language prompt describing what to extract."
             },
             "schema": {
               "type": "object",
@@ -5475,15 +4948,15 @@
                 "type": "string"
               },
               "additionalProperties": {},
-              "description": "(Dict[str, Any]) JSON schema for extraction."
+              "description": "JSON schema for extraction."
             },
             "max_depth": {
               "type": "integer",
-              "description": "(int) Max crawl depth. Defaults to 2."
+              "description": "Max crawl depth. Defaults to 2."
             },
             "max_pages": {
               "type": "integer",
-              "description": "(int) Max number of pages to crawl. Defaults to 2."
+              "description": "Max number of pages to crawl. Defaults to 2."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5516,7 +4989,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5896,11 +5369,18 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search the web with."
+              "description": "The query to search the web with."
             },
             "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5931,7 +5411,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to scrape."
+              "description": "The URL of the webpage to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5962,11 +5442,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to crawl."
+              "description": "The URL of the webpage to crawl."
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The maximum number of pages to crawl. Defaults to 10."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of pages to crawl. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6002,12 +5489,19 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_tables",
-        "description": "Use this function to get a list of table names in the database.",
+        "name": "sql_inspect",
+        "description": "Inspect database tables and schemas via SQLAlchemy.\nActions:\n- `list_tables`: list available table names in the configured schema.\n- `describe_table`: return column names, types, nullability, and defaults for `table_name`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_tables",
+                "describe_table"
+              ]
+            },
+            "table_name": {
               "anyOf": [
                 {
                   "type": "string"
@@ -6015,26 +5509,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "describe_table",
-        "description": "Use this function to describe a table.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "table_name": {
-              "type": "string",
-              "description": "(str) The name of the table to get the schema for."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6050,7 +5525,7 @@
             }
           },
           "required": [
-            "table_name"
+            "action"
           ]
         },
         "strict": false,
@@ -6059,17 +5534,22 @@
       },
       {
         "name": "run_sql_query",
-        "description": "Use this function to run a SQL query and return the result.",
+        "description": "Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty).",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) The query to run."
+              "type": "string"
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6112,7 +5592,7 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6143,7 +5623,7 @@
           "properties": {
             "urls": {
               "type": "string",
-              "description": "(str) Single URL or multiple comma-separated URLs to extract content from.\nExample: \"https://example.com\" or \"https://example.com,https://another.com\""
+              "description": "Single URL or multiple comma-separated URLs to extract content from.\nExample: \"https://example.com\" or \"https://example.com,https://another.com\""
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6419,11 +5899,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract content from."
+              "description": "The URL to extract content from."
             },
             "output_format": {
-              "type": "string",
-              "description": "(Optional[str]) Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6454,11 +5941,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract metadata from."
+              "description": "The URL to extract metadata from."
             },
             "as_json": {
               "type": "boolean",
-              "description": "(bool) Whether to return metadata as JSON string."
+              "description": "Whether to return metadata as JSON string."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6489,11 +5976,11 @@
           "properties": {
             "html_content": {
               "type": "string",
-              "description": "(str) The HTML content to convert."
+              "description": "The HTML content to convert."
             },
             "clean": {
               "type": "boolean",
-              "description": "(bool) Whether to remove potentially undesirable elements."
+              "description": "Whether to remove potentially undesirable elements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6527,7 +6014,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) List of URLs to extract content from."
+              "description": "List of URLs to extract content from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6558,11 +6045,11 @@
           "properties": {
             "homepage_url": {
               "type": "string",
-              "description": "(str) The starting URL (preferably homepage) to crawl from."
+              "description": "The starting URL (preferably homepage) to crawl from."
             },
             "extract_content": {
               "type": "boolean",
-              "description": "(bool) Whether to extract content from discovered URLs."
+              "description": "Whether to extract content from discovered URLs."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6702,30 +6189,83 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_photos",
-        "description": "Search for photos on Unsplash by keyword.",
+        "name": "unsplash",
+        "description": "Search, fetch, pick random photos, or track downloads on Unsplash.\n- `search`: requires `query`; optional `count` (1-30, default 10), `page`, `orientation`, `color`.\n- `get`: requires `photo_id`; returns photo metadata, EXIF, location, views, downloads.\n- `random`: optional `query`, `orientation`, `count` (1-30, default 1).\n- `download`: requires `photo_id`; triggers Unsplash download tracking and returns `download_url`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The search query string (e.g., \"mountain sunset\", \"office workspace\")."
+              "enum": [
+                "search",
+                "get",
+                "random",
+                "download"
+              ],
+              "description": "Operation to run."
             },
-            "per_page": {
-              "type": "integer",
-              "description": "Number of results per page (1-30). Default: 10."
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search keywords (`search` required, `random` optional)."
+            },
+            "photo_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unsplash photo ID (`get`, `download`)."
+            },
+            "count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Result count (`search` per_page default 10, `random` default 1; clamped to 1-30)."
             },
             "page": {
               "type": "integer",
-              "description": "Page number to retrieve. Default: 1."
+              "description": "Result page number (`search`, default 1)."
             },
             "orientation": {
               "type": "string",
-              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
+              "enum": [
+                "landscape",
+                "portrait",
+                "squarish"
+              ],
+              "description": "Optional orientation filter (`search`, `random`)."
             },
             "color": {
               "type": "string",
-              "description": "Filter by color: \"black_and_white\", \"black\", \"white\", \"yellow\",\n\"orange\", \"red\", \"purple\", \"magenta\", \"green\", \"teal\", \"blue\"."
+              "enum": [
+                "black_and_white",
+                "black",
+                "white",
+                "yellow",
+                "orange",
+                "red",
+                "purple",
+                "magenta",
+                "green",
+                "teal",
+                "blue"
+              ],
+              "description": "Optional color filter (`search`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6741,106 +6281,7 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_photo",
-        "description": "Get detailed information about a specific photo.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "photo_id": {
-              "type": "string",
-              "description": "The unique identifier of the photo."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "photo_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_random_photo",
-        "description": "Get random photo(s) from Unsplash.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Optional search query to filter random photos."
-            },
-            "orientation": {
-              "type": "string",
-              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Number of random photos to return (1-30). Default: 1."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "download_photo",
-        "description": "Trigger a download event for a photo.\nThis is required by the Unsplash API guidelines when a photo is downloaded\nor used. It helps photographers track the usage of their work.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "photo_id": {
-              "type": "string",
-              "description": "The unique identifier of the photo being downloaded."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "photo_id"
+            "action"
           ]
         },
         "strict": false,
@@ -6958,11 +6399,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_bar_chart",
-        "description": "Create a bar chart from the provided data.",
+        "name": "create_chart",
+        "description": "Render a matplotlib chart and save it inside the agent workspace.\n- `bar` / `line` / `pie`: `data` as `{label: value}`, list of dicts, or JSON string.\n- `scatter`: `x_data` & `y_data`, or `data` as `{\"x\": [...], \"y\": [...]}` or `[[x, y], ...]`.\n- `histogram`: `data` as a list of numbers; optional `bins`.",
         "parameters": {
           "type": "object",
           "properties": {
+            "chart_type": {
+              "type": "string",
+              "enum": [
+                "bar",
+                "line",
+                "pie",
+                "scatter",
+                "histogram"
+              ],
+              "description": "Chart kind to render."
+            },
             "data": {
               "anyOf": [
                 {
@@ -6977,121 +6429,27 @@
                       },
                       {
                         "type": "number"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_line_chart",
-        "description": "Create a line chart from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
                       },
                       {
-                        "type": "number"
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ]
+                        }
                       }
                     ]
                   }
                 },
                 {
                   "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
+                  "items": {}
                 },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with x-values as keys and y-values as numbers,\nor list of dictionaries, or JSON string"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
                 {
                   "type": "string"
                 },
@@ -7099,207 +6457,51 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_pie_chart",
-        "description": "Create a pie chart from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
+              "description": "Primary chart dataset (dict, list, or JSON string)."
             },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_scatter_plot",
-        "description": "Create a scatter plot from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "x_data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
-                ]
-              },
-              "description": "List of x-values (can also use 'x' parameter)"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "X-axis numeric series (`scatter`)."
             },
             "y_data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              },
-              "description": "List of y-values (can also use 'y' parameter)"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "x": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              }
-            },
-            "y": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              }
-            },
-            "data": {
               "anyOf": [
                 {
                   "type": "array",
                   "items": {
-                    "type": "array",
-                    "items": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "number"
-                        }
-                      ]
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "number"
-                        }
-                      ]
-                    }
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Alternative format - list of [x,y] pairs or dict with 'x' and 'y' keys"
+              "description": "Y-axis numeric series (`scatter`)."
             },
-            "mindroom_output_path": {
+            "title": {
               "anyOf": [
                 {
                   "type": "string"
@@ -7308,55 +6510,44 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_histogram",
-        "description": "Create a histogram from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              },
-              "description": "List of numeric values to plot"
+              "description": "Optional chart title."
+            },
+            "x_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional X-axis label."
+            },
+            "y_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Y-axis label."
             },
             "bins": {
               "type": "integer",
-              "description": "(int) Number of bins for the histogram"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
+              "description": "Histogram bin count (default 10)."
             },
             "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional plain filename (no directory components); defaults to `<type>_<n>.png`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7372,52 +6563,7 @@
             }
           },
           "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
-  "web_browser_tools": {
-    "overrides": {
-      "all": true,
-      "enable_open_page": true
-    },
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "open_page",
-        "description": "Open an http or https URL in a browser window.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "(str) http or https URL to open"
-            },
-            "new_window": {
-              "type": "boolean",
-              "description": "(bool) If True, open in a new window, otherwise open in a new tab. Default is False."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "url"
+            "chart_type"
           ]
         },
         "strict": false,
@@ -7919,241 +7065,29 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_current_stock_price",
-        "description": "Use this function to get the current stock price for a given symbol.",
+        "name": "yfinance_get",
+        "description": "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n- `stock_price`: current/regular market stock price.\n- `company_info`: company profile and key metrics.\n- `fundamentals`: valuation and summary fundamentals.\n- `income_statements`: income statement table as JSON.\n- `financial_ratios`: full ticker info/ratios JSON.\n- `analyst_recommendations`: analyst recommendation history.\n- `company_news`: recent news items (capped by `num_stories`).\n- `technical_indicators`: OHLCV history for `period` (default `3mo`).\n- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "symbol": {
+            "action": {
               "type": "string",
-              "description": "(str) The stock symbol."
+              "enum": [
+                "stock_price",
+                "company_info",
+                "fundamentals",
+                "income_statements",
+                "financial_ratios",
+                "analyst_recommendations",
+                "company_news",
+                "technical_indicators",
+                "historical_prices"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_info",
-        "description": "Use this function to get company information and overview for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_stock_fundamentals",
-        "description": "Use this function to get fundamental data for a given stock symbol yfinance API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_income_statements",
-        "description": "Use this function to get income statements for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_key_financial_ratios",
-        "description": "Use this function to get key financial ratios for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_analyst_recommendations",
-        "description": "Use this function to get analyst recommendations for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_news",
-        "description": "Use this function to get company news and press releases for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "num_stories": {
-              "type": "integer",
-              "description": "(int) The number of news stories to return. Defaults to 3."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_technical_indicators",
-        "description": "Use this function to get technical indicators for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
+              "type": "string"
             },
             "period": {
-              "type": "string",
-              "description": "(str) The time period for which to retrieve technical indicators.\nValid periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max. Defaults to 3mo."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -8161,36 +7095,13 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_historical_stock_prices",
-        "description": "Use this function to get the historical stock price for a given symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "period": {
-              "type": "string",
-              "description": "(str) The period for which to retrieve historical prices. Defaults to \"1mo\".\nValid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max"
+              ]
             },
             "interval": {
-              "type": "string",
-              "description": "(str) The interval between data points. Defaults to \"1d\".\nValid intervals: 1d,5d,1wk,1mo,3mo"
+              "type": "string"
+            },
+            "num_stories": {
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8206,6 +7117,7 @@
             }
           },
           "required": [
+            "action",
             "symbol"
           ]
         },

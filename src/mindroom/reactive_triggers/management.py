@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.reactive_triggers.models import (
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -67,7 +69,7 @@ def refresh_reactive_state_on_reenable(
     now: float,
     refreshed_tag_present: bool | None,
 ) -> None:
-    """Refresh room cursor or thread tag checkpoint before re-enabling a disabled reactive trigger."""
+    """Refresh cursor or checkpoint before re-enabling a disabled reactive trigger."""
     if isinstance(record.source, RoomMessageSourceSpec):
         reactive_store.advance_room_cursor(
             record.trigger_id,
@@ -81,6 +83,9 @@ def refresh_reactive_state_on_reenable(
             state_event_id=None,
             expected_rule_uid=record.rule_uid,
         )
+    elif isinstance(record.source, GitHubPRSourceSpec):
+        refreshed = GitHubPRCheckpoint(next_poll_at=now, updated_at=now)
+        reactive_store.upsert_github_pr_checkpoint(record.trigger_id, refreshed, expected_rule_uid=record.rule_uid)
 
 
 def _not_found(trigger_id: str) -> ExternalTriggerStoreError:
@@ -125,7 +130,12 @@ def set_trigger_enabled_sync(
             now=time.time(),
             refreshed_tag_present=refreshed_tag_present,
         )
-    updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=record.rule_uid)
+    pol = config.external_trigger_policy
+    caps = {
+        "max_per_owner": pol.max_reactive_triggers_per_owner,
+        "max_github_pr_per_owner": pol.max_github_pr_watches_per_owner,
+    }
+    updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=record.rule_uid, **caps)
     if updated is None:
         raise _not_found(trigger_id)
     return updated

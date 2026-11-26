@@ -1875,20 +1875,20 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     *,
     deferred_first: bool,
 ) -> None:
-    """Agno registers the first toolkit's function for a name; deferral follows that owner and search offers only it."""
+    """The registry uses the first toolkit's function for a name; deferral follows that owner and search offers only it."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["filesystem", {"python": {"defer": True}}]
+    tools: list[object] = ["duckduckgo", {"googlesearch": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
     agent = _code_agent(config, tmp_path)
 
-    assert ("read_file" in agent.request_template.deferred_tools.names) is deferred_first
+    assert ("web_search" in agent.request_template.deferred_tools.names) is deferred_first
     if "tool_search" in _function_names(agent):
-        matches = (await _search(agent, "read_file"))["matches"]
-        offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
-        assert offered == (["python"] if deferred_first else [])
+        matches = (await _search(agent, "web_search"))["matches"]
+        offered = [match["toolkit"] for match in matches if match["name"] == "web_search"]
+        assert offered == (["googlesearch"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

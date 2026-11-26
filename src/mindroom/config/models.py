@@ -635,7 +635,7 @@ class DefaultsConfig(BaseModel):
         description=(
             "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) "
             "may read and write files: workspace confines them to the agent workspace and its attachments, "
-            "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
+            "unrestricted allows any path their process can reach. Code-execution tools such as shell "
             "are always unrestricted; isolate them with worker_tools"
         ),
     )

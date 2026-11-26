@@ -10,7 +10,11 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.aws_ses import aws_ses_tools
 from mindroom.tools.discord import discord_tools
 from mindroom.tools.email import email_tools
@@ -43,13 +47,25 @@ def test_smtp_sends_only_to_configured_recipient() -> None:
     assert not email_tools()(enable_email_user=False).functions
 
 
-def test_resend_uses_each_toolkits_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resend_uses_each_toolkits_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Sending for one toolkit does not change the next toolkit's bearer key."""
     resend = pytest.importorskip("resend")
     monkeypatch.setattr(resend, "api_url", "https://mail.example.test/proxy/")
-    monkeypatch.setenv("RESEND_API_KEY", "environment-example")
+    (tmp_path / "config.yaml").write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "RESEND_API_KEY": "environment-example"},
+    )
     first = resend_tools()(api_key="explicit-example", from_email="sender@example.test")
-    second = resend_tools()(from_email="other@example.test")
+    second = get_tool_by_name(
+        "resend",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"from_email": "other@example.test"},
+        runs_in_worker=False,
+        worker_target=None,
+    )
     with patch("resend.RequestsClient.request", return_value=(b"{}", 200, {})) as request:
         assert first.send_email("reader@example.test", "Status", "<b>Ready</b>") == "Email sent."
         assert second.send_email("reader@example.test", "Status", "Hello") == "Email sent."

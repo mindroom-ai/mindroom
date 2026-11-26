@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-from os import getenv
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.tool_system.authoring import Toolkit, tool
@@ -40,12 +39,12 @@ class _TwilioTools(Toolkit):
         enable_list_messages: bool = True,
         all: bool = False,  # noqa: A002 - public config field
     ) -> None:
-        self._account_sid = account_sid or getenv("TWILIO_ACCOUNT_SID")
-        self._auth_token = auth_token or getenv("TWILIO_AUTH_TOKEN")
-        self._api_key = api_key or getenv("TWILIO_API_KEY")
-        self._api_secret = api_secret or getenv("TWILIO_API_SECRET")
-        self._region = region or getenv("TWILIO_REGION")
-        self._edge = edge or getenv("TWILIO_EDGE")
+        self._account_sid = account_sid or None
+        self._auth_token = auth_token or None
+        self._api_key = api_key or None
+        self._api_secret = api_secret or None
+        self._region = region or None
+        self._edge = edge or None
         self._debug = debug
         self._read_actions: dict[_ReadAction, bool] = {
             "get_call_details": all or enable_get_call_details,

@@ -16,13 +16,12 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
+    from mindroom.custom_tools.openai_media import OpenAITools
 
 
 @register_tool_with_metadata(
     name="openai",
     file_access=ToolFileAccess.AGENT,
-    worker_inert_agent_functions=("generate_speech",),
     display_name="OpenAI",
     description="AI-powered tools for transcription, image generation, and speech synthesis",
     category=ToolCategory.DEVELOPMENT,
@@ -128,8 +127,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#openai",
     function_names=("generate_image", "generate_speech", "transcribe_audio"),
 )
-def openai_tools() -> type[MindRoomOpenAITools]:
+def openai_tools() -> type[OpenAITools]:
     """Return OpenAI tools whose transcription input follows the agent's file_access."""
-    from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
+    from mindroom.custom_tools.openai_media import OpenAITools
 
-    return MindRoomOpenAITools
+    return OpenAITools

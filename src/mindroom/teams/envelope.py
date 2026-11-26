@@ -746,7 +746,7 @@ class _TeamTurn:
             provider=provider,
         )
         text = f"[{self.ctx.entity_label}] {info.plain_text}" if self.ctx.entity_label else info.plain_text
-        return text, info.to_wire()
+        return text, info.to_wire(fallback=text)
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
@@ -836,14 +836,16 @@ async def team_response_stream(
     if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         model_label, provider = model_error_labels(sinks.active_model() if sinks.active_model is not None else None)
-        error_info = describe_reply_error(
+        info = describe_reply_error(
             turn.error,
             runtime_paths=spec.orchestrator.runtime_paths,
             model_label=model_label,
             provider=provider,
-        ).to_wire()
+        )
+        reply_text = info.summary.strip() if turn.text.strip() else ""
+        error_info = info.to_wire(fallback=reply_text)
         publish_error_run_metadata(sinks, error_info=error_info)
-        yield turn
+        yield FailedReply(reply_text, turn.error)
         return
 
     def unexpected_error_text(error: Exception) -> str:

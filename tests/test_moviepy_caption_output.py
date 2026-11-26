@@ -9,7 +9,7 @@ import pytest
 from moviepy import AudioClip, ColorClip, CompositeVideoClip
 from moviepy.video import VideoClip
 
-from mindroom.custom_tools import agno_compat_moviepy as adapter
+from mindroom.custom_tools import moviepy_video as adapter
 
 
 @pytest.mark.parametrize(
@@ -87,7 +87,7 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
     if failure == "publish":
         monkeypatch.setattr(os, "replace", reject_publication)
 
-    toolkit = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path)
+    toolkit = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path)
     result = toolkit.embed_captions(str(source), str(captions), str(output))
 
     if failure is None:

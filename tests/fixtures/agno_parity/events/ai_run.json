@@ -224,7 +224,8 @@
         "title": "Reply failed",
         "summary": "Rate limited",
         "retryable": false,
-        "provider": "Synthetic"
+        "provider": "Synthetic",
+        "fallback": "⚠️ Rate limited"
       }
     }
   },

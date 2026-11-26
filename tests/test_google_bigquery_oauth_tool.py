@@ -22,7 +22,7 @@ from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools, _is_read_only_select
-from mindroom.oauth.google import google_cloud_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider, google_service_scopes
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -365,4 +365,7 @@ def test_service_account_file_authenticates_without_a_stored_oauth_connection(tm
     credentials = client._http.credentials
     assert isinstance(credentials, service_account.Credentials)
     assert credentials.service_account_email == "reader@example-project.iam.gserviceaccount.com"
-    assert set(credentials.scopes) == set(google_cloud_oauth_provider().scopes)
+    assert set(credentials.scopes) == set(google_service_scopes(google_cloud_oauth_provider()))
+    assert "openid" not in credentials.scopes
+    assert "https://www.googleapis.com/auth/userinfo.email" not in credentials.scopes
+    assert "https://www.googleapis.com/auth/userinfo.profile" not in credentials.scopes

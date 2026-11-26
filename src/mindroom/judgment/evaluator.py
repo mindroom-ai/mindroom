@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from functools import partial
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentConfig
@@ -149,24 +151,46 @@ def _logged_evaluator[T](
     *,
     question_id: str,
 ) -> _JudgmentEvaluator[T]:
-    async def logged(request: JudgmentRequest) -> JudgmentResult[T]:
-        result = await evaluate(request)
+    model_alias = settings.model if isinstance(settings, LLMJudgmentConfig) else None
+    threshold = None if isinstance(settings, LLMJudgmentConfig) else settings.threshold
+
+    def _emit(
+        request: JudgmentRequest,
+        *,
+        result: JudgmentResult[T] | None,
+        failure: str | None,
+        latency_ms: int,
+    ) -> None:
         logger.info(
             "Judgment evaluated",
             question=question_id,
             backend=settings.provider,
-            model=result.model_id,
-            model_alias=settings.model if isinstance(settings, LLMJudgmentConfig) else None,
-            decision=_logged_decision(result.decision),
-            probability=result.probability,
-            threshold=settings.threshold if not isinstance(settings, LLMJudgmentConfig) else None,
-            failure=result.failure,
-            latency_ms=result.latency_ms,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            state_bytes=result.state_bytes,
+            model=None if result is None else result.model_id,
+            model_alias=model_alias,
+            decision=None if result is None else _logged_decision(result.decision),
+            probability=None if result is None else result.probability,
+            threshold=threshold,
+            failure=failure,
+            latency_ms=latency_ms,
+            input_tokens=None if result is None else result.input_tokens,
+            output_tokens=None if result is None else result.output_tokens,
+            state_bytes=request.state_bytes if result is None else result.state_bytes,
             incomplete_reason=request.incomplete_reason,
         )
+
+    async def logged(request: JudgmentRequest) -> JudgmentResult[T]:
+        started = perf_counter()
+        try:
+            result = await evaluate(request)
+        except asyncio.CancelledError:
+            _emit(
+                request,
+                result=None,
+                failure="cancelled",
+                latency_ms=max(0, round((perf_counter() - started) * 1000)),
+            )
+            raise
+        _emit(request, result=result, failure=result.failure, latency_ms=result.latency_ms)
         return result
 
     return logged

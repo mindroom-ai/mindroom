@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.reasoning import ReasoningTools
+    from mindroom.custom_tools.reasoning import ReasoningTools
 
 
 @register_tool_with_metadata(
@@ -74,6 +74,6 @@ if TYPE_CHECKING:
 )
 def reasoning_tools() -> type[ReasoningTools]:
     """Return Reasoning tools for step-by-step problem solving."""
-    from agno.tools.reasoning import ReasoningTools
+    from mindroom.custom_tools.reasoning import ReasoningTools
 
     return ReasoningTools

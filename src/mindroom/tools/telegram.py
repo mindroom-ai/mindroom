@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Literal
@@ -107,13 +106,12 @@ class _TelegramTools(Toolkit):
             msg = "`pyTelegramBotAPI` not installed. Install with `pip install pytelegrambotapi`."
             raise ImportError(msg) from exc
 
-        resolved_token = token or os.getenv("TELEGRAM_TOKEN")
-        if not resolved_token:
+        if not token:
             msg = "TELEGRAM_TOKEN not set. Please set the TELEGRAM_TOKEN environment variable."
             raise ValueError(msg)
 
-        self.token = resolved_token
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+        self.token = token
+        self.chat_id = chat_id or None
         self.bot = TeleBot(self.token)
         self._api_error = ApiTelegramException
         self._reaction_emoji_cls = ReactionTypeEmoji

@@ -19,14 +19,11 @@ from mindroom.tool_system.registry import builtin_tool_registry
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools import Toolkit
-    from agno.tools.exa import ExaTools
-    from agno.tools.firecrawl import FirecrawlTools
-
     from mindroom.custom_tools.searxng import SearxngTools
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 
-def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> Toolkit:
+def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> AnyToolkit:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -58,7 +55,7 @@ def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object
 @pytest.mark.parametrize("domains", [["matrix.org", "element.io"], []])
 def test_exa_authored_domain_lists_reach_tool(tmp_path: Path, domains: list[str]) -> None:
     """Both domain lists retain their collection values through config and factory."""
-    tool = cast("ExaTools", _configured_tool(tmp_path, "exa", {"include_domains": domains, "exclude_domains": domains}))
+    tool = _configured_tool(tmp_path, "exa", {"include_domains": domains, "exclude_domains": domains})
 
     assert tool.include_domains == domains
     assert tool.exclude_domains == domains
@@ -67,7 +64,7 @@ def test_exa_authored_domain_lists_reach_tool(tmp_path: Path, domains: list[str]
 @pytest.mark.parametrize("formats", [["markdown", "html"], []])
 def test_firecrawl_authored_formats_reach_tool(tmp_path: Path, formats: list[str]) -> None:
     """The toolkit receives a format list, including an explicitly empty list."""
-    tool = cast("FirecrawlTools", _configured_tool(tmp_path, "firecrawl", {"formats": formats}))
+    tool = _configured_tool(tmp_path, "firecrawl", {"formats": formats})
 
     assert tool.formats == formats
 

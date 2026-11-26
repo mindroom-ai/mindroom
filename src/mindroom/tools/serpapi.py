@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.serpapi import SerpApiTools
+    from mindroom.custom_tools.serpapi import SerpApiTools
 
 
 @register_tool_with_metadata(
@@ -58,6 +58,6 @@ if TYPE_CHECKING:
 )
 def serpapi_tools() -> type[SerpApiTools]:
     """Return SerpApi tools for Google and YouTube search."""
-    from agno.tools.serpapi import SerpApiTools
+    from mindroom.custom_tools.serpapi import SerpApiTools
 
     return SerpApiTools

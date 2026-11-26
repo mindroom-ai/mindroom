@@ -25,10 +25,10 @@ from mindroom.external_triggers.auth import (
     verify_trigger_request,
 )
 from mindroom.external_triggers.models import ExternalTriggerPayload
-from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.policy import is_source_subscriber_allowed
+from mindroom.reactive_triggers.github_pr import nudge_github_pr_watches_for_webhook
 from mindroom.reactive_triggers.matching import lookup_data_key, matches_external_event
 from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEvent
-from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -73,23 +73,6 @@ def event_source_replay_store(runtime_paths: RuntimePaths) -> DeliveryReplayStor
         msg = "Event source replay store requires primary control state"
         raise ExternalSourceUnavailableError(msg)
     return DeliveryReplayStore(root=control_root / "event_source_replay")
-
-
-def is_source_subscriber_allowed(
-    source: ExternalEventSourceConfig,
-    owner_user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether owner_user_id may subscribe to or receive events from source."""
-    if is_external_trigger_administrator(config, runtime_paths, owner_user_id):
-        return True
-    owner_ids = {owner_user_id, *equivalent_requester_ids(owner_user_id, config, runtime_paths)}
-    for subscriber in source.subscribers:
-        subscriber_ids = {subscriber, *equivalent_requester_ids(subscriber, config, runtime_paths)}
-        if owner_ids & subscriber_ids:
-            return True
-    return False
 
 
 def validate_subscription_against_source(
@@ -369,6 +352,7 @@ def fan_out_external_event(
     config: Config,
     runtime_paths: RuntimePaths,
     now: float | None = None,
+    on_github_pr_nudged: Callable[[], None] | None = None,
 ) -> int:
     """Enqueue deduplicated firings for all matching, authorized, unexpired rules subscribed to source_id."""
     if isinstance(source, GitHubEventSourceConfig) and event.kind == "ping" and "ping" not in source.allowed_events:
@@ -392,6 +376,19 @@ def fan_out_external_event(
             continue
         if store.enqueue_firing(rule.trigger_id, event.event_id, event, expected_rule_uid=rule.rule_uid):
             matched_count += 1
+    repo = event.data.get("repo") if event.kind != "ping" else None
+    if isinstance(source, GitHubEventSourceConfig) and isinstance(repo, str) and repo:
+        nudged = nudge_github_pr_watches_for_webhook(
+            source_id=source_id,
+            source=source,
+            repo=repo,
+            store=store,
+            config=config,
+            runtime_paths=runtime_paths,
+            now=current_time,
+        )
+        if nudged > 0 and on_github_pr_nudged is not None:
+            on_github_pr_nudged()
     return matched_count
 
 

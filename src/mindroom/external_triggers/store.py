@@ -58,6 +58,10 @@ class ExternalTriggerTarget(BaseModel):
     thread_id: str | None = Field(default=None, description="Optional Matrix thread event ID")
     agent: str = Field(description="Agent or team name to mention")
     new_thread: bool = Field(default=False, description="Whether the trigger starts a new thread")
+    reopen_on_fire: bool = Field(
+        default=False,
+        description="Whether to clear the resolved tag on the targeted thread before delivery",
+    )
 
     @field_validator("room_id", "agent")
     @classmethod

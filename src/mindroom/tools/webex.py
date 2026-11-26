@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
@@ -27,13 +26,12 @@ class _WebexTools(Toolkit):
             msg = "Webex tools require `webexpythonsdk`. Install with `pip install webexpythonsdk`."
             raise ImportError(msg) from exc
 
-        resolved_token = access_token or os.getenv("WEBEX_ACCESS_TOKEN")
-        if not resolved_token:
+        if not access_token:
             msg = "Webex access token is not set. Please set the WEBEX_ACCESS_TOKEN environment variable."
             raise ValueError(msg)
 
         self._api_error = ApiError
-        self.client = WebexAPI(access_token=resolved_token)
+        self.client = WebexAPI(access_token=access_token)
         self._allow_read = bool(all or enable_list_rooms)
         self._allow_send = bool(all or enable_send_message)
 

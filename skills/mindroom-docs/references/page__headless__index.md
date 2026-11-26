@@ -35,7 +35,7 @@ print(result.text)
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
-| `workdir` | The existing directory where `shell` runs and `filesystem` and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
+| `workdir` | The existing directory where `shell` runs and `filesystem` resolves paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 | `request_headers` | A function that takes a `HeadlessRun` and returns the headers that run's model requests carry; see [Request headers](#request-headers). |
 
@@ -111,16 +111,15 @@ They run in standard mode; [minimal mode](https://docs.mindroom.chat/tools/agent
 ## Files
 
 With a `workdir`, the files that `shell` and `filesystem` write land there, and MindRoom's own files stay under `storage`.
-Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `filesystem` to the `workdir` instead of the workspace.
 An agent with the [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `filesystem` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.
-The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
+The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` given absolute paths.
 In `shell` commands, `$MINDROOM_AGENT_WORKSPACE` holds the agent's workspace, not the `workdir`.
 
-All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
+All tools run with the calling process's permissions, and `shell` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
 
 ## Logging
 
