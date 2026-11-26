@@ -1199,6 +1199,7 @@ async def schedule_approved_tool_call(
         requester_id=scheduled_by,
         approver_id=approver_id,
         authored_confirmation=call.authored_confirmation,
+        tools=config_plugins(config, context.runtime_paths).tools,
     )
     workflow = ScheduledWorkflow(
         schedule_type="once",

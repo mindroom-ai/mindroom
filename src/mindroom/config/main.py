@@ -1684,15 +1684,20 @@ class Config(BaseModel):
         enabled_toolkits = set(authored_tool_names)
         for agent_name in self.agents:
             enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
-        for toolkit_name in RETIRED_CONSOLIDATED_FUNCTIONS:
-            if toolkit_name not in enabled_toolkits:
+        for toolkit_name in sorted(enabled_toolkits):
+            builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+            metadata = tools.entries.get(toolkit_name)
+            declared_renames = metadata.retired_functions if metadata is not None else None
+            if not builtin_renames and not declared_renames:
                 continue
+            renames = {**(builtin_renames or {}), **(declared_renames or {})}
             if (
                 consolidated_error := retired_consolidated_approval_error(
                     toolkit_name,
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
+                    renames=renames,
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import ToolExecution
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_approval_grants import ApprovalOperation
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -187,11 +188,21 @@ async def plan_approval_calls(
     )
 
 
-def timed_grant_operation(config: Config, tool: ToolExecution, call: ApprovalCall) -> ApprovalOperation | None:
+def timed_grant_operation(
+    config: Config,
+    tool: ToolExecution,
+    call: ApprovalCall,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    tools: ToolRegistry | None = None,
+) -> ApprovalOperation | None:
     """Return the operation a timed approval of this call covers; a tool's own confirmation is approved only once."""
     if tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE:
         return None
-    return grant_operation(config, call.tool_name, dict(tool.tool_args or {}))
+    resolved_tools = (
+        config_plugins(config, runtime_paths).tools if tools is None and runtime_paths is not None else tools
+    )
+    return grant_operation(config, call.tool_name, dict(tool.tool_args or {}), tools=resolved_tools)
 
 
 async def _publish_cards(
@@ -207,6 +218,7 @@ async def _publish_cards(
     """Publish every human-gated card already linked by durable identity."""
     manager = approval_manager.get_approval_store()
     approver = resolve_tool_approval_approver(config, runtime_paths, continuation.requester_id)
+    tools = config_plugins(config, runtime_paths).tools
     cards = []
     for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
         if call.decision is not None:
@@ -228,7 +240,7 @@ async def _publish_cards(
             expires_at_ns=call.expires_at_ns,
             agent_name=call.invoking_agent,
             thread_id=target.resolved_thread_id,
-            grant_operation=timed_grant_operation(config, tool, call),
+            grant_operation=timed_grant_operation(config, tool, call, tools=tools),
         )
         if card is None:
             raise RuntimeError(failure_reason)

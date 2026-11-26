@@ -403,6 +403,8 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
+| `action_scoped_grants` | sequence of strings | `()` | Action-dispatched function names whose timed approval grants bind to `(tool_name, action)` instead of only `tool_name` (and whose scheduled calls never offer approving any arguments); a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
+| `retired_functions` | dict of retired name to replacement name | `None` | Retired function names mapped to their replacement function name so config validation fails closed when `tool_approval.rules` still decides a retired name differently from its replacement; a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.

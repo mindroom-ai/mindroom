@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
@@ -1118,6 +1119,141 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
     ]
 
 
+def _write_consolidated_plugin(tmp_path: Path) -> Path:
+    plugin_root = tmp_path / "plugins" / "demo_consolidated"
+    plugin_root.mkdir(parents=True)
+    manifest = {"name": "demo_consolidated", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}
+    (plugin_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        """from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+class DemoConsolidatedTools(Toolkit):
+    name = "demo_consolidated"
+    @tool
+    def demo_action_tool(self, action: str) -> str:
+        \"\"\"Run an action-dispatched demo operation.\"\"\"
+        return action
+
+@register_tool_with_metadata(
+    name="demo_consolidated", display_name="Demo Consolidated", description="Demo consolidated plugin tool",
+    category=ToolCategory.DEVELOPMENT, file_access=ToolFileAccess.NONE, function_names=("demo_action_tool",),
+    action_scoped_grants=("demo_action_tool",), retired_functions={"unlink_demo": "demo_action_tool"},
+)
+def demo_consolidated_tools() -> type[DemoConsolidatedTools]:
+    return DemoConsolidatedTools
+""",
+        encoding="utf-8",
+    )
+    return plugin_root
+
+
+@pytest.mark.asyncio
+async def test_plugin_action_scoped_grants_scope_timed_approvals_per_action(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Plugin tools declaring action_scoped_grants bind timed grants to (tool_name, action)."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+
+    plugin_root = _write_consolidated_plugin(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [{"path": str(plugin_root)}],
+            "agents": {
+                "code": {"display_name": "Code", "tools": ["demo_consolidated"], "include_default_tools": False},
+            },
+            "tool_approval": {"scheduled_any_arguments": True},
+        },
+        runtime_paths,
+    )
+    plugins = refresh_plugins(config, runtime_paths)
+
+    list_op = grant_operation(config, "demo_action_tool", {"action": "list"})
+    unlink_op = grant_operation(config, "demo_action_tool", {"action": "unlink"})
+    assert list_op is not None
+    assert unlink_op is not None
+    assert list_op == grant_operation(config, "demo_action_tool", {"action": " list "})
+    assert list_op == grant_operation(config, "demo_action_tool", {"action": "list"}, tools=plugins.tools)
+    assert list_op.key != unlink_op.key
+    for bad_args in ({}, {"action": ""}, {"action": "   "}, {"action": 123}):
+        assert grant_operation(config, "demo_action_tool", bad_args) is None
+    assert not scheduled_call_offers_any_arguments(
+        config,
+        "demo_action_tool",
+        {"action": "list"},
+        requester_id="@human:test",
+        approver_id="@human:test",
+        authored_confirmation=False,
+        tools=plugins.tools,
+    )
+    unrelated = grant_operation(Config(), "demo_action_tool", {})
+    assert unrelated is not None
+    assert unrelated.mcp_server_id is None
+
+    # A timed grant on list auto-approves another list call but leaves unlink gated.
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        first_list = await _card(journal, manager, "list-1", tool_name="demo_action_tool", grant_op=list_op)
+        assert (await _approve(manager, first_list)).consumed
+        await _card(journal, manager, "list-2", tool_name="demo_action_tool", grant_op=list_op)
+        await _card(journal, manager, "unlink-1", tool_name="demo_action_tool", grant_op=unlink_op)
+        assert await _call_row(journal, "list-2") == ("approved", "@human:test")
+        assert await _call_row(journal, "unlink-1") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+def test_plugin_retired_functions_fail_closed_in_config_validation(tmp_path: Path) -> None:
+    """Enabled plugin tools declaring retired_functions fail closed until an exact replacement rule is authored."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess  # noqa: PLC0415
+    from mindroom.tool_system.registration import register_tool_with_metadata  # noqa: PLC0415
+
+    plugin_root = _write_consolidated_plugin(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    stale_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "plugins": [{"path": str(plugin_root)}],
+        "agents": {"a": {"display_name": "A", "tools": ["demo_consolidated"], "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [{"match": "unlink_demo", "action": "require_approval"}],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="demo_action_tool"):
+        Config.validate_with_runtime(stale_data, runtime_paths)
+
+    explicit_rules = [
+        {"match": "unlink_demo", "action": "require_approval"},
+        {"match": "demo_action_tool", "action": "require_approval"},
+    ]
+    loaded = Config.validate_with_runtime(
+        {**stale_data, "tool_approval": {"default": "auto_approve", "rules": explicit_rules}},
+        runtime_paths,
+    )
+    assert [rule.match for rule in loaded.tool_approval.rules] == ["unlink_demo", "demo_action_tool"]
+
+    # When the plugin tool is not enabled on any agent or defaults, the legacy rule does not trigger.
+    Config.validate_with_runtime(
+        {**stale_data, "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}}},
+        runtime_paths,
+    )
+
+    with pytest.raises(TypeError, match="action_scoped_grants"):
+        register_tool_with_metadata(
+            name="bad_demo",
+            display_name="Bad Demo",
+            description="Bad",
+            category=ToolCategory.DEVELOPMENT,
+            file_access=ToolFileAccess.NONE,
+            action_scoped_grants="demo_action_tool",
+        )
+
+
 @pytest.mark.parametrize("seconds", [300, 600, 1800])
 def test_timed_wire_round_trip_keeps_original_card(seconds: int) -> None:
     """A custom threaded action targets the reply card, not the thread root."""
@@ -1555,7 +1691,9 @@ async def _card(
     agent: str = "code",
     requester: str = "@human:test",
     thread: str | None = "$thread",
+    tool_name: str = "shell",
     operation: str | None = "binding:shell",
+    grant_op: ApprovalOperation | None = None,
     command: object = None,
     expires_at_ns: int = 9_000_000_000_000_000_000,
 ) -> str:
@@ -1585,7 +1723,7 @@ async def _card(
         calls=(
             ApprovalCall(
                 tool_call_id="call-" + name,
-                tool_name="shell",
+                tool_name=tool_name,
                 invoking_agent=agent,
                 expires_at_ns=expires_at_ns,
             ),
@@ -1601,7 +1739,7 @@ async def _card(
         entity_name=agent,
         response_event_id=continuation.response_event_id,
         tool_call_id="call-" + name,
-        tool_name="shell",
+        tool_name=tool_name,
         arguments={"command": name if command is None else command},
         room_id="!room:test",
         requester_id=requester,
@@ -1609,7 +1747,11 @@ async def _card(
         expires_at_ns=expires_at_ns,
         agent_name=agent,
         thread_id=thread,
-        grant_operation=ApprovalOperation(operation, "shell") if operation is not None else None,
+        grant_operation=(
+            grant_op
+            if grant_op is not None
+            else (ApprovalOperation(operation, tool_name) if operation is not None else None)
+        ),
     )
     assert card is not None
     assert await manager.reserve_and_publish(
