@@ -7332,8 +7332,8 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.memory_entries"
-depends_on = ["mindroom.knowledge.chunking", "mindroom.knowledge.readers"]
-visibility = ["mindroom.knowledge.file_indexer"]
+depends_on = []
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.indexing_config"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"
@@ -7425,6 +7425,7 @@ depends_on = [
 path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.knowledge.legacy_metadata",
+    "mindroom.knowledge.memory_entries",
     "mindroom.knowledge.redaction",
 ]
 
