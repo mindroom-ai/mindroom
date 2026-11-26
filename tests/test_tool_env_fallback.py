@@ -20,6 +20,8 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 
+_TOOLKIT_MODULE_PREFIXES = ("agno.", "mindroom.custom_tools.")
+
 # Variables Agno toolkits read that no config field declares, by the Agno module that reads them.
 UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
     # Agno counts only the exact text `true` and google-genai also counts `1`, while the boolean `vertexai` field
@@ -65,35 +67,41 @@ def _env_reads(source: str) -> set[str]:
 
 
 def _module_env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads, from its source file."""
+    """Return the variables a toolkit module reads, from its source file."""
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     assert spec.origin is not None
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
-def _agno_modules(tool_name: str) -> set[str]:
-    """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
+def _toolkit_modules(tool_name: str) -> set[str]:
+    """Return the vendor or native modules that define a toolkit class and its bases."""
     factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
         return set()
     try:
         toolkit_class = factory()
     except ImportError:
-        # The toolkit's SDK is not installed, so read the Agno modules its registration imports.
+        # The toolkit's SDK is not installed, so read the toolkit modules its registration imports.
         registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
         return {
             node.module
             for node in ast.walk(registration)
-            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith(_TOOLKIT_MODULE_PREFIXES)
         }
-    return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+    return {
+        klass.__module__
+        for klass in inspect.getmro(toolkit_class)
+        if klass.__module__.startswith(_TOOLKIT_MODULE_PREFIXES)
+    }
 
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
-    modules = _agno_modules(tool_name)
+    """Each variable the toolkit reads is declared or allowlisted, and each declared variable is read."""
+    modules = _toolkit_modules(tool_name)
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}

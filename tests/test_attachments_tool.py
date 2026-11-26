@@ -667,7 +667,7 @@ def test_attachments_a_tool_builds_save_where_the_sandbox_settings_route_workspa
     "worker_tools",
     [
         ["coding"],
-        ["python"],
+        ["filesystem"],
         ["shell", "coding"],
     ],
 )
