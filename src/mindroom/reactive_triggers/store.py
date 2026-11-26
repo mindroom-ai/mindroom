@@ -28,14 +28,14 @@ from mindroom.reactive_triggers.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Collection, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _DB_FILENAME = "reactive_triggers.db"
 _TRIGGER_ID_LOCK_FILENAME = ".trigger_id_creation.lock"
 _FINISHED_FIRING_STATUSES = ("triaged_no", "delivered", "failed", "skipped")
@@ -161,7 +161,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         "CREATE INDEX IF NOT EXISTS idx_trigger_firings_hourly "
         "ON trigger_firings(trigger_id, status, claimed_at, updated_at)"
     ),
+    """
+    CREATE TABLE IF NOT EXISTS applied_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at REAL NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_trigger_firings_updated ON trigger_firings(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_trigger_thread_keys_updated ON trigger_thread_keys(updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_github_pr_checkpoints_due ON github_pr_checkpoints(next_poll_at)",
 )
 
@@ -195,9 +202,6 @@ class ReactiveTriggerStore:
         max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord:
         """Atomically enforce quota, insert a trigger, and optionally initialize cursor or checkpoint."""
-        source_room_id, source_id = _source_index_fields(record)
-        spec_json = record.model_dump_json()
-
         with self._write_transaction() as conn:
             existing = conn.execute(
                 "SELECT 1 FROM reactive_triggers WHERE trigger_id = ?",
@@ -211,34 +215,7 @@ class ReactiveTriggerStore:
             if record.source.source_type == "github_pr":
                 _check_pr_quota(conn, record.owner_user_id, max_github_pr_per_owner, record.created_at)
 
-            conn.execute(
-                """
-                INSERT INTO reactive_triggers (
-                    trigger_id, rule_uid, owner_user_id, source_type, source_room_id, source_id,
-                    enabled, disabled_reason, once, expires_at, max_fires_per_hour, cooldown_seconds,
-                    fire_count, last_fired_at, spec_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.trigger_id,
-                    record.rule_uid,
-                    record.owner_user_id,
-                    record.source.source_type,
-                    source_room_id,
-                    source_id,
-                    1 if record.enabled else 0,
-                    record.disabled_reason,
-                    1 if record.once else 0,
-                    record.expires_at,
-                    record.max_fires_per_hour,
-                    record.cooldown_seconds,
-                    record.fire_count,
-                    record.last_fired_at,
-                    spec_json,
-                    record.created_at,
-                    record.updated_at,
-                ),
-            )
+            _insert_trigger_row(conn, record)
 
             if initial_cursor is not None:
                 _upsert_room_cursor(conn, record.trigger_id, initial_cursor, updated_at=record.updated_at)
@@ -1142,15 +1119,96 @@ class ReactiveTriggerStore:
                 raise ReactiveTriggerStoreError(msg) from exc
             return True
 
+    def get_bound_thread_keys(
+        self,
+        trigger_ids: Collection[str],
+        thread_key: str,
+        *,
+        ttl_seconds: float = 7 * 86400,
+        now: float | None = None,
+    ) -> frozenset[str]:
+        """Return the subset of trigger_ids with an unexpired binding for thread_key."""
+        if not trigger_ids or not thread_key:
+            return frozenset()
+        unique_ids = tuple(dict.fromkeys(trigger_ids))
+        current_time = time.time() if now is None else now
+        cutoff = current_time - ttl_seconds
+        bound: set[str] = set()
+        with self._read_connection() as conn:
+            for start in range(0, len(unique_ids), 500):
+                chunk = unique_ids[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT trigger_id
+                    FROM trigger_thread_keys
+                    WHERE thread_key = ?
+                      AND updated_at > ?
+                      AND trigger_id IN ({placeholders})
+                    """,  # noqa: S608 - placeholders are generated '?' markers
+                    (thread_key, cutoff, *chunk),
+                ).fetchall()
+                bound.update(str(row["trigger_id"]) for row in rows)
+        return frozenset(bound)
+
+    def has_migration(self, name: str) -> bool:
+        """Return whether a one-time store migration has already been applied."""
+        with self._read_connection() as conn:
+            row = conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (name,)).fetchone()
+        return row is not None
+
+    def import_triggers_once(
+        self,
+        migration_name: str,
+        triggers: Sequence[ReactiveTriggerRecord],
+        thread_keys: Sequence[tuple[str, str, str, float]] = (),
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Idempotently import migrated triggers and thread keys in one atomic transaction."""
+        stripped_name = migration_name.strip()
+        if not stripped_name:
+            msg = "migration_name must be a non-empty string"
+            raise ValueError(msg)
+        current_time = time.time() if now is None else now
+        with self._write_transaction() as conn:
+            if conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (stripped_name,)).fetchone() is not None:
+                return 0
+            inserted_ids: set[str] = set()
+            for record in triggers:
+                if _insert_trigger_row(conn, record, or_ignore=True):
+                    inserted_ids.add(record.trigger_id)
+            for trigger_id, thread_key, thread_root_id, updated_at in thread_keys:
+                if trigger_id not in inserted_ids:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO trigger_thread_keys (trigger_id, thread_key, thread_root_id, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(trigger_id, thread_key) DO UPDATE SET
+                        thread_root_id = excluded.thread_root_id,
+                        updated_at = excluded.updated_at
+                    WHERE excluded.updated_at > trigger_thread_keys.updated_at
+                    """,
+                    (trigger_id, thread_key, thread_root_id, updated_at),
+                )
+            conn.execute(
+                "INSERT INTO applied_migrations (name, applied_at) VALUES (?, ?)",
+                (stripped_name, current_time),
+            )
+            return len(inserted_ids)
+
     def prune_old_firings(
         self,
         *,
         retention_seconds: float = 30 * 86400,
+        thread_key_ttl_seconds: float = 7 * 86400,
         now: float | None = None,
     ) -> int:
-        """Delete finished firing rows older than retention_seconds and return the deleted count."""
+        """Delete old finished firing rows and expired thread_key bindings; return deleted firing count."""
         current_time = time.time() if now is None else now
         cutoff = current_time - retention_seconds
+        thread_key_cutoff = current_time - thread_key_ttl_seconds
         with self._write_transaction() as conn:
             cursor = conn.execute(
                 """
@@ -1159,6 +1217,13 @@ class ReactiveTriggerStore:
                   AND updated_at < ?
                 """,
                 (*_FINISHED_FIRING_STATUSES, cutoff),
+            )
+            conn.execute(
+                """
+                DELETE FROM trigger_thread_keys
+                WHERE updated_at < ?
+                """,
+                (thread_key_cutoff,),
             )
             return cursor.rowcount
 
@@ -1169,7 +1234,7 @@ class ReactiveTriggerStore:
             row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
-            elif int(row["version"]) == 1:
+            elif int(row["version"]) in (1, 2):
                 conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
             elif int(row["version"]) != _SCHEMA_VERSION:
                 msg = f"Unsupported reactive triggers schema version: {row['version']}"
@@ -1208,6 +1273,45 @@ def _live_rule_uid(conn: sqlite3.Connection, trigger_id: str) -> str | None:
         (trigger_id,),
     ).fetchone()
     return str(row["rule_uid"]) if row is not None else None
+
+
+def _insert_trigger_row(
+    conn: sqlite3.Connection,
+    record: ReactiveTriggerRecord,
+    *,
+    or_ignore: bool = False,
+) -> bool:
+    source_room_id, source_id = _source_index_fields(record)
+    verb = "INSERT OR IGNORE" if or_ignore else "INSERT"
+    cursor = conn.execute(
+        f"""
+        {verb} INTO reactive_triggers (
+            trigger_id, rule_uid, owner_user_id, source_type, source_room_id, source_id,
+            enabled, disabled_reason, once, expires_at, max_fires_per_hour, cooldown_seconds,
+            fire_count, last_fired_at, spec_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.trigger_id,
+            record.rule_uid,
+            record.owner_user_id,
+            record.source.source_type,
+            source_room_id,
+            source_id,
+            1 if record.enabled else 0,
+            record.disabled_reason,
+            1 if record.once else 0,
+            record.expires_at,
+            record.max_fires_per_hour,
+            record.cooldown_seconds,
+            record.fire_count,
+            record.last_fired_at,
+            record.model_dump_json(),
+            record.created_at,
+            record.updated_at,
+        ),
+    )
+    return cursor.rowcount == 1
 
 
 def _source_index_fields(record: ReactiveTriggerRecord) -> tuple[str | None, str | None]:

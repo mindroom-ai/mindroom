@@ -8,6 +8,15 @@ from mindroom.reactive_triggers.dispatch import (
     check_reactive_target_access,
     dispatch_reactive_trigger,
 )
+from mindroom.reactive_triggers.event_sources import (
+    EventSource,
+    EventSourceContext,
+    EventSourceDescriptor,
+    EventSourceEmitter,
+    EventSourceInactiveError,
+    EventSourceRegistry,
+    ValidatedSubscription,
+)
 from mindroom.reactive_triggers.external_sources import (
     ExternalSourceAuthError,
     ExternalSourceBadRequestError,
@@ -72,6 +81,12 @@ __all__ = (
     "ClaimResult",
     "DisabledReason",
     "DispatchResult",
+    "EventSource",
+    "EventSourceContext",
+    "EventSourceDescriptor",
+    "EventSourceEmitter",
+    "EventSourceInactiveError",
+    "EventSourceRegistry",
     "ExternalEventSourceSpec",
     "ExternalSourceAuthError",
     "ExternalSourceBadRequestError",
@@ -100,6 +115,7 @@ __all__ = (
     "TriggerEvent",
     "TriggerSourceSpec",
     "TriggerTargetSpec",
+    "ValidatedSubscription",
     "build_reactive_trigger_body",
     "build_reactive_trigger_transaction_id",
     "check_external_event_source_access",

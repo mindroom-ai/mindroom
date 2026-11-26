@@ -79,7 +79,7 @@ def validate_subscription_against_source(
     source: ExternalEventSourceConfig,
     *,
     kind: str,
-    match: Mapping[str, str | bool | int],
+    match: Mapping[str, str | bool | int | list[str]],
 ) -> None:
     """Validate that a rule's event kind and structured match filters fit source allowlists."""
     stripped_kind = kind.strip()

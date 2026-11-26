@@ -68,7 +68,12 @@ def matches_external_event(spec: ExternalEventSourceSpec, event: TriggerEvent) -
         return False
     for key, expected in spec.match.items():
         actual = lookup_data_key(event.data, key, _MISSING)
-        if actual is _MISSING or type(actual) is not type(expected) or actual != expected:
+        if actual is _MISSING:
+            return False
+        if isinstance(expected, list):
+            if not isinstance(actual, str) or actual not in expected:
+                return False
+        elif type(actual) is not type(expected) or actual != expected:
             return False
     return True
 

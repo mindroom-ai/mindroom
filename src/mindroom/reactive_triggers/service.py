@@ -7,7 +7,7 @@ import contextlib
 import json
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import nio
@@ -28,9 +28,11 @@ from mindroom.reactive_triggers.dispatch import (
     check_room_source_owner_authorization,
     dispatch_reactive_trigger,
 )
+from mindroom.reactive_triggers.event_sources import EventSourceRegistry
 from mindroom.reactive_triggers.github_pr import GitHubPRPoller
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
 from mindroom.reactive_triggers.models import (
+    ExternalEventSourceSpec,
     FiringRecord,
     ReactiveTriggerRecord,
     RoomCursor,
@@ -74,6 +76,18 @@ _MAX_FIRINGS_PER_DRAIN = 50
 _STORE_PERSIST_ERRORS = (ReactiveTriggerStoreError, sqlite3.Error)
 
 _MessageDecision = Literal["allow", "skip", "hold"]
+
+
+def _enqueue_matched_rules(
+    store: ReactiveTriggerStore,
+    rules: Sequence[ReactiveTriggerRecord],
+    *,
+    dedupe_key: str,
+    event: TriggerEvent,
+) -> int:
+    return sum(
+        1 for rule in rules if store.enqueue_firing(rule.trigger_id, dedupe_key, event, expected_rule_uid=rule.rule_uid)
+    )
 
 
 def _reactive_enabled(config: Config) -> bool:
@@ -210,6 +224,10 @@ class ReactiveTriggerService:
 
         self._in_flight_firing_ids: set[int] = set()
         self._in_flight_trigger_ids: set[str] = set()
+        self.event_sources = EventSourceRegistry(
+            config_provider=self.config_provider,
+            emit_handler=self.emit_event,
+        )
 
     @property
     def store(self) -> ReactiveTriggerStore | None:
@@ -270,6 +288,112 @@ class ReactiveTriggerService:
                 running_loop.call_soon_threadsafe(self._wake_event.set)
             return
         self._wake_event.set()
+
+    async def emit_event(
+        self,
+        source_id: str,
+        event: TriggerEvent,
+        *,
+        owner_user_ids: Collection[str] | None = None,
+        audience: object = None,
+        dedupe_key: str | None = None,
+    ) -> int:
+        """Fan out one normalized event from a registered EventSource to matching enabled rules."""
+        store = self._store
+        config = self.config_provider()
+        source = self.event_sources.get(source_id)
+        if store is None or not _reactive_enabled(config) or source is None:
+            return 0
+        if event.source_type != "external_event" or event.source_id != source_id:
+            msg = f"Event source_type/source_id mismatch for {source_id!r}"
+            raise ValueError(msg)
+        effective_dedupe_key = event.event_id if dedupe_key is None else dedupe_key.strip()
+        if not effective_dedupe_key:
+            msg = "dedupe_key must not be empty"
+            raise ValueError(msg)
+
+        allowed_owners = self._expand_emit_owners(owner_user_ids, config=config)
+        if owner_user_ids is not None and not allowed_owners:
+            return 0
+
+        now = time.time()
+        candidates = await self._load_emit_candidates(
+            store,
+            source_id=source_id,
+            allowed_owners=allowed_owners,
+            now=now,
+        )
+        if not candidates:
+            return 0
+
+        bound_trigger_ids = (
+            await asyncio.to_thread(
+                store.get_bound_thread_keys,
+                [rule.trigger_id for rule in candidates],
+                event.thread_key,
+                now=now,
+            )
+            if event.thread_key is not None
+            else frozenset()
+        )
+        matched_rules = [
+            rule
+            for rule in candidates
+            if source.matches_rule(
+                rule,
+                event,
+                audience=audience,
+                has_thread_binding=rule.trigger_id in bound_trigger_ids,
+            )
+        ]
+        if not matched_rules:
+            return 0
+
+        enqueued = await asyncio.to_thread(
+            _enqueue_matched_rules,
+            store,
+            matched_rules,
+            dedupe_key=effective_dedupe_key,
+            event=event,
+        )
+        if enqueued > 0:
+            self.notify_work(poll_github_prs=False)
+        return enqueued
+
+    def _expand_emit_owners(
+        self,
+        owner_user_ids: Collection[str] | None,
+        *,
+        config: Config,
+    ) -> set[str] | None:
+        if owner_user_ids is None:
+            return None
+        expanded: set[str] = set()
+        for user_id in owner_user_ids:
+            expanded.update(equivalent_requester_ids(user_id, config, self.runtime_paths))
+        return expanded
+
+    @staticmethod
+    async def _load_emit_candidates(
+        store: ReactiveTriggerStore,
+        *,
+        source_id: str,
+        allowed_owners: set[str] | None,
+        now: float,
+    ) -> list[ReactiveTriggerRecord]:
+        rules = await asyncio.to_thread(
+            store.list_triggers,
+            include_disabled=False,
+            source_type="external_event",
+            source_id=source_id,
+        )
+        return [
+            rule
+            for rule in rules
+            if isinstance(rule.source, ExternalEventSourceSpec)
+            and not _is_rule_expired(rule, now)
+            and (allowed_owners is None or rule.owner_user_id in allowed_owners)
+        ]
 
     def _schedule_thread_tag_reconcile(self) -> None:
         """Schedule background thread_tag reconciliation without blocking config hot-reload."""
@@ -1113,6 +1237,7 @@ class ReactiveTriggerService:
                 config=self.config_provider(),
                 runtime_paths=self.runtime_paths,
                 memberships=self.memberships,
+                event_sources=self.event_sources,
             )
             await self._record_dispatch_result(firing.id, result)
         except asyncio.CancelledError:
@@ -1181,9 +1306,10 @@ class ReactiveTriggerService:
             return False
 
         room_states: dict[str, RoomStateSnapshot] = {}
+        target_bot = self.bots().get(rule.target.agent)
         target_rejection = await check_reactive_target_access(
             rule=rule,
-            target_bot=self.bots().get(rule.target.agent),
+            target_bot=target_bot,
             config=config,
             runtime_paths=self.runtime_paths,
             memberships=self.memberships,
@@ -1209,14 +1335,16 @@ class ReactiveTriggerService:
                     await self._run_store_update_safe(store.mark_skipped, firing.id, guard_status)
                 return False
 
+        source_bot = target_bot if isinstance(rule.source, ExternalEventSourceSpec) else self._pick_bot_for_source(rule)
         source_rejection = await check_reactive_source_access(
             rule=rule,
             event=firing.event,
-            source_bot=self._pick_bot_for_source(rule),
+            source_bot=source_bot,
             config=config,
             runtime_paths=self.runtime_paths,
             memberships=self.memberships,
             known_room_states=room_states,
+            event_sources=self.event_sources,
         )
         if source_rejection is not None:
             await self._apply_pending_rejection(
