@@ -83,7 +83,7 @@ _PARTIAL = "partial"
 
 RATE_LIMITED = "⏱️ Rate limited."
 UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries."
-UNREACHABLE = "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries."
+UNREACHABLE = "⚠️ The model request failed with a network error or timeout."
 ERROR = "⚠️ Error: "
 AUTHENTICATION = "❌ Authentication failed"
 CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."

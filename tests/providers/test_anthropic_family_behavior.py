@@ -2170,9 +2170,8 @@ _REQUESTS_OAUTH_HOST_FAILURE = (
     '(Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7f0>: '
     "Failed to resolve 'oauth2.googleapis.com' ([Errno -3] Temporary failure in name resolution)\"))"
 )
-_UNREACHABLE_FINAL_MESSAGE = (
-    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries"
-)
+_UNAVAILABLE_FINAL_MESSAGE = "⚠️ Model provider temporarily unavailable after automatic retries"
+_UNREACHABLE_FINAL_MESSAGE = "⚠️ The model request failed with a network error or timeout."
 
 
 class _RefreshFailingCredentials(Credentials):
@@ -2206,7 +2205,7 @@ class _RefreshFailingCredentials(Credentials):
             google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True),
             ProviderUnavailable,
             None,
-            _UNREACHABLE_FINAL_MESSAGE,
+            _UNAVAILABLE_FINAL_MESSAGE,
         ),
         (
             google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."),
@@ -2225,9 +2224,10 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     status_code: int | None,
     final_message: str,
 ) -> None:
-    """A network failure while minting the Vertex token is retryable and reports the provider as unreachable.
+    """Vertex token refresh failures map to network, unavailable, or authentication errors.
 
-    Rejected credentials end as an authentication failure.
+    A transport failure reports a network error, a retryable token-endpoint reply ends as temporary
+    unavailability, and rejected credentials end as an authentication failure.
     """
     monkeypatch.setattr(google.auth, "default", lambda scopes: (_RefreshFailingCredentials(failure), "adc-project"))  # noqa: ARG005
     config_path = tmp_path / "config.yaml"

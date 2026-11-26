@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 _PROVIDER_UNREACHABLE = (
-    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries. "
+    "⚠️ The model request failed with a network error or timeout. "
     "If this keeps happening, check the MindRoom host's internet connection."
 )
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."

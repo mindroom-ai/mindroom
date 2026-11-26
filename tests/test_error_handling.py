@@ -94,7 +94,7 @@ _PROVIDER_UNAVAILABLE_MESSAGE = (
     "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 )
 _PROVIDER_UNREACHABLE_MESSAGE = (
-    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries. "
+    "⚠️ The model request failed with a network error or timeout. "
     "If this keeps happening, check the MindRoom host's internet connection."
 )
 _RATE_LIMITED_MESSAGE = "⏱️ Rate limited. Please wait a moment and try again."

@@ -358,16 +358,15 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         aiohttp.ClientError,
         google_auth.TransportError,
     )
-    if any(
-        isinstance(cause, transport) or (isinstance(cause, google_auth.RefreshError) and cause.retryable)
-        for cause in chain
-    ):
+    if any(isinstance(cause, transport) for cause in chain):
         # A timeout as either HTTP client raises it, or as aiohttp and the socket layer raise it: the OpenAI and
         # Claude SDKs send through httpx2, the Gemini and Ollama SDKs and the CLI login refreshes through httpx.
         timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError)
         timed_out = any(isinstance(cause, timeouts) for cause in chain)
         code = TRANSPORT_TIMEOUT if timed_out else CONNECTION_ERROR
         return ProviderUnavailable(failure_text(error), provider=provider, code=code)
+    if any(isinstance(cause, google_auth.RefreshError) and cause.retryable for cause in chain):
+        return ProviderUnavailable(failure_text(error), provider=provider)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
     for cause in chain:

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
@@ -460,6 +461,22 @@ def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
 
     assert type(error) is ProviderUnavailable
     assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)
+
+
+def test_google_retryable_refresh_error_without_transport_cause_has_no_network_code() -> None:
+    """A Google token-endpoint 503 (retryable RefreshError with no transport cause) is not marked as a network error."""
+    from google.auth import exceptions as google_auth  # noqa: PLC0415
+
+    refresh_503 = provider_failure(
+        google_auth.RefreshError("HTTP 503 Service Unavailable", retryable=True),
+        provider="VertexAI",
+    )
+    assert type(refresh_503) is ProviderUnavailable
+    assert (refresh_503.retryable, refresh_503.code) == (True, None)
+
+    transport_err = provider_failure(google_auth.TransportError("token endpoint unreachable"), provider="VertexAI")
+    assert type(transport_err) is ProviderUnavailable
+    assert (transport_err.retryable, transport_err.code) == (True, CONNECTION_ERROR)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
