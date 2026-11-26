@@ -224,7 +224,7 @@ def test_baidusearch_formatting_language_normalization_and_empty_results(monkeyp
         if not keyword:
             return None
         return [
-            {"title": "Result 1", "url": "https://example.cn/1", "abstract": "Summary 1"},
+            {"title": "百度搜索结果", "url": "https://example.cn/1", "abstract": "Summary 1"},
             {"title": "Result 2"},
         ]
 
@@ -236,10 +236,12 @@ def test_baidusearch_formatting_language_normalization_and_empty_results(monkeyp
     assert baidusearch_module._normalize_language("not-a-language") == "zh"
 
     toolkit = baidusearch_tools()(fixed_max_results=3, fixed_language="English")
-    payload = json.loads(toolkit.baidu_search("python", max_results=10, language="fr"))
+    raw = toolkit.baidu_search("python", max_results=10, language="fr")
+    assert "百度搜索结果" in raw
+    payload = json.loads(raw)
 
     assert payload == [
-        {"title": "Result 1", "url": "https://example.cn/1", "abstract": "Summary 1", "rank": "1"},
+        {"title": "百度搜索结果", "url": "https://example.cn/1", "abstract": "Summary 1", "rank": "1"},
         {"title": "Result 2", "url": "", "abstract": "", "rank": "2"},
     ]
     assert json.loads(toolkit.baidu_search("")) == []

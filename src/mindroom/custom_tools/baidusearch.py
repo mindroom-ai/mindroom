@@ -82,4 +82,4 @@ class BaiduSearchTools(Toolkit):
             }
             for idx, item in enumerate(results, 1)
         ]
-        return json.dumps(formatted, indent=2)
+        return json.dumps(formatted, indent=2, ensure_ascii=False)

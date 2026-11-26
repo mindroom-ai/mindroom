@@ -77,7 +77,6 @@ Not included:
         tools:
           - openclaw_compat
           - memory
-          - python
 
     memory:
       search:

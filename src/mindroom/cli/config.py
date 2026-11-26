@@ -1464,7 +1464,7 @@ tool_approval:
       action: require_approval
 
 defaults:
-  # Execution tools (shell, filesystem, python, docker) run directly in the
+  # Execution tools (shell, filesystem, docker) run directly in the
   # MindRoom process. For isolation, run them in a sandboxed worker instead:
   # deploy the sandbox runner (Docker Compose or Kubernetes) and remove this
   # line — or replace [] with the tools to route, e.g. [shell, filesystem].

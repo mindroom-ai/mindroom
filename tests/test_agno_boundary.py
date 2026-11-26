@@ -70,7 +70,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_agent_personas.py",
         "test_agent_tool_calls.py",
         "test_agent_turn_runtime.py",
-        "test_agent_worker_routing.py",
         "test_agentql_tools.py",
         "test_agents.py",
         "test_agno_tool_wrapping.py",
