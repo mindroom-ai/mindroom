@@ -17,7 +17,7 @@ from mindroom import event_loop_stall
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.api import sandbox_forkserver, sandbox_runner
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import log_reply_error
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.hooks import HookRegistry
 from mindroom.llm.errors import QUOTA_EXHAUSTED, RateLimited
@@ -274,7 +274,7 @@ async def test_provider_request_retried_keeps_its_name_and_fields_for_either_rea
 def test_agent_error_keeps_its_name_and_fields() -> None:
     """A failed reply logs the pinned error with the provider error's class name."""
     with capture_logs() as logs:
-        get_user_friendly_error_message(RateLimited("slow down", provider="Scripted"), "general")
+        log_reply_error(RateLimited("slow down", provider="Scripted"), "general")
 
     assert _assert_logged(logs, "agent_error")["error_type"] == "RateLimited"
 
@@ -283,8 +283,8 @@ def test_agent_error_names_a_refused_accounts_error_code() -> None:
     """A provider error logs its MindRoom code, status, and provider; any other error logs them as null."""
     quota = classify_provider_error("Insufficient credits", provider="Scripted", status_code=402)
     with capture_logs() as logs:
-        get_user_friendly_error_message(quota, "general")
-        get_user_friendly_error_message(RuntimeError("boom"), "general")
+        log_reply_error(quota, "general")
+        log_reply_error(RuntimeError("boom"), "general")
 
     provider_entry, other_entry = [entry for entry in logs if entry["event"] == "agent_error"]
     assert (provider_entry["error_code"], provider_entry["status_code"], provider_entry["provider"]) == (

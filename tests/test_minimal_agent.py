@@ -33,7 +33,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
-from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
+from mindroom.error_handling import MinimalModeUnavailableError, describe_reply_error
 from mindroom.hooks import EnrichmentItem
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.events import RunFinished
@@ -245,8 +245,8 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
 
-    message = get_user_friendly_error_message(raised.value, "helper")
-    assert f"Error: {reason}. " in message
+    message = describe_reply_error(raised.value).plain_text
+    assert f"⚠️ {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
     assert ("Start a new subagent without minimal." if delegation_depth else "/mode helper standard") in message
     assert raised.value.__cause__ is failure

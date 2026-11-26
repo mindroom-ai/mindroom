@@ -7096,6 +7096,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.turns.interactive_selection"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.hooks",

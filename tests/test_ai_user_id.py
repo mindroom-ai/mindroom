@@ -45,7 +45,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import _ReplyErrorInfo, describe_reply_error
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.request_messages import TurnMessages
@@ -1630,7 +1630,13 @@ class TestUserIdPassthrough:
             runtime_paths,
         )
 
-        assert response.text == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
+        assert (
+            response.text
+            == describe_reply_error(
+                error,
+                runtime_paths=runtime_paths,
+            ).plain_text
+        )
         [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         assert stored.metadata["mindroom_original_status"] == "error"
@@ -1639,8 +1645,8 @@ class TestUserIdPassthrough:
     async def test_ai_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:
         """Generic ai helpers should reject configured team names explicitly."""
         with patch(
-            "mindroom.ai.get_user_friendly_error_message",
-            return_value="friendly-error",
+            "mindroom.ai.log_reply_error",
+            return_value=_ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
         ) as mock_friendly_error:
             response = await ai_response(
                 replace(make_turn_context("ultimate", session_id="session1"), prompt="test"),
@@ -1648,7 +1654,7 @@ class TestUserIdPassthrough:
                 _config_with_team(),
             )
 
-        assert response.text == "friendly-error"
+        assert response.text == "⚠️ friendly-error"
         error = mock_friendly_error.call_args.args[0]
         assert isinstance(error, ValueError)
         assert "configured team" in str(error)
@@ -1658,8 +1664,8 @@ class TestUserIdPassthrough:
     async def test_stream_agent_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:
         """Streaming agent helpers should reject configured team names explicitly."""
         with patch(
-            "mindroom.ai.get_user_friendly_error_message",
-            return_value="friendly-error",
+            "mindroom.ai.log_reply_error",
+            return_value=_ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary="friendly-error"),
         ) as mock_friendly_error:
             chunks = [
                 chunk
@@ -1671,7 +1677,7 @@ class TestUserIdPassthrough:
             ]
 
         error = mock_friendly_error.call_args.args[0]
-        assert chunks == [FailedReply("friendly-error", error)]
+        assert chunks == [FailedReply("⚠️ friendly-error", error)]
         assert isinstance(error, ValueError)
         assert "configured team" in str(error)
         assert "team/ultimate" in str(error)
@@ -1721,8 +1727,8 @@ class TestUserIdPassthrough:
         )
 
         assert response.text == (
-            "[general] ⚠️ This model's safeguards blocked the request. "
-            "Choose a different model (`/model list`) or revise the prompt, then try again."
+            "⚠️ Blocked by model safeguards — scripted-model's safeguards blocked this request. "
+            "Choose another model (/model list) or revise the prompt."
         )
         assert len(model.requests) == 1
 

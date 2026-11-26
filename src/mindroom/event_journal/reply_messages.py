@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.reply_lifecycle import (
     NoteKind,
@@ -63,8 +63,11 @@ def _ids(stored: object) -> tuple[str, ...]:
 def _owed_json(owed: OwedWrite | None) -> str | None:
     if owed is None:
         return None
+    payload: dict[str, Any] = {"span_id": owed.span_id, "note": owed.note, "text": owed.text}
+    if owed.error_info is not None:
+        payload["error_info"] = dict(owed.error_info)
     return json.dumps(
-        {"span_id": owed.span_id, "note": owed.note, "text": owed.text},
+        payload,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -79,10 +82,12 @@ def _owed(stored: object) -> OwedWrite | None:
         raise TypeError(msg)
     data = cast("dict[str, object]", raw)
     text = data.get("text")
+    raw_error_info = data.get("error_info")
     return OwedWrite(
         span_id=str(data["span_id"]),
         note=NoteKind(str(data["note"])),
         text=text if isinstance(text, str) else None,
+        error_info=dict(raw_error_info) if isinstance(raw_error_info, dict) else None,
     )
 
 
