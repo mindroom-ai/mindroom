@@ -32,7 +32,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from itertools import count
@@ -1662,6 +1662,14 @@ def delivered_matrix_event(
     return DeliveredMatrixEvent(
         event_id=event_id,
         content_sent={} if content is None else dict(content),
+    )
+
+
+def patch_send_file_outcome(event_id: str = "$file_evt") -> AbstractContextManager[AsyncMock]:
+    """Patch ``attachments.send_file_message_outcome`` to return one delivered event."""
+    return patch(
+        "mindroom.custom_tools.attachments.send_file_message_outcome",
+        new=AsyncMock(return_value=delivered_matrix_event(event_id)),
     )
 
 
