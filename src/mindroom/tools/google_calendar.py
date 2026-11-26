@@ -58,20 +58,12 @@ if TYPE_CHECKING:
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_calendar",
     function_names=(
-        "check_availability",
-        "create_event",
-        "delete_event",
-        "fetch_all_events",
-        "find_available_slots",
-        "get_event",
-        "get_event_attendees",
-        "list_calendars",
-        "list_events",
-        "move_event",
-        "quick_add_event",
-        "respond_to_event",
-        "search_events",
-        "update_event",
+        "google_calendar_read",
+        "google_calendar_write",
+    ),
+    action_scoped_grants=(
+        "google_calendar_read",
+        "google_calendar_write",
     ),
 )
 def google_calendar_tools() -> type[GoogleCalendarTools]:

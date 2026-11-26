@@ -318,7 +318,7 @@ def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(
 
     tool = get_tool_by_name("secondary_gmail", runtime_paths, worker_target=None, tools=tools)
 
-    assert "secondary_get_latest_emails" in tool.functions
+    assert "secondary_gmail_read" in tool.functions
     assert requested == ["gmail", "gmail"]
 
 
