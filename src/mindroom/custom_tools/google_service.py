@@ -198,8 +198,6 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, _ThreadLocalGoogleServiceMixin
         *,
         name: str,
         tools: list[Callable[..., str]],
-        instructions: str | None = None,
-        quota_project_id: str | None = None,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
@@ -207,6 +205,8 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, _ThreadLocalGoogleServiceMixin
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         provided_creds = kwargs.pop("creds", None)
+        instructions = cast("str | None", kwargs.pop("instructions", None))
+        quota_project_id = cast("str | None", kwargs.pop("quota_project_id", None))
         if credentials_manager is None:
             msg = f"{type(self).__name__} requires an explicit credentials_manager"
             raise RuntimeError(msg)

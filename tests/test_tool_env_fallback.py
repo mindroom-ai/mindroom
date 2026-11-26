@@ -65,7 +65,7 @@ def _env_reads(source: str) -> set[str]:
 
 
 def _module_env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads, from its source file."""
+    """Return the variables one module reads from the process environment, from its source file."""
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     assert spec.origin is not None
@@ -90,13 +90,48 @@ def _agno_modules(tool_name: str) -> set[str]:
     return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
 
 
+def _native_modules(tool_name: str) -> set[str]:
+    """Return the MindRoom toolkit modules that define a native built-in tool's class and its bases."""
+    factory = builtin_tool_registry().entries[tool_name].factory
+    if factory is None:
+        return set()
+    try:
+        toolkit_class = factory()
+    except ImportError:
+        registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
+        return {
+            node.module
+            for node in ast.walk(registration)
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("mindroom.")
+            and node.module != "mindroom.tool_system.authoring"
+        }
+    return {
+        klass.__module__
+        for klass in inspect.getmro(toolkit_class)
+        if klass.__module__.startswith("mindroom.") and klass.__module__ != "mindroom.tool_system.authoring"
+    }
+
+
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
+    """Each variable an Agno toolkit reads is declared or allowlisted; native env-configured toolkits read none directly."""
     modules = _agno_modules(tool_name)
+    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
+    if not modules:
+        if declared:
+            native_modules = _native_modules(tool_name)
+            assert native_modules, f"{tool_name} declares env vars {sorted(declared)} without a native toolkit module"
+            native_reads = set().union(*map(_module_env_reads, native_modules))
+            assert native_reads == set(), (
+                f"{tool_name} is a native env-configured toolkit and must receive env values via metadata, "
+                f"not read os.environ directly: {sorted(native_reads)}"
+            )
+        return
+
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
-    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
 
     assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
         "undeclared": set(),
