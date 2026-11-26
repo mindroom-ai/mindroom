@@ -19,6 +19,7 @@ from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.guarded_rooms import send_refused
+from mindroom.matrix.inline_media import attach_inline_media
 from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
     fit_reasoning_to_ordinary_event,
@@ -358,11 +359,14 @@ async def _prepare_matrix_message(
     """Prepare one message, rebuilding once if encryption turns on while yielding."""
     rooms = client.rooms
     cache_bypass = rooms.get(room_id) is None and not room_encrypted
+    if content_is_prepared:
+        return _PreparedMatrixMessage(content, cache_bypass)
 
-    content_sent = content
-    if not content_is_prepared:
+    while True:
+        # Attach inline media keys before sizing so sidecar/reasoning limits see the full wire payload.
+        attached = attach_inline_media(content, room_id, room_encrypted=room_encrypted)
         # Reasoning must not push an ordinary-size message or edit into a sidecar.
-        fitted = fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
+        fitted = fit_reasoning_to_ordinary_event(client, room_id, attached, room_encrypted=room_encrypted)
         try:
             content_sent = await prepare_large_message(
                 client,
@@ -380,29 +384,19 @@ async def _prepare_matrix_message(
         # If encryption became enabled, rebuild from the semantic source once:
         # the first upload remains unreferenced and the sent event points only
         # at encrypted bytes. Matrix room encryption cannot later be disabled.
-        if not room_encrypted and content_sent is not fitted:
-            encryption_outcome = await resolve_room_encryption_outcome(
-                client,
-                room_id,
-                operation=operation,
-            )
-            if isinstance(encryption_outcome, MatrixDeliveryFailure):
-                return encryption_outcome
-            room_encrypted = encryption_outcome
-            cache_bypass = rooms.get(room_id) is None and not room_encrypted
-            if room_encrypted:
-                try:
-                    content_sent = await prepare_large_message(
-                        client,
-                        room_id,
-                        fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=True),
-                        room_encrypted=True,
-                        sidecar_required=sidecar_required,
-                    )
-                except MatrixEventTooLargeError as error:
-                    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
-
-    return _PreparedMatrixMessage(content_sent, cache_bypass)
+        if room_encrypted or content_sent is fitted:
+            return _PreparedMatrixMessage(content_sent, cache_bypass)
+        encryption_outcome = await resolve_room_encryption_outcome(
+            client,
+            room_id,
+            operation=operation,
+        )
+        if isinstance(encryption_outcome, MatrixDeliveryFailure):
+            return encryption_outcome
+        room_encrypted = encryption_outcome
+        cache_bypass = rooms.get(room_id) is None and not room_encrypted
+        if not room_encrypted:
+            return _PreparedMatrixMessage(content_sent, cache_bypass)
 
 
 async def prepare_message_content(
@@ -418,11 +412,12 @@ async def prepare_message_content(
     )
     if isinstance(encryption_outcome, MatrixDeliveryFailure):
         return encryption_outcome
+    attached = attach_inline_media(content, room_id, room_encrypted=encryption_outcome)
     try:
         return await prepare_large_message(
             client,
             room_id,
-            content,
+            attached,
             room_encrypted=encryption_outcome,
             prepare_for_encrypted_delivery=True,
         )

@@ -18,6 +18,7 @@ from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from mindroom.constants import INLINE_MEDIA_CONTENT_KEY
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
 from mindroom.matrix.identity import valid_matrix_server_name
 
@@ -669,8 +670,9 @@ def build_matrix_edit_content(event_id: str, new_content: Mapping[str, Any]) -> 
     """Wrap replacement content in one Matrix ``m.replace`` edit envelope."""
     replacement_content = dict(new_content)
     replacement_content.pop("m.relates_to", None)
+    outer_content = {k: v for k, v in replacement_content.items() if k != INLINE_MEDIA_CONTENT_KEY}
     return {
-        **replacement_content,
+        **outer_content,
         "m.new_content": replacement_content,
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }

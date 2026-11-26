@@ -1852,7 +1852,7 @@ async def test_inline_image_returns_embeddable_markdown(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
-    ["non-image", "encrypted-room", "upload-failure", "encrypted-upload", "read-limit", "out-of-context"],
+    ["non-image", "encrypted-no-e2ee", "upload-failure", "mismatched-file-url", "read-limit", "out-of-context"],
 )
 async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) -> None:
     """Invalid images and unsafe uploads produce errors, never an embeddable URL."""
@@ -1866,11 +1866,13 @@ async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) ->
     )
     assert record is not None
     context = _tool_context(tmp_path, attachment_ids=() if case == "out-of-context" else (record.attachment_id,))
-    context.client.rooms[context.room_id].encrypted = case == "encrypted-room"
+    context.client.rooms[context.room_id].encrypted = case in {"encrypted-no-e2ee", "mismatched-file-url"}
+    if case == "encrypted-no-e2ee":
+        context.client.olm = None
     upload_result = (
         MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, "upload error")
         if case == "upload-failure"
-        else ("mxc://hs/abc", {"file": {"key": "secret"}})
+        else ("mxc://hs/abc", {"file": {"url": "mxc://hs/other"}})
     )
     with (
         patch(
@@ -1883,9 +1885,9 @@ async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) ->
         payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))
     assert payload["status"] == "error"
     assert "markdown" not in payload
-    if case not in {"upload-failure", "encrypted-upload"}:
+    if case not in {"upload-failure", "mismatched-file-url"}:
         upload.assert_not_awaited()
-    if case in {"encrypted-room", "encrypted-upload"}:
+    if case == "encrypted-no-e2ee":
         assert "matrix_message" in payload["message"]
 
 
@@ -1912,13 +1914,14 @@ async def test_inline_image_rejects_non_image_bytes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inline_image_checks_encryption_before_resolving(tmp_path: Path) -> None:
-    """Encrypted rooms must not resolve or retain a workspace file."""
+async def test_inline_image_checks_encryption_guard_before_resolving(tmp_path: Path) -> None:
+    """Encrypted rooms without E2EE support must not resolve or retain a workspace file."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "cat.png").write_bytes(image_bytes())
     context = _tool_context(tmp_path)
     context.client.rooms[context.room_id].encrypted = True
+    context.client.olm = None
     with (
         patch("mindroom.custom_tools.attachments.resolve_send_attachment", wraps=resolve_send_attachment) as resolve,
         tool_runtime_context(context),
