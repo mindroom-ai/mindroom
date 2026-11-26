@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -18,6 +19,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.contacts.store import ContactSide
 from mindroom.custom_tools.script import ScriptTools
 from mindroom.delegation.personas import _inline_persona
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.workers.protocol import ExecuteRequest, LeaseRequest
 
 if TYPE_CHECKING:
@@ -244,6 +246,8 @@ def _load_rules(tmp_path: Path, *rules: str | tuple[str, str]) -> Config:
         ("save_file", "save_file is now write_file"),
         ("search_*", "search_files is now find_files"),
         ("replace_file_chunk", "replace_file_chunk is now edit_file"),
+        ("list_files", "list_files is now ls"),
+        ("*_files", "list_files is now ls"),
         # It still matches read_file, but neither of the two writes it used to gate.
         ("*a*", "save_file is now write_file"),
         ("*_chunk", "replace_file_chunk is now edit_file"),
@@ -277,8 +281,61 @@ def test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails
 
 @pytest.mark.parametrize(
     "match",
-    ["write_file", "edit_file", "grep", "list_files", "*", "*_file", "read_*", "read_file*", "*_files"],
+    ["write_file", "edit_file", "grep", "ls", "*", "*_file", "read_*", "read_file*", "[sf]*_files"],
 )
 def test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load(tmp_path: Path, match: str) -> None:
     """Rules for the new names and globs matching both names of a rename load."""
     assert _load_rules(tmp_path, match).tool_approval.rules[0].match == match
+
+
+@pytest.mark.parametrize("match", ["list_files", "*_files"])
+def test_approval_rules_for_a_retired_file_name_offered_elsewhere_load(match: str) -> None:
+    """A retired filesystem name stays allowed when another registered toolkit still offers it."""
+    builtins = builtin_tool_registry().entries
+    custom_tool = replace(builtins["filesystem"], name="custom_lister", function_names=("list_files",))
+    tools = ToolRegistry({**builtins, "custom_lister": custom_tool})
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {"a": {"display_name": "A", "tools": ["filesystem"]}},
+            "tool_approval": {"rules": [{"match": match, "action": "require_approval"}]},
+        },
+    )
+    with pytest.raises(ConfigRuntimeValidationError, match="list_files is now ls"):
+        config.validate_tool_registry(ToolRegistry(builtins))
+    config.validate_tool_registry(tools)
+
+
+def test_retired_file_approval_check_skips_configs_without_filesystem_and_checks_presets(tmp_path: Path) -> None:
+    """Retired filesystem approval checks skip configs without filesystem and still run for presets and templates."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    without_filesystem = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["shell"], "include_default_tools": False}},
+        "tool_approval": {
+            "rules": [
+                {"match": "list_files", "action": "require_approval"},
+                {"match": "save_file", "action": "require_approval"},
+            ],
+        },
+    }
+    loaded = Config.validate_with_runtime(without_filesystem, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == ["list_files", "save_file"]
+
+    via_preset = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": ["openclaw_compat"]},
+        "agents": {},
+        "tool_approval": {"rules": [{"match": "save_file", "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="save_file is now write_file"):
+        Config.validate_with_runtime(via_preset, runtime_paths)
+
+    via_personal_agent = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {},
+        "personal_agents": {"personal": {"agent": {"display_name": "Personal", "tools": ["filesystem"]}}},
+        "tool_approval": {"rules": [{"match": "save_file", "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="save_file is now write_file"):
+        Config.validate_with_runtime(via_personal_agent, runtime_paths)

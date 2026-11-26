@@ -1655,16 +1655,22 @@ class Config(BaseModel):
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
-        elsewhere = {
-            function
-            for name in tools
-            if name != "filesystem" and (metadata := tools.get(name)) is not None
-            for function in metadata.function_names or ()
-        }
-        globs = [rule.match for rule in self.tool_approval.rules]
-        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
-            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
-            raise ToolConfigOverrideError(msg)
+        enabled_toolkits = (
+            self._enabled_approval_toolkits({entry.name for _, entry in entries}, tools)
+            if self.tool_approval.rules
+            else set()
+        )
+        if self.tool_approval.rules and "filesystem" in enabled_toolkits:
+            elsewhere = {
+                function
+                for name in tools
+                if name != "filesystem" and (metadata := tools.get(name)) is not None
+                for function in metadata.function_names or ()
+            }
+            globs = [rule.match for rule in self.tool_approval.rules]
+            if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
+                msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+                raise ToolConfigOverrideError(msg)
         if (
             any(entry.name == "triggers" for _, entry in entries)
             and (
@@ -1690,20 +1696,33 @@ class Config(BaseModel):
         ):
             raise ToolConfigOverrideError(workflow_error)
         if self.tool_approval.rules:
-            self._validate_retired_consolidated_approval_rules({entry.name for _, entry in entries}, tools)
+            self._validate_retired_consolidated_approval_rules(enabled_toolkits, tools)
 
-    def _validate_retired_consolidated_approval_rules(
+    def _enabled_approval_toolkits(
         self,
         authored_tool_names: set[str],
         tools: ToolRegistry,
-    ) -> None:
-        """Fail closed when approval rules target retired function names of enabled consolidated toolkits."""
+    ) -> set[str]:
+        """Return toolkits enabled across authored entries, personal-agent templates, and resolved agent tools."""
+        # why-lazy: config loads before the runtime tool registry and its dependencies.
         from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
-        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
-        enabled_toolkits = set(authored_tool_names)
+        enabled_toolkits = set(self.expand_tool_names(list(authored_tool_names)))
+        for template in self.personal_agents.values():
+            enabled_toolkits.update(self.expand_tool_names([entry.name for entry in template.agent.tools]))
         for agent_name in self.agents:
             enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
+        return enabled_toolkits
+
+    def _validate_retired_consolidated_approval_rules(
+        self,
+        enabled_toolkits: set[str],
+        tools: ToolRegistry,
+    ) -> None:
+        """Fail closed when approval rules target retired function names of enabled consolidated toolkits."""
+        # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
         for toolkit_name in sorted(enabled_toolkits):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             metadata = tools.entries.get(toolkit_name)

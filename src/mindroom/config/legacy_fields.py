@@ -302,13 +302,15 @@ _RETIRED_FILE_SETTINGS = {
 #   list_files, search_files, or search_content, the functions of Agno's FileTools.
 # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
 #   edit_file, read_file, ls, find_files, and grep.
-# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
-#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
-#   replacement, so the rule that decided a call still decides it.
+# Handling: When the config enables `filesystem`, reject the rules when the first one matching a retired name is
+#   not the first one matching its replacement, unless another registered toolkit still offers the retired name,
+#   naming that rule and the replacement, so the rule that decided a call still decides it.
 # Coverage:
 #   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
 #   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
-#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
+#   tests/test_filesystem_tool_config.py::test_approval_rules_for_a_retired_file_name_offered_elsewhere_load,
+#   tests/test_filesystem_tool_config.py::test_retired_file_approval_check_skips_configs_without_filesystem_and_checks_presets.
 def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
     """Return the rule that decided a retired file function but not its replacement, as text, or None."""
     for old, new in _RETIRED_FILE_FUNCTIONS.items():
