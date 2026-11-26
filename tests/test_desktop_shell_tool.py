@@ -18,6 +18,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import desktop_shell as desktop_shell_mod
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.client import DesktopRequestError
+from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopCommand, DesktopResponse, EncryptedDesktopMedia
 from mindroom.desktop.shell import DesktopShell
 from mindroom.desktop.shell_actions import execute_shell
@@ -34,8 +35,15 @@ from mindroom.tools.desktop import desktop_tools
 from tests.desktop_helpers import ALICE
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _clear_legacy_stderr_cache() -> Iterator[None]:
+    desktop_shell_mod._LEGACY_COMBINED_STDERR_TARGETS.clear()
+    yield
+    desktop_shell_mod._LEGACY_COMBINED_STDERR_TARGETS.clear()
 
 
 def _target() -> ResolvedWorkerTarget:
@@ -261,6 +269,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         "command": "git commit -m 'hello world'",
         "cwd": "/Users/me/repo",
         "timeout_seconds": 2,
+        "separate_stderr": True,
     }
     assert recorded[0][1] == 120.0
 
@@ -269,17 +278,17 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         res2 = await tool.run_desktop_shell("make test", tail=1, timeout=1)
     assert res2 == "Exit code 2\nOutput:\npartial\nStderr:\nboom\ndetail"
     assert meta2 == {"exit_code": 2}
-    assert recorded[1][0].parameters == {"command": "make test", "timeout_seconds": 1}
+    assert recorded[1][0].parameters == {"command": "make test", "timeout_seconds": 1, "separate_stderr": True}
 
     # Exit 0 with state="killed" (killed locally on Mac) prefixes killed notice.
     res3 = await tool.run_desktop_shell(["echo hi && pwd"])
     assert res3 == "Command was killed on the desktop.\ncleaned up"
-    assert recorded[2][0].parameters == {"command": "echo hi && pwd", "timeout_seconds": 2}
+    assert recorded[2][0].parameters == {"command": "echo hi && pwd", "timeout_seconds": 2, "separate_stderr": True}
 
     # JSON-encoded argv string is also normalized.
     res4 = await tool.run_desktop_shell('["ls", "-la"]')
     assert res4 == "ok"
-    assert recorded[3][0].parameters == {"command": "ls -la", "timeout_seconds": 2}
+    assert recorded[3][0].parameters == {"command": "ls -la", "timeout_seconds": 2, "separate_stderr": True}
 
 
 @pytest.mark.asyncio
@@ -367,11 +376,21 @@ async def test_slow_command_polling_tail_reset_progress_and_finished_page_draini
 
 @pytest.mark.asyncio
 async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An older bridge without stderr_next_offset never gets stderr_offset in check_shell."""
+    """An older helper rejecting separate_stderr is cached, retried once with a fresh request_id, and polled legacy."""
     _fast_timers(monkeypatch)
-    replies = iter(
-        [
-            _shell_reply(
+
+    def handler(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell" and "separate_stderr" in cmd.parameters:
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                False,
+                error="Unexpected desktop parameters: separate_stderr.",
+            )
+        if cmd.action == "run_shell" and cmd.parameters["command"] == "legacy-cmd":
+            return _shell_reply(
+                request_id=cmd.request_id,
+                session_id=cmd.session_id,
                 legacy=True,
                 state="running",
                 handle="shell:legacy",
@@ -380,8 +399,11 @@ async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkey
                 output_start=0,
                 next_offset=6,
                 output_bytes=6,
-            ),
-            _shell_reply(
+            )
+        if cmd.action == "check_shell":
+            return _shell_reply(
+                request_id=cmd.request_id,
+                session_id=cmd.session_id,
                 legacy=True,
                 state="completed",
                 handle="shell:legacy",
@@ -390,16 +412,28 @@ async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkey
                 output_start=6,
                 next_offset=12,
                 output_bytes=12,
-            ),
-        ],
-    )
-    tool, recorded = _setup_tool(monkeypatch, lambda _t, _c, _to: next(replies))
+            )
+        return _shell_reply(
+            request_id=cmd.request_id,
+            session_id=cmd.session_id,
+            legacy=True,
+            output="second\n",
+        )
+
+    tool, recorded = _setup_tool(monkeypatch, handler)
     result = await tool.run_desktop_shell("legacy-cmd")
 
     assert result == "part1\npart2"
-    assert recorded[0][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2}
-    assert recorded[1][0].parameters == {"handle": "shell:legacy", "offset": 6}
-    assert "stderr_offset" not in recorded[1][0].parameters
+    assert recorded[0][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2, "separate_stderr": True}
+    assert recorded[1][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2}
+    assert recorded[1][0].request_id != recorded[0][0].request_id
+    assert recorded[2][0].parameters == {"handle": "shell:legacy", "offset": 6}
+    assert "stderr_offset" not in recorded[2][0].parameters
+
+    # Second call against the same cached legacy target skips separate_stderr immediately.
+    result2 = await tool.run_desktop_shell("second-cmd")
+    assert result2 == "second"
+    assert recorded[3][0].parameters == {"command": "second-cmd", "timeout_seconds": 2}
 
 
 @pytest.mark.asyncio
@@ -600,6 +634,13 @@ async def test_cancel_kills_running_handle_and_recovers_handle_before_start_repl
             start_req_id.append(cmd.request_id)
             run_sent.set()
             await asyncio.Event().wait()
+        if cmd.action == "kill_shell" and "request_id" in cmd.parameters:
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                False,
+                error="Unexpected desktop parameters: request_id.",
+            )
         if cmd.action == "request_status":
             recorded_resp = _shell_reply(
                 request_id=start_req_id[0],
@@ -818,3 +859,273 @@ async def test_end_to_end_run_desktop_shell_through_real_desktop_shell_actions(
         assert fail == "Exit code 5\nOutput:\nbefore\nStderr:\nerr-detail"
     finally:
         await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_approval_prompt_is_open_dismisses_prompt_and_never_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancelling run_desktop_shell while Mac approval is open sends kill_shell(request_id=...) and never runs."""
+    _fast_timers(monkeypatch)
+    shell = DesktopShell(
+        environment={"PATH": os.environ["PATH"]},
+        clock=time.time,
+        monotonic_clock=time.monotonic,
+    )
+    marker = tmp_path / "should-not-exist"
+    pending_visible = asyncio.Event()
+
+    async def bridge_handler(_target: object, command: DesktopCommand, _timeout: float) -> DesktopResponse:
+        if command.action == "run_shell":
+            task = asyncio.create_task(execute_shell(AsyncMock(), shell, command))
+            for _ in range(100):
+                if shell.status()["pending"] is not None:
+                    pending_visible.set()
+                    break
+                await asyncio.sleep(0.01)
+            result = await task
+            return DesktopResponse(command.request_id, command.session_id, True, result=result)
+        result = await execute_shell(AsyncMock(), shell, command)
+        return DesktopResponse(command.request_id, command.session_id, True, result=result)
+
+    tool, recorded = _setup_tool(monkeypatch, bridge_handler)
+    try:
+        run_task = asyncio.create_task(tool.run_desktop_shell(f"touch {marker}", cwd=str(tmp_path)))
+        await asyncio.wait_for(pending_visible.wait(), timeout=2)
+        assert shell.status()["pending"] is not None
+
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+        assert shell.status()["pending"] is None
+        assert not marker.exists()
+        start_req_id = recorded[0][0].request_id
+        assert any(cmd.action == "kill_shell" and cmd.parameters == {"request_id": start_req_id} for cmd, _ in recorded)
+    finally:
+        await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_timeout_kill_does_not_report_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When timeout stop cannot be confirmed, report honestly that the remote command may still be running."""
+    _fast_timers(monkeypatch)
+
+    def still_running(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:stuck", exit_code=None, output="partial\n")
+        if cmd.action == "kill_shell":
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                True,
+                result={"state": "killed", "handle": "shell:stuck"},
+            )
+        return _shell_reply(
+            state="running",
+            handle="shell:stuck",
+            exit_code=None,
+            output="",
+            output_start=8,
+            next_offset=8,
+            output_bytes=8,
+        )
+
+    tool, _ = _setup_tool(monkeypatch, still_running)
+    res = await tool.run_desktop_shell("unstoppable", timeout=0.05)
+    assert isinstance(res, str)
+    assert "Stopped after" not in res
+    assert "could not be confirmed" in res
+    assert "may still be running" in res
+    assert "partial" in res
+
+    # Also verify mindroom_output_path refuses to save and keeps existing file intact.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "out.txt"
+    existing.write_text("keep")
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    monkeypatch.setattr(desktop_shell_mod, "shell_call_timeout", lambda _t: 0.05)
+    tool2, _ = _setup_tool(monkeypatch, still_running)
+    fn = next(fn for fn in adapt_toolkit(tool2).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="unstoppable", timeout=1, mindroom_output_path="out.txt"),
+    )["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    assert "Stopped after" not in receipt["error"]
+    assert "could not be confirmed" in receipt["error"]
+    assert "No output file was saved." in receipt["error"]
+    assert existing.read_text() == "keep"
+
+
+@pytest.mark.asyncio
+async def test_failed_attachment_download_preserves_request_id_and_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failed attachment download preserves response.request_id and request_status recovery instruction without re-running."""
+    out_bytes = b"big-output" * 100
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop_shell.download_encrypted_media",
+        AsyncMock(side_effect=DesktopMediaError("download timed out")),
+    )
+    tool, recorded = _setup_tool(
+        monkeypatch,
+        lambda _t, cmd, _to: _shell_reply(
+            request_id=cmd.request_id,
+            session_id=cmd.session_id,
+            exit_code=3,
+            output_bytes=len(out_bytes),
+            output_attachment=_media(out_bytes).to_content(),
+        ),
+    )
+    with structured_tool_result() as meta:
+        res = await tool.run_desktop_shell("big-cmd")
+    req_id = recorded[0][0].request_id
+    assert isinstance(res, str)
+    assert res.startswith("Error:")
+    assert req_id in res
+    assert f'desktop(action="request_status", request_id={req_id!r})' in res
+    assert "without re-running" in res
+    assert "exit code 3" in res
+    assert meta == {"exit_code": 3}
+
+    # Same recovery hint is preserved in error receipt when mindroom_output_path is set.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    tool2, recorded2 = _setup_tool(
+        monkeypatch,
+        lambda _t, cmd, _to: _shell_reply(
+            request_id=cmd.request_id,
+            session_id=cmd.session_id,
+            exit_code=0,
+            output_bytes=len(out_bytes),
+            output_attachment=_media(out_bytes).to_content(),
+        ),
+    )
+    fn = next(fn for fn in adapt_toolkit(tool2).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="big-cmd", mindroom_output_path="out.txt"),
+    )["mindroom_tool_output"]
+    req_id2 = recorded2[0][0].request_id
+    assert receipt["status"] == "error"
+    assert f'desktop(action="request_status", request_id={req_id2!r})' in receipt["error"]
+    assert not (workspace / "out.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_bridge_truncation_notice_on_inline_exit_zero_nonzero_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline exit 0, non-zero exit, and timeout results prepend an explicit notice on 10 MiB bridge truncation."""
+    _fast_timers(monkeypatch)
+    replies = iter(
+        [
+            _shell_reply(output="prefix-ok\n", output_truncated=True, exit_code=0),
+            _shell_reply(output="prefix-fail\n", stderr="err\n", output_truncated=True, exit_code=2),
+        ],
+    )
+    tool, _ = _setup_tool(monkeypatch, lambda _t, _c, _to: next(replies))
+
+    res_ok = await tool.run_desktop_shell("noisy-ok")
+    assert isinstance(res_ok, str)
+    assert res_ok.startswith("[Desktop shell output exceeded the 10 MiB capture limit; later output was dropped.]\n")
+    assert res_ok.endswith("prefix-ok")
+
+    res_fail = await tool.run_desktop_shell("noisy-fail")
+    assert isinstance(res_fail, str)
+    assert res_fail.startswith(
+        "[Desktop shell output exceeded the 10 MiB capture limit; later output was dropped.]\nExit code 2\n",
+    )
+    assert "prefix-fail" in res_fail
+    assert "Stderr:\nerr" in res_fail
+
+    # Timeout with truncated final drained output also prepends the notice.
+    killed = False
+
+    def timeout_truncated(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        nonlocal killed
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:trunc", exit_code=None, output="part\n")
+        if cmd.action == "kill_shell":
+            killed = True
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                True,
+                result={"state": "killed", "handle": "shell:trunc"},
+            )
+        if not killed:
+            return _shell_reply(
+                state="running",
+                handle="shell:trunc",
+                exit_code=None,
+                output="",
+                output_start=5,
+                next_offset=5,
+                output_bytes=5,
+            )
+        return _shell_reply(
+            state="killed",
+            handle="shell:trunc",
+            exit_code=-15,
+            output="",
+            output_start=5,
+            next_offset=5,
+            output_bytes=5,
+            output_truncated=True,
+        )
+
+    tool_to, _ = _setup_tool(monkeypatch, timeout_truncated)
+    res_to = await tool_to.run_desktop_shell("noisy-timeout", timeout=0.05)
+    assert isinstance(res_to, str)
+    assert res_to.startswith(
+        "[Desktop shell output exceeded the 10 MiB capture limit; later output was dropped.]\nStopped after 0.05s.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_conflict_on_run_shell_reports_not_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pre-send DesktopRequestError on run_shell reports not_started=True, while one on check_shell does not."""
+    _fast_timers(monkeypatch)
+
+    def conflict_start(_t: object, _c: DesktopCommand, _to: float) -> DesktopResponse:
+        msg = "A desktop request is already in progress for this device."
+        raise DesktopRequestError(msg)
+
+    tool1, _ = _setup_tool(monkeypatch, conflict_start)
+    with structured_tool_result() as meta1:
+        res1 = await tool1.run_desktop_shell("echo hi")
+    assert isinstance(res1, str)
+    assert res1.startswith("Error:")
+    assert meta1 == {"not_started": True}
+
+    def not_started_start(_t: object, _c: DesktopCommand, _to: float) -> DesktopResponse:
+        err = DesktopRequestError("router conflict")
+        err.action_outcome = "not_started"
+        raise err
+
+    tool2, _ = _setup_tool(monkeypatch, not_started_start)
+    with structured_tool_result() as meta2:
+        res2 = await tool2.run_desktop_shell("echo hi")
+    assert isinstance(res2, str)
+    assert res2.startswith("Error:")
+    assert meta2 == {"not_started": True}
+
+    def conflict_check(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:running", exit_code=None)
+        msg = "A desktop request is already in progress for this device."
+        raise DesktopRequestError(msg)
+
+    tool3, _ = _setup_tool(monkeypatch, conflict_check)
+    with structured_tool_result() as meta3:
+        res3 = await tool3.run_desktop_shell("sleep 10")
+    assert isinstance(res3, str)
+    assert res3.startswith("Error:")
+    assert "not_started" not in meta3

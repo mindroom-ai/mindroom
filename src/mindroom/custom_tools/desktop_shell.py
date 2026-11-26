@@ -3,99 +3,54 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import shlex
 import time
 import weakref
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from contextlib import suppress
 from itertools import count
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mindroom.desktop import protocol as proto
 from mindroom.desktop.client import DesktopRequestError, desktop_response_router
 from mindroom.desktop.configuration import DesktopConfigurationState, DesktopConfigurationStatus
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media
-from mindroom.desktop.protocol import (
-    MAX_COMMAND_TTL_MS,
-    DesktopAction,
-    DesktopCommand,
-    DesktopProtocolError,
-    DesktopResponse,
-    EncryptedDesktopMedia,
-)
+from mindroom.desktop.protocol import DesktopAction, DesktopResponse
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
-from mindroom.shell.execution import (
-    ShellOutputBuffer,
-    ShellOutputProgress,
-    format_shell_success,
-    parse_shell_args,
-    shell_call_timeout,
-)
-from mindroom.shell.output_capture import (
-    CapturedShellStream,
-    ShellOutputCapture,
-    ShellOutputDestination,
-    format_shell_completion,
-    format_shell_timeout,
-)
+from mindroom.shell import execution
+from mindroom.shell import output_capture as cap
+from mindroom.shell.execution import shell_call_timeout
 from mindroom.tool_jobs.control import current_job_id
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import Awaitable
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-_SHELL_START_TIMEOUT_SECONDS = MAX_COMMAND_TTL_MS / 1000
-_MAX_SHELL_COMMAND_LENGTH = 8192
-_MAX_LOCAL_PATH_LENGTH = 4096
 _APPROVAL_WAIT_THRESHOLD_SECONDS = 2.5
 _POLL_BACKOFF_SECONDS = (0.5, 0.5, 1.0, 1.5, 2.0)
 _TIMEOUT_KILL_GRACE_DELAYS = (0.0, 0.25, 0.4, 0.85)
 _FORCE_KILL_DRAIN_DELAY_SECONDS = 0.2
 _RECOVERY_DELAYS_SECONDS = (0.5, 0.5, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0)
 _CANCEL_CLEANUP_TIMEOUT_SECONDS = 5.0
-_CANCEL_REQUEST_TIMEOUT_SECONDS = 2.0
 _CANCEL_STATUS_RETRY_DELAY_SECONDS = 0.5
-_SHELL_ARGS_ERROR = (
-    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
+_TRANSPORT_ERRORS = (DesktopRequestError, proto.DesktopProtocolError, OlmToDeviceError)
+_STREAM_SPECS = (
+    ("output", "output_start", "next_offset", "output_bytes", "output_attachment"),
+    ("stderr", "stderr_start", "stderr_next_offset", "stderr_bytes", "stderr_attachment"),
 )
-_STDOUT_KEYS = ("output", "output_start", "next_offset", "output_bytes", "output_attachment")
-_STDERR_KEYS = ("stderr", "stderr_start", "stderr_next_offset", "stderr_bytes", "stderr_attachment")
-_TRANSPORT_ERRORS = (DesktopRequestError, DesktopProtocolError, OlmToDeviceError)
+_MAX_MIB = proto.MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)
+_TRUNCATION_NOTICE = f"[Desktop shell output exceeded the {_MAX_MIB} MiB capture limit; later output was dropped.]"
+type _Params = dict[str, object]
+type _LoopLocks = weakref.WeakValueDictionary[PinnedMatrixDevice, asyncio.Lock]
+_START_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopLocks] = weakref.WeakKeyDictionary()
+_LEGACY_COMBINED_STDERR_TARGETS: dict[PinnedMatrixDevice, None] = {}
 
 
 class _DesktopShellError(RuntimeError):
     """Unrecoverable remote desktop shell error."""
-
-
-@dataclass
-class _TargetStartLock:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    waiters: int = 0
-
-
-_START_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[PinnedMatrixDevice, _TargetStartLock]] = (
-    weakref.WeakKeyDictionary()
-)
-
-
-@asynccontextmanager
-async def _target_start_lock(target: PinnedMatrixDevice) -> AsyncIterator[None]:
-    """Serialize ``run_shell`` starts per paired desktop target and clean up idle locks."""
-    per_loop = _START_LOCKS.setdefault(asyncio.get_running_loop(), {})
-    entry = per_loop.setdefault(target, _TargetStartLock())
-    entry.waiters += 1
-    try:
-        async with entry.lock:
-            yield
-    finally:
-        entry.waiters -= 1
-        if entry.waiters == 0 and per_loop.get(target) is entry:
-            per_loop.pop(target, None)
 
 
 def _not_started(message: str) -> str:
@@ -103,46 +58,44 @@ def _not_started(message: str) -> str:
     return message
 
 
-def _setup_required_error(error: str | None, *, chat_pairing: bool) -> str:
-    if chat_pairing:
+def _with_truncation_notice(message: str, *, truncated: bool) -> str:
+    return message if not truncated else (f"{_TRUNCATION_NOTICE}\n{message}" if message else _TRUNCATION_NOTICE)
+
+
+def _expired(dl: float | None, margin: float = 0.0) -> bool:
+    return dl is not None and dl - time.monotonic() <= margin
+
+
+def _is_state(resp: DesktopResponse | None, state: str) -> bool:
+    return bool(resp is not None and resp.ok and resp.result.get("state") == state)
+
+
+def _setup_error(cfg: DesktopConfigurationState, *, chat: bool) -> str:
+    if cfg.error is not None:
+        suffix = " Run `/desktop setup` to replace it." if chat else ""
+        return f"Error: Desktop configuration is invalid: {cfg.error}{suffix}"
+    if chat:
         return (
-            f"Error: Desktop configuration is invalid: {error} Run `/desktop setup` to replace it."
-            if error is not None
-            else "Error: Desktop setup is required for this requester and agent. Run `/desktop setup` in this Matrix chat."
+            "Error: Desktop setup is required for this requester and agent. Run `/desktop setup` in this Matrix chat."
         )
-    return (
-        f"Error: Desktop configuration is invalid: {error}"
-        if error is not None
-        else "Error: Desktop setup requires a live Matrix agent chat. Run `/desktop setup` in a private Matrix room."
-    )
+    return "Error: Desktop setup requires a live Matrix agent chat. Run `/desktop setup` in a private Matrix room."
 
 
-def _validate_call_arguments(
-    args: object,
-    tail: object,
-    timeout: object,
-    cwd: object,
-) -> tuple[str, int, float | None, str | None]:
-    parsed = parse_shell_args(args)
-    if isinstance(parsed, str):
-        command = parsed
-    else:
-        if not parsed or not parsed[0]:
-            raise ValueError(_SHELL_ARGS_ERROR)
-        command = shlex.join(parsed)
-    if len(command) > _MAX_SHELL_COMMAND_LENGTH:
-        msg = f"Shell command must not exceed {_MAX_SHELL_COMMAND_LENGTH} characters."
+def _validate_args(args: object, tail: object, limit: object, cwd: object) -> tuple[str, int, float | None, str | None]:
+    command = execution.shell_args_to_command(args)
+    if len(command) > 8192:
+        msg = "Shell command must not exceed 8192 characters."
         raise ValueError(msg)
     if isinstance(tail, bool) or not isinstance(tail, int) or tail < 0:
         msg = "tail must be a non-negative integer."
         raise ValueError(msg)
-    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0):
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int | float) or limit <= 0):
         msg = "timeout must be a positive number of seconds; omit it for the default limit."
         raise ValueError(msg)
-    if cwd is not None and (not isinstance(cwd, str) or not cwd or len(cwd) > _MAX_LOCAL_PATH_LENGTH):
-        msg = f"cwd must be a non-empty string of at most {_MAX_LOCAL_PATH_LENGTH} characters."
+    if cwd is not None and (not isinstance(cwd, str) or not cwd or len(cwd) > 4096):
+        msg = "cwd must be a non-empty string of at most 4096 characters."
         raise ValueError(msg)
-    return command, tail, float(timeout) if timeout is not None else None, cwd
+    return command, tail, float(limit) if limit is not None else None, cwd
 
 
 async def _await_with_approval_status[T](coro: Awaitable[T], *, context: ToolRuntimeContext) -> T:
@@ -150,481 +103,345 @@ async def _await_with_approval_status[T](coro: Awaitable[T], *, context: ToolRun
     task = asyncio.ensure_future(coro)
     try:
         done, _ = await asyncio.wait({task}, timeout=_APPROVAL_WAIT_THRESHOLD_SECONDS)
-        if task in done:
-            return await task
-        job_id = current_job_id()
+        job_id = None if task in done else current_job_id()
         runtime = get_background_runtime(context.runtime_paths) if job_id is not None else None
-        if job_id is None or runtime is None:
-            return await task
-        async with runtime.human_decision_wait(job_id):
-            return await task
+        if job_id is not None and runtime is not None:
+            async with runtime.human_decision_wait(job_id):
+                return await task
+        return await task
     except BaseException:
         if not task.done():
             task.cancel()
-            with contextlib.suppress(BaseException):
+            with suppress(BaseException):
                 await task
         raise
 
 
-def _unwrap_request_status(status_resp: DesktopResponse, request_id: str) -> DesktopResponse | None:
+def _unwrap_request_status(resp: DesktopResponse, req_id: str) -> DesktopResponse | None:
     """Return the recorded response, None if still queued/running, or raise ``_DesktopShellError``."""
-    if not status_resp.ok:
-        raise _DesktopShellError(status_resp.error or f"Desktop request_status failed for {request_id!r}.")
-    state = status_resp.result.get("state")
+    if not resp.ok:
+        raise _DesktopShellError(resp.error or f"Desktop request_status failed for {req_id!r}.")
+    state = resp.result.get("state")
     if state in {"queued", "running"}:
         return None
-    if state == "completed" and "response" in status_resp.result:
-        return DesktopResponse.from_content(status_resp.result["response"])
+    if state == "completed" and "response" in resp.result:
+        return DesktopResponse.from_content(resp.result["response"])
     if state == "unknown":
-        raw_recorded = status_resp.result.get("response")
-        if raw_recorded is not None:
-            warning = DesktopResponse.from_content(raw_recorded).result.get("warning")
-            if isinstance(warning, str) and warning:
-                raise _DesktopShellError(warning)
-        msg = f"Desktop shell request {request_id!r} ended with an unknown outcome; do not repeat it automatically."
-        raise _DesktopShellError(msg)
-    msg = (
-        f"Desktop shell request {request_id!r} was not found on the desktop device."
-        if state == "not_found"
-        else f"Desktop shell request {request_id!r} reported unexpected state {state!r}."
-    )
+        raw = resp.result.get("response")
+        warn = DesktopResponse.from_content(raw).result.get("warning") if raw is not None else None
+        fallback = f"Desktop shell request {req_id!r} ended with an unknown outcome; do not repeat it automatically."
+        raise _DesktopShellError(warn if isinstance(warn, str) and warn else fallback)
+    detail = "was not found on the desktop device." if state == "not_found" else f"reported unexpected state {state!r}."
+    msg = f"Desktop shell request {req_id!r} {detail}"
     raise _DesktopShellError(msg)
 
 
-@dataclass(frozen=True, slots=True)
-class _IngestOutcome:
-    state: str
-    exit_code: int | None
-    has_more: bool
-    bridge_truncated: bool
-    advanced: bool
-    warning: str | None
-
-
-@dataclass
 class _DesktopShellRunner:
     """Drive one ``run_desktop_shell`` call across ``run_shell``, ``check_shell``, ``kill_shell``, and recovery."""
 
-    context: ToolRuntimeContext
-    target: PinnedMatrixDevice
-    requester_id: str
-    agent_name: str
-    transport_timeout: float
-    capture: ShellOutputCapture | None
-    session_id: str = field(default_factory=lambda: uuid4().hex)
-    sequences: count[int] = field(default_factory=count)
-    start_request_id: str | None = None
-    handle: str | None = None
-    split_stderr: bool = False
-    stdout_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
-    stderr_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
-    stdout_offset: int = 0
-    stderr_offset: int = 0
-    progress: ShellOutputProgress = field(init=False)
+    def __init__(self, ctx: ToolRuntimeContext, cfg: DesktopConfigurationState, scope: tuple[str, str]) -> None:
+        assert cfg.target is not None
+        self.context, self.target, self.transport_timeout, self.scope = ctx, cfg.target, cfg.timeout_seconds, scope
+        self.capture: cap.ShellOutputCapture | None = None
+        self.session_id, self.sequences = uuid4().hex, count()
+        self.start_request_id: str | None = None
+        self.handle: str | None = None
+        self.split_stderr, self.state, self.truncated = False, "completed", False
+        self.exit_code: int | None = None
+        self.warning: str | None = None
+        self.buffers = (execution.ShellOutputBuffer(), execution.ShellOutputBuffer())
+        self.offsets = [0, 0]
+        self.progress = execution.ShellOutputProgress(report_tool_progress, *self.buffers)
 
-    def __post_init__(self) -> None:
-        self.progress = ShellOutputProgress(report_tool_progress, self.stdout_buf, self.stderr_buf)
+    async def _raw(self, act: DesktopAction, params: _Params, wait: float) -> DesktopResponse:
+        now = round(time.time() * 1000)
+        end = now + max(1, min(proto.MAX_COMMAND_TTL_MS, round(wait * 1000)))
+        req_id = uuid4().hex
+        cmd = proto.DesktopCommand(req_id, self.session_id, next(self.sequences), now, end, act, *self.scope, params)
+        if act == "run_shell":
+            self.start_request_id = req_id
+        return await desktop_response_router(self.context.client).request(self.target, cmd, timeout_seconds=wait)
 
-    async def _send_raw(
-        self,
-        action: DesktopAction,
-        parameters: dict[str, object],
-        *,
-        timeout_seconds: float,
-    ) -> DesktopResponse:
-        now_ms = round(time.time() * 1000)
-        ttl_ms = max(1, min(MAX_COMMAND_TTL_MS, round(timeout_seconds * 1000)))
-        command = DesktopCommand(
-            request_id=uuid4().hex,
-            session_id=self.session_id,
-            sequence=next(self.sequences),
-            issued_at_ms=now_ms,
-            expires_at_ms=now_ms + ttl_ms,
-            action=action,
-            requester_id=self.requester_id,
-            agent_name=self.agent_name,
-            parameters=parameters,
-        )
-        if action == "run_shell":
-            self.start_request_id = command.request_id
-        return await desktop_response_router(self.context.client).request(
-            self.target,
-            command,
-            timeout_seconds=timeout_seconds,
-        )
+    async def _send(self, act: DesktopAction, params: _Params, wait: float | None = None) -> DesktopResponse:
+        try:
+            return await self._raw(act, params, self.transport_timeout if wait is None else wait)
+        except DesktopRequestError as exc:
+            if act == "run_shell" and exc.action_outcome in {"not_sent", "not_started"}:
+                report_tool_metadata(not_started=True)
+            if exc.request_id is None:
+                raise _DesktopShellError(str(exc)) from exc
+            return await self._recover_request(exc.request_id)
 
     async def _recover_request(self, request_id: str) -> DesktopResponse:
         for attempt, delay in enumerate((0.0, *_RECOVERY_DELAYS_SECONDS)):
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                status_resp = await self._send_raw(
-                    "request_status",
-                    {"request_id": request_id},
-                    timeout_seconds=self.transport_timeout,
-                )
+                resp = await self._raw("request_status", {"request_id": request_id}, self.transport_timeout)
             except (DesktopRequestError, OlmToDeviceError) as exc:
                 if attempt == len(_RECOVERY_DELAYS_SECONDS):
                     msg = f"Failed to recover desktop shell request {request_id!r}: {exc}"
                     raise _DesktopShellError(msg) from exc
-                continue
-            recovered = _unwrap_request_status(status_resp, request_id)
-            if recovered is not None:
-                return recovered
+            else:
+                if (recovered := _unwrap_request_status(resp, request_id)) is not None:
+                    return recovered
         msg = f"Desktop shell request {request_id!r} did not settle within the recovery window."
         raise _DesktopShellError(msg)
 
-    async def _send(
-        self,
-        action: DesktopAction,
-        parameters: dict[str, object],
-        *,
-        timeout_seconds: float | None = None,
-    ) -> DesktopResponse:
+    async def _try(self, act: DesktopAction, params: _Params, dl: float | None) -> DesktopResponse | None:
         try:
-            return await self._send_raw(
-                action,
-                parameters,
-                timeout_seconds=self.transport_timeout if timeout_seconds is None else timeout_seconds,
-            )
-        except DesktopRequestError as exc:
-            if exc.request_id is None:
-                raise _DesktopShellError(str(exc)) from exc
-            return await self._recover_request(exc.request_id)
+            if dl is None:
+                return await self._send(act, params)
+            return await self._raw(act, params, max(0.1, min(2.0, dl - time.monotonic())))
+        except (*_TRANSPORT_ERRORS, _DesktopShellError):
+            return None
 
-    async def _start(self, command_str: str, *, start_wait: int, cwd: str | None) -> tuple[DesktopResponse, float]:
-        params: dict[str, object] = {"command": command_str, "timeout_seconds": start_wait}
-        if cwd is not None:
-            params["cwd"] = cwd
+    async def _start(self, cmd: str, *, start_wait: int, cwd: str | None) -> tuple[DesktopResponse, float]:
+        start_timeout = proto.MAX_COMMAND_TTL_MS / 1000
 
-        async def _locked_start() -> tuple[DesktopResponse, float]:
-            async with _target_start_lock(self.target):
+        async def _locked() -> tuple[DesktopResponse, float]:
+            per_loop = _START_LOCKS.setdefault(asyncio.get_running_loop(), weakref.WeakValueDictionary())
+            if (lock := per_loop.get(self.target)) is None:
+                per_loop[self.target] = lock = asyncio.Lock()
+            async with lock:
+                send_split = self.target not in _LEGACY_COMBINED_STDERR_TARGETS
+                params: _Params = {"command": cmd, "timeout_seconds": start_wait}
+                if cwd is not None:
+                    params["cwd"] = cwd
+                if send_split:
+                    params["separate_stderr"] = True
                 sent_at = time.monotonic()
-                response = await self._send("run_shell", params, timeout_seconds=_SHELL_START_TIMEOUT_SECONDS)
-                return response, time.monotonic() - sent_at
+                resp = await self._send("run_shell", params, start_timeout)
+                err = resp.error or ""
+                if send_split and not resp.ok and "Unexpected desktop parameters:" in err and "separate_stderr" in err:
+                    if len(_LEGACY_COMBINED_STDERR_TARGETS) >= 256:
+                        _LEGACY_COMBINED_STDERR_TARGETS.pop(next(iter(_LEGACY_COMBINED_STDERR_TARGETS)))
+                    _LEGACY_COMBINED_STDERR_TARGETS[self.target] = None
+                    legacy_params = {k: v for k, v in params.items() if k != "separate_stderr"}
+                    sent_at = time.monotonic()
+                    resp = await self._send("run_shell", legacy_params, start_timeout)
+                return resp, time.monotonic() - sent_at
 
-        return await _await_with_approval_status(_locked_start(), context=self.context)
+        return await _await_with_approval_status(_locked(), context=self.context)
 
-    def _check_parameters(self) -> dict[str, object]:
+    def _check_params(self) -> _Params:
         assert self.handle is not None
-        params: dict[str, object] = {"handle": self.handle, "offset": self.stdout_offset}
-        if self.split_stderr:
-            params["stderr_offset"] = self.stderr_offset
-        return params
+        extra = {"stderr_offset": self.offsets[1]} if self.split_stderr else {}
+        return {"handle": self.handle, "offset": self.offsets[0], **extra}
 
-    async def _ingest_stream(
-        self,
-        result: dict[str, Any],
-        keys: tuple[str, str, str, str, str],
-        buf: ShellOutputBuffer,
-        capture_stream: CapturedShellStream | None,
-        current_offset: int,
-        *,
-        is_initial: bool,
-        state: str,
-    ) -> tuple[int, bool, bool]:
-        text_key, start_key, next_key, bytes_key, attachment_key = keys
-        raw_attachment, raw_next, raw_bytes = result.get(attachment_key), result.get(next_key), result.get(bytes_key)
-        if raw_attachment is not None:
-            media = EncryptedDesktopMedia.from_content(raw_attachment, kind="output_attachment")
-            downloaded = await download_encrypted_media(
-                self.context.client,
-                media,
-                timeout_seconds=self.transport_timeout,
-            )
-            text = downloaded.decode("utf-8", errors="replace")
-            new_offset = raw_next if isinstance(raw_next, int) else current_offset + len(downloaded)
+    async def _ingest_stream(self, result: dict[str, Any], idx: int, *, initial: bool) -> tuple[bool, bool]:
+        text_key, start_key, next_key, bytes_key, att_key = _STREAM_SPECS[idx]
+        cur, raw_next, raw_bytes = self.offsets[idx], result.get(next_key), result.get(bytes_key)
+        if (raw_att := result.get(att_key)) is not None:
+            media = proto.EncryptedDesktopMedia.from_content(raw_att, kind="output_attachment")
+            data = await download_encrypted_media(self.context.client, media, timeout_seconds=self.transport_timeout)
+            text = data.decode("utf-8", errors="replace")
+            new_off = raw_next if isinstance(raw_next, int) else cur + len(data)
         else:
-            raw_start = result.get(start_key, 0)
-            start = raw_start if isinstance(raw_start, int) else 0
-            if is_initial and state == "running" and start > 0:
-                return 0, True, False
-            inline = result.get(text_key)
-            text = inline if start == current_offset and isinstance(inline, str) else ""
-            new_offset = (
-                (raw_next if isinstance(raw_next, int) else current_offset + len(text.encode("utf-8")))
-                if start == current_offset
-                else current_offset
-            )
+            start = raw_s if isinstance(raw_s := result.get(start_key, 0), int) else 0
+            if initial and self.state == "running" and start > 0:
+                self.offsets[idx] = 0
+                return True, False
+            text = inline if start == cur and isinstance(inline := result.get(text_key), str) else ""
+            new_off = (raw_next if isinstance(raw_next, int) else cur + len(text.encode())) if start == cur else cur
         if text:
-            buf.append(text)
-            if capture_stream is not None:
-                capture_stream.append(text)
-        return new_offset, isinstance(raw_bytes, int) and new_offset < raw_bytes, new_offset > current_offset
+            self.buffers[idx].append(text)
+            if self.capture is not None:
+                (self.capture.stdout if idx == 0 else self.capture.stderr).append(text)
+        self.offsets[idx] = new_off
+        return isinstance(raw_bytes, int) and new_off < raw_bytes, new_off > cur
 
-    async def _ingest(self, response: DesktopResponse, *, is_initial: bool) -> _IngestOutcome:
+    async def _ingest(self, response: DesktopResponse, *, initial: bool) -> tuple[bool, bool]:
         if not response.ok:
             raise _DesktopShellError(response.error or "Desktop device rejected the shell request.")
         result = response.result
         if result.get("action_outcome") == "unknown":
-            warning = result.get("warning")
-            raise _DesktopShellError(
-                warning
-                if isinstance(warning, str) and warning
-                else "The desktop shell command outcome is unknown; do not repeat it automatically.",
-            )
-        if is_initial:
+            warn = result.get("warning")
+            fallback = "The desktop shell command outcome is unknown; do not repeat it automatically."
+            raise _DesktopShellError(warn if isinstance(warn, str) and warn else fallback)
+        if initial:
             self.split_stderr = "stderr_next_offset" in result
-        state = str(result.get("state") or "completed")
-        raw_handle = result.get("handle")
-        if isinstance(raw_handle, str) and raw_handle:
+        self.state = str(result.get("state") or "completed")
+        if isinstance(raw_handle := result.get("handle"), str) and raw_handle:
             self.handle = raw_handle
-        elif raw_handle is None and state != "running":
+        elif raw_handle is None and self.state != "running":
             self.handle = None
-
         raw_exit = result.get("exit_code")
-        exit_code = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) else None
-        raw_warning = result.get("warning")
-        warning = raw_warning if isinstance(raw_warning, str) and raw_warning else None
-        streams = [
-            ("stdout_offset", _STDOUT_KEYS, self.stdout_buf, self.capture.stdout if self.capture else None),
-            *(
-                [("stderr_offset", _STDERR_KEYS, self.stderr_buf, self.capture.stderr if self.capture else None)]
-                if self.split_stderr
-                else []
-            ),
-        ]
+        self.exit_code = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) else None
+        self.warning = w if isinstance(w := result.get("warning"), str) and w else None
         has_more, advanced = False, False
         try:
-            for offset_attr, keys, buf, cap_stream in streams:
-                new_off, more, adv = await self._ingest_stream(
-                    result,
-                    keys,
-                    buf,
-                    cap_stream,
-                    getattr(self, offset_attr),
-                    is_initial=is_initial,
-                    state=state,
-                )
-                setattr(self, offset_attr, new_off)
-                has_more = has_more or more
-                advanced = advanced or adv
-        except (DesktopMediaError, DesktopProtocolError) as exc:
-            if exit_code is not None:
-                report_tool_metadata(exit_code=exit_code)
-            suffix = f" (exit code {exit_code})" if exit_code is not None else ""
-            msg = f"The desktop shell command finished{suffix}, but its full output could not be downloaded: {exc}"
+            for idx in (0, 1) if self.split_stderr else (0,):
+                more, adv = await self._ingest_stream(result, idx, initial=initial)
+                has_more, advanced = has_more or more, advanced or adv
+        except (DesktopMediaError, proto.DesktopProtocolError) as exc:
+            if self.exit_code is not None:
+                report_tool_metadata(exit_code=self.exit_code)
+            suffix = f" (exit code {self.exit_code})" if self.exit_code is not None else ""
+            msg = (
+                f"The desktop shell command finished{suffix}, but its full output could not be downloaded: {exc}. "
+                f'Recover it without re-running the command via desktop(action="request_status", request_id={response.request_id!r}).'
+            )
             raise _DesktopShellError(msg) from exc
+        self.truncated = bool(result.get("output_truncated") or (self.split_stderr and result.get("stderr_truncated")))
+        return has_more, advanced
 
-        bridge_truncated = bool(result.get("output_truncated")) or (
-            self.split_stderr and bool(result.get("stderr_truncated"))
-        )
-        return _IngestOutcome(state, exit_code, has_more, bridge_truncated, advanced, warning)
+    async def _check(self) -> tuple[bool, bool]:
+        return await self._ingest(await self._send("check_shell", self._check_params()), initial=False)
 
-    async def _check(self) -> _IngestOutcome:
-        return await self._ingest(await self._send("check_shell", self._check_parameters()), is_initial=False)
-
-    async def _drain_finished(self, outcome: _IngestOutcome) -> _IngestOutcome:
-        while outcome.state != "running" and outcome.has_more and self.handle is not None:
-            outcome = await self._check()
-            if not outcome.advanced and outcome.has_more:
+    async def _drain_finished(self, has_more: bool) -> bool:
+        while self.state != "running" and has_more and self.handle is not None:
+            has_more, advanced = await self._check()
+            if not advanced and has_more:
                 break
-        return outcome
+        return has_more
 
-    async def _safe_check_drain(self) -> tuple[bool, int | None]:
-        if self.handle is None:
-            return True, None
+    async def _poll_stopped(self, dl: float | None) -> bool | None:
+        if dl is not None:
+            r = await self._try("check_shell", self._check_params(), dl)
+            return None if r is None or not r.ok else not _is_state(r, "running")
         try:
-            outcome = await self._check()
-        except (_DesktopShellError, DesktopProtocolError, OlmToDeviceError):
-            return True, None
-        if outcome.state == "running":
-            return False, None
-        with contextlib.suppress(_DesktopShellError, DesktopProtocolError, OlmToDeviceError):
-            outcome = await self._drain_finished(outcome)
-        return True, outcome.exit_code
-
-    async def _kill_and_drain_for_timeout(self) -> int | None:
-        if self.handle is None:
+            has_more, _ = await self._check()
+        except (*_TRANSPORT_ERRORS, _DesktopShellError):
             return None
-        with contextlib.suppress(_DesktopShellError, DesktopProtocolError, OlmToDeviceError):
-            await self._send("kill_shell", {"handle": self.handle})
-        for delay in _TIMEOUT_KILL_GRACE_DELAYS:
+        if self.state == "running":
+            return False
+        with suppress(*_TRANSPORT_ERRORS, _DesktopShellError):
+            await self._drain_finished(has_more)
+        return True
+
+    async def _grace_poll(self, dl: float | None) -> bool:
+        for delay in _TIMEOUT_KILL_GRACE_DELAYS if dl is None else (0.25,):
+            if _expired(dl, 1.0):
+                break
             if delay > 0:
                 await asyncio.sleep(delay)
-            stopped, exit_code = await self._safe_check_drain()
-            if stopped:
-                return exit_code
-        if self.handle is None:
-            return None
-        with contextlib.suppress(_DesktopShellError, DesktopProtocolError, OlmToDeviceError):
-            await self._send("kill_shell", {"handle": self.handle, "force": True})
+            if (stopped := await self._poll_stopped(dl)) is not False:
+                return bool(stopped)
+        return False
+
+    async def _stop_handle(self, handle: str, *, dl: float | None = None) -> bool:
+        """Stop ``handle`` via SIGTERM -> grace checks -> SIGKILL and return whether stop was confirmed."""
+        if _expired(dl):
+            return False
+        resp = await self._try("kill_shell", {"handle": handle}, dl)
+        completed = _is_state(resp, "completed")
+        if completed and dl is not None:
+            return True
+        if (dl is None or (resp is not None and resp.ok)) and await self._grace_poll(dl):
+            return True
+        if not _expired(dl):
+            fresp = await self._try("kill_shell", {"handle": handle, "force": True}, dl)
+            completed = completed or _is_state(fresp, "completed")
+        if dl is not None:
+            return completed
         if _FORCE_KILL_DRAIN_DELAY_SECONDS > 0:
             await asyncio.sleep(_FORCE_KILL_DRAIN_DELAY_SECONDS)
-        _, exit_code = await self._safe_check_drain()
-        return exit_code
+        return bool(await self._poll_stopped(None)) or completed
+
+    def _interrupt_or_return(self, message: str, exit_code: int | None = None) -> str | ToolOutputFileHandled:
+        if self.capture is None:
+            return message
+        self.capture.incomplete, self.capture.interruption = True, message
+        return ToolOutputFileHandled(self.capture.publish(exit_code))
 
     async def _stop_on_timeout(self, *, tail: int, stop_after: float) -> str | ToolOutputFileHandled:
-        exit_code = await self._kill_and_drain_for_timeout()
+        assert self.handle is not None
+        confirmed = await self._stop_handle(self.handle)
+        exit_code = self.exit_code if self.state != "running" else None
         if exit_code is not None:
             report_tool_metadata(exit_code=exit_code)
-        message = format_shell_timeout(
-            self.stdout_buf.render(tail=tail),
-            self.stderr_buf.render() if self.stderr_buf else None,
-            timeout=stop_after,
-            no_output_file=self.capture is not None,
-        )
-        if self.capture is not None:
-            self.capture.incomplete = True
-            self.capture.interruption = message
-            return ToolOutputFileHandled(self.capture.publish(exit_code))
-        return message
+        stdout, stderr = self.buffers[0].render(tail=tail), self.buffers[1].render() if self.buffers[1] else None
+        if confirmed:
+            message = cap.format_shell_timeout(stdout, stderr, timeout=stop_after, no_output_file=bool(self.capture))
+        else:
+            no_file = " No output file was saved." if self.capture is not None else ""
+            head = (
+                f"Timed out after {stop_after:g}s, but stopping the remote command could not be confirmed; "
+                f"it may still be running on the desktop.{no_file}"
+            )
+            extra = (["Output:", stdout] if stdout else []) + (["Stderr:", stderr] if stderr is not None else [])
+            message = "\n".join([head, *extra])
+        message = _with_truncation_notice(message, truncated=self.state != "running" and self.truncated)
+        return self._interrupt_or_return(message, exit_code)
 
-    async def _recover_handle_on_cancel(self, deadline: float) -> str | None:
-        recovered: str | None = None
-        while self.start_request_id is not None and time.monotonic() < deadline:
-            timeout_left = max(0.1, min(_CANCEL_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic()))
+    async def _cancel_start(self, req_id: str, dl: float) -> None:
+        resp = await self._try("kill_shell", {"request_id": req_id}, dl)
+        if resp is None or (resp.ok and not _is_state(resp, "not_found")):
+            return
+        while not _expired(dl):
+            if (sresp := await self._try("request_status", {"request_id": req_id}, dl)) is None:
+                break
             try:
-                status_resp = await self._send_raw(
-                    "request_status",
-                    {"request_id": self.start_request_id},
-                    timeout_seconds=timeout_left,
-                )
-            except _TRANSPORT_ERRORS:
+                rec = _unwrap_request_status(sresp, req_id)
+            except (_DesktopShellError, proto.DesktopProtocolError):
                 break
-            if not status_resp.ok:
+            if rec is not None:
+                h = rec.result.get("handle")
+                if _is_state(rec, "running") and isinstance(h, str) and h and not _expired(dl):
+                    await self._try("kill_shell", {"handle": h, "force": True}, dl)
                 break
-            state = status_resp.result.get("state")
-            if state == "completed" and "response" in status_resp.result:
-                with contextlib.suppress(DesktopProtocolError):
-                    recorded = DesktopResponse.from_content(status_resp.result["response"])
-                    raw_handle = recorded.result.get("handle")
-                    if recorded.ok and recorded.result.get("state") == "running" and isinstance(raw_handle, str):
-                        recovered = raw_handle or None
-                break
-            if state not in {"queued", "running"}:
-                break
-            sleep_for = min(_CANCEL_STATUS_RETRY_DELAY_SECONDS, max(0.0, deadline - time.monotonic()))
-            if sleep_for <= 0:
-                break
-            await asyncio.sleep(sleep_for)
-        return recovered
+            await asyncio.sleep(min(_CANCEL_STATUS_RETRY_DELAY_SECONDS, max(0.0, dl - time.monotonic())))
+            if resp.ok and not _expired(dl):
+                cresp = await self._try("kill_shell", {"request_id": req_id}, dl)
+                if cresp is not None and cresp.ok and not _is_state(cresp, "not_found"):
+                    break
 
     async def cleanup_on_cancel(self) -> None:
+        """Stop any running handle or dismiss a pending approval when the caller cancels."""
         deadline = time.monotonic() + _CANCEL_CLEANUP_TIMEOUT_SECONDS
+        if self.handle is not None:
+            await self._stop_handle(self.handle, dl=deadline)
+        elif self.start_request_id is not None:
+            await self._cancel_start(self.start_request_id, deadline)
 
-        def remaining() -> float:
-            return max(0.1, min(_CANCEL_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic()))
-
-        if self.handle is None:
-            recovered = await self._recover_handle_on_cancel(deadline)
-            if recovered is not None and time.monotonic() < deadline:
-                with contextlib.suppress(*_TRANSPORT_ERRORS):
-                    await self._send_raw(
-                        "kill_shell",
-                        {"handle": recovered, "force": True},
-                        timeout_seconds=remaining(),
-                    )
-            return
-
-        if time.monotonic() >= deadline:
-            return
-        kill_ok = False
-        with contextlib.suppress(*_TRANSPORT_ERRORS):
-            kill_resp = await self._send_raw("kill_shell", {"handle": self.handle}, timeout_seconds=remaining())
-            kill_ok = kill_resp.ok
-            if kill_resp.ok and kill_resp.result.get("state") == "completed":
-                return
-        if kill_ok and deadline - time.monotonic() > 1.0:
-            await asyncio.sleep(0.25)
-            with contextlib.suppress(*_TRANSPORT_ERRORS):
-                check_resp = await self._send_raw("check_shell", self._check_parameters(), timeout_seconds=remaining())
-                if check_resp.ok and check_resp.result.get("state") != "running":
-                    return
-        if time.monotonic() < deadline:
-            with contextlib.suppress(*_TRANSPORT_ERRORS):
-                await self._send_raw("kill_shell", {"handle": self.handle, "force": True}, timeout_seconds=remaining())
-
-    def _format_finished(self, outcome: _IngestOutcome, *, tail: int) -> str | ToolOutputFileHandled:
-        exit_code = outcome.exit_code
-        if exit_code is not None:
+    def _format_finished(self, *, has_more: bool, tail: int) -> str | ToolOutputFileHandled:
+        if (exit_code := self.exit_code) is not None:
             report_tool_metadata(exit_code=exit_code)
         if self.capture is not None:
-            self.capture.stdout.reached_eof = True
-            self.capture.stderr.reached_eof = True
-            if outcome.bridge_truncated or outcome.has_more:
-                self.capture.incomplete = True
-                self.capture.interruption = (
-                    outcome.warning
-                    or "Desktop shell output was truncated before full delivery; no complete output file was saved."
-                )
+            self.capture.stdout.reached_eof = self.capture.stderr.reached_eof = True
+            if self.truncated or has_more:
+                fallback = "Desktop shell output was truncated before full delivery; no complete output file was saved."
+                return self._interrupt_or_return(self.warning or fallback, exit_code)
             return ToolOutputFileHandled(self.capture.publish(exit_code))
         if exit_code is None:
             return "Error: Desktop shell command ended without an exit code."
         if exit_code != 0:
-            errors = self.stderr_buf.render() if self.stderr_buf else None
-            return format_shell_completion(self.stdout_buf.render(tail=tail), errors, return_code=exit_code)
-        success = format_shell_success(self.stdout_buf, self.stderr_buf, tail)
-        if outcome.state == "killed":
-            return f"Command was killed on the desktop.\n{success}" if success else "Command was killed on the desktop."
-        return success
+            errors = self.buffers[1].render() if self.buffers[1] else None
+            body = cap.format_shell_completion(self.buffers[0].render(tail=tail), errors, return_code=exit_code)
+        else:
+            body = execution.format_shell_success(self.buffers[0], self.buffers[1], tail)
+            if self.state == "killed":
+                prefix = "Command was killed on the desktop."
+                body = f"{prefix}\n{body}" if body else prefix
+        return _with_truncation_notice(body, truncated=self.truncated)
 
-    async def execute(
-        self,
-        command_str: str,
-        *,
-        tail: int,
-        timeout: float | None,  # noqa: ASYNC109
-        cwd: str | None,
-    ) -> str | ToolOutputFileHandled:
-        stop_after = shell_call_timeout(timeout)
-        start_wait = 1 if (timeout is not None and timeout <= 1) else 2
-        start_response, start_elapsed = await self._start(command_str, start_wait=start_wait, cwd=cwd)
-        outcome = await self._ingest(start_response, is_initial=True)
-        if outcome.state != "running":
-            return self._format_finished(await self._drain_finished(outcome), tail=tail)
-
-        self.progress.poll()
-        deadline = (
-            None
-            if stop_after is None
-            else time.monotonic() + max(0.0, stop_after - min(start_elapsed, float(start_wait)))
-        )
+    async def execute(self, cmd: str, tail: int, limit: float | None, cwd: str | None) -> str | ToolOutputFileHandled:
+        """Start, poll, drain, and format one desktop shell command."""
+        stop_after = shell_call_timeout(limit)
+        start_wait = 1 if (limit is not None and limit <= 1) else 2
+        start_response, start_elapsed = await self._start(cmd, start_wait=start_wait, cwd=cwd)
+        has_more, _ = await self._ingest(start_response, initial=True)
+        dl = None if stop_after is None else time.monotonic() + max(0.0, stop_after - min(start_elapsed, start_wait))
         poll_index = 0
-        while outcome.state == "running":
+        while self.state == "running":
+            self.progress.poll()
             if self.handle is None:
                 msg = "Desktop shell command is still running but returned no handle."
                 raise _DesktopShellError(msg)
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    assert stop_after is not None
-                    return await self._stop_on_timeout(tail=tail, stop_after=stop_after)
-                delay = 0.0 if outcome.has_more else min(_POLL_BACKOFF_SECONDS[poll_index], remaining)
-            else:
-                delay = 0.0 if outcome.has_more else _POLL_BACKOFF_SECONDS[poll_index]
-            if delay > 0:
-                await asyncio.sleep(delay)
-            if not outcome.has_more and poll_index + 1 < len(_POLL_BACKOFF_SECONDS):
-                poll_index += 1
-            outcome = await self._check()
-            if outcome.state == "running":
-                if outcome.advanced:
-                    poll_index = 0
-                self.progress.poll()
-        return self._format_finished(await self._drain_finished(outcome), tail=tail)
-
-
-def _capture_error(capture: ShellOutputCapture | None, message: str) -> str | ToolOutputFileHandled:
-    if capture is None:
-        return f"Error: {message}"
-    capture.incomplete = True
-    capture.interruption = message
-    return ToolOutputFileHandled(capture.publish(None))
-
-
-def _open_capture() -> ShellOutputCapture | None:
-    output_request = current_tool_output_file_request()
-    if output_request is None or output_request.path is None:
-        return None
-    return ShellOutputCapture(
-        ShellOutputDestination(
-            workspace_root=str(output_request.policy.workspace_root),
-            path=output_request.path.requested_path,
-            max_bytes=output_request.policy.max_bytes,
-            tools_use_workdir=output_request.policy.tools_use_workdir,
-        ),
-    )
+            remaining = None if dl is None else dl - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                assert stop_after is not None
+                return await self._stop_on_timeout(tail=tail, stop_after=stop_after)
+            if not has_more:
+                backoff = _POLL_BACKOFF_SECONDS[poll_index]
+                if (delay := backoff if remaining is None else min(backoff, remaining)) > 0:
+                    await asyncio.sleep(delay)
+                poll_index = min(poll_index + 1, len(_POLL_BACKOFF_SECONDS) - 1)
+            has_more, advanced = await self._check()
+            if self.state == "running" and advanced:
+                poll_index = 0
+        return self._format_finished(has_more=await self._drain_finished(has_more), tail=tail)
 
 
 async def run_desktop_shell_command(
@@ -639,45 +456,29 @@ async def run_desktop_shell_command(
 ) -> str | ToolOutputFileHandled:
     """Run one shell command on the paired desktop with native ``run_shell_command`` semantics."""
     if configuration.status is not DesktopConfigurationStatus.READY or configuration.target is None:
-        return _not_started(_setup_required_error(configuration.error, chat_pairing=credential_scope is not None))
+        return _not_started(_setup_error(configuration, chat=credential_scope is not None))
     if context is None:
         return _not_started("Error: Desktop shell requires a live Matrix runtime context.")
     assert credential_scope is not None
-    requester_id, agent_name = credential_scope
-
     try:
-        command_str, validated_tail, validated_timeout, validated_cwd = _validate_call_arguments(
-            args,
-            tail,
-            timeout,
-            cwd,
-        )
-    except ValueError as exc:
-        return _not_started(f"Error: {exc}")
-
-    try:
-        capture = _open_capture()
+        cmd_str, tail_n, limit, cwd_str = _validate_args(args, tail, timeout, cwd)
+        capture = None
+        if (req := current_tool_output_file_request()) is not None and req.path is not None:
+            p, root = req.policy, str(req.policy.workspace_root)
+            dest = cap.ShellOutputDestination(root, req.path.requested_path, p.max_bytes, p.tools_use_workdir)
+            capture = cap.ShellOutputCapture(dest)
     except Exception as exc:
-        return f"Error: {exc}"
-
-    runner = _DesktopShellRunner(
-        context=context,
-        target=configuration.target,
-        requester_id=requester_id,
-        agent_name=agent_name,
-        transport_timeout=configuration.timeout_seconds,
-        capture=capture,
-    )
+        return _not_started(f"Error: {exc}")
+    runner = _DesktopShellRunner(context, configuration, credential_scope)
+    runner.capture = capture
     try:
-        return await runner.execute(command_str, tail=validated_tail, timeout=validated_timeout, cwd=validated_cwd)
+        return await runner.execute(cmd_str, tail_n, limit, cwd_str)
     except asyncio.CancelledError:
-        with contextlib.suppress(BaseException):
-            await asyncio.shield(
-                asyncio.wait_for(runner.cleanup_on_cancel(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS),
-            )
+        with suppress(BaseException):
+            await asyncio.shield(asyncio.wait_for(runner.cleanup_on_cancel(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS))
         raise
-    except (_DesktopShellError, DesktopProtocolError, OlmToDeviceError) as exc:
-        return _capture_error(capture, str(exc))
+    except (_DesktopShellError, proto.DesktopProtocolError, OlmToDeviceError) as exc:
+        return runner._interrupt_or_return(f"Error: {exc}" if capture is None else str(exc))
     finally:
         if capture is not None:
             capture.close()

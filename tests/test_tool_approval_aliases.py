@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.approval.response import plan_approval_calls
-from mindroom.approval.tool_approval import ToolApprovalScriptError, evaluate_tool_approval, tool_may_require_approval
+from mindroom.approval.tool_approval import (
+    ToolApprovalScriptError,
+    evaluate_tool_approval,
+    tool_may_require_approval,
+    toolkit_approval_alias,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.llm.runs import ToolExecution
@@ -498,3 +503,100 @@ async def test_a_judge_that_fails_is_an_approval_policy_error_like_a_failing_scr
 
     assert "run_line" in str(raised.value)
     assert "judging service" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_desktop_approval_rules_gate_run_desktop_shell_and_fail_closed_on_invalid_args(
+    tmp_path: Path,
+) -> None:
+    """Existing match: desktop rules (plain and script) gate run_desktop_shell, and unparseable args fail closed."""
+    desktop_script = (
+        "def check(tool_name, arguments, agent_name):\n"
+        "    return arguments.get('action') == 'run_shell' and 'rm' in str(arguments.get('command', '')).split()\n"
+    )
+    (tmp_path / "desktop_review.py").write_text(desktop_script, encoding="utf-8")
+
+    # 1. Plain match: desktop rule gates run_desktop_shell.
+    plain_config, plain_paths = _config(tmp_path, {"match": "desktop", "action": "require_approval", "timeout_days": 2})
+    alias = toolkit_approval_alias(plain_config, builtin_tool_registry(), "desktop", "run_desktop_shell")
+    assert alias is not None
+    assert alias.judged_as == "desktop"
+    assert tool_may_require_approval(plain_config, "run_desktop_shell", alias) is True
+
+    asks, timeout = await evaluate_tool_approval(
+        plain_config,
+        plain_paths,
+        "run_desktop_shell",
+        {"args": "ls -la"},
+        "code",
+        alias,
+    )
+    assert (asks, timeout) == (True, 2 * 24 * 60 * 60)
+    asks_argv, _ = await evaluate_tool_approval(
+        plain_config,
+        plain_paths,
+        "run_desktop_shell",
+        {"args": ["git", "status"], "cwd": "/Users/me/repo"},
+        "code",
+        alias,
+    )
+    assert asks_argv is True
+
+    # 2. Script rule inspecting action == "run_shell" and command gates matching calls (string & argv) and allows benign ones.
+    script_config, script_paths = _config(
+        tmp_path,
+        {"match": "desktop", "script": "desktop_review.py", "timeout_days": 1},
+    )
+    assert tool_may_require_approval(script_config, "run_desktop_shell", alias) is True
+
+    asks_rm_str, rm_timeout = await evaluate_tool_approval(
+        script_config,
+        script_paths,
+        "run_desktop_shell",
+        {"args": "rm -rf build", "cwd": "/Users/me"},
+        "code",
+        alias,
+    )
+    assert (asks_rm_str, rm_timeout) == (True, 24 * 60 * 60)
+
+    asks_rm_argv, _ = await evaluate_tool_approval(
+        script_config,
+        script_paths,
+        "run_desktop_shell",
+        {"args": ["rm", "-rf", "build"]},
+        "code",
+        alias,
+    )
+    assert asks_rm_argv is True
+
+    asks_ls, _ = await evaluate_tool_approval(
+        script_config,
+        script_paths,
+        "run_desktop_shell",
+        {"args": ["ls", "-la"]},
+        "code",
+        alias,
+    )
+    assert asks_ls is False
+
+    # 3. Missing/unparseable args or non-string cwd returns None from the judge and fails closed.
+    for invalid_arguments in (
+        {},
+        {"args": None},
+        {"args": ""},
+        {"args": []},
+        {"args": [""]},
+        {"args": 123},
+        {"args": ["echo", 1]},
+        {"args": "ls", "cwd": 123},
+    ):
+        assert alias.judge(invalid_arguments) is None
+        failed_closed, _ = await evaluate_tool_approval(
+            script_config,
+            script_paths,
+            "run_desktop_shell",
+            invalid_arguments,
+            "code",
+            alias,
+        )
+        assert failed_closed is True

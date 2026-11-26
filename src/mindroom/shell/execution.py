@@ -391,6 +391,16 @@ def normalize_shell_args(args: object) -> list[str]:
     return ["bash", "-c", parsed] if isinstance(parsed, str) else parsed
 
 
+def shell_args_to_command(args: object) -> str:
+    """Convert natural shell command strings or argv lists into one shell command line."""
+    parsed = parse_shell_args(args)
+    if isinstance(parsed, str):
+        return parsed
+    if not parsed or not parsed[0]:
+        raise ValueError(_SHELL_ARGS_ERROR)
+    return shlex.join(parsed)
+
+
 def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
     """Return how long a reply waits for a shell command that runs as a job when its call sets no wait, else None.
 

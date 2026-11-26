@@ -1001,28 +1001,34 @@ async def test_bridge_stop_during_a_stalled_output_upload_returns_within_the_bou
 
 def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
     """Size the exact completed reply shape the bridge measures, with the metrics room it reserves."""
+    result: dict[str, object] = {
+        "state": "completed",
+        "handle": None,
+        "exit_code": 0,
+        "output": output,
+        "output_bytes": len(output.encode()),
+        "output_truncated": False,
+        "output_attachment": None,
+        "output_start": 0,
+        "next_offset": len(output.encode()),
+        "metrics": _WIDEST_METRICS,
+    }
+    if command.parameters.get("separate_stderr") is True:
+        result.update(
+            {
+                "stderr": "",
+                "stderr_bytes": 0,
+                "stderr_truncated": False,
+                "stderr_attachment": None,
+                "stderr_start": 0,
+                "stderr_next_offset": 0,
+            },
+        )
     return DesktopResponse(
         request_id=command.request_id,
         session_id=command.session_id,
         ok=True,
-        result={
-            "state": "completed",
-            "handle": None,
-            "exit_code": 0,
-            "output": output,
-            "output_bytes": len(output.encode()),
-            "output_truncated": False,
-            "output_attachment": None,
-            "output_start": 0,
-            "next_offset": len(output.encode()),
-            "stderr": "",
-            "stderr_bytes": 0,
-            "stderr_truncated": False,
-            "stderr_attachment": None,
-            "stderr_start": 0,
-            "stderr_next_offset": 0,
-            "metrics": _WIDEST_METRICS,
-        },
+        result=result,
     ).content_bytes()
 
 
@@ -3526,5 +3532,42 @@ async def test_status_succeeds_with_shell_and_folders_when_gui_display_probe_fai
     assert bridge_status["gui_permissions_ready"] is False
     assert bridge_status["shell"]["enabled"] is True
     assert len(bridge_status["file_roots"]) == 1
+    await shell.close()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_kill_shell_by_request_id_dismisses_pending_approval_in_parallel_bridge_lane(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """kill_shell(request_id=...) runs on the non-start bridge lane to dismiss pending approval immediately."""
+    shell = _local_shell()
+    bridge = _local_bridge(shell=shell)
+    marker = tmp_path / "never-run"
+    start_cmd = _run_shell(f"touch {marker}", tmp_path, request_id="run-pending", sequence=1)
+    await bridge.on_to_device_event(_event(start_cmd))
+    start_lane = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+    for _ in range(100):
+        if shell.status()["pending"] is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert shell.status()["pending"] is not None
+
+    cancel_cmd = _command("kill_shell", request_id="cancel-1", sequence=2, parameters={"request_id": "run-pending"})
+    await bridge.on_to_device_event(_event(cancel_cmd))
+    await bridge.execute_pending(shell_starts=False)
+    await asyncio.wait_for(start_lane, timeout=2)
+    await bridge.deliver_pending()
+
+    assert shell.status()["pending"] is None
+    assert not marker.exists()
+    cancel_resp = bridge._journal.get("cancel-1").response
+    run_resp = bridge._journal.get("run-pending").response
+    assert cancel_resp.ok is True
+    assert cancel_resp.result["state"] == "cancelled"
+    assert run_resp.ok is False
+    assert "cancelled before approval" in (run_resp.error or "")
+    assert transport.await_count == 2
     await shell.close()
     bridge.close()

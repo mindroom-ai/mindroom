@@ -1,10 +1,12 @@
-"""Matrix desktop-device tool registration."""
+"""Matrix desktop tool configuration."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.shell.execution import shell_args_to_command
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolCategory,
@@ -15,7 +17,21 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.custom_tools.desktop import DesktopTools
+
+
+def _judge_desktop_shell_approval(arguments: Mapping[str, object]) -> list[dict[str, object]] | None:
+    """Map ``run_desktop_shell`` calls to existing ``desktop(action="run_shell", ...)`` approval rules."""
+    try:
+        command = shell_args_to_command(arguments.get("args"))
+    except ValueError:
+        return None
+    cwd = arguments.get("cwd")
+    if cwd is not None and not isinstance(cwd, str):
+        return None
+    return [{"action": "run_shell", "command": command, **({"cwd": cwd} if isinstance(cwd, str) else {})}]
 
 
 @register_tool_with_metadata(
@@ -49,6 +65,7 @@ if TYPE_CHECKING:
         "Desktop-enabled agent."
     ),
     function_names=("desktop", "run_desktop_shell"),
+    approval_aliases={"run_desktop_shell": ApprovalAlias(judged_as="desktop", judge=_judge_desktop_shell_approval)},
     managed_init_args=(ToolManagedInitArg.CREDENTIALS_MANAGER, ToolManagedInitArg.WORKER_TARGET),
 )
 def desktop_tools() -> type[DesktopTools]:

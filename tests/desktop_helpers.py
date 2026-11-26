@@ -410,14 +410,18 @@ def _run_shell(
     requester_id: str = ALICE,
     timeout_seconds: int = 1,
     expires_at_ms: int = 120_000,
+    separate_stderr: bool | None = None,
 ) -> DesktopCommand:
+    params: dict[str, object] = {"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds}
+    if separate_stderr is not None:
+        params["separate_stderr"] = separate_stderr
     return replace(
         _command(
             "run_shell",
             request_id=request_id,
             sequence=sequence,
             requester_id=requester_id,
-            parameters={"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
+            parameters=params,
         ),
         expires_at_ms=expires_at_ms,
     )

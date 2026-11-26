@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_WARNING_DETAIL = 500
+_STDOUT_SLICE_KEYS = ("output", "output_truncated", "output_start", "next_offset")
+_STDERR_SLICE_KEYS = ("stderr", "stderr_truncated", "stderr_start", "stderr_next_offset")
 
 
 def shell_status(
@@ -95,9 +98,25 @@ async def execute_shell(
         )
         return await _shell_result(client, command, shell, result, offset=offset, stderr_offset=stderr_offset)
     if command.action == "kill_shell":
-        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
-        handle = required_str_parameter(parameters, "handle")
+        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force", "request_id"}))
+        has_handle = "handle" in parameters
+        has_request_id = "request_id" in parameters
+        if has_handle == has_request_id:
+            msg = "Desktop kill_shell requires exactly one of handle or request_id."
+            raise DesktopProtocolError(msg)
         force = optional_bool_parameter(parameters, "force")
+        if has_request_id:
+            request_id = required_str_parameter(parameters, "request_id")
+            return {
+                "state": shell.cancel_request(
+                    command.requester_id,
+                    command.agent_name,
+                    request_id,
+                    controller_key=controller_key,
+                ),
+                "request_id": request_id,
+            }
+        handle = required_str_parameter(parameters, "handle")
         return {
             "state": shell.kill(
                 command.requester_id,
@@ -108,8 +127,12 @@ async def execute_shell(
             ),
             "handle": handle,
         }
-    reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
+    reject_unexpected_parameters(
+        parameters,
+        allowed=frozenset({"command", "cwd", "timeout_seconds", "separate_stderr"}),
+    )
     timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
+    separate_stderr = optional_bool_parameter(parameters, "separate_stderr")
     request = DesktopShellRequest(
         request_id=command.request_id,
         requester_id=command.requester_id,
@@ -119,6 +142,7 @@ async def execute_shell(
         expires_at_ms=command.expires_at_ms,
         timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         controller_key=controller_key,
+        separate_stderr=separate_stderr,
     )
     return await _shell_result(client, command, shell, await shell.execute(request))
 
@@ -166,12 +190,12 @@ async def _shell_result(
 ) -> dict[str, object]:
     """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
 
-    Output starts at byte ``offset`` (and stderr at ``stderr_offset``); without one, a running command shows its
-    newest bytes. Returned stdout covers ``[output_start, next_offset)`` and stderr ``[stderr_start, stderr_next_offset)``.
+    Output starts at byte ``offset`` (and stderr at ``stderr_offset`` when ``separate_stderr`` was requested);
+    without one, a running command shows its newest bytes. Legacy callers omit ``separate_stderr`` and receive only
+    combined stdout/stderr keys so older controllers never drop stderr or leak ``stderr_attachment`` keys.
     """
     output = result.output
     size = output.size
-    stderr_size = output.stderr_size
     payload: dict[str, object] = {
         "state": result.state,
         "handle": result.handle,
@@ -182,42 +206,48 @@ async def _shell_result(
         "output_attachment": None,
         "output_start": offset or 0,
         "next_offset": size,
-        "stderr": "",
-        "stderr_bytes": stderr_size,
-        "stderr_truncated": output.stderr_truncated,
-        "stderr_attachment": None,
-        "stderr_start": stderr_offset or 0,
-        "stderr_next_offset": stderr_size,
     }
+    if result.separate_stderr:
+        stderr_size = output.stderr_size
+        payload.update(
+            {
+                "stderr": "",
+                "stderr_bytes": stderr_size,
+                "stderr_truncated": output.stderr_truncated,
+                "stderr_attachment": None,
+                "stderr_start": stderr_offset or 0,
+                "stderr_next_offset": stderr_size,
+            },
+        )
     if result.state == "running":
         stdout_raw = (
             output.tail(MAX_INLINE_RESPONSE_BYTES) if offset is None else output.read(offset, MAX_INLINE_RESPONSE_BYTES)
         )
-        stderr_raw = (
-            output.tail_stderr(MAX_INLINE_RESPONSE_BYTES)
-            if stderr_offset is None
-            else output.read_stderr(stderr_offset, MAX_INLINE_RESPONSE_BYTES)
+        stdout_slice = _stream_slice(
+            stdout_raw,
+            keys=_STDOUT_SLICE_KEYS,
+            offset=offset,
+            requested=size if offset is None else size - offset,
+            size=size,
+            base_truncated=output.truncated,
         )
-        return _fit_streams(
-            command,
-            payload,
-            _stream_slice(
-                stdout_raw,
-                keys=_STDOUT_SLICE_KEYS,
-                offset=offset,
-                requested=size if offset is None else size - offset,
-                size=size,
-                base_truncated=output.truncated,
-            ),
-            _stream_slice(
+        stderr_slice: _StreamSlice | None = None
+        if result.separate_stderr:
+            stderr_size = cast("int", payload["stderr_bytes"])
+            stderr_raw = (
+                output.tail_stderr(MAX_INLINE_RESPONSE_BYTES)
+                if stderr_offset is None
+                else output.read_stderr(stderr_offset, MAX_INLINE_RESPONSE_BYTES)
+            )
+            stderr_slice = _stream_slice(
                 stderr_raw,
                 keys=_STDERR_SLICE_KEYS,
                 offset=stderr_offset,
                 requested=stderr_size if stderr_offset is None else stderr_size - stderr_offset,
                 size=stderr_size,
                 base_truncated=output.stderr_truncated,
-            ),
-        )
+            )
+        return _fit_streams(command, payload, stdout_slice, stderr_slice)
     try:
         return await _finished_shell_result(
             client,
@@ -240,7 +270,9 @@ async def _upload_stream_attachment(
     content: bytes,
     *,
     filename: str,
-) -> dict[str, object]:
+) -> dict[str, object] | None:
+    if not content:
+        return None
     media = await upload_encrypted_media(
         client,
         content,
@@ -249,6 +281,36 @@ async def _upload_stream_attachment(
         timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
     )
     return media.to_content()
+
+
+async def _upload_attachments(
+    client: nio.AsyncClient,
+    request_id: str,
+    stdout_content: bytes,
+    stderr_content: bytes,
+    *,
+    separate_stderr: bool,
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    """Upload stdout (and stderr concurrently when split) within one shared upload timeout budget."""
+    coros = [_upload_stream_attachment(client, stdout_content, filename=f"shell-{request_id}.txt")]
+    if separate_stderr:
+        coros.append(_upload_stream_attachment(client, stderr_content, filename=f"shell-{request_id}-stderr.txt"))
+    outcomes = await asyncio.gather(*coros, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+            raise outcome
+    error: str | None = None
+    for outcome in outcomes:
+        if isinstance(outcome, DesktopMediaError):
+            error = error or str(outcome)
+        elif isinstance(outcome, Exception):
+            logger.exception("shell_output_upload_failed", request_id=request_id, exc_info=outcome)
+            error = error or "Shell output upload failed."
+    if error is not None:
+        return None, None, error
+    stdout_attachment = cast("dict[str, object] | None", outcomes[0])
+    stderr_attachment = cast("dict[str, object] | None", outcomes[1]) if separate_stderr else None
+    return stdout_attachment, stderr_attachment, None
 
 
 async def _finished_shell_result(
@@ -262,38 +324,30 @@ async def _finished_shell_result(
 ) -> dict[str, object]:
     """Deliver a finished command's stdout/stderr from their offsets; its handle stays until the rest arrives."""
     stdout_content = result.output.read(start)
-    stderr_content = result.output.read_stderr(stderr_start)
+    stderr_content = result.output.read_stderr(stderr_start) if result.separate_stderr else b""
     # A run_shell reply names its handle only while that handle stays to page from.
     delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
     # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
     if len(stdout_content) + len(stderr_content) <= MAX_INLINE_RESPONSE_BYTES:
-        inline = {**delivered, "output": stdout_content.decode(), "stderr": stderr_content.decode()}
+        inline: dict[str, object] = {**delivered, "output": stdout_content.decode()}
+        if result.separate_stderr:
+            inline["stderr"] = stderr_content.decode()
         if fits_inline(command, inline):
             shell.hand_over(result)
             return inline
-    try:
-        stdout_attachment = (
-            await _upload_stream_attachment(client, stdout_content, filename=f"shell-{command.request_id}.txt")
-            if stdout_content
-            else None
-        )
-        stderr_attachment = (
-            await _upload_stream_attachment(client, stderr_content, filename=f"shell-{command.request_id}-stderr.txt")
-            if stderr_content
-            else None
-        )
-    except DesktopMediaError as exc:
-        error = str(exc)
-    except Exception:
-        logger.exception("shell_output_upload_failed", request_id=command.request_id)
-        error = "Shell output upload failed."
-    else:
+    stdout_attachment, stderr_attachment, error = await _upload_attachments(
+        client,
+        command.request_id,
+        stdout_content,
+        stderr_content,
+        separate_stderr=result.separate_stderr,
+    )
+    if error is None:
         shell.hand_over(result)
-        return {
-            **delivered,
-            "output_attachment": stdout_attachment,
-            "stderr_attachment": stderr_attachment,
-        }
+        attached: dict[str, object] = {**delivered, "output_attachment": stdout_attachment}
+        if result.separate_stderr:
+            attached["stderr_attachment"] = stderr_attachment
+        return attached
     detail = error[:_MAX_WARNING_DETAIL]
     if result.handle is None:
         # Revocation raced this command's registration, so there is no handle to page from.
@@ -307,17 +361,15 @@ async def _finished_shell_result(
             f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
             "Continue with check_shell from next_offset."
         )
-    return _fit_streams(
-        command,
-        {**payload, "warning": warning},
-        _stream_slice(
-            stdout_content[:MAX_INLINE_RESPONSE_BYTES],
-            keys=_STDOUT_SLICE_KEYS,
-            offset=start,
-            requested=len(stdout_content),
-            size=cast("int", payload["output_bytes"]),
-            base_truncated=bool(payload["output_truncated"]),
-        ),
+    stdout_slice = _stream_slice(
+        stdout_content[:MAX_INLINE_RESPONSE_BYTES],
+        keys=_STDOUT_SLICE_KEYS,
+        offset=start,
+        requested=len(stdout_content),
+        size=cast("int", payload["output_bytes"]),
+        base_truncated=bool(payload["output_truncated"]),
+    )
+    stderr_slice = (
         _stream_slice(
             stderr_content[:MAX_INLINE_RESPONSE_BYTES],
             keys=_STDERR_SLICE_KEYS,
@@ -325,12 +377,11 @@ async def _finished_shell_result(
             requested=len(stderr_content),
             size=cast("int", payload["stderr_bytes"]),
             base_truncated=bool(payload["stderr_truncated"]),
-        ),
+        )
+        if result.separate_stderr
+        else None
     )
-
-
-_STDOUT_SLICE_KEYS = ("output", "output_truncated", "output_start", "next_offset")
-_STDERR_SLICE_KEYS = ("stderr", "stderr_truncated", "stderr_start", "stderr_next_offset")
+    return _fit_streams(command, {**payload, "warning": warning}, stdout_slice, stderr_slice)
 
 
 def _stream_slice(
@@ -349,9 +400,15 @@ def _fit_streams(
     command: DesktopCommand,
     payload: dict[str, object],
     stdout_slice: _StreamSlice,
-    stderr_slice: _StreamSlice,
+    stderr_slice: _StreamSlice | None,
 ) -> dict[str, object]:
-    """Fit both stdout and stderr into one inline reply without starving either stream."""
+    """Fit stdout (and stderr when split) into one inline reply without starving either stream."""
+    if stderr_slice is None:
+        full = {**payload, **stdout_slice.apply(0)}
+        if fits_inline(command, full):
+            return full
+        cut = leftmost_fitting(command, 0, len(stdout_slice.text), lambda c: {**payload, **stdout_slice.apply(c)})
+        return {**payload, **stdout_slice.apply(cut)}
 
     def build(stdout_cut: int, stderr_cut: int) -> dict[str, object]:
         return {**payload, **stdout_slice.apply(stdout_cut), **stderr_slice.apply(stderr_cut)}

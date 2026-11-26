@@ -29,6 +29,7 @@ def request(
     requester_id: str = REQUESTER,
     agent_name: str = AGENT,
     lifetime_ms: int = 60_000,
+    separate_stderr: bool = False,
 ) -> DesktopShellRequest:
     """Build one short-lived request for real subprocess tests."""
     return DesktopShellRequest(
@@ -39,6 +40,7 @@ def request(
         str(cwd),
         int(time.time() * 1000) + lifetime_ms,
         timeout,
+        separate_stderr=separate_stderr,
     )
 
 
@@ -142,13 +144,28 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_commands_use_the_captured_environment_and_split_streams(tmp_path: Path) -> None:
-    """The login environment reaches commands, stdin is detached, and stdout/stderr are captured separately."""
+    """Default requests merge stderr into stdout; separate_stderr=True captures stdout and stderr separately."""
     shell = local_shell()
     shell.grant(60)
     command = 'printf "$MINDROOM_TEST_LOGIN_VALUE\\n"; printf "warning\\n" >&2; cat; printf "last"'
-    result = await shell.execute(request(command, tmp_path))
+
+    # Legacy default (separate_stderr=False) merges stderr into stdout and rejects stderr_offset.
+    merged = await shell.execute(request(command, tmp_path, request_id="r-merged"))
+    assert merged.state == "completed"
+    assert merged.exit_code == 0
+    assert merged.separate_stderr is False
+    assert merged.output.read().decode() == "from-login\nwarning\nlast"
+    assert merged.output.read_stderr() == b""
+    assert merged.handle is not None
+    with pytest.raises(DesktopShellError, match="separate_stderr"):
+        shell.check(REQUESTER, AGENT, merged.handle, stderr_offset=0)
+    shell.hand_over(merged)
+
+    # Opt-in separate_stderr=True splits stdout and stderr cleanly.
+    result = await shell.execute(request(command, tmp_path, request_id="r-split", separate_stderr=True))
     assert result.state == "completed"
     assert result.exit_code == 0
+    assert result.separate_stderr is True
     assert result.output.read().decode() == "from-login\nlast"
     assert result.output.read_stderr().decode() == "warning\n"
     await shell.close()
@@ -173,7 +190,7 @@ async def test_invalid_stderr_offset_is_rejected_without_dropping_handle(tmp_pat
     """An invalid stderr_offset fails without modifying or handing over a completed handle."""
     shell = local_shell()
     shell.grant(60)
-    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path))
+    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path, separate_stderr=True))
     assert result.handle is not None
     for bad in (-1, 99, 1):
         with pytest.raises(DesktopShellError, match="stderr offset"):
@@ -1105,4 +1122,39 @@ async def test_unapproved_or_invalid_shell_request_does_not_evict_finished_handl
     checked = shell.check(REQUESTER, AGENT, finished.handle)
     assert checked.output.read() == b"keep-me\n"
     shell.hand_over(checked)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_dismisses_pending_approval_and_kills_handle(tmp_path: Path) -> None:
+    """cancel_request dismisses a caller's pending approval immediately (never running) or force-kills its handle."""
+    shell = local_shell()
+    marker = tmp_path / "never-created"
+    pending_task = asyncio.create_task(
+        shell.execute(request(f"touch {marker}", tmp_path, request_id="req-pending")),
+    )
+    await wait_pending(shell)
+
+    # Wrong caller or wrong request_id cannot dismiss the pending prompt.
+    assert shell.cancel_request("@other:example.org", AGENT, "req-pending") == "not_found"
+    assert shell.cancel_request(REQUESTER, AGENT, "req-other") == "not_found"
+    assert shell.status()["pending"] is not None
+
+    # Exact caller dismisses the prompt immediately and the command never runs.
+    assert shell.cancel_request(REQUESTER, AGENT, "req-pending") == "cancelled"
+    assert shell.status()["pending"] is None
+    with pytest.raises(DesktopShellError, match="cancelled before approval"):
+        await asyncio.wait_for(pending_task, timeout=2)
+    assert not marker.exists()
+
+    # After a command starts and returns a handle, cancel_request(request_id=...) force-kills that handle.
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, request_id="req-bg", timeout=1))
+    assert running.state == "running"
+    assert running.handle is not None
+    assert shell.cancel_request("@other:example.org", AGENT, "req-bg") == "not_found"
+    assert shell.cancel_request(REQUESTER, AGENT, "req-bg") == "killed"
+    finished = await check_until_finished(shell, running.handle)
+    assert finished.state == "killed"
+    assert finished.exit_code == -signal.SIGKILL
     await shell.close()

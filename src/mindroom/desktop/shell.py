@@ -76,6 +76,7 @@ class DesktopShellRequest:
     expires_at_ms: int
     timeout_seconds: int = 30
     controller_key: str = ""
+    separate_stderr: bool = False
 
 
 class DesktopShellOutput(ShellOutputCapture):
@@ -184,6 +185,7 @@ class DesktopShellResult:
     handle: str | None
     exit_code: int | None
     output: DesktopShellOutput
+    separate_stderr: bool = False
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,8 @@ class _ShellHandle:
     output: DesktopShellOutput
     killed: bool = False
     controller_key: str = ""
+    request_id: str = ""
+    separate_stderr: bool = False
 
     def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
         if not record.finished:
@@ -246,6 +250,7 @@ class DesktopShell:
         self._monotonic_clock = monotonic_clock
         self._leases: dict[str, float] = {}
         self._pending: DesktopShellRequest | None = None
+        self._admitted_request: DesktopShellRequest | None = None
         # True from the moment a request needs a decision, including while it is held back behind agent input.
         self._awaiting_decision = False
         self._decision: asyncio.Future[str] | None = None
@@ -289,6 +294,9 @@ class DesktopShell:
             or not 1 <= request.timeout_seconds <= 60
         ):
             message = "Shell timeout must be an integer from 1 to 60 seconds."
+            raise DesktopShellError(message)
+        if not isinstance(request.separate_stderr, bool):
+            message = "Shell separate_stderr flag must be boolean."
             raise DesktopShellError(message)
         if not isinstance(request.expires_at_ms, int) or isinstance(request.expires_at_ms, bool):
             message = "Shell approval expiry is invalid."
@@ -512,6 +520,7 @@ class DesktopShell:
             raise DesktopShellError(message)
         self._check_handle_capacity()
         self._used_ids.add(used_key)
+        self._admitted_request = request
         self._active_controller_key = request.controller_key
         self._busy = True
         self._finished.clear()
@@ -566,6 +575,7 @@ class DesktopShell:
             return await self._run(request, max(0.0, min(request.timeout_seconds, remaining)))
         finally:
             self._pending = None
+            self._admitted_request = None
             self._decision = None
             self._active_controller_key = None
             self._active_request_id = None
@@ -588,7 +598,7 @@ class DesktopShell:
                 timeout=inline_wait,
                 output_capture=output,
                 stdin=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE if request.separate_stderr else asyncio.subprocess.STDOUT,
                 kill_group_after_exit=True,
                 # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
                 register_finished=True,
@@ -617,7 +627,13 @@ class DesktopShell:
             if not output.completed:
                 output.release()
                 raise DesktopShellError(_STOPPED)
-            return DesktopShellResult("completed", None, output.exit_code, output)
+            return DesktopShellResult(
+                "completed",
+                None,
+                output.exit_code,
+                output,
+                separate_stderr=request.separate_stderr,
+            )
         entry = _ShellHandle(
             request.requester_id,
             request.agent_name,
@@ -625,10 +641,18 @@ class DesktopShell:
             started_at,
             output,
             controller_key=request.controller_key,
+            request_id=request.request_id,
+            separate_stderr=request.separate_stderr,
         )
         self._handles[result.handle] = entry
         record = self._records[result.handle]
-        return DesktopShellResult(entry.state(record), result.handle, record.return_code, output)
+        return DesktopShellResult(
+            entry.state(record),
+            result.handle,
+            record.return_code,
+            output,
+            separate_stderr=entry.separate_stderr,
+        )
 
     def check(
         self,
@@ -650,10 +674,19 @@ class DesktopShell:
         if offset is not None:
             entry.output.check_offset(offset)
         if stderr_offset is not None:
+            if not entry.separate_stderr:
+                message = "Shell stderr_offset is only supported for commands started with separate_stderr."
+                raise DesktopShellError(message)
             entry.output.check_stderr_offset(stderr_offset)
         if not record.finished:
-            return DesktopShellResult("running", handle, None, entry.output)
-        return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)
+            return DesktopShellResult("running", handle, None, entry.output, separate_stderr=entry.separate_stderr)
+        return DesktopShellResult(
+            entry.state(record),
+            handle,
+            record.return_code,
+            entry.output,
+            separate_stderr=entry.separate_stderr,
+        )
 
     def hand_over(self, result: DesktopShellResult) -> None:
         """Forget a finished result's handle and release its output once the rest of it reached the caller."""
@@ -677,6 +710,60 @@ class DesktopShell:
             handle,
             force=force,
         )
+
+    def cancel_request(
+        self,
+        requester_id: str,
+        agent_name: str,
+        request_id: str,
+        *,
+        controller_key: str | None = None,
+    ) -> Literal["cancelled", "killed", "completed", "not_found"]:
+        """Cancel a caller's pending approval or stop its active/retained command by ``request_id``."""
+
+        def _matches(req_id: str, req_user: str, req_agent: str, req_controller: str) -> bool:
+            return (
+                req_id == request_id
+                and (req_user, req_agent) == (requester_id, agent_name)
+                and (controller_key is None or req_controller == controller_key)
+            )
+
+        pending = self._pending
+        decision = self._decision
+        if (
+            pending is not None
+            and decision is not None
+            and not decision.done()
+            and _matches(pending.request_id, pending.requester_id, pending.agent_name, pending.controller_key)
+        ):
+            decision.set_result("cancelled")
+            self._pending = None
+            return "cancelled"
+        admitted = self._admitted_request
+        if (
+            self._awaiting_decision
+            and admitted is not None
+            and _matches(admitted.request_id, admitted.requester_id, admitted.agent_name, admitted.controller_key)
+        ):
+            self._cancel_event.set()
+            return "cancelled"
+        if (
+            self._active_request_id is not None
+            and self._active_owner is not None
+            and _matches(
+                self._active_request_id,
+                self._active_owner[1],
+                self._active_owner[2],
+                self._active_owner[0],
+            )
+        ):
+            self._cancel_event.set()
+            return "killed"
+        self._prune()
+        for handle, entry in self._handles.items():
+            if _matches(entry.request_id, entry.requester_id, entry.agent_name, entry.controller_key):
+                return self._signal(self._records[handle], handle, force=True)
+        return "not_found"
 
     def kill_handle(self, handle: str) -> None:
         """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""

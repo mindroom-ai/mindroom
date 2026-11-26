@@ -60,8 +60,14 @@ _READ_ONLY_ACTIONS = frozenset(
 def _command_handle(command: DesktopCommand) -> str | None:
     if command.action not in _HANDLE_ACTIONS:
         return None
-    raw = command.parameters.get("handle")
-    return raw if isinstance(raw, str) and raw else None
+    raw_handle = command.parameters.get("handle")
+    if isinstance(raw_handle, str) and raw_handle:
+        return f"handle:{raw_handle}"
+    if command.action == "kill_shell":
+        raw_request_id = command.parameters.get("request_id")
+        if isinstance(raw_request_id, str) and raw_request_id:
+            return f"request_id:{raw_request_id}"
+    return None
 
 
 def _actions_conflict(

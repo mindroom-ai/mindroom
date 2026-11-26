@@ -445,3 +445,55 @@ async def test_shell_handle_actions_conflict_only_on_same_handle(monkeypatch: py
     results = await asyncio.gather(h1_check, h2_check, click_task)
     assert [r.result["ok"] for r in results] == ["c1", "c2", "g1"]
     assert not router._pending
+
+
+@pytest.mark.asyncio
+async def test_kill_shell_request_id_scoping_in_router(monkeypatch: pytest.MonkeyPatch) -> None:
+    """kill_shell(request_id=...) conflicts only on the same request_id, never with run_shell or handle actions."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
+
+    def cmd(request_id: str, action: str, params: dict[str, object]) -> DesktopCommand:
+        base = _command(request_id=request_id, action=action)
+        return DesktopCommand(
+            request_id=base.request_id,
+            session_id=base.session_id,
+            sequence=base.sequence,
+            issued_at_ms=base.issued_at_ms,
+            expires_at_ms=base.expires_at_ms,
+            action=base.action,
+            requester_id=base.requester_id,
+            agent_name=base.agent_name,
+            parameters=params,
+        )
+
+    run_task = asyncio.create_task(
+        router.request(TARGET, cmd("start-1", "run_shell", {"command": "sleep 60"}), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+
+    # Cancelling start-1 via kill_shell(request_id="start-1") runs concurrently with the in-flight run_shell.
+    k1 = asyncio.create_task(
+        router.request(TARGET, cmd("k1", "kill_shell", {"request_id": "start-1"}), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+
+    # Same request_id conflicts, while a different request_id or a handle-scoped kill/check does not.
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, cmd("k1-dup", "kill_shell", {"request_id": "start-1"}), timeout_seconds=1)
+
+    k2 = asyncio.create_task(
+        router.request(TARGET, cmd("k2", "kill_shell", {"request_id": "start-2"}), timeout_seconds=1),
+    )
+    k_handle = asyncio.create_task(
+        router.request(TARGET, cmd("k-handle", "kill_shell", {"handle": "start-1"}), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+
+    for req_id in ("start-1", "k1", "k2", "k-handle"):
+        router.on_to_device_event(_event(DesktopResponse(req_id, "session-1", True, result={"ok": req_id})))
+    results = await asyncio.gather(run_task, k1, k2, k_handle)
+    assert [r.result["ok"] for r in results] == ["start-1", "k1", "k2", "k-handle"]
+    assert not router._pending
