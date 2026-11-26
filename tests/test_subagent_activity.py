@@ -37,8 +37,16 @@ from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
-from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.events import (
+    ReportedCall,
+    RunFinished,
+    TextDelta,
+    ToolCallOrigin,
+    ToolCompleted,
+    ToolProgress,
+    ToolStarted,
+)
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.providers.identity import model_identity
 from mindroom.redaction import redact_sensitive_text
@@ -74,7 +82,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.activity import _SubagentStatus
     from mindroom.llm.usage import MessageMetrics
-    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from tests.fakes.scripted_model import ScriptStep
@@ -155,6 +163,7 @@ def test_start_reads_the_child_identity() -> None:
     """The snapshot carries the resolved thread, callers, parent link, and the sub-agent the run is a turn of."""
     snapshot = _activity().snapshot()
     assert snapshot.subagent_id == "s1"
+    assert snapshot.caller_tool_call_id == "call"
     assert (snapshot.caller_agent_name, snapshot.root_caller_agent_name) == ("parent", "lead")
     assert (snapshot.thread_id, snapshot.parent_delegation_id, snapshot.source) == ("$thread", "p0", "delegate")
     assert (snapshot.status, snapshot.started_at, snapshot.ended_at) == ("running", 1.0, None)
@@ -213,7 +222,7 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     (running,) = a.snapshot().items
     assert running.state == "running"
     assert "example-secret" not in (_checked_entry(running).args_preview or "")
-    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin))
+    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin), now=2.0)
     (item,) = a.snapshot().items
     assert item.state == "done"
     assert item.tool_call_id == "c1"
@@ -229,7 +238,7 @@ def test_a_call_announced_again_keeps_its_one_row() -> None:
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("Waiting")
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), now=2.0)
     assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
         ("tool", "c1", "done"),
         ("text", None, None),
@@ -239,26 +248,38 @@ def test_a_call_announced_again_keeps_its_one_row() -> None:
 def test_a_tool_row_keeps_when_its_call_first_started() -> None:
     """A row carries when its call started, which announcing it again on resume and completing it keep.
 
-    A completion with no row of its own appends a row that names no start.
+    Reusing a completed call's ID starts anew with the later start timestamp, and a completion with no row of its own
+    appends a row that names no start.
     """
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=100.0)
+    assert a.tool_progress("c1", "step 1") is True
     assert a.snapshot().items[0].started_at == 100.0
     a.add_text("Waiting")
     a.tool_started(ToolStarted(call=_call("c1")), now=200.0)
-    assert a.snapshot().items[0].started_at == 100.0
-    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
-    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
-    assert [(i.tool_call_id, i.state, i.started_at) for i in a.snapshot().items if i.kind == "tool"] == [
-        ("c1", "done", 100.0),
-        ("c9", "done", None),
+    assert (a.snapshot().items[0].started_at, a.snapshot().items[0].progress) == (100.0, "step 1")
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), now=150.0)
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")), now=160.0)
+    assert [(i.tool_call_id, i.state, i.started_at, i.ended_at) for i in a.snapshot().items if i.kind == "tool"] == [
+        ("c1", "done", 100.0, 150.0),
+        ("c9", "done", None, 160.0),
     ]
+    a.tool_started(ToolStarted(call=_call("c1")), now=300.0)
+    c1_restarted = a.snapshot().items[0]
+    assert (c1_restarted.state, c1_restarted.started_at, c1_restarted.ended_at, c1_restarted.progress) == (
+        "running",
+        300.0,
+        None,
+        None,
+    )
+    a.tool_completed(ToolCompleted(call=_call("c1", result="y")), now=350.0)
+    assert (a.snapshot().items[0].started_at, a.snapshot().items[0].ended_at) == (300.0, 350.0)
 
 
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
     """An unmatched completion still shows up."""
     a = _activity()
-    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")), now=2.0)
     assert [(i.tool_call_id, i.state) for i in a.snapshot().items] == [("c9", "done")]
 
 
@@ -266,7 +287,7 @@ def test_failed_tool_call_is_an_error_row() -> None:
     """A failed call ends in state error and preserves `is_error` on its public entry."""
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)), now=2.0)
     (item,) = a.snapshot().items
     assert item.tool is not None
     assert (item.state, item.tool.type, item.tool.is_error) == ("error", "tool_call_completed", True)
@@ -339,7 +360,7 @@ def test_subagent_usage_counts_tool_calls_past_the_transcript_cap() -> None:
     a = _activity()
     for n in range(25):
         a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
-        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")))
+        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")), now=2.0)
     snapshot = a.snapshot()
     assert len(snapshot.items) == 20
     assert snapshot.usage is not None
@@ -352,7 +373,7 @@ def test_a_call_announced_again_is_counted_once_and_a_reused_call_id_again() -> 
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_started(ToolStarted(call=_call("c1")), now=2.0)
     assert a.snapshot().usage == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 1}
-    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=2.5)
     a.tool_started(ToolStarted(call=_call("c1")), now=3.0)
     assert a.snapshot().usage == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 2}
 
@@ -363,7 +384,7 @@ def test_a_call_resumed_after_the_cap_removed_its_row_is_counted_once() -> None:
     a.tool_started(ToolStarted(call=_call("gated")), now=1.0)
     for n in range(20):
         a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
-        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")))
+        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")), now=1.5)
     assert all(item.tool_call_id != "gated" for item in a.snapshot().items)
     a.tool_started(ToolStarted(call=_call("gated")), now=2.0)
     usage = a.snapshot().usage
@@ -475,7 +496,7 @@ def test_status_change_settles_only_terminal_running_tools(
     """Terminal statuses settle running tools (keeping `started_at`); non-terminal ones leave them open."""
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=10.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=15.0)
     a.tool_started(ToolStarted(call=_call("c2")), now=20.0)
     a.set_status(status, 30.0, interrupted_by_restart=interrupted)
     done_item, item = a.snapshot().items
@@ -764,12 +785,12 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
 
 
 @pytest.mark.asyncio
-async def test_a_childs_progress_names_when_its_tool_call_started(
+async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_feed_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """The caller's progress names the UTC time the child's call started, the start its feed row carries."""
+    """The caller's progress and the feed row agree on when a call started, and the feed row records ended_at."""
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
@@ -779,11 +800,14 @@ async def test_a_childs_progress_names_when_its_tool_call_started(
         await ai_response(turn, paths, config)
 
     last = await seen.wait_for_status("completed")
-    started_at = last.items[0].started_at
+    assert last.caller_tool_call_id == "delegate"
+    started_at, ended_at = last.items[0].started_at, last.items[0].ended_at
     assert started_at is not None
+    assert ended_at is not None
     assert abs(time.time() - started_at) < 60
-    started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
-    assert f"\nCalling add (started {started} UTC)\n" in reports
+    assert ended_at >= started_at
+    expected = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+    assert reports[0] == f"\nCalling add (started {expected} UTC)\n"
 
 
 @pytest.mark.asyncio
@@ -792,7 +816,7 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """A provider may reuse a call id within a run; the later call names its own start, not the finished one's."""
+    """A provider may reuse a call id within a run; the later call records a fresh start timestamp."""
     clock = iter([100.0, 200.0])
     monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
     reports: list[str] = []
@@ -804,9 +828,10 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
         await ai_response(turn, paths, config)
 
     last = await seen.wait_for_status("completed")
-    assert [item.started_at for item in last.items if item.kind == "tool"] == [100.0]
-    calling = [line for line in reports[-1].splitlines() if line.startswith("Calling")]
-    assert calling == ["Calling add (started 00:01:40 UTC)", "Calling add (started 00:03:20 UTC)"]
+    (tool_item,) = (item for item in last.items if item.kind == "tool")
+    assert tool_item.started_at == 200.0
+    assert tool_item.ended_at is not None
+    assert reports[-1] == "\nCalling add (started 00:01:40 UTC)\n\nCalling add (started 00:03:20 UTC)\nDone"
 
 
 @pytest.mark.asyncio
@@ -1554,3 +1579,131 @@ async def test_a_child_resumed_where_nothing_publishes_it_ends_on_its_open_feed(
     assert last is seen.snapshots[-1]
     assert last.result_preview == "Child done"
     assert not _OPEN
+
+
+def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
+    """Running tools store redacted bounded progress, clear it on completion/settlement, and record `ended_at`."""
+    activity = _activity()
+    activity.tool_started(ToolStarted(call=_call("c1")), now=10.0)
+    activity.tool_started(ToolStarted(call=_call("c2")), now=11.0)
+    assert activity.tool_progress("c1", "z" * 1_200 + "\nAuthorization: Bearer super-secret-token") is True
+    assert activity.tool_progress("c2", "working on c2") is True
+    assert activity.tool_progress("c2", "working on c2") is False
+    assert activity.tool_progress("missing", "ignored") is False
+
+    snap = activity.snapshot()
+    c1, c2 = snap.items
+    assert c1.ended_at is None
+    assert c2.ended_at is None
+    assert c1.progress is not None
+    assert c1.progress.endswith("\nAuthorization: Bearer ***redacted***")
+    assert "super-secret-token" not in c1.progress
+    assert len(c1.progress) == 1_000
+    assert c2.progress == "working on c2"
+
+    activity.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=15.5)
+    assert activity.tool_progress("c1", "late progress ignored") is False
+    c1_done, c2_running = activity.snapshot().items
+    assert (c1_done.started_at, c1_done.ended_at, c1_done.progress) == (10.0, 15.5, None)
+    assert (c2_running.started_at, c2_running.ended_at, c2_running.progress) == (11.0, None, "working on c2")
+
+    activity.set_status("failed", 20.0, result="stopped")
+    c1_final, c2_settled = activity.snapshot().items
+    assert (c1_final.ended_at, c1_final.progress) == (15.5, None)
+    assert (c2_settled.state, c2_settled.started_at, c2_settled.ended_at, c2_settled.progress) == (
+        "error",
+        11.0,
+        20.0,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_observe_child_event_forwards_tool_progress_without_auditing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """`ToolProgress` updates the child's activity feed without writing transient events to the child audit."""
+    audit_events: list[object] = []
+    orig_record = lifecycle.record_child_event
+
+    async def spy_record(audit: Any, event: Any) -> None:  # noqa: ANN401
+        audit_events.append(event)
+        await orig_record(audit, event)
+
+    monkeypatch.setattr(lifecycle, "record_child_event", spy_record)
+
+    async def child_with_progress(
+        ctx: ResponseTurnContext,
+        *_args: object,
+        sinks: TurnSinks,
+        **_kwargs: object,
+    ) -> TurnResult:
+        assert sinks.on_attempt_start is not None
+        sinks.on_attempt_start("child-run", ctx.active_model_name)
+        call = ReportedCall("call-bash", "bash", {"command": "echo hi"})
+        await lifecycle.observe_child_event(ToolStarted(call=call))
+        await lifecycle.observe_child_event(ToolProgress("call-bash", "line 1\nline 2"))
+        await asyncio.sleep(_FLUSH_INTERVAL_SECONDS + 0.05)
+        await lifecycle.observe_child_event(ToolCompleted(call=replace(call, result="hi")))
+        done_record = RunRecord(
+            run_id="child-run",
+            session_id=ctx.session_id,
+            status=RunStatus.completed,
+            content="done",
+        )
+        await lifecycle.observe_child_event(RunFinished(done_record))
+        return TurnResult("done")
+
+    tools, config, runtime_paths = _direct_tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.ai.ai_response", side_effect=child_with_progress),
+    ):
+        await tools.run_subagent(agent_name="child", task="Run bash")
+
+    last = await seen.wait_for_status("completed")
+    progress_seen = [
+        item.progress
+        for snap in seen.snapshots
+        for item in snap.items
+        if item.kind == "tool" and item.progress is not None
+    ]
+    assert "line 1\nline 2" in progress_seen
+    assert last.items[0].progress is None
+    assert last.items[0].ended_at is not None
+    assert not any(isinstance(ev, ToolProgress) for ev in audit_events)
+
+
+@pytest.mark.asyncio
+async def test_caller_tool_call_id_is_capped_on_start_and_resume() -> None:
+    """Empty, non-string, and oversized stored `parent_tool_call_id` values are normalized on start and resume."""
+    for raw in ("", 3):
+        activity = _SubagentActivity.start(
+            replace(_child(), parent_tool_call_id=raw),  # type: ignore[arg-type]
+            parent_delegation_id=None,
+            root_caller_agent_name="lead",
+            now=1.0,
+        )
+        assert activity.snapshot().caller_tool_call_id is None
+
+    seen = _Sink()
+    child = replace(_child(), parent_tool_call_id="a" * 500)
+    feed = ActivityFeed.open(child, parent_delegation_id=None, root_caller_agent_name="lead", sink=seen)
+    first = await seen.wait_for(1)
+    assert first.caller_tool_call_id == "a" * 256
+
+    feed.status("paused")
+    await seen.wait_for(2)
+    ActivityFeed.open(
+        replace(child, parent_tool_call_id="b" * 500),
+        parent_delegation_id=None,
+        root_caller_agent_name="lead",
+        sink=seen,
+    )
+    resumed = await seen.wait_for(3)
+    assert resumed.caller_tool_call_id == "b" * 256
+    feed.status("completed")
+    await seen.wait_for_status("completed")

@@ -30,7 +30,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation import execution, lifecycle
+from mindroom.delegation import activity, execution, lifecycle
 from mindroom.delegation.cost import SubagentCost, receipts_metadata, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
@@ -505,7 +505,9 @@ async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_ca
     code = ScriptedModel([calls(tool_call("write_report", "same-call")), answer("child result")])
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
     clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: clock.now))
+    fake_time = SimpleNamespace(time=lambda: clock.now)
+    monkeypatch.setattr(lifecycle, "time", fake_time)
+    monkeypatch.setattr(activity, "time", fake_time)
     snapshots: list[SubagentSnapshot] = []
     monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: snapshots.append if feed else None)
     reports: list[str] = []
@@ -527,6 +529,9 @@ async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_ca
     assert isinstance(result, CompletedApprovalRun)
     starts = [item.started_at for snapshot in snapshots for item in snapshot.items if item.kind == "tool"]
     assert set(starts) == ({100.0} if feed else set())
+    if feed:
+        ended_tools = [item for item in snapshots[-1].items if item.kind == "tool"]
+        assert [(item.started_at, item.ended_at) for item in ended_tools] == [(100.0, 10_900.0)]
     calling = [line for report in reports for line in report.splitlines() if line.startswith("Calling")]
     assert calling
     assert set(calling) == {"Calling write_report (started 00:01:40 UTC)"}

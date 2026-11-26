@@ -32,7 +32,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
-from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, serialize_tool_trace_entry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
@@ -1433,3 +1433,138 @@ async def test_frames_are_recorded_only_after_the_edit_in_flight_landed(tmp_path
     kinds = [write.kind for write in records.writes]
     assert kinds == ["progress", "progress_delivered", "progress", "progress_delivered", "shown_live"]
     assert records.writes[-1].progress.text == "Approved. Building now"
+
+
+@pytest.mark.asyncio
+async def test_running_tool_emits_started_at_in_live_frames_only_never_in_durable_writes(
+    tmp_path: Path,
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running tool carries `started_at` on `io.mindroom.live` frames, drops it on completion, and never persists it."""
+    monkeypatch.setattr("mindroom.tool_system.events.time.time", lambda: 1762790123.5)
+    records, edits = _records(), _Edits()
+    stream = _running_shell(ToolProgress("call-1", "step 1"), 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    running_entries = [entry for entry in entries if entry["type"] == "tool_call_started"]
+    assert running_entries
+    assert all(entry["started_at"] == 1762790123.5 for entry in running_entries)
+    assert entries[-1]["type"] == "tool_call_completed"
+    assert "started_at" not in entries[-1]
+    written = [write.content for write in records.writes if write.content is not None] + edits.contents
+    assert all('"started_at"' not in json.dumps(content) for content in written)
+
+    started_entry = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="bash",
+        args_preview="command=ls",
+        tool_call_id="call-1",
+        started_at=1762790123.5,
+    )
+    assert "started_at" not in serialize_tool_trace_entry(started_entry, include_internal=False)
+    assert "started_at" not in serialize_tool_trace_entry(started_entry, include_internal=True)
+
+
+def test_sync_live_tools_cache_key_tracks_started_at(tmp_path: Path) -> None:
+    """Changing `started_at` on a running trace entry invalidates `_live_tool_cache`."""
+    config = _config(tmp_path)
+    records = _records()
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve(_ROOM_ID, None, "$question"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **records.hooks(),
+    )
+    entry = ToolTraceEntry(type="tool_call_started", tool_name="bash", tool_call_id="c1", started_at=None)
+    streaming.append_tool_trace(entry)
+    assert "started_at" not in streaming._sync_live_tools()[0]
+
+    entry.started_at = 1001.25
+    streaming.note_tool_trace_changed()
+    assert streaming._sync_live_tools()[0]["started_at"] == 1001.25
+
+    entry.type = "tool_call_completed"
+    streaming.note_tool_trace_changed()
+    assert "started_at" not in streaming._sync_live_tools()[0]
+
+
+def test_sync_live_tools_guards_reused_call_id_progress_to_running_entry(tmp_path: Path) -> None:
+    """A running call's progress never attaches to an earlier completed trace row with the same call ID."""
+    config = _config(tmp_path)
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve(_ROOM_ID, None, "$question"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **_records().hooks(),
+    )
+    streaming.append_tool_trace(
+        ToolTraceEntry(type="tool_call_completed", tool_name="bash", tool_call_id="c1", result_preview="ok"),
+    )
+    streaming.append_tool_trace(
+        ToolTraceEntry(type="tool_call_started", tool_name="bash", tool_call_id="c1", started_at=1002.5),
+    )
+    streaming.set_tool_progress("c1", "step 2")
+
+    completed_row, running_row = streaming._sync_live_tools()
+    assert "progress" not in completed_row
+    assert "started_at" not in completed_row
+    assert running_row["progress"] == "step 2"
+    assert running_row["started_at"] == 1002.5
+
+
+@pytest.mark.asyncio
+async def test_structured_started_at_update_reaches_live_frames_without_durable_edit(
+    tmp_path: Path,
+    frames: _Frames,
+) -> None:
+    """Adding `started_at` to a tracked running entry updates live frames without triggering a durable edit."""
+    config = _config(tmp_path)
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve(_ROOM_ID, None, "$question"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **_records().hooks(),
+    )
+    initial = ToolTraceEntry(type="tool_call_started", tool_name="bash", tool_call_id="c1", started_at=None)
+    streaming.apply_tool_trace_snapshot([initial])
+    prepared = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=True)
+    assert prepared is not None
+    streaming._mark_delivery_committed(prepared.committed_state)
+    assert not streaming.has_uncommitted_presentation()
+
+    progress_version = streaming._tool_progress_version
+    with_start = ToolTraceEntry(type="tool_call_started", tool_name="bash", tool_call_id="c1", started_at=1001.25)
+    streaming.apply_tool_trace_snapshot([with_start])
+    assert streaming.tool_trace[0] is not with_start
+    assert streaming.tool_trace[0].started_at == 1001.25
+    assert streaming._tool_progress_version > progress_version
+    assert not streaming.has_uncommitted_presentation()
+    assert streaming._sync_live_tools()[0]["started_at"] == 1001.25
+
+    edits = _Edits()
+    records = FakeReplyRecords()
+    body = "Working\n\n🔧 `bash` [1] ⏳"
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
+        async with stream_progress_edits(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            event_id="$answer",
+            show_tool_calls=True,
+            **records.progress_hooks(),
+        ) as publish:
+            await publish(StructuredStreamChunk(content=body, tool_trace=[initial]))
+            await asyncio.sleep(0.1)
+            await publish(StructuredStreamChunk(content=body, tool_trace=[with_start]))
+            await asyncio.sleep(0.1)
+
+    assert len(edits.contents) == 1
+    assert [write.kind for write in records.writes] == ["progress", "progress_delivered"]
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    assert any(entry.get("started_at") == 1001.25 for entry in entries)
