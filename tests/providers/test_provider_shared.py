@@ -462,6 +462,34 @@ def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
     assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)
 
 
+def test_google_auth_transport_and_retryable_refresh_errors_have_no_network_code() -> None:
+    """Google auth transport/refresh failures stay retryable with code None; unwrapped requests SSLError falls through."""
+    import requests.exceptions  # noqa: PLC0415
+    from google.auth import exceptions as google_auth  # noqa: PLC0415
+
+    refresh_503 = provider_failure(
+        google_auth.RefreshError("HTTP 503 Service Unavailable", retryable=True),
+        provider="VertexAI",
+    )
+    assert type(refresh_503) is ProviderUnavailable
+    assert (refresh_503.retryable, refresh_503.code) == (True, None)
+
+    metadata_503 = google_auth.RefreshError("Failed to retrieve metadata token")
+    metadata_503.__cause__ = google_auth.TransportError("503 Service Unavailable")
+    metadata_err = provider_failure(metadata_503, provider="VertexAI")
+    assert type(metadata_err) is ProviderUnavailable
+    assert (metadata_err.retryable, metadata_err.code) == (True, None)
+
+    dns_cause = requests.exceptions.ConnectionError("Failed to resolve 'oauth2.googleapis.com'")
+    dns_wrapped = google_auth.TransportError(dns_cause)
+    dns_wrapped.__cause__ = dns_cause
+    dns_err = provider_failure(dns_wrapped, provider="VertexAI")
+    assert type(dns_err) is ProviderUnavailable
+    assert (dns_err.retryable, dns_err.code) == (True, None)
+
+    assert provider_failure(requests.exceptions.SSLError("certificate verify failed"), provider="VertexAI") is None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Settings:
     api_key: str | None = None

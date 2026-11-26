@@ -115,9 +115,9 @@ _CORRECTING = "The agent of this call is correcting its answer. Try again in a m
 _EARLIER_TURN = "cut:"
 
 # How one agent turn ended: `completed` and its answer, or the kind of its error and what to tell the script.
-type ChildOutcome = tuple[str, str]
+type _ChildOutcome = tuple[str, str]
 # Ledger entries one agent turn adds: (ledger_key, attempt, usage_payload).
-type TurnUsage = list[tuple[int | str, int, dict[str, object]]]
+type _TurnUsage = list[tuple[int | str, int, dict[str, object]]]
 
 
 class AgentNodeError(Exception):
@@ -161,7 +161,7 @@ def first_prompt(node: WorkflowNode) -> str:
     return prompt if schema is None else schema_prompt(prompt, schema)
 
 
-def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
+def _turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
     """Return the ID of the job one turn of one generation of a node runs as: the same for the same turn, always."""
     identity = [run.execution_identity, run.run_id, key, generation, turn]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -349,7 +349,8 @@ async def launch_child(
     store, job_runtime = engine.store, jobs or runtime.jobs
     session = store.get_node(run.run_id, node.session_key) if node.session_key else None
     source = session.request if session is not None else node.request
-    first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
+    raw_turn = node.request.get("turn", 1)
+    first_turn = node.kind != "turn" or (isinstance(raw_turn, int) and not isinstance(raw_turn, bool) and raw_turn == 1)
     if turn == 1 and first_turn and not source.get("agent") and node.name in context.current_config.agents:
         await asyncio.to_thread(store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
 
@@ -365,7 +366,7 @@ async def launch_child(
     if source_kind is not None and context.source_kind != source_kind:
         context = replace(context, source_kind=source_kind)
 
-    job_id = turn_job_id(run, node.key, node.generation, turn)
+    job_id = _turn_job_id(run, node.key, node.generation, turn)
     with tool_runtime_context(context):
         target, child, spec = _prepare_turn_spec(
             context,
@@ -433,7 +434,7 @@ async def await_child(  # noqa: C901
     runtime: AgentRuntime,
     *,
     on_waiting: Callable[[str | None, float | None], Awaitable[object]] | None,
-) -> tuple[ChildOutcome, TurnUsage, JobClaim | None]:
+) -> tuple[_ChildOutcome, _TurnUsage, JobClaim | None]:
     """Wait for the job of *node* to end; return its outcome, usage, and claim.
 
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
@@ -458,8 +459,11 @@ async def await_child(  # noqa: C901
     while True:
         since = loop.time()
         try:
-            times = {"approval_timeout": None if waiting else 0, "work_timeout": 0 if waiting else left}
-            waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
+            waited = (
+                await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else left)
+                if on_waiting is not None
+                else await wait(timeout=0)
+            )
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again: the
             # runtime holds the job, which may have started before its handle got the mark that it was handed over.
@@ -501,7 +505,7 @@ async def _job_outcome(
     runtime: AgentRuntime,
     reading: WorkflowRun,
     node: WorkflowNode,
-) -> tuple[ChildOutcome, TurnUsage]:
+) -> tuple[_ChildOutcome, _TurnUsage]:
     """Return how an ended *job* ended and the ledger entries it adds for *node* as read by *reading*.
 
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
@@ -519,7 +523,7 @@ async def _job_outcome(
         if job.status != "completed" and record is not None and record.status == RunStatus.completed and job.result
         else (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
     )
-    usage: TurnUsage = []
+    usage: _TurnUsage = []
     records = [rec for rec in (*cut_short, record) if rec is not None]
     prices = model_prices(runtime.config)
     for is_final, rec in (*((False, r) for r in cut_short), (True, record)):

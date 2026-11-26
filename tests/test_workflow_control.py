@@ -13,7 +13,7 @@ import nio
 import pytest
 import pytest_asyncio
 
-from mindroom.custom_tools.workflow import handle_workflow_control, handle_workflow_event
+from mindroom.custom_tools.workflow import _handle_workflow_control, handle_workflow_event
 from mindroom.event_journal import EventKind
 from mindroom.journal_dispatch import _BINDINGS
 from mindroom.matrix.event_types import WORKFLOW_ANSWER_EVENT_TYPE, WORKFLOW_CONTROL_EVENT_TYPE
@@ -102,7 +102,7 @@ async def _control(
         payload["max_cost_usd"] = max_cost_usd
     event = _event(WORKFLOW_CONTROL_EVENT_TYPE, payload, sender=sender, thread=thread, event_id=event_id)
     room = nio.MatrixRoom(room_id, "@mindroom_watcher:example.test")
-    return await handle_workflow_control(
+    return await _handle_workflow_control(
         room,
         event,
         agent_name=agent_name or stack.context.agent_name,

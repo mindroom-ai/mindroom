@@ -78,7 +78,7 @@ def is_own_thread_message(message: Message) -> bool:
     return (message.provider_data or {}).get(_OWN_THREAD_MESSAGE_KEY) is True and isinstance(message.content, str)
 
 
-def own_thread_message_text(message: Message) -> str | None:
+def _own_thread_message_text(message: Message) -> str | None:
     """Return what the agent said in a message ``own_thread_message`` built, or None for any other message."""
     if not is_own_thread_message(message):
         return None
@@ -87,7 +87,7 @@ def own_thread_message_text(message: Message) -> str | None:
 
 def spoken_message(message: Message) -> Message:
     """Return ``message`` as a reader of the conversation hears it: the agent's own thread message as its assistant text."""
-    own = own_thread_message_text(message)
+    own = _own_thread_message_text(message)
     return message if own is None else replace(message, role="assistant", content=own)
 
 

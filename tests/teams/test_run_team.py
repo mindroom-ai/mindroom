@@ -1116,7 +1116,7 @@ async def test_run_prepared_team_binds_and_closes_shell_background_scope(
 
     monkeypatch.setattr(team_envelope, "scope_run_storage", lambda _ctx: None)
     monkeypatch.setattr(team_envelope, "_leader_run", lambda *_a, **_kw: SimpleNamespace(start=fake_start))
-    prepared = SimpleNamespace(run_input=lambda _m: None, run_metadata={})
+    prepared = SimpleNamespace(run_input=lambda: None, run_metadata={})
 
     def start_stream() -> AsyncIterator[object]:
         seen_scopes.clear()

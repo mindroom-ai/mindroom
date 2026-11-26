@@ -298,6 +298,7 @@ __all__ = [
     "INTERRUPTED_CALL_RESULT",
     "STOPPED_BY_USER_NOTE",
     "CheckpointHooks",
+    "InterruptedTurn",
     "checkpoint_hooks",
     "is_recovered_run",
     "link_response_event",

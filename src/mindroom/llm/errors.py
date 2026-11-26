@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 # media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
 # The marker of a transport failure that timed out, such as an HTTP connect or read timeout, so callers that report
-# timeouts need not read the error's text; other transport failures carry ``connection_error``.
+# timeouts need not read the error's text.
 TRANSPORT_TIMEOUT = "timeout"
+# The marker of a non-timeout transport failure, such as DNS failure, a refused connect, or a dropped connection.
+CONNECTION_ERROR = "connection_error"
 # The marker of a response the model's safeguards refused: neither a retry nor a resend without the request's media can
 # change the answer.
 SAFEGUARD_REFUSAL = "refusal"
@@ -191,6 +193,7 @@ def fails_over(error: ProviderError) -> bool:
 
 
 __all__ = [
+    "CONNECTION_ERROR",
     "ENCRYPTED_REPLAY_REJECTED",
     "MALFORMED_TOOL_CALL",
     "MISSING_API_KEY",
