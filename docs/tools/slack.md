@@ -30,7 +30,6 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
 | `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
 | `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
-| `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
 
 Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
 `slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](../configuration/agents.md) setting.
@@ -227,49 +226,48 @@ A channel has one answering agent, so two agents cannot both set `room` with the
 
 ## Watches
 
-A watch forwards a person's own Slack mentions and direct messages into the Matrix room where they start it.
+A Slack watch forwards a person's own Slack mentions, bound thread replies, and direct messages into a private Matrix room through the unified `triggers` toolkit (`source_id="slack"`).
 It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
+Existing `<control_state>/slack/watches.json` watches and live thread bindings are migrated automatically on startup and archived as `watches.json.migrated`.
 
-In the room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `slack_watch`:
+In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers(action="subscribe_event", source_id="slack", ...)`:
 
-- `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
-- `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
-- `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
-- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
-- `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
-  Replies in a thread where the person was mentioned also arrive, within those channels.
+- `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
+- `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
+- Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), and `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives.
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_prompt` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
-Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel unless it is a direct message, and a link.
-Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
-The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
-A watch lasts until it is stopped.
+Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
+Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.
+The agent's turn runs as the watch's owner.
 
-A watch delivers only while all of these hold, so someone else never reads a private message:
+A Slack watch delivers only while all of these hold, so someone else never reads a private message:
 
 - Only the owner and MindRoom's own accounts are in the room, and nobody is invited; a bridge or other bot counts as a person.
 - The room hides earlier messages from people who join later.
   A [personal room](../personal-rooms.md) MindRoom created already does.
-- The owner's Slack connection works and is still the Slack account the watch started with.
+- The target agent still has personal Slack configured, the Slack app has an `app_token`, and the owner's Slack connection is still the Slack account bound at subscribe time.
 
-`slack_watch(action="status")` reports a paused watch with one of these texts:
+`triggers(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
 
-| Status | Fix |
+| `paused_reason` | Fix |
 | --- | --- |
-| `paused: Slack is not connected` | Connect Slack again from the link the agent gives. |
-| `paused: Slack account changed; start the watch again` | Start the watch again. |
-| `paused: you are not in this room` | Rejoin the room. |
-| `paused: another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
-| `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
-| `paused: room members could not be checked` | Try again when the homeserver answers. |
+| `Slack is not connected` | Connect Slack again from the link the agent gives. |
+| `Slack account changed; recreate this subscription` | Delete and recreate the Slack trigger subscription. |
+| `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
+| `the watch's agent no longer has personal Slack` | Re-enable personal `slack` on the target agent or recreate the subscription with another agent. |
+| `you are not in this room` | Rejoin the room. |
+| `another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
+| `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
+| `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn that a watch started, `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
-A new message from the owner in the same thread can post.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
 ## MCP
 
 `slack` works through the [MCP gateway](../deployment/mcp-gateway.md): select the agent and the `slack` tool on the Connections portal, and calls use the signed-in person's own Slack account, as in Matrix.
-`slack_watch` does not work there.
 A project agent's channels are readable over MCP by everyone allowed to use that agent, and writable unless `write` is `false`, because its calls use the app's token.
 Which agents the gateway offers is described in [Agent eligibility](../deployment/mcp-gateway.md#agent-eligibility).
 

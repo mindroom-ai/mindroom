@@ -73,7 +73,6 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
-        ToolManagedInitArg.CURRENT_ROOM_ID,
         ToolManagedInitArg.FILE_ACCESS,
     ),
     dependencies=[],
@@ -81,7 +80,7 @@ if TYPE_CHECKING:
     helper_text=(
         "Each user connects their own Slack account through the MindRoom Slack app. "
         "Store the app's client ID and secret in the slack_oauth_client credential service, "
-        "and its bot token, signing secret and, for watches, app-level token in slack_app."
+        "and its bot token, signing secret and, for Slack event triggers, app-level token in slack_app."
     ),
     function_names=(
         "slack_search",
@@ -93,7 +92,6 @@ if TYPE_CHECKING:
         "slack_edit",
         "slack_delete",
         "slack_upload",
-        "slack_watch",
     ),
 )
 def slack_tools() -> type[SlackTools]:

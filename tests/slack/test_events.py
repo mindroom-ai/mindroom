@@ -19,11 +19,7 @@ from mindroom.slack.events import (
     project_thread_key,
     project_wake_agent,
     verify_slack_signature,
-    watch_accepts,
-    watch_candidates,
-    watch_thread_key,
 )
-from mindroom.slack.watches import SlackWatch
 
 SECRET = "signing-secret"  # noqa: S105
 BOT = "U0BOT0001"
@@ -62,24 +58,6 @@ def _event(**changes: Any) -> SlackMessageEvent:  # noqa: ANN401
     parsed = parse_message_event(_envelope(), bot_user_id=BOT, answered_channels=ANSWERED)
     assert parsed is not None
     return replace(parsed, **changes)
-
-
-def _watch(**changes: Any) -> SlackWatch:  # noqa: ANN401
-    return replace(
-        SlackWatch(
-            watch_id="w1",
-            owner_id="@alice:example.org",
-            agent_name="assistant",
-            room_id="!room:example.org",
-            team_id=TEAM,
-            slack_user_id=OWNER,
-            mentions=True,
-            direct_messages=True,
-            channels=(),
-            created_at=1,
-        ),
-        **changes,
-    )
 
 
 def _answering(agent: str, *channels: str) -> SlackAnsweringAgent:
@@ -257,14 +235,7 @@ def test_mention_parsing_forms(text: str, expected: set[str]) -> None:
 
 
 def test_thread_keys() -> None:
-    reply = _event(thread_ts="1700000000.000050")
-    top = _event()
     assert project_thread_key(TEAM, CHANNEL, "1700000000.000050") == f"{TEAM}:{CHANNEL}:1700000000.000050"
-    assert watch_thread_key("w1", reply) == f"w1:{CHANNEL}:1700000000.000050"
-    assert watch_thread_key("w1", top) == f"w1:{CHANNEL}:1700000000.000100"
-    for channel_type in ("im", "mpim"):
-        direct = _event(channel_id=DM, channel_type=channel_type, thread_ts="1700000000.000050")
-        assert watch_thread_key("w1", direct) == f"w1:{DM}"
 
 
 def test_project_wake_agent_answers_the_events_channel() -> None:
@@ -275,91 +246,3 @@ def test_project_wake_agent_answers_the_events_channel() -> None:
     assert project_wake_agent(replace(event, channel_id="C0UNOWNED"), answering) is None
     assert project_wake_agent(event, ()) is None
 
-
-def test_watch_candidates_dm_mention_thread() -> None:
-    watch = _watch()
-    plain = _event()
-    assert watch_candidates(plain, (watch,), bound_watch_ids=frozenset()) == ()
-    assert watch_candidates(plain, (watch,), bound_watch_ids=frozenset({"w1"})) == (watch,)
-    assert watch_candidates(plain, (watch,), bound_watch_ids=frozenset({"other"})) == ()
-    mention = _event(text=f"hi <@{OWNER}>")
-    assert watch_candidates(mention, (watch,), bound_watch_ids=frozenset()) == (watch,)
-    for channel_type in ("im", "mpim"):
-        direct = _event(channel_id=DM, channel_type=channel_type)
-        assert watch_candidates(direct, (watch,), bound_watch_ids=frozenset()) == (watch,)
-
-
-def test_watch_candidates_keep_only_watches_of_this_team_and_flags() -> None:
-    mention = _event(text=f"hi <@{OWNER}>")
-    direct = _event(channel_id=DM, channel_type="im")
-    other_team = _watch(watch_id="w2", team_id="T0OTHER99")
-    no_mentions = _watch(watch_id="w3", mentions=False)
-    no_direct = _watch(watch_id="w4", direct_messages=False)
-    everyone = (_watch(), other_team, no_mentions, no_direct)
-    assert watch_candidates(mention, everyone, bound_watch_ids=frozenset()) == (everyone[0], no_direct)
-    assert watch_candidates(direct, everyone, bound_watch_ids=frozenset()) == (everyone[0], no_mentions)
-
-
-def test_author_never_wakes_own_watch() -> None:
-    watch = _watch()
-    own_mention = _event(user_id=OWNER, text=f"note to self <@{OWNER}>")
-    own_dm = _event(user_id=OWNER, channel_id=DM, channel_type="im")
-    own_bound = _event(user_id=OWNER)
-    for event in (own_mention, own_dm, own_bound):
-        assert watch_candidates(event, (watch,), bound_watch_ids=frozenset({"w1"})) == ()
-        assert not watch_accepts(watch, event, bound=True, visible_to=frozenset({OWNER}))
-
-
-def test_channel_filter_skips_channels_not_dms() -> None:
-    watch = _watch(channels=(CHANNEL,))
-    elsewhere = _event(channel_id=OTHER_CHANNEL, text=f"<@{OWNER}>")
-    inside = _event(text=f"<@{OWNER}>")
-    visible = frozenset({OWNER})
-    assert watch_candidates(elsewhere, (watch,), bound_watch_ids=frozenset({"w1"})) == ()
-    assert not watch_accepts(watch, elsewhere, bound=True, visible_to=visible)
-    assert watch_candidates(inside, (watch,), bound_watch_ids=frozenset()) == (watch,)
-    assert watch_accepts(watch, inside, bound=False, visible_to=visible)
-    for channel_type in ("im", "mpim"):
-        direct = _event(channel_id=DM, channel_type=channel_type)
-        assert watch_candidates(direct, (watch,), bound_watch_ids=frozenset()) == (watch,)
-        assert watch_accepts(watch, direct, bound=False, visible_to=visible)
-
-
-@pytest.mark.parametrize(
-    ("watch_changes", "event_changes", "bound", "visible_to", "accepted"),
-    [
-        ({}, {"text": f"<@{OWNER}>"}, False, {OWNER}, True),
-        ({}, {"text": f"<@{OWNER}|alice>"}, False, {OWNER}, True),
-        ({}, {"text": f"<@{OWNER}>"}, False, {"U0OTHER99"}, False),
-        ({}, {"text": f"<@{OWNER}>"}, False, set(), False),
-        ({}, {"text": f"<@{OWNER}>", "team_id": "T0OTHER99"}, False, {OWNER}, False),
-        ({}, {"text": "no mention"}, False, {OWNER}, False),
-        ({}, {"text": "no mention"}, True, {OWNER}, True),
-        ({}, {"text": "no mention"}, True, {"U0OTHER99"}, False),
-        ({"mentions": False}, {"text": f"<@{OWNER}>"}, False, {OWNER}, False),
-        ({"mentions": False}, {"text": f"<@{OWNER}>"}, True, {OWNER}, True),
-        ({}, {"channel_id": DM, "channel_type": "im"}, False, {OWNER}, True),
-        ({}, {"channel_id": DM, "channel_type": "mpim"}, False, {OWNER}, True),
-        ({}, {"channel_id": DM, "channel_type": "im"}, False, set(), False),
-        ({"direct_messages": False}, {"channel_id": DM, "channel_type": "im"}, True, {OWNER}, False),
-        (
-            {"direct_messages": False},
-            {"channel_id": DM, "channel_type": "mpim", "text": f"<@{OWNER}>"},
-            False,
-            {OWNER},
-            True,
-        ),
-        ({"mentions": False}, {"channel_id": DM, "channel_type": "mpim", "text": f"<@{OWNER}>"}, False, {OWNER}, True),
-    ],
-)
-def test_watch_accepts_after_the_authorizations_lookup(
-    watch_changes: dict[str, Any],
-    event_changes: dict[str, Any],
-    bound: bool,
-    visible_to: set[str],
-    accepted: bool,
-) -> None:
-    assert (
-        watch_accepts(_watch(**watch_changes), _event(**event_changes), bound=bound, visible_to=frozenset(visible_to))
-        is accepted
-    )

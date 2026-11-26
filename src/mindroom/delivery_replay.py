@@ -181,6 +181,20 @@ class DeliveryReplayStore:
             return None
         return record["room_id"], record["thread_event_id"]
 
+    def list_bound_thread_roots(self, replay_scope: str, *, now: int) -> dict[str, tuple[str, str, int]]:
+        """Return unexpired bound ``thread_key -> (room_id, thread_event_id, expires_at)`` entries for one scope."""
+        if not self._scope_path(replay_scope).exists() and (
+            self.legacy_shared_file is None or not self.legacy_shared_file.exists()
+        ):
+            return {}
+        with self._scope_lock(replay_scope) as path:
+            threads = self._read_store(path)["threads"]
+        return {
+            thread_key: (record["room_id"], record["thread_event_id"], record["expires_at"])
+            for thread_key, record in threads.items()
+            if record["thread_event_id"] is not None and record["expires_at"] >= now
+        }
+
     def bind_thread_root(
         self,
         replay_scope: str,

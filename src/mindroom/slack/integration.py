@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.config.slack import drop_slack_room, validate_slack_agents
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.integrations import Integration
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.slack.delivery import SlackRuntime
 
 _NAME = "slack"
+logger = get_logger(__name__)
 
 
 def bound_slack_runtime(api_app: FastAPI) -> SlackRuntime | None:
@@ -41,25 +43,58 @@ def _events_router() -> APIRouter:
     return router
 
 
+def _unregister_slack_event_source(runtime: SlackRuntime | None) -> None:
+    if runtime is None or runtime.reactive_triggers is None or runtime.event_source_token is None:
+        return
+    from mindroom.slack.event_source import SLACK_EVENT_SOURCE_ID  # noqa: PLC0415
+
+    runtime.reactive_triggers.event_sources.unregister(SLACK_EVENT_SOURCE_ID, runtime.event_source_token)
+
+
 def _bind(
     api_app: FastAPI,
     bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
     reactive_triggers: ReactiveTriggerService | None = None,
 ) -> None:
-    """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""
+    """Let Slack events reach live bots, migrate legacy watches once, and register SlackEventSource."""
     from mindroom.slack.delivery import SlackRuntime  # noqa: PLC0415
-
-    del reactive_triggers
+    from mindroom.slack.event_source import SlackEventSource, migrate_legacy_slack_watches  # noqa: PLC0415
 
     runtime = bound_slack_runtime(api_app)
-    if runtime is None or runtime.bots is not bots:
-        _runtimes(api_app)[_NAME] = SlackRuntime(bots, agent_reply_memberships)
+    if runtime is not None and runtime.bots is bots and runtime.reactive_triggers is reactive_triggers:
+        return
+    _unregister_slack_event_source(runtime)
+
+    token: str | None = None
+    if reactive_triggers is not None:
+        if reactive_triggers.store is not None:
+            try:
+                migrate_legacy_slack_watches(
+                    reactive_triggers.runtime_paths,
+                    reactive_triggers.store,
+                    reactive_triggers.config_provider(),
+                )
+            except Exception:
+                logger.exception("Failed to migrate legacy Slack watches.json")
+        try:
+            token = reactive_triggers.event_sources.register(SlackEventSource()).token
+        except ValueError as exc:
+            logger.warning("Could not register built-in Slack EventSource", reason=str(exc))
+
+    _runtimes(api_app)[_NAME] = SlackRuntime(
+        bots,
+        agent_reply_memberships,
+        reactive_triggers=reactive_triggers,
+        event_source_token=token,
+    )
 
 
 def _unbind(api_app: FastAPI) -> object | None:
-    """Refuse Slack events, so Slack resends them after the restart, and return the runtime that owns the deliveries."""
-    return _runtimes(api_app).pop(_NAME, None)
+    """Refuse Slack events, unregister SlackEventSource, and return the runtime that owns running deliveries."""
+    runtime = cast("SlackRuntime | None", _runtimes(api_app).pop(_NAME, None))
+    _unregister_slack_event_source(runtime)
+    return runtime
 
 
 def _mirror_reply(

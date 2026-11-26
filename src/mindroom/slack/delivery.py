@@ -17,6 +17,7 @@ from mindroom.matrix.state import resolve_room_id
 from mindroom.response_admission import admitted_response_decision
 from mindroom.slack.api import SlackApiError, slack_call, slack_http_client
 from mindroom.slack.app import load_slack_app, slack_bot_identity
+from mindroom.slack.event_source import emit_slack_watch_event
 from mindroom.slack.events import parse_message_event, project_thread_key, project_wake_agent
 from mindroom.slack.identity import project_channel_refusal
 from mindroom.slack.turns import (
@@ -37,7 +38,6 @@ from mindroom.slack.turns import (
     running_bot,
     skipped,
 )
-from mindroom.slack.watch_delivery import deliver_to_watches
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from mindroom.config.slack import SlackAnsweringAgent
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.slack.app import SlackAppCredentials
     from mindroom.slack.turns import DeliveryResult
 
@@ -70,6 +71,8 @@ class SlackRuntime:
     bots: Mapping[str, AgentBot]
     agent_reply_memberships: AgentReplyMembershipIndex
     http_client: Callable[[], httpx.AsyncClient] = slack_http_client
+    reactive_triggers: ReactiveTriggerService | None = None
+    event_source_token: str | None = None
     # When each (Slack author, thread key) last got a notice; they get at most one a day, remembered in memory only.
     notices: dict[tuple[str, str], int] = field(default_factory=dict)
 
@@ -196,7 +199,8 @@ async def _deliver(
         last_attempt=last_attempt,
     )
     project = await _deliver_to_project(attempt, answering)
-    return _combined([project, *await deliver_to_watches(attempt)])
+    watch_result = await retry_on_failure(event, emit_slack_watch_event(attempt, attempt.runtime.reactive_triggers))
+    return _combined([project, watch_result])
 
 
 def _combined(results: Iterable[DeliveryResult]) -> DeliveryResult:

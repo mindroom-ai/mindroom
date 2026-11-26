@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -17,10 +18,12 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
+from mindroom.reactive_triggers.models import ExternalEventSourceSpec, ReactiveTriggerRecord, TriggerTargetSpec
+from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.slack.delivery import SlackRuntime
+from mindroom.slack.event_source import SLACK_EVENT_SOURCE_ID
 from mindroom.slack.oauth import slack_oauth_provider
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.matrix_state_helpers import save_matrix_state
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
 
 TEAM = "T0123ABCD"
 BOT_USER = "U0BOT0000"
@@ -128,9 +132,16 @@ class FakeMatrix:
     gate: asyncio.Event | None = None
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
-    async def send(self, client: object, room_id: str, content: dict[str, Any]) -> DeliveredMatrixEvent | None:
+    async def send(
+        self,
+        client: object,
+        room_id: str,
+        content: dict[str, Any],
+        *,
+        transaction_id: str | None = None,
+    ) -> DeliveredMatrixEvent | None:
         """Record one Matrix send, or fail it."""
-        del client
+        del client, transaction_id
         self.started.set()
         if self.gate is not None:
             await self.gate.wait()
@@ -149,6 +160,13 @@ class FakeRuntime:
 
 
 @dataclass
+class FakeConversationReader:
+    """Minimal conversation reader stub for reactive trigger dispatch."""
+
+    latest_thread_event_id: AsyncMock = field(default_factory=lambda: AsyncMock(return_value="$latest"))
+
+
+@dataclass
 class FakeBot:
     """The parts of a running agent bot that Slack delivery uses."""
 
@@ -156,15 +174,23 @@ class FakeBot:
     latest_thread_event_id_if_needed: AsyncMock = field(default_factory=AsyncMock)
     running: bool = True
     orchestrator: FakeRuntime = field(default_factory=FakeRuntime)
+    conversation_reader: FakeConversationReader = field(default_factory=FakeConversationReader)
 
 
 def runtime_for(
     bots: Mapping[str, FakeBot],
     memberships: AgentReplyMembershipIndex,
     slack: FakeSlack,
+    *,
+    reactive_triggers: ReactiveTriggerService | None = None,
 ) -> SlackRuntime:
     """Return a Slack runtime over fake bots whose Slack calls reach `slack`."""
-    return SlackRuntime(cast("Mapping[str, AgentBot]", bots), memberships, http_client=slack.client)
+    return SlackRuntime(
+        cast("Mapping[str, AgentBot]", bots),
+        memberships,
+        http_client=slack.client,
+        reactive_triggers=reactive_triggers,
+    )
 
 
 def config_data(
@@ -183,10 +209,15 @@ def config_data(
                 "access": {"users": list(launch_users), "members_of_rooms": []},
                 "tools": [{"slack": {"channels": [CHANNEL], "room": "launch"}}],
             },
-            "assistant": {"display_name": "Assistant", "tools": list(assistant_tools)},
+            "assistant": {
+                "display_name": "Assistant",
+                "access": {"users": [ALICE], "members_of_rooms": []},
+                "tools": list(assistant_tools),
+            },
             "other_agent": {"display_name": "Other"},
         },
         "rooms": {"launch": {"display_name": "Launch"}},
+        "external_trigger_policy": {"enabled": True, "reactive_enabled": True},
         "slack": {"email_domain": "example.com", "matrix_user_id_template": "@{localpart}:example.org"},
     }
 
@@ -207,23 +238,45 @@ def entity_id(config: Config, runtime_paths: RuntimePaths, name: str) -> str:
     return entity_identity_registry(config, runtime_paths).current_id(name).full_id
 
 
-def alice_watch(runtime_paths: RuntimePaths) -> SlackWatch:
-    """Store and return Alice's watch with `assistant` in `WATCH_ROOM`."""
-    watch = SlackWatch(
-        watch_id=_watch_id_for(ALICE, "assistant", WATCH_ROOM),
-        owner_id=ALICE,
-        agent_name="assistant",
-        room_id=WATCH_ROOM,
-        team_id=TEAM,
-        slack_user_id=SLACK_IDS["alice"],
-        mentions=True,
-        direct_messages=True,
-        channels=(),
-        created_at=NOW - 100,
+def alice_slack_trigger(
+    runtime_paths: RuntimePaths,
+    *,
+    trigger_id: str = "slack_watch_alice",
+    kind: str = "message",
+    match: dict[str, str | bool | int | list[str]] | None = None,
+    room_id: str = WATCH_ROOM,
+    agent_name: str = "assistant",
+    owner_user_id: str = ALICE,
+    slack_user_id: str = SLACK_IDS["alice"],
+    team_id: str = TEAM,
+) -> ReactiveTriggerRecord:
+    """Store and return Alice's reactive Slack trigger with `assistant` in `WATCH_ROOM`."""
+    now = time.time()
+    record = ReactiveTriggerRecord(
+        trigger_id=trigger_id,
+        owner_user_id=owner_user_id,
+        description="Alice Slack watch",
+        source=ExternalEventSourceSpec(
+            source_id=SLACK_EVENT_SOURCE_ID,
+            kind=kind,
+            match=match or {},
+            binding={"team_id": team_id, "slack_user_id": slack_user_id},
+        ),
+        target=TriggerTargetSpec(
+            agent=agent_name,
+            room_id=room_id,
+            new_thread=True,
+            thread_key_from_event=True,
+            reopen_on_fire=True,
+            prompt="Summarize this Slack message and ask if I want to reply.",
+        ),
+        once=False,
+        max_fires_per_hour=60,
+        created_at=now,
+        updated_at=now,
     )
-    assert runtime_paths.control_state_root is not None
-    SlackWatchStore(runtime_paths.control_state_root).put(watch)
-    return watch
+    ReactiveTriggerStore(runtime_paths).create_trigger(record)
+    return record
 
 
 def connect_alice(runtime_paths: RuntimePaths, *, slack_user_id: str = SLACK_IDS["alice"]) -> None:

@@ -372,7 +372,18 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
+# LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
+# Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
+# Last legacy release: v2026.11; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
+# Handling: Reject `slack_watch` in `include_tools`/`exclude_tools` on `slack` and fail closed in `tool_approval.rules`
+#   whenever `slack_watch` and `triggers` would receive different approval decisions.
+# Coverage: tests/slack/test_event_source.py::test_retired_slack_watch_config_validation_fails_closed.
+_RETIRED_SLACK_FUNCTIONS: dict[str, str] = {
+    "slack_watch": "triggers",
+}
+
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
+    "slack": _RETIRED_SLACK_FUNCTIONS,
     "scheduler": {
         "schedule": "scheduler",
         "edit_schedule": "scheduler",
@@ -890,11 +901,25 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     )
 
 
+def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired Slack function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        _RETIRED_SLACK_FUNCTIONS,
+        guidance_for=lambda _key, _new: (
+            '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
+            "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
+        ),
+    )
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
         return retired
     if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
+        return retired
+    if tool_name == "slack" and (retired := _retired_slack_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
