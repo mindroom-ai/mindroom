@@ -221,7 +221,6 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  # 2.10 adds GithubRetry.max_rate_limit_wait, which the provider-failure retry copy carries over.
   "pygithub>=2.10",
 ]
 gmail = [
