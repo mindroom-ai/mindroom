@@ -2174,6 +2174,16 @@ _UNAVAILABLE_FINAL_MESSAGE = "⚠️ Model provider temporarily unavailable afte
 _UNREACHABLE_FINAL_MESSAGE = "⚠️ The model request failed with a network error or timeout."
 
 
+def _requests_transport_error(message: str) -> google.auth.exceptions.TransportError:
+    """Return the TransportError chain google-auth's requests transport raises on a DNS/connect failure."""
+    import requests.exceptions  # noqa: PLC0415
+
+    cause = requests.exceptions.ConnectionError(message)
+    err = google.auth.exceptions.TransportError(cause)
+    err.__cause__ = cause
+    return err
+
+
 class _RefreshFailingCredentials(Credentials):
     """Credentials whose token refresh fails the way google-auth reports it."""
 
@@ -2193,10 +2203,10 @@ class _RefreshFailingCredentials(Credentials):
             google.auth.exceptions.TransportError("token endpoint unreachable"),
             ProviderUnavailable,
             None,
-            _UNREACHABLE_FINAL_MESSAGE,
+            _UNAVAILABLE_FINAL_MESSAGE,
         ),
         (
-            google.auth.exceptions.TransportError(_REQUESTS_OAUTH_HOST_FAILURE),
+            _requests_transport_error(_REQUESTS_OAUTH_HOST_FAILURE),
             ProviderUnavailable,
             None,
             _UNREACHABLE_FINAL_MESSAGE,
