@@ -166,7 +166,7 @@ def test_authored_csv_paths_register_each_file(tmp_path: Path) -> None:
         worker_target=None,
     )
 
-    assert json.loads(blocking_entrypoint(tool, "list_csv_files")()) == ["orders"]
+    assert json.loads(blocking_entrypoint(tool, "csv_inspect")(action="list")) == ["orders"]
 
 
 def test_authored_duckdb_init_commands_run_when_the_connection_opens(tmp_path: Path) -> None:

@@ -373,6 +373,26 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "apply_template": "todo",
         "list_templates": "todo",
     },
+    "csv": {
+        "list_csv_files": "csv_inspect",
+        "get_columns": "csv_inspect",
+        "read_csv_file": "csv_inspect",
+    },
+    "duckdb": {
+        "show_tables": "duckdb_inspect",
+        "describe_table": "duckdb_inspect",
+        "summarize_table": "duckdb_inspect",
+        "inspect_query": "duckdb_inspect",
+        "full_text_search": "duckdb_inspect",
+        "create_table_from_path": "duckdb_manage",
+        "load_local_path_to_table": "duckdb_manage",
+        "load_local_csv_to_table": "duckdb_manage",
+        "load_s3_path_to_table": "duckdb_manage",
+        "load_s3_csv_to_table": "duckdb_manage",
+        "export_table_to_path": "duckdb_manage",
+        "create_fts_index": "duckdb_manage",
+        "get_table_name_from_path": "duckdb_manage",
+    },
 }
 
 
