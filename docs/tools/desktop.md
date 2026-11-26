@@ -443,7 +443,8 @@ tool_approval:
 
 Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
 Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
-Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule. Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule.
+Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 

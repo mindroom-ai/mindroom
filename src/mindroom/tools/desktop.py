@@ -31,7 +31,16 @@ def _judge_desktop_shell_approval(arguments: Mapping[str, object]) -> list[dict[
     cwd = arguments.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         return None
-    return [{"action": "run_shell", "command": command, **({"cwd": cwd} if isinstance(cwd, str) else {})}]
+    judged: dict[str, object] = {"action": "run_shell", "command": command}
+    if isinstance(cwd, str):
+        judged["cwd"] = cwd
+    if "mindroom_output_path" in arguments:
+        output_path = arguments["mindroom_output_path"]
+        if output_path is not None and not isinstance(output_path, str):
+            return None
+        if isinstance(output_path, str):
+            judged["mindroom_output_path"] = output_path
+    return [judged]
 
 
 @register_tool_with_metadata(

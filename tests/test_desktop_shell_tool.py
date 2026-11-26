@@ -23,7 +23,8 @@ from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError, Desk
 from mindroom.desktop.shell import DesktopShell
 from mindroom.desktop.shell_actions import execute_shell
 from mindroom.matrix.olm_to_device import OlmToDeviceError
-from mindroom.shell.execution import shell_job_wait_seconds
+from mindroom.shell.background_scope import shell_background_scope
+from mindroom.shell.execution import shell_call_timeout, shell_job_wait_seconds
 from mindroom.tool_jobs.control import JobControl, current_job_id, job_control_context
 from mindroom.tool_jobs.execution import _default_wait, project_definitions
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -1426,3 +1427,67 @@ async def test_unrecoverable_poll_error_reports_when_stop_cannot_be_confirmed(
     assert receipt["status"] == "error"
     assert "may still be running on the desktop" in receipt["error"]
     assert existing.read_text() == "keep-2"
+
+
+@pytest.mark.asyncio
+async def test_untimed_desktop_shell_in_subagent_gets_default_timeout_while_top_level_job_is_unbounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside a subagent (job_owns_execution + active background scope), untimed calls get the default timeout."""
+    _fast_timers(monkeypatch)
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.05)
+
+    # Top-level managed job (no shell background scope) remains unbounded (no max_runtime_seconds).
+    tool_job, recorded_job = _setup_tool(monkeypatch, lambda *_a: _shell_reply(output="ok\n"))
+    with job_control_context(JobControl(job_id="top-job")):
+        assert shell_call_timeout(None) is None
+        assert await tool_job.run_desktop_shell("top-job-cmd") == "ok"
+    assert "max_runtime_seconds" not in recorded_job[0][0].parameters
+
+    # Subagent inside a parent job has both job_owns_execution() == True and an active shell_background_scope:
+    # it must receive the default timeout (max_runtime_seconds set) and stop at timeout instead of hanging.
+    killed = False
+
+    def hanging_until_killed(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        nonlocal killed
+        if cmd.action == "run_shell":
+            return _shell_reply(state="running", handle="shell:sub", exit_code=None, output="working\n")
+        if cmd.action == "kill_shell":
+            killed = True
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                True,
+                result={"state": "killed", "handle": "shell:sub"},
+            )
+        if not killed:
+            return _shell_reply(
+                state="running",
+                handle="shell:sub",
+                exit_code=None,
+                output="",
+                output_start=8,
+                next_offset=8,
+                output_bytes=8,
+            )
+        return _shell_reply(
+            state="killed",
+            handle="shell:sub",
+            exit_code=-15,
+            output="",
+            output_start=8,
+            next_offset=8,
+            output_bytes=8,
+        )
+
+    tool_sub, recorded_sub = _setup_tool(monkeypatch, hanging_until_killed)
+    with job_control_context(JobControl(job_id="parent-job")):
+        async with shell_background_scope():
+            assert shell_call_timeout(None) == 0.05
+            result = await tool_sub.run_desktop_shell("sleep 30")
+
+    assert isinstance(result, str)
+    assert result.startswith("Stopped after 0.05s.")
+    assert "working" in result
+    assert recorded_sub[0][0].parameters["max_runtime_seconds"] == 0.05
+    assert any(cmd.action == "kill_shell" and cmd.parameters["handle"] == "shell:sub" for cmd, _ in recorded_sub)

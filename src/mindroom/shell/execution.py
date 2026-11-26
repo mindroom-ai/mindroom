@@ -352,10 +352,12 @@ def default_run_timeout_seconds() -> float:
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
-    """Return when a shell call's command is stopped: its own timeout, none for a job's call, else the default."""
+    """Return when a shell call's command is stopped: its own timeout, none for a top-level job, else the default."""
     if timeout is not None:
         return timeout
-    return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
+    if job_owns_execution() and current_shell_background_scope() is None:
+        return None
+    return _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
 def _looks_like_shell_command_line(command: str) -> bool:

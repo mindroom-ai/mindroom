@@ -589,6 +589,7 @@ async def test_desktop_approval_rules_gate_run_desktop_shell_and_fail_closed_on_
         {"args": 123},
         {"args": ["echo", 1]},
         {"args": "ls", "cwd": 123},
+        {"args": "ls", "mindroom_output_path": 123},
     ):
         assert alias.judge(invalid_arguments) is None
         failed_closed, _ = await evaluate_tool_approval(
@@ -600,3 +601,53 @@ async def test_desktop_approval_rules_gate_run_desktop_shell_and_fail_closed_on_
             alias,
         )
         assert failed_closed is True
+
+
+@pytest.mark.asyncio
+async def test_desktop_shell_approval_alias_preserves_mindroom_output_path(tmp_path: Path) -> None:
+    """Desktop approval scripts inspecting mindroom_output_path see it for run_desktop_shell and fail closed on invalid types."""
+    output_script = (
+        "def check(tool_name, arguments, agent_name):\n"
+        "    return arguments.get('action') == 'run_shell' and 'mindroom_output_path' in arguments\n"
+    )
+    (tmp_path / "desktop_output_path.py").write_text(output_script, encoding="utf-8")
+    config, paths = _config(
+        tmp_path,
+        {"match": "desktop", "script": "desktop_output_path.py", "timeout_days": 1},
+    )
+    alias = toolkit_approval_alias(config, builtin_tool_registry(), "desktop", "run_desktop_shell")
+    assert alias is not None
+
+    asks_with_path, _ = await evaluate_tool_approval(
+        config,
+        paths,
+        "run_desktop_shell",
+        {"args": "ls", "mindroom_output_path": "out/result.txt"},
+        "code",
+        alias,
+    )
+    assert asks_with_path is True
+    assert alias.judge({"args": "ls", "mindroom_output_path": "out/result.txt"}) == [
+        {"action": "run_shell", "command": "ls", "mindroom_output_path": "out/result.txt"},
+    ]
+
+    asks_without_path, _ = await evaluate_tool_approval(
+        config,
+        paths,
+        "run_desktop_shell",
+        {"args": "ls", "mindroom_output_path": None},
+        "code",
+        alias,
+    )
+    assert asks_without_path is False
+
+    assert alias.judge({"args": "ls", "mindroom_output_path": 42}) is None
+    asks_invalid, _ = await evaluate_tool_approval(
+        config,
+        paths,
+        "run_desktop_shell",
+        {"args": "ls", "mindroom_output_path": 42},
+        "code",
+        alias,
+    )
+    assert asks_invalid is True
