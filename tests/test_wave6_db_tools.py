@@ -13,6 +13,7 @@ import neo4j
 import psycopg
 import psycopg.conninfo
 import psycopg.pq
+import psycopg.sql
 import pytest
 import redshift_connector
 
@@ -597,3 +598,107 @@ def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_sem
     tool.close()
     assert connections[0].closed is True
     assert tool._connection is None
+
+
+class _StatefulPostgresCursor:
+    def __init__(self, conn: _StatefulPostgresConnection) -> None:
+        self._conn = conn
+        self.description: list[tuple[str]] | None = None
+        self.statusmessage = "OK"
+        self._rows: list[dict[str, object]] = []
+
+    def __enter__(self) -> _StatefulPostgresCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: object, _params: object = None) -> None:
+        rendered = query.as_string(None) if isinstance(query, psycopg.sql.Composable) else str(query)
+        self._conn.events.append(f"execute:{rendered}")
+        if rendered.startswith("SET search_path TO "):
+            self._conn.pending_search_path = rendered.removeprefix("SET search_path TO ").strip('"')
+            self.description = None
+            self._rows = []
+        elif rendered == "SELECT broken":
+            msg = "syntax error at or near broken"
+            raise RuntimeError(msg)
+        elif rendered == "SHOW search_path":
+            self.description = [("search_path",)]
+            self._rows = [{"search_path": self._conn.current_search_path}]
+        else:
+            self.description = None
+            self._rows = []
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return list(self._rows)
+
+
+class _StatefulPostgresConnection:
+    def __init__(self) -> None:
+        self.read_only = False
+        self.closed = False
+        self.events: list[str] = []
+        self.committed_search_path = "public"
+        self.pending_search_path: str | None = None
+
+    @property
+    def current_search_path(self) -> str:
+        return self.pending_search_path or self.committed_search_path
+
+    def cursor(self) -> _StatefulPostgresCursor:
+        return _StatefulPostgresCursor(self)
+
+    def commit(self) -> None:
+        if self.pending_search_path is not None:
+            self.committed_search_path = self.pending_search_path
+            self.pending_search_path = None
+        self.events.append("commit")
+
+    def rollback(self) -> None:
+        self.pending_search_path = None
+        self.events.append("rollback")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_postgres_commits_search_path_before_failed_query_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres commits SET search_path immediately so a failed query rollback does not revert it."""
+    pg_cls = cast("Any", builtin_tool_registry().factory("postgres")())
+    connections: list[_StatefulPostgresConnection] = []
+
+    def fake_connect(**_kwargs: object) -> _StatefulPostgresConnection:
+        conn = _StatefulPostgresConnection()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    tool = pg_cls(
+        host="db.internal",
+        db_name="app",
+        user="u",
+        password=_DUMMY_SECRET,
+        table_schema="analytics",
+    )
+
+    assert "Error executing query: syntax error at or near broken" in tool.run_query("SELECT broken")
+    assert len(connections) == 1
+    conn = connections[0]
+    assert conn.events == [
+        'execute:SET search_path TO "analytics"',
+        "commit",
+        "execute:SELECT broken",
+        "rollback",
+    ]
+    assert conn.committed_search_path == "analytics"
+    assert conn.current_search_path == "analytics"
+
+    # Reused connection still has the committed search_path after the rollback.
+    assert tool.run_query("SHOW search_path") == "search_path\nanalytics"
+    assert len(connections) == 1
+
+    tool.close()
+    assert conn.closed is True

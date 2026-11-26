@@ -88,6 +88,7 @@ class _PostgresTools(Toolkit):
         connection.read_only = True
         with connection.cursor() as cursor:
             cursor.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        connection.commit()
         return connection
 
     def _ensure_connection(self) -> Any:  # noqa: ANN401 - optional psycopg connection
