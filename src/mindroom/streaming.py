@@ -110,6 +110,7 @@ __all__ = [
     "current_task_is_process_shutdown",
     "format_stream_error_note",
     "interactive_response_for_visible_body",
+    "is_error_ai_run",
     "is_interrupted_partial_reply",
     "send_streaming_response",
     "stream_progress_edits",

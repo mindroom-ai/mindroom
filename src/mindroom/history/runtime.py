@@ -166,7 +166,7 @@ def note_prepared_history_timing(
 
 
 @dataclass(frozen=True)
-class ScopeCompactionLifecycleResult:
+class _ScopeCompactionLifecycleResult:
     """The compaction outcome and reply-level status returned by ``run_scope_compaction_with_lifecycle``."""
 
     outcome: CompactionOutcome | None
@@ -494,7 +494,7 @@ async def run_scope_compaction_with_lifecycle(
     runs_before: int,
     compaction_lifecycle: CompactionLifecycle | None,
     compact: _ScopeCompactor,
-) -> ScopeCompactionLifecycleResult:
+) -> _ScopeCompactionLifecycleResult:
     """Run ``compact`` while reporting start, progress, completion, and failure through ``compaction_lifecycle``.
 
     Pre-reply callers pass history-only counts for ``current_history_tokens`` and ``history_budget``;
@@ -568,13 +568,13 @@ async def run_scope_compaction_with_lifecycle(
             scope=scope.key,
             mode=mode,
         )
-        return ScopeCompactionLifecycleResult(outcome=None, reply_outcome=status)
+        return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome=status)
 
     if outcome is None:
         await _fail("failed", "No compactable history remained.")
-        return ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
+        return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
 
-    return ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
+    return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
 
 
 async def _send_notice[T](
@@ -615,7 +615,7 @@ async def _compact_stored_scope(
     runs_before: int,
     lifecycle: CompactionLifecycle | None,
     fork: SummaryFork | None = None,
-) -> ScopeCompactionLifecycleResult:
+) -> _ScopeCompactionLifecycleResult:
     storage, session, plan = context.storage, context.session, resolved_inputs.execution_plan
     assert session is not None
 

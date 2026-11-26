@@ -88,9 +88,9 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
     )
     assert toolkit is not None
     tools = toolkit_job_tools(toolkit, authored_name="memory", snapshot=authority_snapshot(config, "leader"))
-    tool = tools["add_memory"]
+    tool = tools["memory"]
     model = ScriptedModel(
-        [calls(tool_call("add_memory", "write-memory", content="accepted memory marker")), answer("done")],
+        [calls(tool_call("memory", "write-memory", action="add", content="accepted memory marker")), answer("done")],
     )
     actor = job_actor(*tools.values())
     started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -110,7 +110,7 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
             with tool_runtime_context(replace(memory_context, config_provider=lambda: current)):
                 _, claim = await coordinator.runtime.start(
                     "accepted-memory",
-                    tool_name="add_memory",
+                    tool_name="memory",
                     depth=0,
                     toolkit_name="memory",
                     adapter={"origin": function_provenance(tool), "authority": dict(tool.authority)},

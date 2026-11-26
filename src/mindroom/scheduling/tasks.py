@@ -1149,7 +1149,7 @@ async def _checked_scheduled_call(
         msg = f"Could not evaluate the approval policy for `{tool_name}`: {exc}"
         raise SchedulingError(msg) from exc
     if not requires_approval and not call.authored_confirmation:
-        msg = f"`{tool_name}` does not require approval; use `schedule` instead."
+        msg = f'`{tool_name}` does not require approval; use `scheduler(action="create", ...)` instead.'
         raise SchedulingError(msg)
     responders = await context.responder_candidates_for_current_room(_require_context_room(context), scheduled_by)
     if entity_identity_registry(config, runtime_paths).current_id(agent_name) not in responders:

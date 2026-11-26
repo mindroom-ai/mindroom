@@ -75,7 +75,9 @@ def _knowledge_search_tool_description(
         lines.append(f"- {source.base_id}: {description}")
     lines.append("This list only describes sources available through search_knowledge_base.")
     if memory_search_available:
-        lines.append("For resilient memory search, team-visible memory, and memory IDs, use search_memories.")
+        lines.append(
+            'For resilient memory search, team-visible memory, and memory IDs, use memory(action="search", ...).',
+        )
     return "\n".join(lines)
 
 

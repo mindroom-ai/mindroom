@@ -33,9 +33,9 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
     _follow_up_event_id,
+    _has_working_jobs_for_conversation,
     follow_up_envelope,
     follow_up_event,
-    has_working_jobs_for_conversation,
     has_working_jobs_for_reply,
     next_follow_up_id,
 )
@@ -343,7 +343,7 @@ async def test_has_working_jobs_for_conversation_states(tmp_path: Path) -> None:
     key = _conversation_key(owner)
     silent_key = _conversation_key(owner, silent=True)
     try:
-        assert not await has_working_jobs_for_conversation(runtime, key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
 
         # Cancelled and follow-up-capped jobs do not trigger follow-ups.
         await _start_ended(runtime, "cancelled_job", BackgroundOutcome("cancelled"), owner)
@@ -355,7 +355,7 @@ async def test_has_working_jobs_for_conversation_states(tmp_path: Path) -> None:
             owner,
             source_event_id=capped_source,
         )
-        assert not await has_working_jobs_for_conversation(runtime, key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
 
         # Silent-schedule ended jobs get silent follow-ups with distinct IDs and stay isolated from visible turns.
         await _start_ended(
@@ -365,11 +365,11 @@ async def test_has_working_jobs_for_conversation_states(tmp_path: Path) -> None:
             owner,
             source_kind=SILENT_SCHEDULE_SOURCE_KIND,
         )
-        assert not await has_working_jobs_for_conversation(runtime, key)
-        assert await has_working_jobs_for_conversation(runtime, silent_key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
+        assert await _has_working_jobs_for_conversation(runtime, silent_key)
         silent_ended = await runtime.ended_jobs(silent_key)
         silent_follow_up_id = next_follow_up_id(silent_key, silent_ended)
-        assert not await has_working_jobs_for_conversation(
+        assert not await _has_working_jobs_for_conversation(
             runtime,
             silent_key,
             current_follow_up_id=silent_follow_up_id,
@@ -377,31 +377,31 @@ async def test_has_working_jobs_for_conversation_states(tmp_path: Path) -> None:
 
         # Unconsumed ended follow-up job returns True unless matching current or already-settled follow-up.
         await _start_ended(runtime, "ended_job", BackgroundOutcome("completed", "done"), owner)
-        assert await has_working_jobs_for_conversation(runtime, key)
+        assert await _has_working_jobs_for_conversation(runtime, key)
         ended_snapshot = await runtime.ended_jobs(key)
         follow_up_id = next_follow_up_id(key, [j for j in ended_snapshot if j.job_id == "ended_job"])
-        assert not await has_working_jobs_for_conversation(runtime, key, current_follow_up_id=follow_up_id)
+        assert not await _has_working_jobs_for_conversation(runtime, key, current_follow_up_id=follow_up_id)
 
         async def settled(event_id: str) -> bool:
             return event_id == follow_up_id
 
-        assert not await has_working_jobs_for_conversation(runtime, key, is_follow_up_settled=settled)
+        assert not await _has_working_jobs_for_conversation(runtime, key, is_follow_up_settled=settled)
 
         # A second ended job changes the follow-up digest so a new follow-up will still run.
         await _start_ended(runtime, "ended_job_2", BackgroundOutcome("completed", "done2"), owner)
-        assert await has_working_jobs_for_conversation(runtime, key, current_follow_up_id=follow_up_id)
+        assert await _has_working_jobs_for_conversation(runtime, key, current_follow_up_id=follow_up_id)
 
         for jid in ("ended_job", "ended_job_2"):
             waited = await runtime.wait(jid, owner=owner, depth=0, timeout=0)
             await runtime.acknowledge_wait(jid, waited.claim)
-        assert not await has_working_jobs_for_conversation(runtime, key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
 
         # Active running job returns True; any awaiting_approval job overrides it to False immediately.
         await _start_forever(runtime, "running_job", owner)
-        assert await has_working_jobs_for_conversation(runtime, key)
+        assert await _has_working_jobs_for_conversation(runtime, key)
 
         await _start_awaiting_approval(runtime, "approval_job", owner)
-        assert not await has_working_jobs_for_conversation(runtime, key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
     finally:
         await runtime.shutdown()
 
@@ -532,7 +532,7 @@ async def test_workflow_node_awaiting_approval_does_not_suppress_push(tmp_path: 
     key = _conversation_key(owner)
     try:
         await _start_forever(runtime, "parent_workflow", owner, kind="workflow", adapter={"workflow": "deploy"})
-        assert await has_working_jobs_for_conversation(runtime, key)
+        assert await _has_working_jobs_for_conversation(runtime, key)
 
         await _start_awaiting_approval(
             runtime,
@@ -541,7 +541,7 @@ async def test_workflow_node_awaiting_approval_does_not_suppress_push(tmp_path: 
             kind="delegation",
             adapter={"child": {"workflow_run_id": "wf-1"}, "wait": "approval"},
         )
-        assert not await has_working_jobs_for_conversation(runtime, key)
+        assert not await _has_working_jobs_for_conversation(runtime, key)
     finally:
         await runtime.shutdown()
 
@@ -582,8 +582,8 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
             source_kind=SILENT_SCHEDULE_SOURCE_KIND,
         )
         await _start_forever(runtime, "visible_job", owner)
-        assert await has_working_jobs_for_conversation(runtime, silent_key)
-        assert await has_working_jobs_for_conversation(runtime, visible_key)
+        assert await _has_working_jobs_for_conversation(runtime, silent_key)
+        assert await _has_working_jobs_for_conversation(runtime, visible_key)
 
         run, _ = store.reserve_run(
             WorkflowRun(
@@ -643,8 +643,8 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
         assert seen_context_source_kinds == [SILENT_SCHEDULE_SOURCE_KIND]
 
         # Silent query surfaces Needs You (False); visible query still sees its own running work (True).
-        assert not await has_working_jobs_for_conversation(runtime, silent_key)
-        assert await has_working_jobs_for_conversation(runtime, visible_key)
+        assert not await _has_working_jobs_for_conversation(runtime, silent_key)
+        assert await _has_working_jobs_for_conversation(runtime, visible_key)
 
         # Clicking Resume starts a visible workflow job (source_kind=None) on the same run: its retained
         # current job_id must win over the silent origin_job_id so the resumed child's approval surfaces
@@ -688,7 +688,7 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
         assert resumed_child is not None
         assert resumed_child.source_kind is None
         assert seen_context_source_kinds == [SILENT_SCHEDULE_SOURCE_KIND, None]
-        assert not await has_working_jobs_for_conversation(runtime, visible_key)
+        assert not await _has_working_jobs_for_conversation(runtime, visible_key)
     finally:
         await runtime.shutdown()
 
