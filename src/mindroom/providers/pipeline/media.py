@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -69,9 +69,6 @@ _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 _NOT_MEDIA_RELATED_CODES = frozenset(
     {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED},
 )
-_PAYLOAD_TOO_LARGE_STATUS = 413
-# Provider errors naming a capability are short; capping the scan keeps the list patterns cheap on huge errors.
-_MAX_SCANNED_ERROR_CHARS = 2000
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime", "webp")
 _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
@@ -228,7 +225,7 @@ def _without_media(
 
 def _named_capability_gaps(error: ProviderError) -> frozenset[MediaKind]:
     """Return kinds explicitly described as unsupported, ignoring unrelated media mentions."""
-    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
+    text = str(error).lower()[: webp.MAX_SCANNED_ERROR_CHARS]
     return frozenset(
         kind
         for clause in _CAPABILITY_GAP_ERRORS.finditer(text)
@@ -247,7 +244,7 @@ def _named_media_kinds(error: ProviderError) -> frozenset[MediaKind]:
 
 def _names_capability_gap(error: ProviderError, removed: frozenset[MediaKind]) -> frozenset[MediaKind]:
     """Return explicitly unsupported kinds fully removed by a successful retry, excluding input-specific errors."""
-    if isinstance(error, ContextWindowExceeded) or error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
+    if isinstance(error, ContextWindowExceeded) or error.status_code == webp.PAYLOAD_TOO_LARGE_STATUS:
         return frozenset()
     text = str(error).lower()
     if any(marker in text for marker in _INPUT_SPECIFIC_ERROR_MARKERS):
@@ -336,13 +333,25 @@ def _narrowed_removal(
             return _without_media(base, known | kinds, frozenset(), fallback_prompt), kinds, "image" in kinds
     if (
         transcoded_webp
-        and error.status_code == _PAYLOAD_TOO_LARGE_STATUS
+        and error.status_code == webp.PAYLOAD_TOO_LARGE_STATUS
         and remaining != _IMAGES
         and not (named & sent.keys())
     ):
         log("Retrying model request without images after transcoded payload exceeded size limit")
         return _without_media(base, known | _IMAGES, frozenset(), fallback_prompt), _IMAGES, True
     return None
+
+
+@dataclass(slots=True)
+class _FallbackState:
+    base: Sequence[Message]
+    checked_webp: bool
+    transcoded_webp: bool
+    webp_trigger: ProviderError | None = None
+    failure: ProviderError | None = None
+    sent_broad: bool = False
+    stripped_image: bool = False
+    removed_kinds: frozenset[MediaKind] = frozenset()
 
 
 async def media_fallback_stream(
@@ -358,20 +367,15 @@ async def media_fallback_stream(
     remaining = present - known
     checked_webp = route in webp.LEARNED_WEBP_UNSUPPORTED and "image" in remaining
     base, transcoded_webp = await webp.transcode_webp_if(checked_webp, base)
-    first = replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
+    state = _FallbackState(base=base, checked_webp=checked_webp, transcoded_webp=transcoded_webp)
+    first = replace(request, messages=_without_media(state.base, known, frozenset(), fallback_prompt))
     sent = _sent_media(first.messages)
     local_images = webp.local_image_ids(first.messages)
-    failure: ProviderError | None = None
-    webp_trigger: ProviderError | None = None
-    sent_broad = False
-    stripped_image = False
-    removed_kinds: frozenset[MediaKind] = frozenset()
 
     async def without_rejected_media(error: ProviderError) -> Retry | None:
-        nonlocal base, checked_webp, transcoded_webp, failure, webp_trigger, sent_broad, stripped_image, removed_kinds
         if (
             request.overrides.transient_retries != "pipeline"
-            or sent_broad
+            or state.sent_broad
             or not remaining
             or error.retryable
             or error.already_retried
@@ -386,8 +390,8 @@ async def media_fallback_stream(
             error=redact_sensitive_text(str(error), max_length=500),
         )
         if (
-            not checked_webp
-            and failure is None
+            not state.checked_webp
+            and state.failure is None
             and webp.is_webp_transcode_candidate(
                 error,
                 remaining,
@@ -397,46 +401,46 @@ async def media_fallback_stream(
                 names_image_kind="image" in _named_media_kinds(error),
             )
         ):
-            checked_webp = True
-            base, transcoded_webp = await webp.transcode_webp_if(True, base)
-            if transcoded_webp:
-                webp_trigger = error
+            state.checked_webp = True
+            state.base, state.transcoded_webp = await webp.transcode_webp_if(True, state.base)
+            if state.transcoded_webp:
+                state.webp_trigger = error
                 log("Retrying model request after transcoding WebP images")
-                return Retry(replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt)))
-        if failure is None:
-            failure = error
+                return Retry(replace(request, messages=_without_media(state.base, known, frozenset(), fallback_prompt)))
+        if state.failure is None:
+            state.failure = error
             if (
                 narrowed := _narrowed_removal(
                     error,
-                    base,
+                    state.base,
                     sent,
                     known,
                     remaining,
                     fallback_prompt,
                     log,
-                    transcoded_webp=transcoded_webp,
+                    transcoded_webp=state.transcoded_webp,
                 )
             ) is not None:
-                messages, removed_kinds, narrowed_stripped = narrowed
-                stripped_image = stripped_image or narrowed_stripped
+                messages, state.removed_kinds, narrowed_stripped = narrowed
+                state.stripped_image = state.stripped_image or narrowed_stripped
                 return Retry(replace(request, messages=messages))
-        sent_broad = True
-        removed_kinds = remaining
-        stripped_image = stripped_image or "image" in remaining
+        state.sent_broad = True
+        state.removed_kinds = remaining
+        state.stripped_image = state.stripped_image or "image" in remaining
         log("Retrying model request without inline media")
-        return Retry(replace(request, messages=_without_media(base, present, frozenset(), fallback_prompt)))
+        return Retry(replace(request, messages=_without_media(state.base, present, frozenset(), fallback_prompt)))
 
     events = attempts(inner, first, without_rejected_media)
     async with closing_async_stream(events):
         async for event in events:
             yield event
     if (
-        transcoded_webp
-        and not stripped_image
-        and webp_trigger is not None
-        and webp.should_learn_webp_unsupported(webp_trigger)
+        state.transcoded_webp
+        and not state.stripped_image
+        and state.webp_trigger is not None
+        and webp.should_learn_webp_unsupported(state.webp_trigger)
     ):
         webp.LEARNED_WEBP_UNSUPPORTED.add(route)
     # Successful removal of a whole named kind can teach the route; partial item removal cannot.
-    if failure is not None and (learned := _names_capability_gap(failure, removed_kinds)):
+    if state.failure is not None and (learned := _names_capability_gap(state.failure, state.removed_kinds)):
         _LEARNED_UNSUPPORTED.setdefault(route, set()).update(learned)

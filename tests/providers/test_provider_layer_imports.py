@@ -9,6 +9,7 @@ import sys
 import pytest
 
 OWNED_PROVIDER_MODULES = (
+    "mindroom.llm.image_encoding",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.cache_ladder",
     "mindroom.providers.errors",

@@ -1627,7 +1627,7 @@ def test_importing_media_pipeline_does_not_import_pillow() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; import mindroom.providers.pipeline.media, mindroom.providers.pipeline.webp; assert 'PIL' not in sys.modules",
+            "import sys; import mindroom.llm.image_encoding, mindroom.providers.pipeline.media, mindroom.providers.pipeline.webp; assert 'PIL' not in sys.modules",
         ],
         check=True,
         capture_output=True,

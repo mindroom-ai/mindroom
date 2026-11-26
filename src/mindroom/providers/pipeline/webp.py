@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.image_encoding import (
+    MAX_IMAGE_DECODED_PIXELS,
+    MAX_IMAGE_EDGE,
+    MAX_IMAGE_SOURCE_BYTES,
+    MAX_INLINE_IMAGE_BYTES,
+    encode_png_or_jpeg,
+)
 from mindroom.llm.media import IMAGE_HEADER_BYTES, image_format
 
 if TYPE_CHECKING:
@@ -23,6 +30,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LEARNED_WEBP_UNSUPPORTED",
+    "MAX_SCANNED_ERROR_CHARS",
+    "PAYLOAD_TOO_LARGE_STATUS",
     "MediaRoute",
     "is_webp_transcode_candidate",
     "local_image_ids",
@@ -32,39 +41,25 @@ __all__ = [
     "transcode_webp_messages",
 ]
 
-_PAYLOAD_TOO_LARGE_STATUS = 413
+PAYLOAD_TOO_LARGE_STATUS = 413
 _UNSUPPORTED_MEDIA_TYPE_STATUS = 415
-_MAX_SCANNED_ERROR_CHARS = 2000
-_MAX_WEBP_SOURCE_BYTES = 20 * 1024 * 1024
-_MAX_WEBP_DECODED_PIXELS = 40_000_000
-_MAX_WEBP_EDGE = 2048
-_MAX_WEBP_OUTPUT_BYTES = 5 * 1024 * 1024
+# Provider errors naming a capability or format are short; capping the scan keeps regexes cheap on huge errors.
+MAX_SCANNED_ERROR_CHARS = 2000
+_MAX_WEBP_OUTPUT_BYTES = MAX_INLINE_IMAGE_BYTES
 _INVALID_IMAGE_URL_CODE = "invalid_image_url"
 _WEBP_TRANSCODE_ERROR_CODES = frozenset({"invalid_image_format", "image_parse_error", "invalid_image"})
 # Standalone format tokens (never .webp/.png/.jpg inside filenames/URLs, while still allowing image/<fmt>).
-_STANDALONE_WEBP_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\bwebp\b")
+_WEBP_PATTERN = r"(?:(?<![./])|(?<=\bimage/))\bwebp\b"
+_STANDALONE_WEBP_FORMAT = re.compile(_WEBP_PATTERN)
 _STANDALONE_IMAGE_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\b(?:png|jpe?g)\b")
 _REJECTED_WEBP_ERROR = re.compile(
-    r"(?:unsupported|invalid|not supported|disallowed|unrecognized|got|received)"
-    r"[^.;\n]{0,60}(?:(?<![./])|(?<=\bimage/))\bwebp\b"
-    r"|(?:(?<![./])|(?<=\bimage/))\bwebp\b[^.;\n]{0,40}"
-    r"(?:is |are )?(?:not supported|unsupported|invalid|disallowed)",
+    rf"(?:unsupported|invalid|not supported|disallowed|unrecognized|got|received)[^.;\n]{{0,60}}{_WEBP_PATTERN}"
+    rf"|{_WEBP_PATTERN}[^.;\n]{{0,40}}(?:is |are )?(?:not supported|unsupported|invalid|disallowed)",
 )
-_FORMAT_LIST_CONTEXT_MARKERS = (
-    "supported",
-    "only",
-    "expected",
-    "allowed",
-    "format",
-    "mime",
-    "media_type",
-    "media type",
-)
+_FORMAT_MARKERS = ("mime", "media_type", "media type", "format")
+_FORMAT_LIST_CONTEXT_MARKERS = (*_FORMAT_MARKERS, "supported", "only", "expected", "allowed")
 _IMAGE_FORMAT_ERROR_MARKERS = (
-    "mime",
-    "media_type",
-    "media type",
-    "format",
+    *_FORMAT_MARKERS,
     "unsupported image",
     "invalid image",
     "decode image",
@@ -101,7 +96,7 @@ def _read_local_webp_bytes(image: Image) -> bytes | None:
     if image.content is not None:
         return (
             image.content
-            if 0 < len(image.content) <= _MAX_WEBP_SOURCE_BYTES and image_format(image.content) == "webp"
+            if 0 < len(image.content) <= MAX_IMAGE_SOURCE_BYTES and image_format(image.content) == "webp"
             else None
         )
     if not image.filepath:
@@ -112,12 +107,12 @@ def _read_local_webp_bytes(image: Image) -> bytes | None:
             return None
         with file_path.open("rb") as handle:
             header = handle.read(IMAGE_HEADER_BYTES)
-            if image_format(header) != "webp" or os.fstat(handle.fileno()).st_size > _MAX_WEBP_SOURCE_BYTES:
+            if image_format(header) != "webp" or os.fstat(handle.fileno()).st_size > MAX_IMAGE_SOURCE_BYTES:
                 return None
-            data = header + handle.read(_MAX_WEBP_SOURCE_BYTES - len(header) + 1)
+            data = header + handle.read(MAX_IMAGE_SOURCE_BYTES - len(header) + 1)
     except OSError:
         return None
-    return data if len(data) <= _MAX_WEBP_SOURCE_BYTES else None
+    return data if len(data) <= MAX_IMAGE_SOURCE_BYTES else None
 
 
 def _transcode_webp_bytes(data: bytes) -> tuple[bytes, str] | None:
@@ -128,27 +123,16 @@ def _transcode_webp_bytes(data: bytes) -> tuple[bytes, str] | None:
     try:
         with PILImage.open(io.BytesIO(data)) as source:
             width, height = source.size
-            if source.format != "WEBP" or width * height > _MAX_WEBP_DECODED_PIXELS:
+            if source.format != "WEBP" or width * height > MAX_IMAGE_DECODED_PIXELS:
                 return None
             source.seek(0)
             oriented = ImageOps.exif_transpose(source)
             if oriented is None:
                 return None
-            if max(oriented.size) > _MAX_WEBP_EDGE:
-                oriented.thumbnail((_MAX_WEBP_EDGE, _MAX_WEBP_EDGE), PILImage.Resampling.LANCZOS)
-            if oriented.mode == "CMYK":
-                oriented = oriented.convert("RGB")
-            output = io.BytesIO()
-            oriented.save(output, format="PNG")
-            encoded = output.getvalue()
-            if len(encoded) <= _MAX_WEBP_OUTPUT_BYTES:
-                return encoded, "image/png"
-            if "A" in oriented.getbands() or "transparency" in oriented.info:
-                return None
-            jpeg_output = io.BytesIO()
-            oriented.convert("RGB").save(jpeg_output, format="JPEG", quality=85)
-            jpeg_data = jpeg_output.getvalue()
-            return (jpeg_data, "image/jpeg") if len(jpeg_data) <= _MAX_WEBP_OUTPUT_BYTES else None
+            if max(oriented.size) > MAX_IMAGE_EDGE:
+                oriented.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE), PILImage.Resampling.LANCZOS)
+            encoded, mime_type = encode_png_or_jpeg(oriented, max_bytes=_MAX_WEBP_OUTPUT_BYTES)
+            return (encoded, mime_type) if len(encoded) <= _MAX_WEBP_OUTPUT_BYTES else None
     except (
         OSError,
         ValueError,
@@ -189,6 +173,12 @@ async def transcode_webp_if(should_check: bool, base: Sequence[Message]) -> tupl
     return transcoded, True
 
 
+def _names_png_jpeg_allowlist(text: str) -> bool:
+    return bool(_STANDALONE_IMAGE_FORMAT.search(text)) and any(
+        marker in text for marker in _FORMAT_LIST_CONTEXT_MARKERS
+    )
+
+
 def is_webp_transcode_candidate(
     error: ProviderError,
     remaining: frozenset[MediaKind],
@@ -203,7 +193,7 @@ def is_webp_transcode_candidate(
         "image" not in remaining
         or not local_images
         or not (isinstance(error, InvalidRequest) or error.status_code == _UNSUPPORTED_MEDIA_TYPE_STATUS)
-        or error.status_code == _PAYLOAD_TOO_LARGE_STATUS
+        or error.status_code == PAYLOAD_TOO_LARGE_STATUS
         or is_image_capability_gap
         or error.provider_code == _INVALID_IMAGE_URL_CODE
     ):
@@ -211,12 +201,12 @@ def is_webp_transcode_candidate(
     named = error.rejected_media & sent.keys() if isinstance(error, InvalidRequest) else frozenset()
     if named and not (named & local_images):
         return False
-    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
+    text = str(error).lower()[:MAX_SCANNED_ERROR_CHARS]
     if "download" in text:
         return False
     if _STANDALONE_WEBP_FORMAT.search(text) or error.provider_code in _WEBP_TRANSCODE_ERROR_CODES:
         return True
-    if _STANDALONE_IMAGE_FORMAT.search(text) and any(marker in text for marker in _FORMAT_LIST_CONTEXT_MARKERS):
+    if _names_png_jpeg_allowlist(text):
         return True
     implicates_image = bool(named & local_images) or names_image_kind
     return implicates_image and any(marker in text for marker in _IMAGE_FORMAT_ERROR_MARKERS)
@@ -224,11 +214,7 @@ def is_webp_transcode_candidate(
 
 def should_learn_webp_unsupported(error: ProviderError) -> bool:
     """Return whether ``error`` proves the route rejects WebP, rather than one malformed or animated image."""
-    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
+    text = str(error).lower()[:MAX_SCANNED_ERROR_CHARS]
     if _REJECTED_WEBP_ERROR.search(text):
         return True
-    return (
-        not _STANDALONE_WEBP_FORMAT.search(text)
-        and bool(_STANDALONE_IMAGE_FORMAT.search(text))
-        and any(marker in text for marker in _FORMAT_LIST_CONTEXT_MARKERS)
-    )
+    return not _STANDALONE_WEBP_FORMAT.search(text) and _names_png_jpeg_allowlist(text)
