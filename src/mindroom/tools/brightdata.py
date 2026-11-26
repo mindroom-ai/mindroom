@@ -64,7 +64,7 @@ _DATASETS: dict[str, str] = {
     "youtube_profiles": "gd_lk538t2k2p1k3oos71",
     "youtube_comments": "gd_lk9q0ew71spt1mxywf",
     "reddit_posts": "gd_lvz8ah06191smkebj4",
-    "youtube_videos": "gd_m5mbdl081229ln6t4a",
+    "youtube_videos": "gd_lk56epmy2i5g7lzu0k",
 }
 
 
@@ -78,7 +78,7 @@ def _require_requests() -> ModuleType:
     return requests
 
 
-class BrightDataTools(Toolkit):
+class _BrightDataTools(Toolkit):
     """Web scraping, screenshots, search engines, and structured data feeds via Bright Data."""
 
     def __init__(
@@ -436,7 +436,7 @@ class BrightDataTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#brightdata",
     function_names=("get_screenshot", "scrape_as_markdown", "search_engine", "web_data_feed"),
 )
-def brightdata_tools() -> type[BrightDataTools]:
+def brightdata_tools() -> type[Toolkit]:
     """Return BrightData tools for web scraping and data extraction."""
     _require_requests()
-    return BrightDataTools
+    return _BrightDataTools

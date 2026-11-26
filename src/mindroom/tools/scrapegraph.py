@@ -33,7 +33,7 @@ def _require_scrapegraph() -> tuple[type[Any], type[Any], type[Any], type[Any], 
     return FetchConfig, HtmlFormatConfig, JsonFormatConfig, MarkdownFormatConfig, ScrapeGraphAI
 
 
-class ScrapeGraphTools(Toolkit):
+class _ScrapeGraphTools(Toolkit):
     """Web scraping, structured extraction, search, and crawl via the ScrapeGraphAI API."""
 
     def __init__(
@@ -315,7 +315,7 @@ class ScrapeGraphTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#scrapegraph",
     function_names=("crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
 )
-def scrapegraph_tools() -> type[ScrapeGraphTools]:
+def scrapegraph_tools() -> type[Toolkit]:
     """Return ScrapeGraph tools for web data extraction."""
     _require_scrapegraph()
-    return ScrapeGraphTools
+    return _ScrapeGraphTools

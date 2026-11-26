@@ -26,7 +26,7 @@ def _require_linkup() -> type[Any]:
     return LinkupClient
 
 
-class LinkupTools(Toolkit):
+class _LinkupTools(Toolkit):
     """Search the web using the Linkup API."""
 
     def __init__(
@@ -138,7 +138,7 @@ class LinkupTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-search/#linkup",
     function_names=("web_search_with_linkup",),
 )
-def linkup_tools() -> type[LinkupTools]:
+def linkup_tools() -> type[Toolkit]:
     """Return Linkup tools for web search."""
     _require_linkup()
-    return LinkupTools
+    return _LinkupTools

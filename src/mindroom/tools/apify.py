@@ -16,9 +16,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-MAX_DESCRIPTION_LEN = 350
-REQUESTS_TIMEOUT_SECS = 300
-APIFY_API_ENDPOINT_GET_DEFAULT_BUILD = "https://api.apify.com/v2/acts/{actor_id}/builds/default"
+_MAX_DESCRIPTION_LEN = 350
 
 
 def _require_apify() -> type[ApifyClient]:
@@ -31,28 +29,61 @@ def _require_apify() -> type[ApifyClient]:
     return ApifyClient
 
 
-def _infer_array_item_type(prop: dict[str, Any]) -> str:
-    type_map = {
-        "string": "string",
-        "int": "number",
-        "float": "number",
-        "dict": "object",
-        "list": "array",
-        "bool": "boolean",
-        "none": "null",
-    }
-    if prop.get("items", {}).get("type"):
-        return str(prop["items"]["type"])
-    for key in ("prefill", "default"):
-        sample = prop.get(key)
-        if sample:
-            return type_map.get(type(sample[0]).__name__.lower(), "string")
+def _truncate_description(description: str) -> str:
+    if len(description) > _MAX_DESCRIPTION_LEN:
+        return description[:_MAX_DESCRIPTION_LEN] + "..."
+    return description
+
+
+_PYTHON_TYPE_TO_JSON_TYPE: tuple[tuple[type, str], ...] = (
+    (bool, "boolean"),
+    (int, "integer"),
+    (float, "number"),
+    (str, "string"),
+    (dict, "object"),
+    (list, "array"),
+)
+
+
+def _python_value_to_json_type(value: Any) -> str:  # noqa: ANN401
+    """Map a Python runtime value to a valid JSON Schema type name."""
+    if value is None:
+        return "null"
+    for py_type, json_type in _PYTHON_TYPE_TO_JSON_TYPE:
+        if isinstance(value, py_type):
+            return json_type
     return "string"
 
 
-def _object_property_schema(value: dict[str, Any]) -> dict[str, Any]:
-    if value.get("editor") == "proxy":
+def _infer_schema_from_value(value: Any) -> dict[str, Any]:  # noqa: ANN401
+    """Infer a valid JSON Schema fragment from a Python default or prefill sample value."""
+    json_type = _python_value_to_json_type(value)
+    if json_type == "object":
+        schema: dict[str, Any] = {"type": "object"}
+        if value:
+            schema["properties"] = {key: _infer_schema_from_value(val) for key, val in value.items()}
+        return schema
+    if json_type == "array":
+        item_schema = _infer_schema_from_value(value[0]) if value else {"type": "string"}
+        return {"type": "array", "items": item_schema}
+    return {"type": json_type}
+
+
+def _object_property_schema(raw: dict[str, Any]) -> dict[str, Any]:
+    declared_properties = raw.get("properties")
+    if isinstance(declared_properties, dict):
         result: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                prop_key: _property_to_json_schema(prop_val)
+                for prop_key, prop_val in declared_properties.items()
+                if isinstance(prop_val, dict)
+            },
+        }
+        if isinstance(raw.get("required"), list):
+            result["required"] = [field for field in raw["required"] if isinstance(field, str)]
+    elif raw.get("editor") == "proxy":
+        result = {
             "type": "object",
             "properties": {
                 "useApifyProxy": {
@@ -65,67 +96,105 @@ def _object_property_schema(value: dict[str, Any]) -> dict[str, Any]:
             },
             "required": ["useApifyProxy"],
         }
-        if "default" in value:
-            result["default"] = value["default"]
-        return result
+    else:
+        result = {"type": "object"}
+        sample = raw.get("default") if isinstance(raw.get("default"), dict) else raw.get("prefill")
+        if isinstance(sample, dict) and sample:
+            result["properties"] = {
+                prop_key: _infer_schema_from_value(prop_val) for prop_key, prop_val in sample.items()
+            }
 
-    result = {"type": "object"}
-    if "default" in value:
-        result["default"] = value["default"]
-        nested: dict[str, Any] = {}
-        for prop_key, prop_val in value.get("properties", value["default"]).items():
-            nested_type = prop_val["type"] if isinstance(prop_val, dict) else type(prop_val).__name__.lower()
-            nested[prop_key] = {"type": "boolean" if nested_type == "bool" else nested_type}
-        result["properties"] = nested
+    if "additionalProperties" in raw:
+        additional = raw["additionalProperties"]
+        if isinstance(additional, bool):
+            result["additionalProperties"] = additional
+        elif isinstance(additional, dict):
+            result["additionalProperties"] = _property_to_json_schema(additional)
     return result
 
 
-def _property_to_json_schema(value: dict[str, Any]) -> dict[str, Any]:
-    prop_schema: dict[str, Any] = {}
-    if "enum" in value:
-        prop_schema["enum"] = value["enum"]
-    if "default" in value:
-        prop_schema["default"] = value["default"]
-    elif "prefill" in value:
-        prop_schema["default"] = value["prefill"]
-    if "description" in value:
-        prop_schema["description"] = value["description"]
+def _array_items_schema(raw: dict[str, Any]) -> dict[str, Any]:
+    declared_items = raw.get("items")
+    if isinstance(declared_items, dict) and declared_items:
+        return _property_to_json_schema(declared_items)
 
-    prop_type = value.get("type")
-    if prop_type == "object":
-        prop_schema.update(_object_property_schema(value))
-    elif prop_type == "array" and value.get("editor") == "requestListSources":
-        prop_schema["type"] = "array"
-        prop_schema["items"] = {
+    editor = raw.get("editor")
+    if editor == "requestListSources":
+        return {
             "type": "object",
             "title": "Request list source",
             "description": "Request list source",
             "properties": {
                 "url": {"title": "URL", "type": "string", "description": "URL of the request list source"},
             },
+            "required": ["url"],
         }
-    elif prop_type == "array":
-        prop_schema["type"] = "array"
-        prop_schema["items"] = {
-            "type": _infer_array_item_type(value),
-            "title": value.get("title", "Item"),
-            "description": "Item",
+    if editor == "keyValue":
+        return {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "value": {"type": "string"},
+            },
+            "required": ["key", "value"],
         }
-    else:
-        prop_schema["type"] = prop_type
+
+    for key in ("prefill", "default"):
+        sample = raw.get(key)
+        if isinstance(sample, list) and sample:
+            return _infer_schema_from_value(sample[0])
+
+    return {"type": "string"}
+
+
+def _property_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+    prop_schema: dict[str, Any] = {}
+    if isinstance(raw.get("title"), str) and raw["title"]:
+        prop_schema["title"] = raw["title"]
+    if isinstance(raw.get("description"), str) and raw["description"]:
+        prop_schema["description"] = _truncate_description(raw["description"])
+    if "enum" in raw and raw["enum"] is not None:
+        prop_schema["enum"] = raw["enum"]
+    if "default" in raw:
+        prop_schema["default"] = raw["default"]
+    elif "prefill" in raw:
+        prop_schema["default"] = raw["prefill"]
     return prop_schema
 
 
-def props_to_json_schema(input_dict: dict[str, Any], required_fields: list[str] | None = None) -> dict[str, Any]:
-    """Convert pruned Apify Actor input properties into a JSON Schema object."""
+def _property_to_json_schema(raw: dict[str, Any]) -> dict[str, Any]:
+    prop_schema = _property_metadata(raw)
+    prop_type = raw.get("type")
+    if prop_type == "object":
+        prop_schema.update(_object_property_schema(raw))
+    elif prop_type == "array":
+        prop_schema["type"] = "array"
+        prop_schema["items"] = _array_items_schema(raw)
+    elif prop_type is not None:
+        prop_schema["type"] = prop_type
+    elif "default" in prop_schema:
+        prop_schema.update(_infer_schema_from_value(prop_schema["default"]))
+    return prop_schema
+
+
+def _actor_input_to_json_schema(input_schema: dict[str, Any]) -> dict[str, Any]:
+    """Translate an Apify Actor input schema into a pruned JSON Schema object."""
+    raw_properties = input_schema.get("properties")
+    properties = (
+        {key: _property_to_json_schema(meta) for key, meta in raw_properties.items() if isinstance(meta, dict)}
+        if isinstance(raw_properties, dict)
+        else {}
+    )
+    raw_required = input_schema.get("required")
+    required = [field for field in raw_required if isinstance(field, str)] if isinstance(raw_required, list) else []
     return {
         "type": "object",
-        "properties": {key: _property_to_json_schema(value) for key, value in input_dict.items()},
-        "required": required_fields or [],
+        "properties": properties,
+        "required": required,
     }
 
 
-def create_apify_client(token: str) -> ApifyClient:
+def _create_apify_client(token: str) -> ApifyClient:
     """Create an Apify client instance with a MindRoom user-agent suffix."""
     if not token:
         msg = "API token is required to create an Apify client."
@@ -138,7 +207,7 @@ def create_apify_client(token: str) -> ApifyClient:
     return client
 
 
-def response_to_dict(response: Any) -> dict[str, Any]:  # noqa: ANN401
+def _response_to_dict(response: Any) -> dict[str, Any]:  # noqa: ANN401
     """Return an Apify client response as a dict across apify-client 2.x and 3.x."""
     if isinstance(response, dict):
         return response
@@ -148,57 +217,42 @@ def response_to_dict(response: Any) -> dict[str, Any]:  # noqa: ANN401
     raise TypeError(msg)
 
 
-def actor_id_to_tool_name(actor_id: str) -> str:
+def _actor_id_to_tool_name(actor_id: str) -> str:
     """Turn an Apify Actor ID into a valid tool function name."""
     valid_chars = string.ascii_letters + string.digits + "_-"
     return "apify_actor_" + "".join(char if char in valid_chars else "_" for char in actor_id)
 
 
-def get_actor_latest_build(apify_client: ApifyClient, actor_id: str) -> dict[str, Any]:
-    """Fetch the default build metadata for an Apify Actor."""
-    import requests
-
-    if not (actor := apify_client.actor(actor_id).get()):
+def _get_actor_latest_build(apify_client: ApifyClient, actor_id: str) -> dict[str, Any]:
+    """Fetch the default build metadata for an Apify Actor through the authenticated client."""
+    actor_client = apify_client.actor(actor_id)
+    if not (actor := actor_client.get()):
         msg = f"Actor {actor_id} not found."
         raise ValueError(msg)
 
-    if not (actor_obj_id := response_to_dict(actor).get("id")):
-        msg = f"Failed to get the Actor object ID for {actor_id}."
+    actor_dict = _response_to_dict(actor)
+    default_tag = (actor_dict.get("defaultRunOptions") or {}).get("build")
+    tagged_builds = actor_dict.get("taggedBuilds") or {}
+    tagged_build = (
+        tagged_builds.get(default_tag) if isinstance(default_tag, str) and isinstance(tagged_builds, dict) else None
+    )
+    build_id = tagged_build.get("buildId") if isinstance(tagged_build, dict) else None
+
+    if build_id:
+        build = apify_client.build(build_id).get()
+    elif hasattr(actor_client, "default_build"):
+        build = actor_client.default_build().get()
+    else:
+        msg = f"Failed to determine the default build for Actor {actor_id}."
         raise ValueError(msg)
 
-    url = APIFY_API_ENDPOINT_GET_DEFAULT_BUILD.format(actor_id=actor_obj_id)
-    response = requests.request("GET", url, timeout=REQUESTS_TIMEOUT_SECS)
-    build = response.json()
-    if not isinstance(build, dict):
-        msg = f"Failed to get the latest build of the Actor {actor_id}."
-        raise TypeError(msg)
-
-    if (data := build.get("data")) is None:
+    if not build:
         msg = f"Failed to get the latest build data of the Actor {actor_id}."
         raise ValueError(msg)
-    return data
+    return _response_to_dict(build)
 
 
-def prune_actor_input_schema(input_schema: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """Extract and trim input properties and required fields from an Actor build schema."""
-    properties = input_schema.get("properties", {})
-    required = input_schema.get("required", [])
-
-    properties_out: dict[str, Any] = {}
-    for item, meta in properties.items():
-        properties_out[item] = {}
-        if desc := meta.get("description"):
-            properties_out[item]["description"] = (
-                desc[:MAX_DESCRIPTION_LEN] + "..." if len(desc) > MAX_DESCRIPTION_LEN else desc
-            )
-        for key_name in ("type", "default", "prefill", "enum"):
-            if value := meta.get(key_name):
-                properties_out[item][key_name] = value
-
-    return properties_out, required
-
-
-class ApifyTools(Toolkit):
+class _ApifyTools(Toolkit):
     """Run Apify Actors registered dynamically from their build input schemas."""
 
     def __init__(
@@ -212,7 +266,7 @@ class ApifyTools(Toolkit):
             msg = "APIFY_API_TOKEN environment variable or apify_api_token parameter must be set"
             raise ValueError(msg)
 
-        self.client = create_apify_client(self.apify_api_token)
+        self.client = _create_apify_client(self.apify_api_token)
         super().__init__(name="ApifyTools", tools=[])
 
         if actors:
@@ -230,20 +284,22 @@ class ApifyTools(Toolkit):
 
         """
         try:
-            build = get_actor_latest_build(self.client, actor_id)
-            tool_name = actor_id_to_tool_name(actor_id)
+            build = _get_actor_latest_build(self.client, actor_id)
+            tool_name = _actor_id_to_tool_name(actor_id)
 
-            actor_description = build.get("actorDefinition", {}).get("description", "")
-            if len(actor_description) > MAX_DESCRIPTION_LEN:
-                actor_description = actor_description[:MAX_DESCRIPTION_LEN] + "...(TRUNCATED, TOO LONG)"
+            actor_definition = build.get("actorDefinition") or {}
+            actor_description = actor_definition.get("description") or ""
+            if len(actor_description) > _MAX_DESCRIPTION_LEN:
+                actor_description = actor_description[:_MAX_DESCRIPTION_LEN] + "...(TRUNCATED, TOO LONG)"
 
-            actor_input = build.get("actorDefinition", {}).get("input")
+            actor_input = actor_definition.get("input")
             if not actor_input:
                 logger.error("apify_actor_input_schema_missing", actor_id=actor_id)
                 return
 
-            properties, required = prune_actor_input_schema(actor_input)
-            parameters_schema = props_to_json_schema(properties, required)
+            parameters_schema = _actor_input_to_json_schema(actor_input)
+            properties = parameters_schema["properties"]
+            required = parameters_schema["required"]
 
             docstring = f"{actor_description}\n\nArgs:\n"
             for param_name, param_info in properties.items():
@@ -262,8 +318,6 @@ class ApifyTools(Toolkit):
                     logger.exception("apify_actor_failed", actor_id=actor_id)
                     return json.dumps([{"error": error_msg}])
 
-            actor_function.__name__ = tool_name
-            actor_function.__doc__ = docstring
             self.functions[tool_name] = actor_function
             logger.info("apify_actor_registered", actor_id=actor_id, tool_name=tool_name)
         except Exception:
@@ -276,7 +330,7 @@ class ApifyTools(Toolkit):
         if details is None:
             msg = f"Actor: {actor_id} was not started properly and details about the run were not returned"
             raise ValueError(msg)
-        run_id = response_to_dict(details).get("id")
+        run_id = _response_to_dict(details).get("id")
         if run_id is None:
             msg = f"Run ID not found in the run details for Actor: {actor_id}"
             raise ValueError(msg)
@@ -320,7 +374,7 @@ class ApifyTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#apify",
     function_names=("register_actor",),
 )
-def apify_tools() -> type[ApifyTools]:
+def apify_tools() -> type[Toolkit]:
     """Return Apify tools for web scraping and automation."""
     _require_apify()
-    return ApifyTools
+    return _ApifyTools

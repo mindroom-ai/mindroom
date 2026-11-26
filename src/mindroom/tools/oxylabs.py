@@ -126,7 +126,7 @@ def _extract_amazon_search_results(result: Any) -> list[dict[str, Any]]:  # noqa
     return []
 
 
-class OxylabsTools(Toolkit):
+class _OxylabsTools(Toolkit):
     """Google search, Amazon product lookup/search, and universal website scraping via Oxylabs."""
 
     def __init__(
@@ -356,7 +356,7 @@ class OxylabsTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#oxylabs",
     function_names=("get_amazon_product", "scrape_website", "search_amazon_products", "search_google"),
 )
-def oxylabs_tools() -> type[OxylabsTools]:
+def oxylabs_tools() -> type[Toolkit]:
     """Return Oxylabs tools for web scraping and data extraction."""
     _require_oxylabs()
-    return OxylabsTools
+    return _OxylabsTools

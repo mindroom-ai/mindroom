@@ -38,7 +38,7 @@ def _require_async_playwright() -> Any:  # noqa: ANN401
     return async_playwright
 
 
-class BrowserbaseTools(Toolkit):
+class _BrowserbaseTools(Toolkit):
     """Navigate, screenshot, and extract content from remote Browserbase browser sessions."""
 
     def __init__(
@@ -326,7 +326,7 @@ class BrowserbaseTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browserbase",
     function_names=("close_session", "get_page_content", "navigate_to", "screenshot"),
 )
-def browserbase_tools() -> type[BrowserbaseTools]:
+def browserbase_tools() -> type[Toolkit]:
     """Return Browserbase tools for browser automation and web scraping."""
     _require_browserbase()
-    return BrowserbaseTools
+    return _BrowserbaseTools

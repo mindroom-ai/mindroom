@@ -26,7 +26,7 @@ def _require_spider() -> type[Any]:
     return Spider
 
 
-class SpiderTools(Toolkit):
+class _SpiderTools(Toolkit):
     """Search, scrape, and crawl websites using Spider."""
 
     def __init__(
@@ -186,7 +186,7 @@ class SpiderTools(Toolkit):
     helper_text="Get your API key from the [Spider dashboard](https://spider.cloud)",
     function_names=("crawl", "scrape", "search_web"),
 )
-def spider_tools() -> type[SpiderTools]:
+def spider_tools() -> type[Toolkit]:
     """Return Spider tools for web scraping and crawling."""
     _require_spider()
-    return SpiderTools
+    return _SpiderTools

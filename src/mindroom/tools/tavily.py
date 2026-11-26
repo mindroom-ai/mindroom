@@ -26,7 +26,7 @@ def _require_tavily() -> type[Any]:
     return TavilyClient
 
 
-class TavilyTools(Toolkit):
+class _TavilyTools(Toolkit):
     """Search the web and extract URL content using the Tavily API."""
 
     def __init__(
@@ -454,7 +454,7 @@ class TavilyTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-search/#tavily",
     function_names=("extract_url_content", "web_search_using_tavily", "web_search_with_tavily"),
 )
-def tavily_tools() -> type[TavilyTools]:
+def tavily_tools() -> type[Toolkit]:
     """Return Tavily tools for real-time web search."""
     _require_tavily()
-    return TavilyTools
+    return _TavilyTools

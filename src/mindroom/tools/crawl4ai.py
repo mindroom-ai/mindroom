@@ -48,7 +48,7 @@ def _require_crawl4ai() -> ModuleType:
     return crawl4ai
 
 
-class Crawl4aiTools(Toolkit):
+class _Crawl4aiTools(Toolkit):
     """Crawl4AI toolkit with MindRoom server-fetch URL validation and browser destination proxy."""
 
     # Expose only safe crawling options; raw proxy_config overrides would bypass the egress route.
@@ -263,7 +263,7 @@ class Crawl4aiTools(Toolkit):
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("crawl",),
 )
-def crawl4ai_tools() -> type[Crawl4aiTools]:
+def crawl4ai_tools() -> type[Toolkit]:
     """Return Crawl4AI tools for web crawling and scraping."""
     _require_crawl4ai()
-    return Crawl4aiTools
+    return _Crawl4aiTools

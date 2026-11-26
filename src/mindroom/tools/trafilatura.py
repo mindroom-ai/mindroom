@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, run_fetch_sync
@@ -36,7 +36,17 @@ _visit_page: Callable[[CrawlParameters, bool], CrawlParameters] | None = None
 _process_url_store: UrlStore | None = None
 
 
-def _require_trafilatura() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+class _TrafilaturaImports(NamedTuple):
+    extract: Any
+    extract_metadata: Any
+    html2txt: Any
+    reset_caches: Any
+    user_agent: str
+    response_cls: Any
+    default_config: ConfigParser
+
+
+def _require_trafilatura() -> _TrafilaturaImports:
     """Import and return the Trafilatura functions and settings needed by the toolkit."""
     try:
         from trafilatura import extract, extract_metadata, html2txt
@@ -46,7 +56,15 @@ def _require_trafilatura() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     except ImportError as exc:
         msg = "`trafilatura` not installed. Please install using `pip install trafilatura`"
         raise ImportError(msg) from exc
-    return extract, extract_metadata, html2txt, reset_caches, USER_AGENT, Response, DEFAULT_CONFIG
+    return _TrafilaturaImports(
+        extract=extract,
+        extract_metadata=extract_metadata,
+        html2txt=html2txt,
+        reset_caches=reset_caches,
+        user_agent=USER_AGENT,
+        response_cls=Response,
+        default_config=DEFAULT_CONFIG,
+    )
 
 
 def _load_spider() -> Any | None:  # noqa: ANN401 - optional trafilatura.spider module
@@ -104,13 +122,15 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
     A refused URL raises ``PublicFetchError``; any other failure, including a non-2xx response or a download the
     time limit ends, returns ``None``, and so does every download once the time limit has passed.
     """
-    _, _, _, _, user_agent, response_cls, default_config = _require_trafilatura()
-    max_bytes = _MAX_FILE_SIZE if _MAX_FILE_SIZE is not None else default_config.getint("DEFAULT", "MAX_FILE_SIZE")
+    trafilatura = _require_trafilatura()
+    max_bytes = (
+        _MAX_FILE_SIZE if _MAX_FILE_SIZE is not None else trafilatura.default_config.getint("DEFAULT", "MAX_FILE_SIZE")
+    )
     seconds = _seconds_left()
     if seconds is not None and seconds <= 0:
         return None
     try:
-        page = run_fetch_sync(_fetch(url, seconds, max_bytes=max_bytes, user_agent=user_agent))
+        page = run_fetch_sync(_fetch(url, seconds, max_bytes=max_bytes, user_agent=trafilatura.user_agent))
     except TimeoutError:
         logger.warning("trafilatura_download_time_limit_reached", url=url)
         return None
@@ -120,7 +140,7 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
         logger.warning("trafilatura_download_failed", url=url, error=str(error))
         return None
     # The shared fetch returns only a 2xx body.
-    fetched = response_cls(page.content, 200, page.url)
+    fetched = trafilatura.response_cls(page.content, 200, page.url)
     fetched.decode_data(decode)
     return fetched
 
@@ -175,7 +195,7 @@ def _time_limit() -> Iterator[None]:
         _call.reset(token)
 
 
-def install_server_fetch_guard() -> None:
+def _install_server_fetch_guard() -> None:
     """Install MindRoom's SSRF-guarded fetchers, per-call deadline hooks, and isolated crawl store on Trafilatura's spider."""
     global _visit_page, _process_url_store
     trafilatura_spider = _load_spider()
@@ -192,7 +212,7 @@ def install_server_fetch_guard() -> None:
     trafilatura_spider.URL_STORE = _CallUrlStore()
 
 
-class TrafilaturaTools(Toolkit):
+class _TrafilaturaTools(Toolkit):
     """Web scraping and text extraction toolkit powered by Trafilatura with SSRF and per-call deadline guards."""
 
     def __init__(
@@ -219,7 +239,7 @@ class TrafilaturaTools(Toolkit):
         all: bool = False,  # noqa: A002
     ) -> None:
         _require_trafilatura()
-        install_server_fetch_guard()
+        _install_server_fetch_guard()
 
         self.output_format = output_format
         self.include_comments = include_comments
@@ -299,7 +319,7 @@ class TrafilaturaTools(Toolkit):
             Extracted content in the specified format, or an error message if extraction fails.
 
         """
-        extract, _, _, reset_caches, _, _, _ = _require_trafilatura()
+        trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_extract_text", url=url)
             html_content = _fetch_url(url)
@@ -307,11 +327,11 @@ class TrafilaturaTools(Toolkit):
                 return f"Error: Could not fetch content from URL: {url}"
 
             params = self._get_extraction_params(output_format=output_format)
-            result = extract(html_content, url=url, **params)
+            result = trafilatura.extract(html_content, url=url, **params)
             if result is None:
                 return f"Error: Could not extract readable content from URL: {url}"
 
-            reset_caches()
+            trafilatura.reset_caches()
         except Exception as exc:
             logger.warning("trafilatura_extract_text_failed", url=url, error=str(exc))
             return f"Error extracting text from {url}: {exc}"
@@ -329,14 +349,14 @@ class TrafilaturaTools(Toolkit):
             Extracted metadata as JSON string or formatted text.
 
         """
-        _, extract_metadata, _, reset_caches, _, _, _ = _require_trafilatura()
+        trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_extract_metadata", url=url)
             html_content = _fetch_url(url)
             if not html_content:
                 return f"Error: Could not fetch content from URL: {url}"
 
-            metadata_doc = extract_metadata(
+            metadata_doc = trafilatura.extract_metadata(
                 html_content,
                 default_url=url,
                 extensive=True,
@@ -346,7 +366,7 @@ class TrafilaturaTools(Toolkit):
                 return f"Error: Could not extract metadata from URL: {url}"
 
             metadata_dict = metadata_doc.as_dict()
-            reset_caches()
+            trafilatura.reset_caches()
             if as_json:
                 return json.dumps(metadata_dict, indent=2, default=str)
             return "\n".join(f"{key}: {value}" for key, value in metadata_dict.items())
@@ -365,11 +385,11 @@ class TrafilaturaTools(Toolkit):
             Plain text extracted from HTML.
 
         """
-        _, _, html2txt, reset_caches, _, _, _ = _require_trafilatura()
+        trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_html_to_text")
-            result = html2txt(html_content, clean=clean)
-            reset_caches()
+            result = trafilatura.html2txt(html_content, clean=clean)
+            trafilatura.reset_caches()
         except Exception as exc:
             logger.warning("trafilatura_html_to_text_failed", error=str(exc))
             return f"Error converting HTML to text: {exc}"
@@ -388,7 +408,7 @@ class TrafilaturaTools(Toolkit):
         """
         if len(urls) > _MAX_BATCH_URLS:
             return f"Error: extract_batch takes at most {_MAX_BATCH_URLS} URLs per call; split the list into several calls."
-        extract, _, _, reset_caches, _, _, _ = _require_trafilatura()
+        trafilatura = _require_trafilatura()
         with _time_limit():
             try:
                 logger.debug("trafilatura_extract_batch", count=len(urls))
@@ -400,7 +420,7 @@ class TrafilaturaTools(Toolkit):
                         params = self._get_extraction_params()
                         html_content = _fetch_url(url)
                         if html_content:
-                            content = extract(html_content, url=url, **params)
+                            content = trafilatura.extract(html_content, url=url, **params)
                             if content:
                                 results[url] = content
                             else:
@@ -411,7 +431,7 @@ class TrafilaturaTools(Toolkit):
                         failed_urls.append(url)
                         results[url] = f"Error: {exc}"
 
-                reset_caches()
+                trafilatura.reset_caches()
                 batch_results = {
                     "successful_extractions": len(results)
                     - len([value for value in results.values() if str(value).startswith("Error:")]),
@@ -439,8 +459,8 @@ class TrafilaturaTools(Toolkit):
         trafilatura_spider = _load_spider()
         if trafilatura_spider is None:
             return "Error: Web crawling functionality not available. Trafilatura spider module could not be imported."
-        extract, _, _, reset_caches, _, _, _ = _require_trafilatura()
-        install_server_fetch_guard()
+        trafilatura = _require_trafilatura()
+        _install_server_fetch_guard()
         with _time_limit():
             try:
                 logger.debug("trafilatura_crawl_website", homepage_url=homepage_url)
@@ -470,14 +490,14 @@ class TrafilaturaTools(Toolkit):
                             params = self._get_extraction_params()
                             html_content = _fetch_url(url)
                             if html_content:
-                                content = extract(html_content, url=url, **params)
+                                content = trafilatura.extract(html_content, url=url, **params)
                                 if content:
                                     extracted_content[url] = content
                         except Exception as exc:
                             extracted_content[url] = f"Error extracting content: {exc}"
                     crawl_results["extracted_content"] = extracted_content
 
-                reset_caches()
+                trafilatura.reset_caches()
                 return json.dumps(crawl_results, indent=2, default=str)
             except Exception as exc:
                 logger.warning("trafilatura_crawl_website_failed", homepage_url=homepage_url, error=str(exc))
@@ -642,8 +662,8 @@ class TrafilaturaTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#trafilatura",
     function_names=("crawl_website", "extract_batch", "extract_metadata_only", "extract_text", "html_to_text"),
 )
-def trafilatura_tools() -> type[TrafilaturaTools]:
+def trafilatura_tools() -> type[Toolkit]:
     """Return Trafilatura tools whose downloads follow the server-fetch policy within one time limit per call."""
     _require_trafilatura()
-    install_server_fetch_guard()
-    return TrafilaturaTools
+    _install_server_fetch_guard()
+    return _TrafilaturaTools

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
@@ -17,18 +15,28 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_RESEARCH_MODEL_EFFORT: dict[str, str] = {
+    "exa-research": "auto",
+    "exa-research-pro": "high",
+}
 
-def _require_exa() -> type[Any]:
-    """Import and return ``exa_py.Exa``, raising a helpful ImportError when absent."""
+
+class _ExaImports(NamedTuple):
+    exa_cls: type[Any]
+    timeout_error_cls: type[Exception]
+
+
+def _require_exa() -> _ExaImports:
+    """Import and return ``exa_py.Exa`` and its timeout error, raising a helpful ImportError when absent."""
     try:
-        from exa_py import Exa
+        from exa_py import Exa, ExaTimeoutError
     except ImportError as exc:
         msg = "`exa_py` not installed. Please install using `pip install exa_py`"
         raise ImportError(msg) from exc
-    return Exa
+    return _ExaImports(exa_cls=Exa, timeout_error_cls=ExaTimeoutError)
 
 
-class ExaTools(Toolkit):
+class _ExaTools(Toolkit):
     """Search the web, fetch page contents, find similar links, and run research via Exa."""
 
     def __init__(
@@ -63,12 +71,13 @@ class ExaTools(Toolkit):
         timeout: int = 30,
         research_model: Literal["exa-research", "exa-research-pro"] = "exa-research",
     ) -> None:
-        exa_cls = _require_exa()
+        exa_imports = _require_exa()
+        self._timeout_error_cls = exa_imports.timeout_error_cls
         self.api_key = api_key
         if not self.api_key:
             logger.error("exa_api_key_missing")
 
-        self.exa = exa_cls(self.api_key)
+        self.exa = exa_imports.exa_cls(self.api_key, timeout=timeout)
         self.show_results = show_results
         self.timeout = timeout
         self.text = text
@@ -105,16 +114,6 @@ class ExaTools(Toolkit):
             tools.append(self.research)
 
         super().__init__(name="exa", tools=tools)
-
-    def _execute_with_timeout(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        """Execute a blocking Exa SDK call bounded by ``self.timeout``."""
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(func, *args, **kwargs)
-            try:
-                return future.result(timeout=self.timeout)
-            except FuturesTimeoutError as exc:
-                msg = f"Operation timed out after {self.timeout} seconds"
-                raise TimeoutError(msg) from exc
 
     def _parse_results(self, exa_results: Any) -> str:  # noqa: ANN401
         parsed = []
@@ -177,11 +176,11 @@ class ExaTools(Toolkit):
             }
             search_kwargs = {key: value for key, value in search_kwargs.items() if value is not None}
 
-            exa_results = self._execute_with_timeout(self.exa.search_and_contents, query, **search_kwargs)
+            exa_results = self.exa.search_and_contents(query, **search_kwargs)
             parsed_results = self._parse_results(exa_results)
             if self.show_results:
                 logger.info("exa_search_results", results=parsed_results)
-        except TimeoutError as exc:
+        except (TimeoutError, self._timeout_error_cls) as exc:
             logger.exception("exa_search_timeout", timeout=self.timeout, error=str(exc))
             return f"Error: {exc}"
         except Exception as exc:
@@ -209,11 +208,11 @@ class ExaTools(Toolkit):
         try:
             if self.show_results:
                 logger.info("exa_get_contents", urls=urls)
-            exa_results = self._execute_with_timeout(self.exa.get_contents, urls=urls, **query_kwargs)
+            exa_results = self.exa.get_contents(urls=urls, **query_kwargs)
             parsed_results = self._parse_results(exa_results)
             if self.show_results:
                 logger.info("exa_get_contents_results", results=parsed_results)
-        except TimeoutError as exc:
+        except (TimeoutError, self._timeout_error_cls) as exc:
             logger.exception("exa_get_contents_timeout", timeout=self.timeout, error=str(exc))
             return f"Error: {exc}"
         except Exception as exc:
@@ -251,11 +250,11 @@ class ExaTools(Toolkit):
         try:
             if self.show_results:
                 logger.info("exa_find_similar", url=url)
-            exa_results = self._execute_with_timeout(self.exa.find_similar_and_contents, url=url, **query_kwargs)
+            exa_results = self.exa.find_similar_and_contents(url=url, **query_kwargs)
             parsed_results = self._parse_results(exa_results)
             if self.show_results:
                 logger.info("exa_find_similar_results", results=parsed_results)
-        except TimeoutError as exc:
+        except (TimeoutError, self._timeout_error_cls) as exc:
             logger.exception("exa_find_similar_timeout", timeout=self.timeout, error=str(exc))
             return f"Error: {exc}"
         except Exception as exc:
@@ -287,7 +286,7 @@ class ExaTools(Toolkit):
             }
             answer_kwargs = {key: value for key, value in answer_kwargs.items() if value is not None}
 
-            answer = self._execute_with_timeout(self.exa.answer, query=query, **answer_kwargs)
+            answer = self.exa.answer(query=query, **answer_kwargs)
             result = {
                 "answer": answer.answer,
                 "citations": [
@@ -305,7 +304,7 @@ class ExaTools(Toolkit):
             serialized = json.dumps(result, indent=4)
             if self.show_results:
                 logger.info("exa_answer_result", result=serialized)
-        except TimeoutError as exc:
+        except (TimeoutError, self._timeout_error_cls) as exc:
             logger.exception("exa_answer_timeout", timeout=self.timeout, error=str(exc))
             return f"Error: {exc}"
         except Exception as exc:
@@ -313,6 +312,37 @@ class ExaTools(Toolkit):
             return f"Error: {exc}"
         else:
             return serialized
+
+    @staticmethod
+    def _serialize_research_run(terminal_run: Any) -> dict[str, Any]:  # noqa: ANN401
+        if terminal_run.status == "failed":
+            error_detail = (
+                terminal_run.error.message
+                if terminal_run.error is not None and terminal_run.error.message
+                else f"Research run {terminal_run.id} failed"
+            )
+            return {"error": error_detail}
+        if terminal_run.status == "cancelled":
+            return {"error": f"Research run {terminal_run.id} was cancelled"}
+
+        output = terminal_run.output
+        data = (
+            output.structured
+            if output is not None and output.structured is not None
+            else (output.text if output is not None else None)
+        )
+        citations: dict[str, list[dict[str, Any]]] = {}
+        if output is not None and output.grounding:
+            for entry in output.grounding:
+                citations.setdefault(entry.field, []).extend(
+                    {"url": citation.url, "title": citation.title} for citation in entry.citations
+                )
+        return {
+            "id": terminal_run.id,
+            "status": terminal_run.status,
+            "data": data,
+            "citations": citations,
+        }
 
     def research(self, instructions: str, output_schema: dict[str, Any] | None = None) -> str:
         """Perform deep research on a topic.
@@ -326,30 +356,24 @@ class ExaTools(Toolkit):
 
         """
         try:
-            logger.debug("exa_research_create_task", instructions=instructions, has_schema=output_schema is not None)
-            task_kwargs: dict[str, Any] = {
-                "instructions": instructions,
-                "model": self.research_model,
+            logger.debug("exa_research_create_run", instructions=instructions, has_schema=output_schema is not None)
+            create_kwargs: dict[str, Any] = {
+                "query": instructions,
+                "effort": _RESEARCH_MODEL_EFFORT.get(self.research_model, self.research_model),
             }
             if output_schema is not None:
-                task_kwargs["output_schema"] = output_schema
-            else:
-                task_kwargs["output_infer_schema"] = True
+                create_kwargs["output_schema"] = output_schema
 
-            task_result = self._execute_with_timeout(self.exa.research.create_task, **task_kwargs)
-            task_id = task_result.id
+            run = self.exa.agent.runs.create(**create_kwargs)
+            run_id = run.id
             if self.show_results:
-                logger.info("exa_research_task_created", task_id=task_id)
+                logger.info("exa_research_run_created", run_id=run_id)
 
-            task = self.exa.research.poll_task(task_id)
-            result: dict[str, Any] = {"data": task.data, "citations": {}}
-            for field_name, sources in task.citations.items():
-                result["citations"][field_name] = [
-                    {"url": source.url, "title": source.title, "id": source.id} for source in sources
-                ]
-            if self.show_results:
-                logger.info("exa_research_completed", task_id=task_id)
-        except TimeoutError:
+            terminal_run = self.exa.agent.runs.poll_until_finished(run_id)
+            result = self._serialize_research_run(terminal_run)
+            if self.show_results and "error" not in result:
+                logger.info("exa_research_completed", run_id=run_id)
+        except (TimeoutError, self._timeout_error_cls):
             error_msg = "Research task timed out"
             logger.exception("exa_research_timeout")
             return json.dumps({"error": error_msg}, indent=4)
@@ -581,7 +605,7 @@ class ExaTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-search/#exa",
     function_names=("exa_answer", "find_similar", "get_contents", "research", "search_exa"),
 )
-def exa_tools() -> type[ExaTools]:
+def exa_tools() -> type[Toolkit]:
     """Return Exa tools for AI-powered web search and research."""
     _require_exa()
-    return ExaTools
+    return _ExaTools

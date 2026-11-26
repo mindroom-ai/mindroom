@@ -33,7 +33,7 @@ def _serialize(value: Any) -> str:  # noqa: ANN401
     return json.dumps(payload, default=str)
 
 
-class FirecrawlTools(Toolkit):
+class _FirecrawlTools(Toolkit):
     """Scrape, crawl, map, and search websites using Firecrawl."""
 
     def __init__(
@@ -235,7 +235,7 @@ class FirecrawlTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#firecrawl",
     function_names=("crawl_website", "map_website", "scrape_website", "search_web"),
 )
-def firecrawl_tools() -> type[FirecrawlTools]:
+def firecrawl_tools() -> type[Toolkit]:
     """Return Firecrawl tools for web scraping and crawling."""
     _require_firecrawl()
-    return FirecrawlTools
+    return _FirecrawlTools

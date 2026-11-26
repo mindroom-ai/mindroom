@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class JinaReaderToolsConfig(BaseModel):
-    """Validated configuration for JinaReaderTools."""
+class _JinaReaderToolsConfig(BaseModel):
+    """Validated configuration for _JinaReaderTools."""
 
     api_key: str | None = Field(None, description="API key for Jina Reader")
     base_url: HttpUrl = Field(HttpUrl("https://r.jina.ai/"), description="Base URL for Jina Reader API")
@@ -29,7 +29,7 @@ class JinaReaderToolsConfig(BaseModel):
     search_query_content: bool | None = Field(False, description="Toggle full URL content in query search result")
 
 
-class JinaReaderTools(Toolkit):
+class _JinaReaderTools(Toolkit):
     """Read web pages and run web searches through the Jina AI Reader API."""
 
     def __init__(
@@ -45,7 +45,7 @@ class JinaReaderTools(Toolkit):
         all: bool = False,  # noqa: A002
     ) -> None:
         self.api_key = api_key
-        self.config = JinaReaderToolsConfig(
+        self.config = _JinaReaderToolsConfig(
             api_key=self.api_key,
             base_url=HttpUrl(base_url),
             search_url=HttpUrl(search_url),
@@ -66,7 +66,11 @@ class JinaReaderTools(Toolkit):
         """Reads a URL and returns the truncated content using Jina Reader API."""
         full_url = f"{self.config.base_url}{url}"
         try:
-            response = httpx.get(full_url, headers=self._get_headers(), timeout=self.config.timeout)
+            headers = self._get_headers()
+            if self.config.timeout is None:
+                response = httpx.get(full_url, headers=headers)
+            else:
+                response = httpx.get(full_url, headers=headers, timeout=self.config.timeout)
             response.raise_for_status()
             content = response.json()
         except Exception as exc:
@@ -84,7 +88,10 @@ class JinaReaderTools(Toolkit):
             headers["X-Respond-With"] = "no-content"
 
         try:
-            response = httpx.post(full_url, headers=headers, json={"q": query}, timeout=self.config.timeout)
+            if self.config.timeout is None:
+                response = httpx.post(full_url, headers=headers, json={"q": query})
+            else:
+                response = httpx.post(full_url, headers=headers, json={"q": query}, timeout=self.config.timeout)
             response.raise_for_status()
             content = response.json()
         except Exception as exc:
@@ -193,6 +200,6 @@ class JinaReaderTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#jina",
     function_names=("read_url", "search_query"),
 )
-def jina_tools() -> type[JinaReaderTools]:
+def jina_tools() -> type[Toolkit]:
     """Return Jina Reader tools for web content reading and search."""
-    return JinaReaderTools
+    return _JinaReaderTools

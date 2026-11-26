@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from email.message import Message
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
@@ -56,24 +57,30 @@ def _decode_page(body: bytes, content_type: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-def _guarded_article(url: str) -> Any:  # noqa: ANN401 - optional newspaper.Article instance
-    """Download and parse one article through the shared SSRF guard, skipping image downloads."""
-    newspaper = _require_newspaper()
+@cache
+def _text_only_article_cls(article_cls: type[Any]) -> type[Any]:
+    """Return a cached Article subclass whose parse skips image downloads."""
 
-    class _TextOnlyArticle(newspaper.Article):
+    class _TextOnlyArticle(article_cls):
         """Article whose parse skips image extraction, which would otherwise fetch arbitrary image URLs."""
 
         def fetch_images(self) -> None:
             """Leave image fields empty; the toolkit returns only text fields."""
 
+    return _TextOnlyArticle
+
+
+def _guarded_article(url: str) -> Any:  # noqa: ANN401 - optional newspaper.Article instance
+    """Download and parse one article through the shared SSRF guard, skipping image downloads."""
+    newspaper = _require_newspaper()
     page = fetch_public_url_sync(url, max_bytes=_MAX_PAGE_BYTES, user_agent=f"newspaper/{newspaper.__version__}")
-    article = _TextOnlyArticle(url)
+    article = _text_only_article_cls(newspaper.Article)(url)
     article.download(input_html=_decode_page(page.content, page.content_type))
     article.parse()
     return article
 
 
-class Newspaper4kTools(Toolkit):
+class _Newspaper4kTools(Toolkit):
     """Extract article text and metadata from public HTTP(S) URLs using Newspaper4k."""
 
     def __init__(
@@ -183,7 +190,7 @@ class Newspaper4kTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#newspaper",
     function_names=("get_article_data", "read_article"),
 )
-def newspaper4k_tools() -> type[Newspaper4kTools]:
+def newspaper4k_tools() -> type[Toolkit]:
     """Return Newspaper4k tools whose downloads follow the server-fetch policy."""
     _require_newspaper()
-    return Newspaper4kTools
+    return _Newspaper4kTools

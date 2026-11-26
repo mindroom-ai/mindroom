@@ -264,7 +264,7 @@ def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
         loop.close()
 
 
-class AgentQLTools(Toolkit):
+class _AgentQLTools(Toolkit):
     """AgentQL web scraping toolkit with scoped credentials, browser destination relay, and lossless JSON results."""
 
     def __init__(
@@ -423,7 +423,7 @@ class AgentQLTools(Toolkit):
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("custom_scrape_website", "scrape_website"),
 )
-def agentql_tools() -> type[AgentQLTools]:
+def agentql_tools() -> type[Toolkit]:
     """Return AgentQL tools for AI-powered web scraping."""
     _require_agentql()
-    return AgentQLTools
+    return _AgentQLTools
