@@ -10,6 +10,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tools.native_helpers import UNSET, UnsetType, json_dumps, require_non_empty, resolve_toggle
 
 _ReadAction = Literal["search", "get_all"]
@@ -138,6 +139,9 @@ class _Mem0Tools(Toolkit):
         call = current_call()
         if call is not None and call.runtime is not None and call.runtime.requester_id:
             return call.runtime.requester_id
+        identity = current_execution_identity()
+        if identity is not None and identity.requester_id:
+            return identity.requester_id
         msg = f"Error in {method_name}: A user_id must be provided or resolvable from the active request."
         raise ValueError(msg)
 

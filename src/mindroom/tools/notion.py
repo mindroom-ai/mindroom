@@ -14,6 +14,7 @@ from mindroom.tools.native_helpers import (
     UnsetType,
     error_json,
     json_dumps,
+    require_non_blank_text,
     require_non_empty,
     resolve_toggle,
     safe_path_segment,
@@ -124,7 +125,7 @@ class _NotionTools(Toolkit):
                     return error_json("Creating Notion pages is disabled.", success=False)
                 clean_title = require_non_empty(title, "title")
                 clean_tag = require_non_empty(tag, "tag")
-                body_text = require_non_empty(content, "content")
+                body_text = require_non_blank_text(content, "content")
                 new_page = cast(
                     "dict[str, Any]",
                     self.client.pages.create(
@@ -155,7 +156,7 @@ class _NotionTools(Toolkit):
             if not self._allow_update:
                 return error_json("Updating Notion pages is disabled.", success=False)
             safe_page = safe_path_segment(require_non_empty(page_id, "page_id"), "page_id")
-            body_text = require_non_empty(content, "content")
+            body_text = require_non_blank_text(content, "content")
             self.client.blocks.children.append(
                 block_id=safe_page,
                 children=[

@@ -9,6 +9,8 @@ import pytest
 from mem0.exceptions import LLMError
 from mem0.memory.main import _reject_top_level_entity_params
 
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.tools.mem0 import mem0_tools
 
 
@@ -146,3 +148,26 @@ def test_mem0_org_and_project_mismatch_raises_without_overwriting() -> None:
         found = json.loads(toolkit.mem0_read(action="get_all"))
         assert found == [{"id": "m1", "memory": "Likes green tea"}]
         assert toolkit.client is matching
+
+
+def test_mem0_detached_execution_identity_fallback() -> None:
+    """Without configured user_id or current_call, mem0 falls back to current_execution_identity().requester_id."""
+    client = _Mem0Client()
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="assistant",
+        requester_id="user-mcp-42",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="sess-mcp",
+    )
+    with (
+        patch("mem0.memory.main.Memory", return_value=client),
+        detached_tool_scope(identity),
+    ):
+        toolkit = mem0_tools()()
+        found = json.loads(toolkit.mem0_read(action="search", query="tea"))
+
+    assert found == [{"id": "m1", "memory": "Likes green tea"}]
+    assert client.filters == {"search tea": {"user_id": "user-mcp-42"}}

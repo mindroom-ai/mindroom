@@ -352,7 +352,14 @@ class SpotifyTools(Toolkit):
             "device": result.get("device", {}).get("name"),
         }
 
-    def _get_playlist(self, playlist_id: str | None, *, include_tracks: bool) -> dict[str, Any]:
+    def _get_playlist(
+        self,
+        playlist_id: str | None,
+        *,
+        include_tracks: bool,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         safe_id = safe_path_segment(require_non_empty(playlist_id, "playlist_id"), "playlist_id")
         fields = "id,name,description,public,owner(display_name),external_urls"
         result = self._make_request(f"playlists/{safe_id}", params={"fields": fields})
@@ -367,7 +374,12 @@ class SpotifyTools(Toolkit):
             "url": result.get("external_urls", {}).get("spotify"),
         }
         if include_tracks:
-            items_res = self._make_request(f"playlists/{safe_id}/items")
+            item_limit = max(1, min(limit, 100))
+            item_offset = max(0, offset)
+            items_res = self._make_request(
+                f"playlists/{safe_id}/items",
+                params={"limit": item_limit, "offset": item_offset},
+            )
             if "error" in items_res:
                 err = items_res["error"]
                 if isinstance(err, dict) and err.get("status") == 403:
@@ -383,9 +395,9 @@ class SpotifyTools(Toolkit):
             tracks = [parsed for entry in raw_items if (parsed := _extract_playlist_item(entry)) is not None]
             info["tracks"] = tracks
             total_tracks = items_res.get("total")
-            info["total_tracks"] = total_tracks if isinstance(total_tracks, int) else len(tracks)
+            info["total_tracks"] = total_tracks if isinstance(total_tracks, int) else item_offset + len(tracks)
             info["tracks_truncated"] = bool(items_res.get("next")) or (
-                isinstance(total_tracks, int) and total_tracks > len(raw_items)
+                isinstance(total_tracks, int) and (item_offset + len(raw_items)) < total_tracks
             )
         return info
 
@@ -394,6 +406,7 @@ class SpotifyTools(Toolkit):
         action: _LibraryAction,
         playlist_id: str | None = None,
         limit: int = 20,
+        offset: int = 0,
         time_range: _TimeRange = "medium_term",
         include_tracks: bool = True,
     ) -> str:
@@ -403,7 +416,7 @@ class SpotifyTools(Toolkit):
         - `current_user`: Authenticated user profile.
         - `currently_playing`: Current track, device, and playback progress.
         - `user_playlists`: Current user's playlists (`limit`).
-        - `playlist`: Details and optional track list for `playlist_id` (`include_tracks`).
+        - `playlist`: Details and optional track list for `playlist_id` (`include_tracks`, `limit`, `offset`).
         - `my_top_tracks`: User's top tracks (`time_range`, `limit`).
         - `my_top_artists`: User's top artists (`time_range`, `limit`).
         """
@@ -421,7 +434,7 @@ class SpotifyTools(Toolkit):
                     else [_simplify_playlist(p) for p in res.get("items", []) if isinstance(p, dict)]
                 )
             elif action == "playlist":
-                data = self._get_playlist(playlist_id, include_tracks=include_tracks)
+                data = self._get_playlist(playlist_id, include_tracks=include_tracks, limit=limit, offset=offset)
             elif action == "my_top_tracks":
                 res = self._make_request("me/top/tracks", params={"time_range": time_range, "limit": capped})
                 data = (

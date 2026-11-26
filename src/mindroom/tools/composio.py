@@ -15,11 +15,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_MAX_ACTION_NAME_LENGTH = 64
+
+
+def _published_action_name(action_name: str) -> str:
+    return action_name.lower()[:_MAX_ACTION_NAME_LENGTH]
+
+
 def _wrap_composio_action(
     toolset: Any,  # noqa: ANN401
     action_enum: Any,  # noqa: ANN401
     schema: dict[str, Any],
     *,
+    published_name: str,
     entity_id: str,
 ) -> Callable[..., str]:
     action_name = str(schema["name"])
@@ -28,7 +36,7 @@ def _wrap_composio_action(
     if not isinstance(parameters, dict):
         parameters = {"type": "object", "properties": {}}
 
-    @passthrough_tool(name=action_name.lower(), description=description, parameters=parameters)
+    @passthrough_tool(name=published_name, description=description, parameters=parameters)
     def _run_action(**kwargs: Any) -> str:  # noqa: ANN401
         result = toolset.execute_action(
             action=action_enum(value=action_name),
@@ -205,15 +213,29 @@ def composio_tools() -> type[Toolkit]:
                 check_connected_accounts=True,
                 _populate_requested=True,
             )
-            wrapped = [
-                _wrap_composio_action(
-                    toolset,
-                    Action,
-                    schema.model_dump(exclude_none=True),
-                    entity_id=toolset.entity_id,
+            seen_names: dict[str, str] = {}
+            wrapped: list[Callable[..., str]] = []
+            for schema in schemas:
+                dumped = schema.model_dump(exclude_none=True)
+                action_name = str(dumped["name"])
+                published_name = _published_action_name(action_name)
+                previous = seen_names.get(published_name)
+                if previous is not None and previous != action_name:
+                    msg = (
+                        f"Composio actions {previous!r} and {action_name!r} collide after "
+                        f"truncating to the {_MAX_ACTION_NAME_LENGTH}-character tool name {published_name!r}."
+                    )
+                    raise ValueError(msg)
+                seen_names[published_name] = action_name
+                wrapped.append(
+                    _wrap_composio_action(
+                        toolset,
+                        Action,
+                        dumped,
+                        published_name=published_name,
+                        entity_id=toolset.entity_id,
+                    ),
                 )
-                for schema in schemas
-            ]
             super().__init__(name="composio", tools=wrapped)
 
     return MindRoomComposioTools

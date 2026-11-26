@@ -121,9 +121,18 @@ def test_notion_toggles_and_crud(monkeypatch: pytest.MonkeyPatch) -> None:
     toolkit.client = MagicMock()
     toolkit.client.pages.create.return_value = {"id": "p1", "url": "https://notion.so/p1"}
 
-    created = json.loads(toolkit.notion_write(action="create_page", title="Note", tag="tech", content="Hello"))
+    indented_note = "    indented block\n        sub-item\n"
+    created = json.loads(toolkit.notion_write(action="create_page", title="Note", tag="tech", content=indented_note))
     assert created["success"] is True
     assert created["page_id"] == "p1"
+    created_children = toolkit.client.pages.create.call_args.kwargs["children"]
+    assert created_children[0]["paragraph"]["rich_text"][0]["text"]["content"] == indented_note
+
+    updatable = notion_tools()(api_key="ntn_key", database_id="db-123")
+    updatable.client = MagicMock()
+    updatable.notion_write(action="update_page", page_id="p1", content=indented_note)
+    appended_children = updatable.client.blocks.children.append.call_args.kwargs["children"]
+    assert appended_children[0]["paragraph"]["rich_text"][0]["text"]["content"] == indented_note
 
     denied = json.loads(toolkit.notion_write(action="update_page", page_id="p1", content="More"))
     assert denied["success"] is False
@@ -278,5 +287,17 @@ def test_trello_key_only_public_read_and_gated_write() -> None:
     denied = json.loads(
         toolkit.trello_write(action="create_card", board_id="pub-board", list_name="Public Todo", name="Nope"),
     )
-    assert "api_key, api_secret, and token" in denied["error"]
+    assert "api_key plus api_secret or token" in denied["error"]
     mock_client.add_board.assert_not_called()
+
+    two_field = trello_tools()(api_key="key-only-plus-secret", api_secret="secret-only")  # noqa: S106
+    assert two_field.client is not None
+    assert two_field.client.api_key == "key-only-plus-secret"
+    assert two_field.client.api_secret == "secret-only"  # noqa: S105
+    assert two_field.client.resource_owner_key is None
+
+    two_field_mock = MagicMock()
+    two_field_mock.add_board.return_value = SimpleNamespace(id="b2", name="Ops", url="https://trello.com/b/2")
+    two_field.client = two_field_mock
+    created_board = json.loads(two_field.trello_write(action="create_board", name="Ops"))
+    assert created_board["id"] == "b2"

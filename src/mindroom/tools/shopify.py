@@ -48,6 +48,7 @@ _QUERY_PRODUCTS = (
 _ORDER_META = "id name createdAt displayFinancialStatus displayFulfillmentStatus"
 _TOTAL_MONEY = "totalPriceSet { shopMoney { amount currencyCode } }"
 _QTY_ITEMS = "lineItems(first: 100) { edges { node { quantity } } }"
+_CUSTOMER_SUMMARY = "customer { id firstName lastName numberOfOrders amountSpent { amount currencyCode } }"
 _CUSTOMER_DETAIL = "customer { id email firstName lastName numberOfOrders amountSpent { amount currencyCode } }"
 _ORDER_SELECTIONS: dict[str, str] = {
     "average_order_value": f"createdAt {_TOTAL_MONEY}",
@@ -70,7 +71,7 @@ _ORDER_SELECTIONS: dict[str, str] = {
     ),
     "repeat_customers": f"totalPriceSet {{ shopMoney {{ amount }} }} {_CUSTOMER_DETAIL}",
     "customer_orders": (
-        f"{_ORDER_META} {_TOTAL_MONEY} {_CUSTOMER_DETAIL} lineItems(first: 100) {{ edges {{ node {{ title quantity }} }} }}"
+        f"{_ORDER_META} {_TOTAL_MONEY} {_CUSTOMER_SUMMARY} lineItems(first: 100) {{ edges {{ node {{ title quantity }} }} }}"
     ),
     "orders": (
         f"{_ORDER_META} {_TOTAL_MONEY} subtotalPriceSet {{ shopMoney {{ amount }} }}"

@@ -118,6 +118,7 @@ def test_todoist_tasks_crud_and_validation(monkeypatch: pytest.MonkeyPatch) -> N
         toolkit.api = TodoistAPI("fake-todoist-token", client=client)
         tasks = json.loads(toolkit.todoist_read(action="active_tasks"))
         assert [t["id"] for t in tasks] == ["t1"]
+        assert tasks[0]["url"].startswith("https://app.todoist.com/app/task/")
 
         created = json.loads(toolkit.todoist_write(action="create_task", content="Ship Wave 8", due_date="2026-12-01"))
         assert created["id"] == "t2"

@@ -11,7 +11,13 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import UNSET, UnsetType, require_non_empty, resolve_toggle
+from mindroom.tools.native_helpers import (
+    UNSET,
+    UnsetType,
+    require_non_blank_text,
+    require_non_empty,
+    resolve_toggle,
+)
 
 _ReadAction = Literal["context", "messages", "search"]
 _SearchScope = Literal["edges", "nodes"]
@@ -101,7 +107,7 @@ class _ZepTools(Toolkit):
 
             kwargs: dict[str, Any] = {
                 "thread_id": self.session_id,
-                "messages": [ZepMessage(role=role, content=require_non_empty(content, "content"))],
+                "messages": [ZepMessage(role=role, content=require_non_blank_text(content, "content"))],
             }
             if self.ignore_assistant_messages:
                 kwargs["ignore_roles"] = ["assistant"]

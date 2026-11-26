@@ -9905,7 +9905,7 @@ expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.mem0"
-depends_on = ["mindroom.failure_text", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+depends_on = ["mindroom.failure_text", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tools.confluence"

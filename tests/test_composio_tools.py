@@ -165,3 +165,30 @@ def test_composio_pins_default_base_url_against_ambient_env(monkeypatch: pytest.
         "https://backend.composio.dev/api",
         "https://custom.composio.example/api",
     ]
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_truncates_long_action_names_and_rejects_collisions() -> None:
+    """Action names >64 chars publish <=64-char tool names, dispatch full action IDs, and reject collisions."""
+    long_action = "GITHUB_CREATE_REPOSITORY_DISPATCH_EVENT_FOR_LONG_WORKFLOW_AUTOMATION_V1"
+    assert len(long_action) > 64
+
+    tool = composio_tools()(api_key="test-key", entity_id="test-user", actions=[long_action], lock=False)
+    (published_name,) = tuple(tool.functions)
+    assert len(published_name) <= 64
+    assert published_name == long_action.lower()[:64]
+
+    function = toolkit_offers(tool, published_name)
+    assert json.loads(function.entrypoint(owner="example")) == {
+        "action": long_action,
+        "params": {"owner": "example"},
+        "entity_id": "test-user",
+    }
+
+    colliding_action = "GITHUB_CREATE_REPOSITORY_DISPATCH_EVENT_FOR_LONG_WORKFLOW_AUTOMATION_V2"
+    with pytest.raises(ValueError, match="collide"):
+        composio_tools()(
+            api_key="test-key",
+            actions=[long_action, colliding_action],
+            lock=False,
+        )

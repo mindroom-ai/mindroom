@@ -437,7 +437,8 @@
             }
           },
           "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,

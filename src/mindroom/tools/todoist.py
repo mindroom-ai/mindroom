@@ -16,7 +16,10 @@ _WriteAction = Literal["create_task", "update_task", "close_task", "delete_task"
 
 def _serialize_item(item: Any) -> dict[str, Any]:  # noqa: ANN401
     if hasattr(item, "to_dict") and callable(item.to_dict):
-        return item.to_dict()
+        data = dict(item.to_dict())
+        if (url := getattr(item, "url", None)) is not None:
+            data.setdefault("url", url)
+        return data
     result: dict[str, Any] = {
         "id": item.id,
         "content": getattr(item, "content", None),

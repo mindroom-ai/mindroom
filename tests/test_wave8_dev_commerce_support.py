@@ -335,6 +335,8 @@ def test_shopify_analytics_uses_minimal_report_specific_queries(monkeypatch: pyt
         query = str(json["query"])
         queries_by_call.append(query)
         order_node = {
+            "id": "gid://shopify/Order/1",
+            "name": "#1001",
             "createdAt": "2026-11-01T10:00:00Z",
             "displayFinancialStatus": "PAID",
             "displayFulfillmentStatus": "FULFILLED",
@@ -354,6 +356,7 @@ def test_shopify_analytics_uses_minimal_report_specific_queries(monkeypatch: pyt
                 "edges": [
                     {
                         "node": {
+                            "title": "Widget",
                             "quantity": 2,
                             "variant": {
                                 "id": "v1",
@@ -392,7 +395,13 @@ def test_shopify_analytics_uses_minimal_report_specific_queries(monkeypatch: pyt
     toolkit.shopify_analytics(action="repeat_customers", min_occurrences=1)
     repeat_query = queries_by_call[-1]
     assert "customer" in repeat_query
+    assert "email" in repeat_query
     assert "lineItems" not in repeat_query
+
+    toolkit.shopify_analytics(action="customer_orders", customer_email="ada@example.com")
+    customer_orders_query = queries_by_call[-1]
+    assert "customer" in customer_orders_query
+    assert "email" not in customer_orders_query
 
 
 def test_shopify_repeat_customers_reports_total_count_before_limit(monkeypatch: pytest.MonkeyPatch) -> None:

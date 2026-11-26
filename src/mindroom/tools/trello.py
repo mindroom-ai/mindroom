@@ -28,32 +28,27 @@ class _TrelloTools(Toolkit):
         self.token = token.strip() if isinstance(token, str) and token.strip() else None
         self.client: Any = None
         if self.api_key:
-            from trello import TrelloClient
-
-            if self._has_full_auth():
-                self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
-            else:
-                self.client = TrelloClient(api_key=self.api_key)
+            self.client = self._build_client()
         super().__init__(name="trello", tools=[self.trello_read, self.trello_write])
 
-    def _has_full_auth(self) -> bool:
-        return bool(self.api_key and self.api_secret and self.token)
+    def _build_client(self) -> Any:  # noqa: ANN401
+        from trello import TrelloClient
+
+        return TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
+
+    def _has_write_auth(self) -> bool:
+        return bool(self.api_key and (self.api_secret or self.token))
 
     def _require_client(self, *, require_auth: bool = False) -> Any:  # noqa: ANN401
-        if require_auth and not self._has_full_auth():
-            msg = "Trello write operations require api_key, api_secret, and token."
+        if require_auth and not self._has_write_auth():
+            msg = "Trello write operations require api_key plus api_secret or token."
             raise ValueError(msg)
         if self.client is not None:
             return self.client
         if not self.api_key:
             msg = "Trello api_key is required."
             raise ValueError(msg)
-        from trello import TrelloClient
-
-        if self._has_full_auth():
-            self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
-        else:
-            self.client = TrelloClient(api_key=self.api_key)
+        self.client = self._build_client()
         return self.client
 
     def trello_read(

@@ -19,6 +19,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.brandfetch import brandfetch_tools
 from mindroom.tools.google_maps import google_maps_tools
 from mindroom.tools.reddit import reddit_tools
+from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +46,10 @@ def test_batch3_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyP
     assert "required" in json.loads(reddit_tools()().reddit_read(action="trending_subreddits"))["error"]
     with pytest.raises(ValueError, match="Google Maps API key"):
         google_maps_tools()(key=None)
-    assert "API key is required" in json.loads(brandfetch_tools()().brandfetch_lookup("nike.com"))["error"]
+    assert (
+        "API key is required"
+        in json.loads(brandfetch_tools()().brandfetch_lookup("nike.com", action="by_identifier"))["error"]
+    )
 
 
 def test_spotify_search_playlist_playback_and_validation(
@@ -234,7 +238,7 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
         title="Hello",
         author="alice",
         subreddit=SimpleNamespace(display_name="python"),
-        reply=lambda body: fake_reply,  # noqa: ARG005
+        reply=MagicMock(return_value=fake_reply),
     )
     fake_sub = SimpleNamespace(
         display_name="python",
@@ -289,14 +293,16 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
         content="Body",
         flair="Unknown",
     )
+    indented_reply = "    quoted reply\n        nested\n"
     replied = json.loads(
         toolkit.reddit_write(
             action="reply_to_post",
             post_id="https://www.reddit.com/r/python/comments/p1/hello/",
-            content="Nice",
+            content=indented_reply,
         ),
     )
     assert replied["reply"]["id"] == "r1"
+    assert fake_sub_post.reply.call_args.kwargs["body"] == indented_reply
     title_only = json.loads(
         toolkit.reddit_write(action="create_post", subreddit="python", title="Just a title", content="", is_self=True),
     )
@@ -393,12 +399,13 @@ def test_brandfetch_toggles_validation_and_lookup(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
 
     default_tool = brandfetch_tools()(api_key="bf_key", client_id="bf_cid")
-    assert json.loads(default_tool.brandfetch_lookup("nike.com"))["name"] == "Nike"
+    assert "action" in toolkit_offers(default_tool, "brandfetch_lookup").parameters["required"]
+    assert json.loads(default_tool.brandfetch_lookup("nike.com", action="by_identifier"))["name"] == "Nike"
     assert "disabled" in json.loads(default_tool.brandfetch_lookup("Nike", action="by_brand"))["error"]
 
     all_tool = brandfetch_tools()(api_key="bf_key", client_id="bf_cid", all=True)
     assert json.loads(all_tool.brandfetch_lookup("Nike", action="by_brand"))[0]["domain"] == "nike.com"
-    assert "Invalid query" in json.loads(all_tool.brandfetch_lookup("../secret"))["error"]
+    assert "Invalid query" in json.loads(all_tool.brandfetch_lookup("../secret", action="by_identifier"))["error"]
 
 
 def test_reddit_app_only_isolation_ignores_ambient_praw_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,11 +541,32 @@ def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
                 },
             )
         if request.url.path == "/v1/playlists/big1/items":
+            req_offset = int(request.url.params.get("offset", "0"))
+            req_limit = int(request.url.params.get("limit", "20"))
+            if req_offset == 20:
+                assert req_limit == 20
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 21,
+                        "next": None,
+                        "items": [
+                            {
+                                "item": {
+                                    "id": "t21",
+                                    "name": "Track Twenty-One",
+                                    "artists": [{"name": "Artist"}],
+                                    "uri": "spotify:track:t21",
+                                },
+                            },
+                        ],
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
-                    "total": 150,
-                    "next": "https://api.spotify.com/v1/playlists/big1/items?offset=100&limit=100",
+                    "total": 21,
+                    "next": "https://api.spotify.com/v1/playlists/big1/items?offset=20&limit=20",
                     "items": [
                         {
                             "item": {
@@ -564,7 +592,14 @@ def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
     assert public_pl["tracks_unavailable"] is True
     assert "permissions" in public_pl["tracks_note"] or "owned" in public_pl["tracks_note"]
 
-    big_pl = json.loads(toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True))
+    big_pl = json.loads(toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True, limit=20))
     assert [t["id"] for t in big_pl["tracks"]] == ["t1"]
-    assert big_pl["total_tracks"] == 150
+    assert big_pl["total_tracks"] == 21
     assert big_pl["tracks_truncated"] is True
+
+    page2 = json.loads(
+        toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True, limit=20, offset=20),
+    )
+    assert [t["id"] for t in page2["tracks"]] == ["t21"]
+    assert page2["total_tracks"] == 21
+    assert page2["tracks_truncated"] is False

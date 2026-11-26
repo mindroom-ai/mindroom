@@ -1427,7 +1427,8 @@
             }
           },
           "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -24928,7 +24929,7 @@
       },
       {
         "name": "spotify_library",
-        "description": "Read the user's Spotify profile, playback state, playlists, and top items.\nActions:\n- `current_user`: Authenticated user profile.\n- `currently_playing`: Current track, device, and playback progress.\n- `user_playlists`: Current user's playlists (`limit`).\n- `playlist`: Details and optional track list for `playlist_id` (`include_tracks`).\n- `my_top_tracks`: User's top tracks (`time_range`, `limit`).\n- `my_top_artists`: User's top artists (`time_range`, `limit`).",
+        "description": "Read the user's Spotify profile, playback state, playlists, and top items.\nActions:\n- `current_user`: Authenticated user profile.\n- `currently_playing`: Current track, device, and playback progress.\n- `user_playlists`: Current user's playlists (`limit`).\n- `playlist`: Details and optional track list for `playlist_id` (`include_tracks`, `limit`, `offset`).\n- `my_top_tracks`: User's top tracks (`time_range`, `limit`).\n- `my_top_artists`: User's top artists (`time_range`, `limit`).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -24954,6 +24955,9 @@
               ]
             },
             "limit": {
+              "type": "integer"
+            },
+            "offset": {
               "type": "integer"
             },
             "time_range": {

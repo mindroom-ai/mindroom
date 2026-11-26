@@ -43,6 +43,14 @@ def require_non_empty(value: str | None, label: str) -> str:
     return value.strip()
 
 
+def require_non_blank_text(value: str | None, label: str) -> str:
+    """Return ``value`` verbatim after verifying it is a non-blank string."""
+    if not isinstance(value, str) or not value.strip():
+        msg = f"{label} is required."
+        raise ValueError(msg)
+    return value
+
+
 def safe_path_segment(value: object, field_name: str) -> str:
     """Validate and URL-encode a single REST path segment, rejecting traversal and delimiters."""
     if (

@@ -130,7 +130,8 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
         # Lazy init: Zep client is not constructed during __init__.
         zep_cls.assert_not_called()
 
-        added = toolkit.zep_add_message("user", "I love green tea")
+        indented_msg = "    I love green tea\n        especially sencha\n"
+        added = toolkit.zep_add_message("user", indented_msg)
         assert "added successfully" in added
         assert zep_cls.call_count == 1
         assert zep_cls.call_args.kwargs["api_key"] == "scoped-zep-key"
@@ -138,6 +139,7 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
         call_kwargs = fake_zep.thread.add_messages.call_args.kwargs
         assert call_kwargs["thread_id"] == "sess-1"
         assert call_kwargs["ignore_roles"] == ["assistant"]
+        assert call_kwargs["messages"][0].content == indented_msg
 
         assert toolkit.zep_read(action="context") == "User likes tea."
         fake_zep.thread.get_user_context.assert_called_once_with(thread_id="sess-1")

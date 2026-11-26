@@ -75,7 +75,7 @@ class _BrandfetchTools(Toolkit):
     def brandfetch_lookup(
         self,
         query: str,
-        action: _LookupAction = "by_identifier",
+        action: _LookupAction,
     ) -> str:
         """Retrieve Brandfetch brand assets or search brands by name.
 

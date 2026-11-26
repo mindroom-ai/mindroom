@@ -1671,7 +1671,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
-        function_name="list_spaces",
+        function_name="clickup_read",
         tools=builtin_tool_registry(),
     )
 
@@ -1700,7 +1700,7 @@ def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
-        function_name="list_spaces",
+        function_name="clickup_read",
         tool_config_overrides={"master_space_id": "space-override"},
         tools=builtin_tool_registry(),
     )
@@ -1730,7 +1730,7 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
-        function_name="list_spaces",
+        function_name="clickup_read",
         tool_config_overrides={"master_space_id": metadata_module._AUTHORED_OVERRIDE_INHERIT},
         tools=builtin_tool_registry(),
     )

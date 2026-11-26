@@ -7,7 +7,13 @@ from typing import Any, Literal
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import error_json, json_dumps, require_non_empty, safe_path_segment
+from mindroom.tools.native_helpers import (
+    error_json,
+    json_dumps,
+    require_non_blank_text,
+    require_non_empty,
+    safe_path_segment,
+)
 
 _ReadAction = Literal["user_info", "top_posts", "subreddit_info", "trending_subreddits", "subreddit_stats"]
 _WriteAction = Literal["create_post", "reply_to_post", "reply_to_comment"]
@@ -270,7 +276,7 @@ class _RedditTools(Toolkit):
     ) -> str:
         field_name = "comment_id" if is_comment else "post_id"
         item_id = _extract_reddit_id(require_non_empty(target_id, field_name), field_name, post_url=not is_comment)
-        clean_content = require_non_empty(content, "content")
+        clean_content = require_non_blank_text(content, "content")
         target = self.reddit.comment(id=item_id) if is_comment else self.reddit.submission(id=item_id)
         if not is_comment:
             _ = target.title
