@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
@@ -25,6 +26,30 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _OpenWeatherAction = Literal["current_weather", "forecast", "air_pollution", "geocode"]
+_OPENWEATHER_HOSTS = frozenset({"api.openweathermap.org"})
+
+
+class _OpenWeatherUrlLogFilter(logging.Filter):
+    """Drop the query string (including ``appid``) from httpx request logs for OpenWeather requests."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                arg.copy_with(query=None)
+                if isinstance(arg, httpx.URL) and (arg.host in _OPENWEATHER_HOSTS or "appid" in arg.params)
+                else arg
+                for arg in record.args
+            )
+        return True
+
+
+def _install_httpx_log_filter() -> None:
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(log_filter, _OpenWeatherUrlLogFilter) for log_filter in httpx_logger.filters):
+        httpx_logger.addFilter(_OpenWeatherUrlLogFilter())
+
+
+_install_httpx_log_filter()
 
 
 class _OpenWeatherTools(Toolkit):
@@ -70,6 +95,7 @@ class _OpenWeatherTools(Toolkit):
         return function
 
     def _request_json(self, url: str, params: dict[str, Any]) -> Any:  # noqa: ANN401 - JSON dict or list
+        _install_httpx_log_filter()
         try:
             response = httpx.get(url, params={**params, "appid": self.api_key}, timeout=self.timeout)
             response.raise_for_status()

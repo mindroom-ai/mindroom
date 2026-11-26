@@ -32,8 +32,27 @@ _OpenBBProvider = Literal["benzinga", "fmp", "intrinio", "polygon", "tiingo", "t
 _OpenBBAction = Literal["stock_price", "search_symbol", "company_news", "company_profile", "price_targets"]
 
 
+def _build_isolated_openbb_app(obb: Any) -> Any:  # noqa: ANN401 - OpenBB app object
+    """Return a fresh OpenBB App with empty credentials so host env and ~/.openbb_platform never leak."""
+    from openbb_core.app.command_runner import CommandRunner
+    from openbb_core.app.model.credentials import Credentials
+    from openbb_core.app.model.defaults import Defaults
+    from openbb_core.app.model.preferences import Preferences
+    from openbb_core.app.model.user_settings import UserSettings
+
+    empty_credentials = Credentials.model_construct()
+    for field_name in set(empty_credentials.__dict__) | set(Credentials.model_fields):
+        object.__setattr__(empty_credentials, field_name, None)
+    isolated_settings = UserSettings.model_construct(
+        credentials=empty_credentials,
+        preferences=Preferences(),
+        defaults=Defaults(),
+    )
+    return type(obb)(command_runner=CommandRunner(user_settings=isolated_settings))
+
+
 def _load_openbb_app() -> Any:  # noqa: ANN401 - openbb.obb is dynamically generated on first import
-    """Import ``openbb.obb`` under an install-local lock so concurrent first-import builds wait safely."""
+    """Import ``openbb.obb`` under an install-local lock and return a credential-isolated App instance."""
     spec = importlib.util.find_spec("openbb")
     if spec is None or spec.origin is None:
         msg = "No module named 'openbb'"
@@ -46,7 +65,7 @@ def _load_openbb_app() -> Any:  # noqa: ANN401 - openbb.obb is dynamically gener
             # so a build needed off the main thread runs in a child process before retrying.
             subprocess.run([sys.executable, "-c", "import openbb"], check=True)
             from openbb import obb
-    return obb
+    return _build_isolated_openbb_app(obb)
 
 
 class _OpenBBTools(Toolkit):
@@ -65,6 +84,7 @@ class _OpenBBTools(Toolkit):
         all: bool | None = UNSET,  # noqa: A002 - matches ConfigField name
     ) -> None:
         self._obb = obb
+        self._injected_obb = obb is not None
         self._logged_in = False
         self.openbb_pat = openbb_pat.strip() if isinstance(openbb_pat, str) and openbb_pat.strip() else None
         self.provider: _OpenBBProvider = provider
@@ -113,11 +133,26 @@ class _OpenBBTools(Toolkit):
         if self._obb is None:
             self._obb = _load_openbb_app()
         if self.openbb_pat and not self._logged_in:
-            try:
-                self._obb.account.login(pat=self.openbb_pat)
-                self._logged_in = True
-            except Exception:
-                logger.exception("Error logging into OpenBB")
+            account = getattr(self._obb, "account", None)
+            login = getattr(account, "login", None)
+            if not callable(login):
+                msg = (
+                    "Configured openbb_pat is not supported by the installed openbb SDK "
+                    "(no obb.account.login); refusing to fall back to ambient credentials."
+                )
+                raise RuntimeError(msg)
+            login(pat=self.openbb_pat)
+            self._logged_in = True
+        if not self._injected_obb and not self._logged_in and self.provider != "yfinance":
+            credentials = getattr(getattr(self._obb, "user", None), "credentials", None)
+            origins = getattr(credentials, "origins", None)
+            required = origins.get(self.provider) if isinstance(origins, dict) else None
+            if required is None or any(not getattr(credentials, key, None) for key in required):
+                msg = (
+                    f"OpenBB provider '{self.provider}' requires scoped credentials that are not configured; "
+                    "refusing to fall back to host environment or ~/.openbb_platform/user_settings.json."
+                )
+                raise RuntimeError(msg)
         return self._obb
 
     def _dispatch(

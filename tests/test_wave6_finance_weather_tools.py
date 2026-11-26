@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -94,14 +95,40 @@ def test_yfinance_actions_toggles_and_schema_narrowing(monkeypatch: pytest.Monke
     }
 
 
-def test_openbb_scoped_pat_and_actions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OpenBBTools never reads ambient OPENBB_PAT, logs in only with explicit PAT, and handles news without images."""
+def test_openbb_real_sdk_isolation_and_fail_closed_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real installed openbb app starts with empty isolated credentials and fails closed on PAT or credentialed providers."""
+    import mindroom.tools.openbb as openbb_module  # noqa: PLC0415
+
+    monkeypatch.setenv("OPENBB_PAT", "ambient-pat")
+    monkeypatch.setenv("FMP_API_KEY", "ambient-fmp-key")
+    monkeypatch.setenv("BENZINGA_API_KEY", "ambient-benzinga-key")
+    openbb_cls = cast("Any", builtin_tool_registry().factory("openbb")())
+
+    # Isolated real SDK app strips every ambient env / ~/.openbb_platform credential.
+    isolated_app = openbb_module._load_openbb_app()
+    non_empty_creds = {k: v for k, v in isolated_app.user.credentials.model_dump().items() if v is not None}
+    assert non_empty_creds == {}
+
+    # Real installed openbb SDK has no obb.account.login: openbb_pat fails closed instead of swallowing and continuing.
+    with_pat = openbb_cls(openbb_pat="scoped-pat", provider="yfinance")
+    pat_err = with_pat.openbb_get("stock_price", symbol="AAPL")
+    assert "Error fetching OpenBB stock_price" in pat_err
+    assert "obb.account.login" in pat_err
+
+    # Credentialed providers fail closed even when ambient provider API keys exist in process env.
+    fmp_tool = openbb_cls(provider="fmp")
+    fmp_err = fmp_tool.openbb_get("stock_price", symbol="AAPL")
+    assert "Error fetching OpenBB stock_price" in fmp_err
+    assert "scoped credentials" in fmp_err
+
+
+def test_openbb_actions_and_non_swallowed_login_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenBBTools executes all 5 actions on real-shaped SDK objects and never swallows failing login errors."""
     monkeypatch.setenv("OPENBB_PAT", "ambient-pat")
     openbb_cls = cast("Any", builtin_tool_registry().factory("openbb")())
 
-    logins: list[str] = []
-    fake_obb = SimpleNamespace(
-        account=SimpleNamespace(login=lambda *, pat: logins.append(pat)),
+    # Match the real installed OpenBB 4.7.x SDK shape (no `account` attribute).
+    real_shape_obb = SimpleNamespace(
         equity=SimpleNamespace(
             price=SimpleNamespace(
                 quote=lambda *, symbol, provider: _FakeOBBResult(
@@ -123,27 +150,39 @@ def test_openbb_scoped_pat_and_actions(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
 
-    # Without explicit openbb_pat, never logs in even though OPENBB_PAT is in host env.
-    no_pat = openbb_cls(obb=fake_obb, all=True)
+    no_pat = openbb_cls(obb=real_shape_obb, all=True)
     quote = json.loads(no_pat.openbb_get("stock_price", symbol="AAPL"))
     assert quote[0]["last_price"] == 150.0
-    assert logins == []
 
-    # News items both with and without "images" succeed cleanly.
     news = json.loads(no_pat.openbb_get("company_news", symbol="AAPL", num_stories=2))
     assert news == [{"title": "AAPL yfinance news"}, {"title": "AAPL plain"}]
     assert json.loads(no_pat.openbb_get("search_symbol", company_name="Apple"))[0]["symbol"] == "AAPL"
     assert json.loads(no_pat.openbb_get("company_profile", symbol="AAPL"))[0]["provider"] == "yfinance"
     assert json.loads(no_pat.openbb_get("price_targets", symbol="AAPL"))[0]["target"] == 200
 
-    # With explicit openbb_pat, logs in once.
-    with_pat = openbb_cls(obb=fake_obb, openbb_pat="scoped-pat")
-    with_pat.openbb_get("stock_price", symbol="MSFT")
-    with_pat.openbb_get("stock_price", symbol="NVDA")
-    assert logins == ["scoped-pat"]
+    # If a custom/older SDK exposes account.login and it fails, fail closed without calling quote.
+    quote_called = False
+
+    def fail_login(*, pat: str) -> None:
+        msg = f"rejected {pat}"
+        raise RuntimeError(msg)
+
+    def track_quote(*, symbol: str, provider: str) -> _FakeOBBResult:
+        nonlocal quote_called
+        quote_called = True
+        return _FakeOBBResult([{"symbol": symbol, "provider": provider}])
+
+    failing_obb = SimpleNamespace(
+        account=SimpleNamespace(login=fail_login),
+        equity=SimpleNamespace(price=SimpleNamespace(quote=track_quote)),
+    )
+    failing_tool = openbb_cls(obb=failing_obb, openbb_pat="bad-pat")
+    err = failing_tool.openbb_get("stock_price", symbol="MSFT")
+    assert "rejected bad-pat" in err
+    assert quote_called is False
 
     # Explicit None disables stock_price.
-    assert openbb_cls(obb=fake_obb, enable_get_stock_price=None).functions == {}
+    assert openbb_cls(obb=real_shape_obb, enable_get_stock_price=None).functions == {}
 
 
 def test_financial_datasets_api_scoped_key_and_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,3 +332,54 @@ def test_wave6_batch3_action_scoped_grants_and_fail_closed_migration(tmp_path: P
                 },
                 runtime_paths,
             )
+
+
+def test_openweather_http_200_request_logs_never_leak_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """HTTPX INFO logs on HTTP 200 drop the query string so OpenWeather appid never reaches MindRoom logs."""
+    from mindroom.logging_config import configure_default_logging, current_log_file, setup_logging  # noqa: PLC0415
+
+    owm_cls = cast("Any", builtin_tool_registry().factory("openweather")())
+    secret_key = "owm-super-secret-query-token-987654"  # noqa: S105 - synthetic test fixture
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["appid"] == secret_key
+        if request.url.path.endswith("/direct"):
+            return httpx.Response(200, json=[{"name": "London", "country": "GB", "lat": 51.5, "lon": -0.1}])
+        return httpx.Response(200, json={"main": {"temp": 18.5}})
+
+    real_client_cls = httpx.Client
+
+    def mock_client(*args: object, **kwargs: object) -> httpx.Client:
+        kwargs["transport"] = httpx.MockTransport(handle)
+        return real_client_cls(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("httpx._api.Client", mock_client)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    setup_logging(level="INFO", runtime_paths=runtime_paths)
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    capsys.readouterr()
+    try:
+        tool = owm_cls(api_key=secret_key)
+        result = json.loads(tool.openweather_get("current_weather", "London"))
+        assert result["location_name"] == "London"
+
+        for handler in list(logging.getLogger().handlers):
+            handler.flush()
+            handler.close()
+        stderr_logs = capsys.readouterr().err
+        log_file = current_log_file()
+        assert log_file is not None
+        assert log_file.exists()
+        file_logs = log_file.read_text(encoding="utf-8")
+        for formatted in (stderr_logs, file_logs):
+            assert "api.openweathermap.org/geo/1.0/direct" in formatted
+            assert "api.openweathermap.org/data/2.5/weather" in formatted
+            assert secret_key not in formatted
+            assert "appid=" not in formatted
+    finally:
+        configure_default_logging()
