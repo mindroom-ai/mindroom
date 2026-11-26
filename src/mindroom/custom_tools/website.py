@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from mindroom.knowledge.readers import Document, FixedSizeChunking
+from mindroom.knowledge.chunking import Document, FixedSizeChunking
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url_sync
 from mindroom.tool_system.authoring import Toolkit, tool
@@ -244,7 +244,6 @@ class _MindRoomWebsiteReader:
         for crawled_url, crawled_content in crawler_result.items():
             document = Document(
                 name=url,
-                id=str(crawled_url),
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )

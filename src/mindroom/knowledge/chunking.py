@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -24,7 +23,6 @@ class Document:
     """One extracted or chunked document."""
 
     content: str
-    id: str | None = None
     name: str | None = None
     meta_data: dict[str, Any] = field(default_factory=dict)
 
@@ -45,24 +43,6 @@ class ChunkingStrategy(ABC):
     @abstractmethod
     def chunk(self, document: Document) -> list[Document]:
         """Split ``document`` into chunk documents."""
-
-    def _generate_chunk_id(
-        self,
-        document: Document,
-        chunk_number: int,
-        content: str | None = None,
-        prefix: str | None = None,
-    ) -> str | None:
-        suffix = f"_{prefix}_{chunk_number}" if prefix else f"_{chunk_number}"
-        if document.id:
-            return f"{document.id}{suffix}"
-        if document.name:
-            return f"{document.name}{suffix}"
-        hash_source = content or document.content
-        if hash_source:
-            content_hash = hashlib.md5(hash_source.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-            return f"chunk_{content_hash}{suffix}"
-        return None
 
     def clean_text(self, text: str) -> str:
         """Collapse repeated runs of each whitespace character while preserving line breaks."""
@@ -106,14 +86,7 @@ class FixedSizeChunking(ChunkingStrategy):
 
             chunk = content[start:end]
             meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(chunk)}
-            chunked.append(
-                Document(
-                    id=self._generate_chunk_id(document, chunk_number, chunk),
-                    name=document.name,
-                    meta_data=meta_data,
-                    content=chunk,
-                ),
-            )
+            chunked.append(Document(name=document.name, meta_data=meta_data, content=chunk))
             chunk_number += 1
             if end >= content_length:
                 break
@@ -125,32 +98,12 @@ class FixedSizeChunking(ChunkingStrategy):
 class DocumentChunking(ChunkingStrategy):
     """Split text on paragraph boundaries, falling back to sentences for oversized paragraphs."""
 
-    def __init__(self, chunk_size: int = 5000, overlap: int = 0) -> None:
-        if overlap >= chunk_size:
-            msg = f"Invalid parameters: overlap ({overlap}) must be less than chunk size ({chunk_size})."
-            raise ValueError(msg)
+    def __init__(self, chunk_size: int = 5000) -> None:
         self.chunk_size = chunk_size
-        self.overlap = overlap
 
     def _make_chunk(self, document: Document, chunk_number: int, content: str) -> Document:
         meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(content)}
-        return Document(
-            id=self._generate_chunk_id(document, chunk_number, content),
-            name=document.name,
-            meta_data=meta_data,
-            content=content,
-        )
-
-    def _apply_overlap(self, document: Document, chunks: list[Document]) -> list[Document]:
-        overlapped: list[Document] = []
-        for index, chunk_doc in enumerate(chunks):
-            if index > 0 and (prev_text := chunks[index - 1].content[-self.overlap :]):
-                overlapped.append(
-                    self._make_chunk(document, chunk_doc.meta_data["chunk"], prev_text + chunk_doc.content),
-                )
-            else:
-                overlapped.append(chunk_doc)
-        return overlapped
+        return Document(name=document.name, meta_data=meta_data, content=content)
 
     def _accumulate_sentences(
         self,
@@ -176,7 +129,7 @@ class DocumentChunking(ChunkingStrategy):
         return current, current_size
 
     def chunk(self, document: Document) -> list[Document]:
-        """Split ``document`` by paragraphs, then sentences, with optional trailing overlap."""
+        """Split ``document`` by paragraphs, falling back to sentences for oversized paragraphs."""
         if len(document.content) <= self.chunk_size:
             return [document]
 
@@ -204,39 +157,26 @@ class DocumentChunking(ChunkingStrategy):
 
         if current:
             chunks.append(self._make_chunk(document, len(chunks) + 1, "\n\n".join(current)))
-        return self._apply_overlap(document, chunks) if self.overlap > 0 else chunks
+        return chunks
 
 
 class RowChunking(ChunkingStrategy):
     """Split line-delimited tabular text into one chunk per non-empty row."""
 
-    def __init__(self, skip_header: bool = False, clean_rows: bool = True) -> None:
-        self.skip_header = skip_header
-        self.clean_rows = clean_rows
-
     def chunk(self, document: Document) -> list[Document]:
         """Split ``document`` into one chunk per non-empty line, keeping logical 1-based row numbers."""
-        if not document or not document.content:
+        if not document.content:
             return []
 
-        rows = document.content.splitlines()
-        start_index = document.meta_data.get("start_row", 1)
-        if self.skip_header and rows and start_index == 1:
-            rows = rows[1:]
-            start_index += 1
-
         chunks: list[Document] = []
-        for offset, row in enumerate(rows):
-            chunk_content = " ".join(row.split()) if self.clean_rows else row.strip()
+        for row_number, row in enumerate(document.content.splitlines(), start=1):
+            chunk_content = " ".join(row.split())
             if not chunk_content:
                 continue
-            row_number = start_index + offset
-            meta_data = {**document.meta_data, "row_number": row_number}
             chunks.append(
                 Document(
-                    id=self._generate_chunk_id(document, row_number, chunk_content, prefix="row"),
                     name=document.name,
-                    meta_data=meta_data,
+                    meta_data={**document.meta_data, "row_number": row_number},
                     content=chunk_content,
                 ),
             )
@@ -281,7 +221,7 @@ class SafeFixedSizeChunking(FixedSizeChunking):
             end = raw_end
 
             if raw_end < content_length:
-                while end > start and content[end] not in [" ", "\n", "\r", "\t"]:
+                while end > start and content[end] not in (" ", "\n", "\r", "\t"):
                     end -= 1
 
                 # Prefer a hard split over tiny overlap-driven fragments when the
@@ -290,17 +230,8 @@ class SafeFixedSizeChunking(FixedSizeChunking):
                     end = raw_end
 
             chunk = content[start:end]
-            meta_data = (document.meta_data or {}).copy()
-            meta_data["chunk"] = chunk_number
-            meta_data["chunk_size"] = len(chunk)
-            chunked_documents.append(
-                Document(
-                    id=self._generate_chunk_id(document, chunk_number, chunk),
-                    name=document.name,
-                    meta_data=meta_data,
-                    content=chunk,
-                ),
-            )
+            meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(chunk)}
+            chunked_documents.append(Document(name=document.name, meta_data=meta_data, content=chunk))
 
             if end >= content_length:
                 break

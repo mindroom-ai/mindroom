@@ -11,20 +11,18 @@ They exercise ``FileIndexer``'s reader construction directly rather than
 through ``reindex_all``. That is deliberate, and the reason is the hazard in
 :func:`test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache`:
 ``_build_reader`` configures the reader ``ReaderFactory`` returns in place,
-which is safe only while the factory builds a new reader per call, as Agno 3.2
-does (Agno 3.0 cached one per extension). Were readers shared again, the
-existing end-to-end suites would still pass, because within one refresh every
-``_build_reader`` call re-applies that indexer's own chunking before the reader
-is used, so a sequential refresh stays internally consistent. The damage needs
-two bases' refreshes to interleave -- a real possibility, since the source-root
-lock is per root and file reads run on worker threads, but not something a
-deterministic end-to-end test can stage. Observing the constructed reader is
-the only way to hold the invariant.
+which is safe only while the factory builds a new reader per call. Were readers
+shared again, the existing end-to-end suites would still pass, because within
+one refresh every ``_build_reader`` call re-applies that indexer's own chunking
+before the reader is used, so a sequential refresh stays internally consistent.
+The damage needs two bases' refreshes to interleave -- a real possibility, since
+the source-root lock is per root and file reads run on worker threads, but not
+something a deterministic end-to-end test can stage. Observing the constructed
+reader is the only way to hold the invariant.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import sys
 from datetime import date, datetime
@@ -34,10 +32,9 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
-import docx
-import openpyxl
 import pytest
 from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -72,14 +69,63 @@ from tests.knowledge_test_support import _FakeEmbedder
 if TYPE_CHECKING:
     from mindroom.knowledge.readers import Reader
 
-#: Chunk settings no factory default could be mistaken for (Agno ships 5000/0).
+
+def _package_available(package: str) -> bool:
+    """Return whether optional dependency ``package`` can currently be imported."""
+    if package in sys.modules:
+        return sys.modules[package] is not None
+    try:
+        return find_spec(package) is not None
+    except ValueError:
+        return False
+
+
+#: Chunk settings no factory default could be mistaken for (default is 5000/0).
 _CHUNK_SIZE = 137
 _CHUNK_OVERLAP = 11
 
 #: Suffixes whose reader MindRoom reconfigures with the base's chunking.
 _CHUNKED_SUFFIXES = (".md", ".markdown", ".txt", ".py", ".yaml", ".html", ".xyz", "")
 #: Suffixes whose reader owns its own splitting and must be left alone.
-_UNTOUCHED_SUFFIXES = (".csv", ".xlsx", ".docx")
+_UNTOUCHED_SUFFIXES = (
+    ".csv",
+    pytest.param(
+        ".xlsx",
+        marks=pytest.mark.skipif(not _package_available("openpyxl"), reason="openpyxl not installed"),
+    ),
+    pytest.param(
+        ".docx",
+        marks=pytest.mark.skipif(not _package_available("docx"), reason="python-docx not installed"),
+    ),
+)
+
+
+def _write_text_pdf(path: Path, pages: list[str]) -> None:
+    """Write a minimal multi-page PDF with extractable Helvetica text using only ``pypdf``."""
+    writer = PdfWriter()
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        },
+    )
+    font_ref = writer._add_object(font)
+    for page_text in pages:
+        page = writer.add_blank_page(width=400, height=400)
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})},
+        )
+        ops = ["BT", "/F1 12 Tf", "50 350 Td", "14 TL"]
+        for index, line in enumerate(page_text.split("\n")):
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            ops.append(f"({escaped}) Tj" if index == 0 else f"T* ({escaped}) Tj")
+        ops.append("ET")
+        stream = DecodedStreamObject()
+        stream.set_data("\n".join(ops).encode("latin-1"))
+        page[NameObject("/Contents")] = writer._add_object(stream)
+    with path.open("wb") as handle:
+        writer.write(handle)
 
 
 def _indexer(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = _CHUNK_OVERLAP) -> FileIndexer:
@@ -135,7 +181,6 @@ def _assert_carries_base_chunking(reader: Reader) -> None:
     assert strategy.chunk_size == _CHUNK_SIZE
     assert strategy.overlap == _CHUNK_OVERLAP
     assert strategy.min_chunk_fill_ratio == 0.5
-    assert reader.chunk is True
     assert reader.chunk_size == _CHUNK_SIZE
     # None is how these readers spell UTF-8 (``self.encoding or "utf-8"``).
     assert reader.encoding is None
@@ -185,7 +230,7 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: F
     ("value", "expected"),
     [
         ({"value": "A\u00a0B\u2028C\u3000D"}, ['{"value": "A B C D"}']),
-        # Agno 3.2's whitespace would split this into chunks of 5, 5000, and 1005 characters.
+        # Preserving Unicode whitespace would split this into chunks of 5, 5000, and 1005 characters.
         ({"v": ("A\u00a0\u00a0" * 2000) + "B"}, ['{"v": "' + "A " * 2000 + 'B"}']),
     ],
     ids=["unicode-whitespace", "long"],
@@ -196,13 +241,12 @@ def test_json_files_chunk_as_agno_3_0_did(
     tmp_path: Path,
     indexer: FileIndexer,
 ) -> None:
-    """JSON keeps Agno's 5000/0 fixed-size split, and its chunks collapse Unicode whitespace as 3.0.9's did."""
+    """JSON keeps 5000/0 fixed-size split, and its chunks collapse Unicode whitespace as legacy indexing did."""
     source = tmp_path / "source.json"
     source.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
     documents = indexer._build_reader(source).read(source, name=source.name)
 
-    # What Agno 3.0.9's JSON reader returned for this file.
     assert [document.content for document in documents] == expected
 
 
@@ -210,24 +254,27 @@ def test_json_files_chunk_as_agno_3_0_did(
     "suffix",
     [
         ".pdf",
-        ".docx",
+        pytest.param(
+            ".docx",
+            marks=pytest.mark.skipif(not _package_available("docx"), reason="python-docx not installed"),
+        ),
         # MindRoom ships no python-pptx, so its indexer skips PPTX files unless a deployment installs it.
-        pytest.param(".pptx", marks=pytest.mark.skipif(find_spec("pptx") is None, reason="python-pptx not installed")),
+        pytest.param(
+            ".pptx",
+            marks=pytest.mark.skipif(not _package_available("pptx"), reason="python-pptx not installed"),
+        ),
     ],
 )
 def test_document_readers_chunk_paragraphs_as_agno_3_0_did(suffix: str, indexer: FileIndexer) -> None:
-    """PDF, DOCX, and PPTX keep Agno's paragraph chunking at its size, and its chunks keep 3.0.9's whitespace.
-
-    Agno 3.2 keeps the line breaks inside a paragraph, which would change every chunk of a re-indexed document.
-    """
+    """PDF, DOCX, and PPTX keep paragraph chunking at 5000 chars and collapse intra-paragraph whitespace."""
     paragraphs = ["\n".join(f"Paragraph {n}, line {i}:\tsome  words\there." for i in range(70)) for n in range(3)]
     reader = indexer._build_reader(Path(f"source{suffix}"))
     strategy = reader.chunking_strategy
 
     assert isinstance(strategy, LegacyDocumentChunking)
-    assert (strategy.chunk_size, strategy.overlap) == (5000, 0)
+    assert strategy.chunk_size == 5000
     chunks = strategy.chunk(Document(name="source", content="\n\n".join(paragraphs)))
-    # What Agno 3.0.9's DocumentChunking returned for this input: one chunk per 2719-character paragraph.
+    # One chunk per 2719-character paragraph.
     assert [chunk.content for chunk in chunks] == [
         " ".join(f"Paragraph {n}, line {i}: some words here." for i in range(70)) for n in range(3)
     ]
@@ -298,7 +345,6 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     """
     reader = indexer._build_reader(Path("source.json"))
 
-    # Agno's fixed-size split at its 5000/0, with the legacy whitespace (``test_json_files_chunk_as_agno_3_0_did``).
     assert type(reader.chunking_strategy) is LegacyFixedSizeChunking
     assert (reader.chunking_strategy.chunk_size, reader.chunking_strategy.overlap) == (5000, 0)
 
@@ -326,20 +372,13 @@ def test_json_elements_above_the_factory_chunk_size_are_still_split(
     tmp_path: Path,
     indexer: FileIndexer,
 ) -> None:
-    """JSON keeps the factory's 5000-character chunking, so a larger value must split.
-
-    Every other JSON case here uses a short document, which cannot tell
-    chunking-enabled from chunking-disabled: both emit one document. Copying
-    the factory reader with chunking off would put a single oversized element
-    into one vector.
-    """
+    """JSON keeps the factory's 5000-character chunking, so a larger value must split."""
     source = tmp_path / "big.json"
     source.write_text(json.dumps({"claim": "x" * 6013}), encoding="utf-8")
     reader = indexer._build_reader(source)
 
     documents = reader.read(source)
 
-    assert reader.chunk is True
     assert len(documents) > 1
     assert max(len(document.content) for document in documents) <= 5000
 
@@ -371,68 +410,103 @@ def test_fallback_documents_keep_the_callers_name(indexer: FileIndexer) -> None:
     assert {document.name for document in documents} == {"a"}
 
 
+@pytest.mark.parametrize("kind", ["pdf", "docx", "json"])
+def test_exact_indexed_chunk_output_for_pdf_docx_and_json(
+    kind: str,
+    tmp_path: Path,
+    indexer: FileIndexer,
+) -> None:
+    """Pin exact chunk text, name, and metadata across PDF, DOCX, and JSON indexing paths."""
+    if kind == "pdf":
+        source = tmp_path / "report.pdf"
+        _write_text_pdf(source, ["1\nFirst line\nwrapped", "2\nSecond page text"])
+        docs = indexer._build_reader(source).read(source, name=source.name)
+        assert [(doc.name, doc.meta_data, doc.content) for doc in docs] == [
+            ("report.pdf", {"page": 1}, "<start page 1>\nFirst line wrapped\n<end page 1>"),
+            ("report.pdf", {"page": 2}, "<start page 2>\nSecond page text\n<end page 2>"),
+        ]
+        return
+
+    if kind == "docx":
+        docx = pytest.importorskip("docx")
+        source = tmp_path / "spec.docx"
+        para_a = " ".join(f"alpha{i}" for i in range(420))
+        para_b = " ".join(f"beta{i}" for i in range(420))
+        document = docx.Document()
+        document.add_paragraph(para_a.replace(" ", "\t", 1))
+        document.add_paragraph(para_b)
+        document.save(source)
+        docs = indexer._build_reader(source).read(source, name=source.name)
+        assert [(doc.name, doc.meta_data, doc.content) for doc in docs] == [
+            ("spec.docx", {"chunk": 1, "chunk_size": len(para_a)}, para_a),
+            ("spec.docx", {"chunk": 2, "chunk_size": len(para_b)}, para_b),
+        ]
+        return
+
+    source = tmp_path / "items.json"
+    source.write_text(json.dumps([{"k": "a\u00a0b"}, {"k": "c"}], ensure_ascii=False), encoding="utf-8")
+    docs = indexer._build_reader(source).read(source, name=source.name)
+    assert [(doc.name, doc.meta_data, doc.content) for doc in docs] == [
+        ("items.json", {"page": 1, "chunk": 1, "chunk_size": 12}, '{"k": "a b"}'),
+        ("items.json", {"page": 2, "chunk": 1, "chunk_size": 10}, '{"k": "c"}'),
+    ]
+
+
 def test_document_to_dict_matches_serialized_contract() -> None:
-    """``Document.to_dict`` omits ``id`` and ``None`` names while always keeping ``content`` and ``meta_data``."""
+    """``Document.to_dict`` omits ``None`` names while always keeping ``content`` and ``meta_data``."""
     assert Document(content="hello").to_dict() == {"meta_data": {}, "content": "hello"}
-    assert Document(id="drop-me", name="page", meta_data={"url": "https://example.test"}, content="body").to_dict() == {
+    assert Document(name="page", meta_data={"url": "https://example.test"}, content="body").to_dict() == {
         "name": "page",
         "meta_data": {"url": "https://example.test"},
         "content": "body",
     }
 
 
-def test_fixed_size_chunking_handles_validation_boundaries_and_fallback_ids() -> None:
-    """Fixed-size chunking validates overlap, aligns to spaces, and hashes anonymous chunks deterministically."""
+def test_fixed_size_chunking_preserves_line_breaks_and_validates_overlap() -> None:
+    """Fixed-size chunking validates overlap, aligns to spaces, and preserves line breaks for website pages."""
     with pytest.raises(ValueError, match="overlap"):
         FixedSizeChunking(chunk_size=10, overlap=10)
 
     strategy = FixedSizeChunking(chunk_size=12, overlap=3)
     assert strategy.chunk(Document(content="")) == []
 
-    chunks = strategy.chunk(Document(content="alpha beta gamma delta"))
-    assert [chunk.content for chunk in chunks] == ["alpha beta", "eta gamma", "mma delta"]
-    assert all(chunk.id is not None and chunk.id.startswith("chunk_") for chunk in chunks)
-    assert [chunk.meta_data["chunk"] for chunk in chunks] == [1, 2, 3]
+    chunks = strategy.chunk(Document(content="alpha  beta\n\ngamma delta"))
+    assert [(chunk.content, chunk.meta_data) for chunk in chunks] == [
+        ("alpha beta", {"chunk": 1, "chunk_size": 10}),
+        ("eta\ngamma", {"chunk": 2, "chunk_size": 9}),
+        ("mma delta", {"chunk": 3, "chunk_size": 9}),
+    ]
 
 
-def test_document_chunking_splits_oversized_paragraphs_and_applies_overlap() -> None:
-    """``DocumentChunking`` keeps short text intact, splits oversized paragraphs by sentence, and adds overlap."""
-    strategy = DocumentChunking(chunk_size=40, overlap=6)
-    short = Document(id="short", name="short", content="Fits in one chunk.")
+def test_document_chunking_splits_oversized_paragraphs_by_sentence() -> None:
+    """``DocumentChunking`` keeps short text intact and splits oversized paragraphs on sentence boundaries."""
+    strategy = DocumentChunking(chunk_size=40)
+    short = Document(name="short", content="Fits in one chunk.")
     assert strategy.chunk(short) == [short]
 
     long_para = "First sentence here. Second sentence here. Third sentence here."
-    chunks = strategy.chunk(Document(id="doc", name="doc", content=f"Intro para.\n\n{long_para}"))
-    assert [chunk.content for chunk in chunks] == [
-        "Intro para.",
-        " para.First sentence here.",
-        " here.Second sentence here.",
-        " here.Third sentence here.",
-    ]
-    assert [chunk.id for chunk in chunks] == ["doc_1", "doc_2", "doc_3", "doc_4"]
-
-
-def test_row_chunking_preserves_row_numbers_and_header_skipping() -> None:
-    """``RowChunking`` skips blank rows without shifting row numbers and respects ``skip_header`` and ``start_row``."""
-    doc = Document(id="csv1", name="data", content="h1, h2\n  a ,  1 \n\nb, 2\n")
-    default_chunks = RowChunking().chunk(doc)
-    assert [(c.meta_data["row_number"], c.content, c.id) for c in default_chunks] == [
-        (1, "h1, h2", "csv1_row_1"),
-        (2, "a , 1", "csv1_row_2"),
-        (4, "b, 2", "csv1_row_4"),
+    chunks = strategy.chunk(Document(name="doc", content=f"Intro para.\n\n{long_para}"))
+    assert [(chunk.content, chunk.meta_data) for chunk in chunks] == [
+        ("Intro para.", {"chunk": 1, "chunk_size": 11}),
+        ("First sentence here.", {"chunk": 2, "chunk_size": 20}),
+        ("Second sentence here.", {"chunk": 3, "chunk_size": 21}),
+        ("Third sentence here.", {"chunk": 4, "chunk_size": 20}),
     ]
 
-    skipped = RowChunking(skip_header=True, clean_rows=False).chunk(doc)
-    assert [(c.meta_data["row_number"], c.content) for c in skipped] == [(2, "a ,  1"), (4, "b, 2")]
 
-    paged = RowChunking(skip_header=True).chunk(
-        Document(id="csv2", name="data", meta_data={"start_row": 11}, content="row11\nrow12\n"),
-    )
-    assert [c.meta_data["row_number"] for c in paged] == [11, 12]
+def test_row_chunking_skips_blank_rows_without_shifting_row_numbers() -> None:
+    """``RowChunking`` normalizes whitespace and preserves 1-based logical row numbers across blank lines."""
+    doc = Document(name="data", content="h1, h2\n  a ,  1 \n\nb, 2\n")
+    chunks = RowChunking().chunk(doc)
+    assert [(c.meta_data["row_number"], c.content) for c in chunks] == [
+        (1, "h1, h2"),
+        (2, "a , 1"),
+        (4, "b, 2"),
+    ]
 
 
-def test_csv_reader_normalizes_multiline_cells_and_streams(tmp_path: Path) -> None:
-    """``CSVReader`` flattens newlines inside quoted cells and supports both files and streams."""
+def test_csv_reader_normalizes_multiline_cells(tmp_path: Path) -> None:
+    """``CSVReader`` flattens newlines inside quoted cells and chunks rows cleanly."""
     source = tmp_path / "notes.csv"
     source.write_text('name,notes\n"Alice","line1\nline2"\n\nBob,42\n', encoding="utf-8")
 
@@ -443,12 +517,10 @@ def test_csv_reader_normalizes_multiline_cells_and_streams(tmp_path: Path) -> No
         ("notes.csv", 4, "Bob, 42"),
     ]
 
-    stream_docs = CSVReader().read(io.StringIO("k;v\nalpha;1\n"), delimiter=";")
-    assert [d.content for d in stream_docs] == ["k, v", "alpha, 1"]
 
-
-def test_excel_reader_reads_xlsx_sheets_and_filters(tmp_path: Path) -> None:
-    """``ExcelReader`` normalizes cell types, trims trailing empties, skips empty sheets, and filters sheets."""
+def test_excel_reader_reads_xlsx_sheets(tmp_path: Path) -> None:
+    """``ExcelReader`` normalizes cell types, trims trailing empties, and skips empty sheets."""
+    openpyxl = pytest.importorskip("openpyxl")
     source = tmp_path / "metrics.xlsx"
     workbook = openpyxl.Workbook()
     first = workbook.active
@@ -472,12 +544,78 @@ def test_excel_reader_reads_xlsx_sheets_and_filters(tmp_path: Path) -> None:
         ("metrics", "Summary", 3, "total, 2"),
     ]
 
-    filtered = ExcelReader(sheets=["summary"]).read(source)
-    assert {d.meta_data["sheet_name"] for d in filtered} == {"Summary"}
+
+def test_excel_reader_streams_xls_sheets_lazily(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``.xls`` reading streams one sheet's rows into the formatter before opening the next sheet."""
+    events: list[tuple[str, object]] = []
+
+    class _TrackedValue:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def __str__(self) -> str:
+            events.append(("format", self.label))
+            return self.label
+
+    class _FakeSheet:
+        def __init__(self, name: str, rows: list[list[tuple[object, int]]]) -> None:
+            self.name = name
+            self._rows = rows
+            self.nrows = len(rows)
+            self.ncols = len(rows[0]) if rows else 0
+
+        def cell_value(self, row: int, col: int) -> object:
+            events.append(("read", f"{self.name}:{row}:{col}"))
+            return self._rows[row][col][0]
+
+        def cell_type(self, row: int, col: int) -> int:
+            return self._rows[row][col][1]
+
+    class _FakeWorkbook:
+        datemode = 0
+
+        def __init__(self) -> None:
+            self._sheets = [
+                _FakeSheet("First", [[(_TrackedValue("a1"), 1)], [(_TrackedValue("a2"), 1)]]),
+                _FakeSheet("Second", [[(46000.0, 3), (1, 4)]]),
+            ]
+            self.nsheets = len(self._sheets)
+
+        def sheet_by_index(self, index: int) -> _FakeSheet:
+            events.append(("open", index))
+            return self._sheets[index]
+
+    fake_xlrd = ModuleType("xlrd")
+    fake_xlrd.XL_CELL_DATE = 3  # type: ignore[attr-defined]
+    fake_xlrd.XL_CELL_BOOLEAN = 4  # type: ignore[attr-defined]
+    fake_xlrd.open_workbook = lambda **_kwargs: _FakeWorkbook()  # type: ignore[attr-defined]
+    fake_xlrd.xldate_as_tuple = lambda _val, _mode: (2026, 11, 25, 0, 0, 0)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
+
+    source = tmp_path / "legacy.xls"
+    source.write_bytes(b"fake-xls")
+    docs = ExcelReader().read(source, name="legacy.xls")
+
+    assert [(d.name, d.meta_data["sheet_name"], d.meta_data["sheet_index"], d.content) for d in docs] == [
+        ("legacy", "First", 1, "a1"),
+        ("legacy", "First", 1, "a2"),
+        ("legacy", "Second", 2, "2026-11-25T00:00:00, True"),
+    ]
+    assert events == [
+        ("open", 0),
+        ("read", "First:0:0"),
+        ("format", "a1"),
+        ("read", "First:1:0"),
+        ("format", "a2"),
+        ("open", 1),
+        ("read", "Second:0:0"),
+        ("read", "Second:0:1"),
+    ]
 
 
 def test_docx_reader_extracts_paragraphs(tmp_path: Path) -> None:
-    """``DocxReader`` joins document paragraphs with blank lines and reads both files and streams."""
+    """``DocxReader`` joins document paragraphs with blank lines."""
+    docx = pytest.importorskip("docx")
     source = tmp_path / "spec.docx"
     document = docx.Document()
     document.add_paragraph("First paragraph.")
@@ -488,8 +626,8 @@ def test_docx_reader_extracts_paragraphs(tmp_path: Path) -> None:
     assert [(d.name, d.content) for d in docs] == [("spec.docx", "First paragraph.\n\nSecond paragraph.")]
 
 
-def test_pdf_reader_helpers_and_password_handling(tmp_path: Path) -> None:
-    """``PDFReader`` sanitizes wrapped lines, cleans sequential page numbers, and handles encrypted PDFs."""
+def test_pdf_reader_helpers_and_encryption_handling(tmp_path: Path) -> None:
+    """``PDFReader`` sanitizes wrapped lines, cleans page numbers, and attempts blank-password decryption."""
     assert _sanitize_pdf_text("word1\nword2\n\npara2\nline2") == "word1 word2\n\npara2 line2"
     cleaned, shift = _clean_page_numbers(["1\nFirst", "2\nSecond", "3\nThird"])
     assert shift == 1
@@ -499,20 +637,23 @@ def test_pdf_reader_helpers_and_password_handling(tmp_path: Path) -> None:
         "<start page 3>\nThird\n<end page 3>",
     ]
 
-    encrypted = tmp_path / "secret.pdf"
+    locked = tmp_path / "locked.pdf"
     writer = PdfWriter()
     writer.add_blank_page(width=200, height=200)
-    correct_code = "open-sesame"
-    wrong_code = "wrong"
-    writer.encrypt(correct_code)
-    with encrypted.open("wb") as handle:
+    writer.encrypt("open-sesame")
+    with locked.open("wb") as handle:
         writer.write(handle)
+    assert PDFReader().read(locked) == []
 
-    assert PDFReader().read(encrypted) == []
-    assert PDFReader().read(encrypted, password=wrong_code) == []
-    unlocked = PDFReader().read(encrypted, name="secret.pdf", password=correct_code)
-    assert len(unlocked) == 1
-    assert unlocked[0].meta_data == {"page": 1}
+    blank_encrypted = tmp_path / "restricted.pdf"
+    blank_writer = PdfWriter()
+    blank_writer.add_blank_page(width=200, height=200)
+    owner_code = "owner-only"
+    blank_writer.encrypt("", owner_code)
+    with blank_encrypted.open("wb") as handle:
+        blank_writer.write(handle)
+    unlocked = PDFReader().read(blank_encrypted, name="restricted.pdf")
+    assert [(d.name, d.meta_data, d.content) for d in unlocked] == [("restricted.pdf", {"page": 1}, "")]
 
 
 def test_pptx_reader_extracts_grouped_shapes_and_reports_missing_dependency(
