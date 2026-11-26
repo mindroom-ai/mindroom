@@ -16,7 +16,7 @@ def _matrix_message_function() -> ToolFunction:
     return toolkit_offers(MatrixMessageTools(), "matrix_message")
 
 
-def test_matrix_message_schema_exposes_four_actions_and_ten_arguments() -> None:
+def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> None:
     """Agents should only see supported actions and the consolidated targeting contract."""
     function = _matrix_message_function()
     properties = function.parameters["properties"]
@@ -27,6 +27,7 @@ def test_matrix_message_schema_exposes_four_actions_and_ten_arguments() -> None:
         "room_id",
         "thread_id",
         "new_thread",
+        "title",
         "event_id",
         "attachments",
         "limit",

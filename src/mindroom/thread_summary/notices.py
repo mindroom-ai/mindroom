@@ -71,6 +71,17 @@ def normalize_thread_summary_text(raw_text: str) -> str:
     return " ".join(normalized.split())
 
 
+def validate_thread_summary_text(summary: str, *, field_name: str = "summary") -> str:
+    """Normalize and validate manual thread summary or title text."""
+    if not (normalized_summary := normalize_thread_summary_text(summary)):
+        msg = f"{field_name} must be a non-empty string."
+        raise ThreadSummaryWriteError(msg)
+    if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
+        msg = f"{field_name} must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
+        raise ThreadSummaryWriteError(msg)
+    return normalized_summary
+
+
 def summary_generated_at(*predecessors: datetime | None) -> datetime:
     """Order a new summary after authorized predecessors despite clock skew."""
     generated_at = datetime.now(UTC)
@@ -96,6 +107,7 @@ async def send_thread_summary_notice(
     initial_enrichment_complete: bool | None = None,
     pinned: bool | None = None,
     generated_at: datetime | None = None,
+    known_latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
 
@@ -120,19 +132,22 @@ async def send_thread_summary_notice(
         if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    try:
-        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Falling back to thread root for summary send after latest-event lookup failure",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        latest_thread_event_id = None
+    if known_latest_thread_event_id is not None:
+        latest_thread_event_id: str | None = known_latest_thread_event_id
+    else:
+        try:
+            latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Falling back to thread root for summary send after latest-event lookup failure",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            latest_thread_event_id = None
     summary_metadata: dict[str, object] = {
         "version": 1,
         "summary": truncated_summary,
@@ -190,6 +205,49 @@ async def send_welcome_thread_summary(
     )
 
 
+async def set_initial_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    summary: str,
+    *,
+    message_count: int,
+    conversation_reader: ConversationReader,
+    known_latest_thread_event_id: str | None = None,
+    pin: bool = True,
+) -> _ThreadSummaryWriteResult:
+    """Write one validated initial summary for a newly started thread without waiting for sync echo."""
+    normalized_summary = validate_thread_summary_text(summary)
+    effective_count = max(1, message_count)
+    baselines = schedule.THREAD_SUMMARY_BASELINES
+    async with baselines.lock(room_id, thread_id):
+        try:
+            event_id = await send_thread_summary_notice(
+                client,
+                room_id,
+                thread_id,
+                normalized_summary,
+                effective_count,
+                "manual",
+                conversation_reader,
+                pinned=pin,
+                known_latest_thread_event_id=known_latest_thread_event_id,
+            )
+        except Exception as exc:
+            msg = "Failed to send thread summary event."
+            raise ThreadSummaryWriteError(msg) from exc
+        if event_id is None:
+            msg = "Failed to send thread summary event."
+            raise ThreadSummaryWriteError(msg)
+
+        baselines.record(room_id, thread_id, effective_count)
+        return _ThreadSummaryWriteResult(
+            event_id=event_id,
+            message_count=effective_count,
+            summary=normalized_summary,
+        )
+
+
 async def set_manual_thread_summary(
     client: nio.AsyncClient,
     room_id: str,
@@ -209,12 +267,7 @@ async def set_manual_thread_summary(
     re-summarization. ``pin=False`` writes the summary and releases any pin an
     earlier manual write established.
     """
-    if not (normalized_summary := normalize_thread_summary_text(summary)):
-        msg = "summary must be a non-empty string."
-        raise ThreadSummaryWriteError(msg)
-    if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
-        msg = f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
-        raise ThreadSummaryWriteError(msg)
+    normalized_summary = validate_thread_summary_text(summary)
 
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):

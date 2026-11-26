@@ -34,9 +34,9 @@ _MAX_PENDING_RECORDS = 1_024
 _MAX_STORE_BYTES = 16 * 1024 * 1024
 # https://spec.matrix.org/latest/appendices/#event-ids limits IDs to 255 UTF-8 bytes.
 _MAX_EVENT_ID_BYTES = 255
-# Six JSON escape bytes per event-ID byte plus a float timestamp fit in 2 KiB.
+# Six JSON escape bytes per event-ID byte for event_id and title_event_id plus a float timestamp fit in 4 KiB.
 # Reserve this for each pending row in addition to its current serialized size.
-_RECEIPT_RESERVE_BYTES = 2048
+_RECEIPT_RESERVE_BYTES = 4096
 _CAPACITY_ERROR = (
     "Matrix message send capacity is exhausted; retry existing keys or wait for completed receipts to expire."
 )
@@ -57,8 +57,10 @@ class _Intent(BaseModel):
     recipient_user_id: str | None
     thread_id: str | None
     starts_thread: bool
+    title: str | None = None
     event_id: str | None = None
     completed_at: float | None = None
+    title_event_id: str | None = None
 
 
 class _State(BaseModel):
@@ -109,6 +111,10 @@ def _read(path: Path, scope: tuple[str, str, str]) -> _State:
         or any(
             (intent.payload is None) != (intent.event_id is not None)
             or (intent.completed_at is not None) != (intent.event_id is not None)
+            or (
+                intent.title_event_id is not None
+                and (not intent.title_event_id or intent.event_id is None or intent.title is None)
+            )
             or not intent.sender_id
             or not intent.device_id
             or not intent.transaction_id
@@ -148,6 +154,7 @@ class MatrixMessageSendClaim:
         recipient_user_id: str | None,
         thread_id: str | None,
         starts_thread: bool,
+        title: str | None = None,
     ) -> None:
         """Persist exactly the payload Matrix will receive before attempting delivery."""
         context = self.context
@@ -165,6 +172,7 @@ class MatrixMessageSendClaim:
             recipient_user_id=recipient_user_id,
             thread_id=thread_id,
             starts_thread=starts_thread,
+            title=title,
         )
         reserved_size = (
             _serialized_size(self.state.model_dump(mode="json")) + _pending_count(self.state) * _RECEIPT_RESERVE_BYTES
@@ -205,6 +213,24 @@ class MatrixMessageSendClaim:
         # Re-publish even an existing receipt before reporting durable success.
         await run_blocking_until_complete(_write, self.path, self.state)
         return intent.event_id, intent.event_id if intent.starts_thread else intent.thread_id
+
+    async def record_title(self, title_event_id: str) -> None:
+        """Persist the initial thread title event ID on an already-delivered receipt."""
+        intent = self.intent
+        assert intent is not None
+        if intent.event_id is None or intent.title is None:
+            msg = "Cannot record a thread title receipt without a delivered titled send."
+            raise MatrixMessageIdempotencyError(msg)
+        if not title_event_id or len(title_event_id.encode("utf-8")) > _MAX_EVENT_ID_BYTES:
+            msg = "Matrix returned an invalid title event ID."
+            raise MatrixMessageIdempotencyError(msg)
+        previous_title_event_id = intent.title_event_id
+        intent.title_event_id = title_event_id
+        try:
+            await run_blocking_until_complete(_write, self.path, self.state)
+        except Exception:
+            intent.title_event_id = previous_title_event_id
+            raise
 
 
 @asynccontextmanager

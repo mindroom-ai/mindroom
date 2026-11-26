@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import nio
 import pytest
 
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.custom_tools import matrix_message_idempotency as durable
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.matrix.state import MatrixState
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from unittest.mock import AsyncMock
 
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("enforce_turn_authorization")]
@@ -556,3 +558,105 @@ async def test_pending_write_uncertainty_prevents_retry_transport(
     assert transport.attempts[0]["tx_id"] == transaction_id
     assert transport.attempts[0]["content"] == pending_rows[0]["payload"]
     assert result["event_id"] == f"${transaction_id}"
+
+
+async def test_keyed_new_thread_with_title_replays_identically_without_duplicate_title(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """A keyed titled new thread posts root and title once and replays identically."""
+    with tool_runtime_context(context):
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="Ship release",
+                new_thread=True,
+                title="🚀 Ship",
+                idempotency_key="titled-1",
+            ),
+        )
+        second = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="changed",
+                idempotency_key="titled-1",
+            ),
+        )
+    assert first["status"] == "ok"
+    assert first["title"] == "🚀 Ship"
+    assert first["title_event_id"]
+    assert second == first
+    assert len(transport.events) == len(transport.attempts) == 2
+    assert thread_summary_baselines.count(context.room_id, first["thread_id"]) == 1
+    notice = transport.attempts[1]["content"]
+    assert notice["msgtype"] == "m.notice"
+    assert notice[THREAD_SUMMARY_CONTENT_KEY]["summary"] == "🚀 Ship"
+    assert notice[THREAD_SUMMARY_CONTENT_KEY]["pinned"] is True
+
+
+async def test_keyed_new_thread_with_title_recovers_after_lost_root_response(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Retrying after a lost root response without repeating title still pins the stored title once."""
+    transport.lose_response = True
+    with tool_runtime_context(context):
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="Ship release",
+                new_thread=True,
+                title="🚀 Ship",
+                idempotency_key="titled-retry",
+            ),
+        )
+        assert first["status"] == "error"
+        assert len(transport.events) == 1
+        second = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="changed",
+                idempotency_key="titled-retry",
+            ),
+        )
+        third = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="changed again",
+                idempotency_key="titled-retry",
+            ),
+        )
+    assert second["status"] == "ok"
+    assert second["title"] == "🚀 Ship"
+    assert second["title_event_id"]
+    assert third == second
+    assert len(transport.events) == 2
+    assert len(transport.attempts) == 3
+    assert thread_summary_baselines.count(context.room_id, second["thread_id"]) == 1
+    assert transport.attempts[2]["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == "🚀 Ship"
+
+
+async def test_receipt_store_accepts_v1_without_title_fields_and_rejects_orphan_title_event_id(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+) -> None:
+    """Existing v1 receipts lacking title keys replay cleanly, while orphan title_event_id fails closed."""
+    with tool_runtime_context(context):
+        first = json.loads(await MatrixMessageTools().matrix_message(message="legacy", idempotency_key="v1-row"))
+        root = context.runtime_paths.control_state_root
+        assert root is not None
+        state_path = next((root / "matrix_message_sends").glob("*.json"))
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        row = next(iter(raw["sends"].values()))
+        row.pop("title", None)
+        row.pop("title_event_id", None)
+        state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        replayed = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="v1-row"))
+        assert replayed == first
+        assert "title" not in replayed
+        assert "title_event_id" not in replayed
+
+        row["title_event_id"] = "$orphan_title"
+        state_path.write_text(json.dumps(raw), encoding="utf-8")
+        corrupted = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="v1-row"))
+    assert corrupted["status"] == "error"
+    assert "invalid identity or delivery state" in corrupted["message"]
+    assert len(transport.events) == 1

@@ -143,7 +143,7 @@ async def test_byte_capacity_reserves_receipt_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A near-full scope reserves room for its pending receipt and rejects another key."""
-    monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 3100, raising=False)
+    monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 5200, raising=False)
     transport.lose_response = True
 
     async def maximum_receipt(**kwargs: Any) -> nio.RoomSendResponse:  # noqa: ANN401
@@ -166,7 +166,7 @@ async def test_byte_capacity_reserves_receipt_completion(
     assert completed["status"] == "ok"
     assert replay == completed
     assert len(transport.events) == 1
-    assert _state_path(context).stat().st_size <= 3100
+    assert _state_path(context).stat().st_size <= 5200
 
 
 async def test_oversized_payload_never_writes_or_sends(
@@ -175,7 +175,7 @@ async def test_oversized_payload_never_writes_or_sends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Actual JSON escaping counts toward the durable byte limit before send."""
-    monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 3100, raising=False)
+    monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 5200, raising=False)
     with tool_runtime_context(context):
         result = json.loads(await MatrixMessageTools().matrix_message(message="\u2603" * 600, idempotency_key="large"))
     assert result["status"] == "error"

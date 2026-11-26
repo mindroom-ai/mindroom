@@ -30,8 +30,13 @@ matrix_message(message="The checks passed.")
 # Ask another agent to respond in the current conversation.
 matrix_message(recipient="code", message="Review the failing check.")
 
-# Start a separate conversation; keep the returned thread_id.
-matrix_message(recipient="code", message="Investigate the regression.", new_thread=True)
+# Start a separate conversation with an immediately pinned title; keep the returned thread_id.
+matrix_message(
+    recipient="code",
+    message="Investigate the regression.",
+    new_thread=True,
+    title="Investigate checkout regression",
+)
 
 # Read or continue that conversation later.
 matrix_message(action="read", thread_id="$returned-root")
@@ -80,6 +85,7 @@ agents:
 Without `room_id`, the call targets the current room; without `thread_id`, `send` and `read` use the current conversation.
 Selecting another room never carries over the current thread.
 Pass `thread_id="room"` to target the room timeline, or `new_thread=True` on `send` to start a separate thread, even from inside a thread.
+Pass `title` alongside `new_thread=True` to pin a plain-text thread title immediately in the same call (returning `title` and `title_event_id`).
 `new_thread` and `thread_id` cannot be combined.
 Calls to other rooms follow the [room access rules](matrix-and-attachments.md#tool-runtime-context).
 
@@ -97,6 +103,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `room_id` | `str \| None` | `None` | Matrix room ID, alias, or configured room name; current room by default. |
 | `thread_id` | `str \| None` | `None` | Thread root ID, or `"room"` for the room timeline; current conversation by default. |
 | `new_thread` | `bool` | `False` | Start a separate thread; send only, cannot be combined with `thread_id`. |
+| `title` | `str \| None` | `None` | Optional plain-text thread title (max 300 chars) pinned immediately; `send` with `new_thread=True` only. |
 | `event_id` | `str \| None` | `None` | Target message ID; required for edit and react. |
 | `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, at most five. |
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |

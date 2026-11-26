@@ -24,6 +24,7 @@ from mindroom.custom_tools.attachments import (
     resolve_send_attachment,
     send_resolved_attachments,
 )
+from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageIdempotencyError
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.logging_config import get_logger
@@ -42,6 +43,7 @@ from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.thread_summary.notices import set_initial_thread_summary
 from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
@@ -195,6 +197,7 @@ class MatrixMessageOperations:
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
         starts_thread: bool = False,
+        title: str | None = None,
     ) -> str | None:
         latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
             room_id=room_id,
@@ -237,6 +240,7 @@ class MatrixMessageOperations:
                 recipient_user_id=recipient_user_id,
                 thread_id=thread_id,
                 starts_thread=starts_thread,
+                title=title,
             )
             event_id, _ = await send_claim.deliver()
             return event_id
@@ -286,6 +290,53 @@ class MatrixMessageOperations:
             return error
         return None
 
+    async def _apply_initial_title(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        title: str | None,
+        message_count: int,
+        known_latest_thread_event_id: str | None,
+        send_claim: MatrixMessageSendClaim | None = None,
+    ) -> dict[str, object]:
+        if title is None or thread_id is None:
+            return {}
+        if send_claim is not None and send_claim.intent is not None and send_claim.intent.title_event_id is not None:
+            return {"title": title, "title_event_id": send_claim.intent.title_event_id}
+        try:
+            written = await set_initial_thread_summary(
+                context.client,
+                room_id,
+                thread_id,
+                title,
+                message_count=message_count,
+                conversation_reader=context.conversation_reader,
+                known_latest_thread_event_id=known_latest_thread_event_id,
+                pin=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to set initial thread title",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return {"warning": f"Message sent, but failed to set thread title: {exc}"}
+        if send_claim is not None:
+            try:
+                await send_claim.record_title(written.event_id)
+            except (MatrixMessageIdempotencyError, OSError, ValueError) as exc:
+                logger.warning(
+                    "Failed to record initial thread title receipt",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    title_event_id=written.event_id,
+                    error=str(exc),
+                )
+        return {"title": written.summary, "title_event_id": written.event_id}
+
     async def _message_send(  # noqa: C901, PLR0911, PLR0912
         self,
         context: ToolRuntimeContext,
@@ -299,9 +350,19 @@ class MatrixMessageOperations:
         new_thread: bool,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
+        title: str | None = None,
     ) -> MatrixMessageOperationResult:
         if send_claim is not None and send_claim.intent is not None:
             event_id, resolved_thread_id = await send_claim.deliver()
+            title_fields = await self._apply_initial_title(
+                context,
+                room_id=room_id,
+                thread_id=resolved_thread_id,
+                title=send_claim.intent.title,
+                message_count=1,
+                known_latest_thread_event_id=event_id,
+                send_claim=send_claim,
+            )
             return self._result(
                 "ok",
                 action="send",
@@ -312,6 +373,7 @@ class MatrixMessageOperations:
                         event_id=event_id,
                     ),
                 ),
+                **title_fields,
             )
         text = (message or "").strip() or None
         if text is None and not attachments:
@@ -374,7 +436,8 @@ class MatrixMessageOperations:
             )
             if error is not None:
                 return self._result("error", action="send", message=error, **asdict(state))
-        if text is not None or recipient_user_id is not None:
+        sent_text = text is not None or recipient_user_id is not None
+        if sent_text:
             with _policy_approved(contact_verdict):
                 state.event_id = await self._send_matrix_text(
                     context,
@@ -390,6 +453,7 @@ class MatrixMessageOperations:
                     known_latest_thread_event_id=(
                         state.attachment_event_ids[-1] if state.attachment_event_ids else None
                     ),
+                    title=title,
                 )
             if state.event_id is None:
                 return self._result(
@@ -412,7 +476,30 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
+        title_fields: dict[str, object] = {}
+        if title is not None and state.thread_id is not None:
+            delivered_count = int(sent_text) + len(state.attachment_event_ids)
+            latest_event_id = (
+                state.attachment_event_ids[-1]
+                if recipient_user_id is None and state.attachment_event_ids
+                else (state.event_id or state.attachment_event_ids[-1])
+            )
+            title_fields = await self._apply_initial_title(
+                context,
+                room_id=room_id,
+                thread_id=state.thread_id,
+                title=title,
+                message_count=delivered_count,
+                known_latest_thread_event_id=latest_event_id,
+                send_claim=send_claim,
+            )
+        return self._result(
+            "ok",
+            action="send",
+            **asdict(state),
+            **_contact_policy_fields(contact_verdict, "Sent"),
+            **title_fields,
+        )
 
     async def _message_react(
         self,
@@ -662,6 +749,7 @@ class MatrixMessageOperations:
         read_limit: int,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
+        title: str | None = None,
     ) -> MatrixMessageOperationResult:
         """Dispatch one authorized action with an already resolved conversation."""
         if action == "send":
@@ -676,6 +764,7 @@ class MatrixMessageOperations:
                 recipient_user_id=recipient_user_id,
                 room_mode=room_mode,
                 new_thread=new_thread,
+                title=title,
             )
         if action == "read":
             return await self._message_read(
