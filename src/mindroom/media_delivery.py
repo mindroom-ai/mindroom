@@ -14,6 +14,13 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.llm.image_encoding import (
+    MAX_IMAGE_DECODED_PIXELS,
+    MAX_IMAGE_EDGE,
+    MAX_IMAGE_SOURCE_BYTES,
+    MAX_INLINE_IMAGE_BYTES,
+    encode_png_or_jpeg,
+)
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Image
 from mindroom.tool_system.tool_function import ToolValue
 
@@ -25,12 +32,12 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.file_access import AuthorizedFile
 
-MAX_SOURCE_BYTES = 20 * 1024 * 1024
-_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_SOURCE_BYTES = MAX_IMAGE_SOURCE_BYTES
+_MAX_IMAGE_BYTES = MAX_INLINE_IMAGE_BYTES
 # Untrusted images decode only in these formats, so Pillow never hands them to an external renderer such as Ghostscript.
 SUPPORTED_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
-MAX_DECODED_PIXELS = 40_000_000
-_MAX_EDGE = 2048
+MAX_DECODED_PIXELS = MAX_IMAGE_DECODED_PIXELS
+_MAX_EDGE = MAX_IMAGE_EDGE
 
 
 def media_error(message: str, *, metadata: dict[str, object]) -> ToolValue:
@@ -39,16 +46,7 @@ def media_error(message: str, *, metadata: dict[str, object]) -> ToolValue:
 
 
 def _encode_image(image: PillowImage) -> tuple[bytes, str]:
-    if image.mode == "CMYK":
-        image = image.convert("RGB")
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    data = output.getvalue()
-    if len(data) <= _MAX_IMAGE_BYTES or "A" in image.getbands() or "transparency" in image.info:
-        return data, "image/png"
-    output = io.BytesIO()
-    image.convert("RGB").save(output, format="JPEG", quality=85)
-    return output.getvalue(), "image/jpeg"
+    return encode_png_or_jpeg(image, max_bytes=_MAX_IMAGE_BYTES)
 
 
 def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolValue:  # noqa: PLR0911
