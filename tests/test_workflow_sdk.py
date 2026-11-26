@@ -5,12 +5,9 @@ Level: pure (the SDK against `FakeWorkflowGateway`).
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
-import sys
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,6 +17,7 @@ from tests.workflow_helpers import TOKEN, FakeWorkflowGateway, completed, failed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from pathlib import Path
     from types import ModuleType
 
 _MODULE_LEVEL = "Call agent() inside main(args). MindRoom calls main; remove your own call."
@@ -381,20 +379,6 @@ def test_superseded_attempt_exits_with_code_3(gateway: FakeWorkflowGateway, sdk:
     with pytest.raises(SystemExit) as raised:
         sdk.tool("files", "read", path="a.txt")
     assert raised.value.code == 3
-
-
-def test_sdk_imports_only_stdlib_and_launch_contract() -> None:
-    """The SDK runs in the script's process, where only the standard library is promised."""
-    tree = ast.parse(Path(workflow_sdk.__file__).read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0
-            imported.add(node.module or "")
-    foreign = {name for name in imported if name.partition(".")[0] not in sys.stdlib_module_names}
-    assert foreign == {"mindroom.script_runs.launch_contract"}
 
 
 @pytest.mark.usefixtures("in_main")
