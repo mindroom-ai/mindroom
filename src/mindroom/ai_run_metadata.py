@@ -158,6 +158,15 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
+def ai_run_error_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return the structured ``io.mindroom.ai_run["error"]`` payload from collected run metadata, if present."""
+    if run_metadata is None:
+        return None
+    ai_run_metadata = run_metadata.get(AI_RUN_METADATA_KEY)
+    error = ai_run_metadata.get("error") if isinstance(ai_run_metadata, dict) else None
+    return dict(error) if isinstance(error, dict) else None
+
+
 def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> float | None:
     """Return the USD cost a reply's AI run metadata reports, or None when the cost is unknown.
 

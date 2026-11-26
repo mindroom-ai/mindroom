@@ -1165,6 +1165,12 @@ async def test_terminal_notes_always_carry_terminal_ai_run_status(
         "version": 1,
         "status": "error",
         "model": model_payload(turn_error.bot.config, "default"),
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "boom",
+            "retryable": False,
+        },
     }
 
     # (c) Post-crash restart owed note (_flush_owed_write with write.handle=None)
@@ -1455,6 +1461,128 @@ async def test_approval_failure_note_prefers_live_span_model_over_stale_continua
             "version": 1,
             "status": "error",
             "model": model_payload(turn.bot.config, "large"),
+        }
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_after_tool_approval_emits_structured_ai_run_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """A provider exception during an approval resume emits structured io.mindroom.ai_run['error'] and friendly text."""
+    del echo_tool
+    secret = "sk-" + "live" + "-secret1234567890"
+    resume_gate = asyncio.Event()
+
+    async def fail_with_provider_error() -> None:
+        await resume_gate.wait()
+        message = f"upstream gateway failed with {secret}"
+        raise ProviderUnavailable(message, provider="openrouter", status_code=503)
+
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [
+                calls(tool_call("echo", "call-1", text="hi")),
+                [Await(fail_with_provider_error)],
+            ],
+        },
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+
+        resumed_writes = await _approve_and_resume(turn, continuation, resume_gate)
+        assert resumed_writes
+        final_write = resumed_writes[-1]
+        assert _stream_status(final_write) == STREAM_STATUS_ERROR
+        assert _ai_run(final_write) == {
+            "version": 1,
+            "status": "error",
+            "model": model_payload(turn.bot.config, "default"),
+            "error": {
+                "kind": "provider_unavailable",
+                "title": "OpenRouter unavailable (503)",
+                "summary": "Primary could not complete the reply. Try again shortly.",
+                "detail": "upstream gateway failed with [redacted]",
+                "status_code": 503,
+                "provider": "OpenRouter",
+                "retryable": True,
+                "action": "continue",
+            },
+        }
+        visible_body = str(_visible_content(final_write).get("body", ""))
+        assert (
+            "⚠️ OpenRouter unavailable (503) — Primary could not complete the reply. Try again shortly." in visible_body
+        )
+        assert secret not in visible_body
+        assert "***redacted***" not in visible_body
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("note_kind", "expected_stream_status", "expected_ai_run_status"),
+    [
+        pytest.param(NoteKind.CANCELLED, STREAM_STATUS_CANCELLED, "cancelled", id="cancelled"),
+        pytest.param(NoteKind.RESTART, STREAM_STATUS_ERROR, "error", id="restart"),
+    ],
+)
+async def test_approval_cancellation_and_restart_notes_omit_structured_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+    note_kind: NoteKind,
+    expected_stream_status: str,
+    expected_ai_run_status: str,
+) -> None:
+    """Cancellation and restart approval notes never emit io.mindroom.ai_run['error']."""
+    del echo_tool
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        assert await gateway.write_approval_failure_note(
+            continuation.response_event_id,
+            approval_id=continuation.approval_id,
+            note=note_kind,
+            text="",
+            target=continuation_target(continuation),
+            model_name=continuation.runtime_model_name,
+            error_info={"kind": "runtime_error", "title": "Reply failed", "summary": "ignored", "retryable": False},
+        )
+        note_write = turn.homeserver.writes[-1]
+        assert _stream_status(note_write) == expected_stream_status
+        assert _ai_run(note_write) == {
+            "version": 1,
+            "status": expected_ai_run_status,
+            "model": model_payload(turn.bot.config, "default"),
         }
     finally:
         await shutdown_approval_runtime()

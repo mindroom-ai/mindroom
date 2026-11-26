@@ -79,6 +79,7 @@ class ApprovalFailure:
 
     kind: ApprovalFailureKind
     detail: str | None = None
+    error_info: Mapping[str, Any] | None = field(default=None, compare=False)
 
     @property
     def reason(self) -> str:

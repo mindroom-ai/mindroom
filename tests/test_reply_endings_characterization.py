@@ -1735,7 +1735,7 @@ async def test_an_unexpected_agent_turn_error_answers_with_redacted_friendly_tex
 
     await turn.runner.generate_response(_plain_request(_target()))
 
-    shown = "⚠️ attempt setup broke with api_key=***redacted***"
+    shown = "⚠️ attempt setup broke with api_key=[redacted]"
     assert all(secret not in body for body in turn.homeserver.bodies)
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.COMPLETED

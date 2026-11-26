@@ -108,10 +108,20 @@ async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_str
     result = await _respond(config)
     chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
 
+    expected_error = {
+        "kind": "provider_unavailable",
+        "title": "scripted-model returned an empty response",
+        "summary": EMPTY_RESPONSE_NOTICE,
+        "provider": "Synthetic",
+        "retryable": True,
+        "action": "retry",
+    }
     assert result.text == EMPTY_RESPONSE_NOTICE
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert result.run_metadata[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert result.run_metadata[AI_RUN_METADATA_KEY]["error"] == expected_error
     assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert streamed[AI_RUN_METADATA_KEY]["error"] == expected_error
 
 
 @pytest.mark.asyncio

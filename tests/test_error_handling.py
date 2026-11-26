@@ -7,9 +7,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom import constants
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.error_handling import (
     ReplyErrorInfo,
     describe_reply_error,
+    empty_response_error_info,
     get_user_friendly_error_message,
     minimal_mode_failure_message,
     model_error_labels,
@@ -59,7 +61,10 @@ def test_an_error_reply_redacts_secrets() -> None:
     info = describe_reply_error(error)
 
     assert message.startswith("[assistant] ❌ Authentication failed (OpenAI Chat): ")
-    assert "***redacted***" in message
+    assert "[redacted]" in message
+    assert "***redacted***" not in message
+    assert "[redacted]" in info.summary
+    assert "***redacted***" not in str(info.to_wire())
     assert "sk-test-secret" not in message
     assert "sk-test-secret" not in str(info.to_wire())
     assert info.detail is None
@@ -451,7 +456,8 @@ def test_describe_reply_error_covers_every_kind_and_omits_empty_wire_fields() ->
     secret_unavailable = ProviderUnavailable("gateway rejected sk-live-secret", provider="OpenRouter", status_code=503)
     wire = describe_reply_error(secret_unavailable, model_label="Neon").to_wire()
     assert "sk-live-secret" not in str(wire)
-    assert "***redacted***" in wire["detail"]
+    assert "[redacted]" in wire["detail"]
+    assert "***redacted***" not in wire["detail"]
 
 
 def test_include_agent_prefix_false_omits_prefix_while_preserving_structured_logging() -> None:
@@ -522,8 +528,11 @@ def test_model_safeguard_refusal_redacts_provider_code(secret_code: str, leaked_
     assert leaked_secret not in (info.detail or "")
     assert leaked_secret not in info.plain_text
     assert leaked_secret not in str(wire)
-    assert "***redacted***" in info.summary
-    assert "***redacted***" in wire["code"]
+    assert "[redacted]" in info.summary
+    assert "[redacted]" in wire["code"]
+    assert "***redacted***" not in info.summary
+    assert "***redacted***" not in wire["code"]
+    assert "***redacted***" not in info.plain_text
 
 
 def test_huge_provider_error_is_bounded_for_matrix_edit_delivery(tmp_path: Path) -> None:
@@ -564,3 +573,30 @@ def test_huge_provider_error_is_bounded_for_matrix_edit_delivery(tmp_path: Path)
         "Open the MindRoom dashboard (https://42.mindroom.chat), choose Connect your AI provider, "
         "paste your key, then send your message again."
     )
+
+
+def test_empty_response_error_info_matches_notice_and_handles_missing_labels() -> None:
+    """Exhausted empty responses build retryable structured metadata matching EMPTY_RESPONSE_NOTICE."""
+    with_labels = empty_response_error_info(
+        summary=EMPTY_RESPONSE_NOTICE,
+        model_label="Neon",
+        provider="openrouter",
+    )
+    assert with_labels == {
+        "kind": "provider_unavailable",
+        "title": "Neon returned an empty response",
+        "summary": EMPTY_RESPONSE_NOTICE,
+        "provider": "OpenRouter",
+        "retryable": True,
+        "action": "retry",
+    }
+    assert not with_labels["summary"].startswith("⚠️")
+
+    without_labels = empty_response_error_info(summary=f"⚠️ {EMPTY_RESPONSE_NOTICE}")
+    assert without_labels == {
+        "kind": "provider_unavailable",
+        "title": "Empty response",
+        "summary": EMPTY_RESPONSE_NOTICE,
+        "retryable": True,
+        "action": "retry",
+    }

@@ -1193,7 +1193,18 @@ class DeliveryGateway:
             shown = _with_note(_shown_before(reply, handle), row_note)
             # An interruption's note keeps its sources pending, yet shows as a failure.
             rendered = render(shown, state=ReplyState.FAILED if row_state is ReplyState.ACTIVE else row_state)
-            return _NoteRow(reply, terminal_write(handle, shown, state=row_state), rendered, target)
+            row_error_info = (
+                ending.error_info
+                if not stopped and isinstance(ending, Failed) and row_state is ReplyState.FAILED
+                else None
+            )
+            return _NoteRow(
+                reply,
+                terminal_write(handle, shown, state=row_state),
+                rendered,
+                target,
+                error_info=row_error_info,
+            )
 
         sent = await self._send_note(compose)
         reply, rendered, delivered = sent.row.reply, sent.row.rendered, sent.event_id
@@ -1380,6 +1391,7 @@ class DeliveryGateway:
         text: str,
         target: MessageTarget,
         model_name: str | None = None,
+        error_info: Mapping[str, Any] | None = None,
     ) -> bool:
         """Show a failed approval's note on the reply it paused; ``text`` is an error note's.
 
@@ -1424,7 +1436,14 @@ class DeliveryGateway:
                 if live_model is not None
                 else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
             )
-            return _NoteRow(reply, write, render(shown, state=state), target, model=model)
+            return _NoteRow(
+                reply,
+                write,
+                render(shown, state=state),
+                target,
+                model=model,
+                error_info=error_info if shown_note is NoteKind.ERROR else None,
+            )
 
         sent = await self._send_note(compose)
         if isinstance(sent, bool):

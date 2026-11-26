@@ -22,7 +22,7 @@ from mindroom.llm.errors import (
 from mindroom.logging_config import get_logger
 from mindroom.origins import configured_public_url
 from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
-from mindroom.redaction import redact_sensitive_text
+from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.tool_system.runtime_context import current_execution_identity
 
 if TYPE_CHECKING:
@@ -38,6 +38,7 @@ _STALL_DURATION_RE = re.compile(r"\bfor\s+(\d+(?:\.\d+)?)s\b")
 _MAX_ERROR_SUMMARY_CHARS = 1_000
 _MAX_ERROR_DETAIL_CHARS = 2_000
 _MAX_ERROR_CODE_CHARS = 200
+_USER_REDACTED = "[redacted]"
 
 type ReplyErrorKind = Literal[
     "safeguard_refusal",
@@ -117,6 +118,14 @@ class MinimalModeUnavailableError(RuntimeError):
     """Minimal mode cannot serve a turn; the message already names its recovery command."""
 
 
+class StructuredReplyError(RuntimeError):
+    """A reply failure that already carries structured ``io.mindroom.ai_run["error"]`` metadata."""
+
+    def __init__(self, message: str, *, error_info: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.error_info: dict[str, Any] = dict(error_info)
+
+
 def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool) -> str:
     """Include how to recover from unavailable minimal mode: the mode command, or a standard subagent."""
     if subagent:
@@ -151,11 +160,35 @@ def _stall_duration_label(safe_error: str) -> str | None:
     return f"{seconds:g}s"
 
 
+def _redact_user_error_text(text: str, *, max_length: int) -> str:
+    """Redact sensitive text and normalize ``***redacted***`` to Markdown-neutral ``[redacted]``."""
+    return redact_sensitive_text(text, max_length=max_length).replace(REDACTED, _USER_REDACTED)
+
+
 def _truncate_error_text(text: str, max_chars: int) -> str:
     """Bound exception-derived text after redaction so wire error metadata stays compact."""
     if len(text) <= max_chars:
         return text
     return f"{text[: max_chars - 1].rstrip()}…"
+
+
+def empty_response_error_info(
+    *,
+    summary: str,
+    model_label: str | None = None,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Return structured ``io.mindroom.ai_run["error"]`` metadata for an exhausted empty model response."""
+    resolved_model = model_label.strip() if model_label and model_label.strip() else None
+    resolved_provider = _display_provider_name(provider)
+    return ReplyErrorInfo(
+        kind="provider_unavailable",
+        title=f"{resolved_model} returned an empty response" if resolved_model else "Empty response",
+        summary=summary.removeprefix("⚠️ ").strip(),
+        provider=resolved_provider,
+        retryable=True,
+        action="retry",
+    ).to_wire()
 
 
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error: str) -> str:
@@ -258,7 +291,7 @@ def describe_reply_error(
     wording where its adapter raised it, and any other error shows its own text, except that a timeout says so.
     """
     raw_error = failure_text(error)
-    safe_error = redact_sensitive_text(raw_error, max_length=_MAX_ERROR_DETAIL_CHARS)
+    safe_error = _redact_user_error_text(raw_error, max_length=_MAX_ERROR_DETAIL_CHARS)
     safe_summary = _truncate_error_text(safe_error, _MAX_ERROR_SUMMARY_CHARS)
     provider_error = error if isinstance(error, ProviderError) else None
     resolved_model = model_label.strip() if model_label and model_label.strip() else None
@@ -267,7 +300,7 @@ def describe_reply_error(
     resolved_provider = _display_provider_name(raw_provider)
     status_code = provider_error.status_code if provider_error is not None else None
     code = (
-        redact_sensitive_text(provider_error.code, max_length=_MAX_ERROR_CODE_CHARS)
+        _redact_user_error_text(provider_error.code, max_length=_MAX_ERROR_CODE_CHARS)
         if provider_error is not None and provider_error.code
         else None
     )
@@ -276,7 +309,7 @@ def describe_reply_error(
     action: ReplyErrorAction | None = None
     if isinstance(error, ModelSafeguardRefusal):
         safe_provider_code = (
-            redact_sensitive_text(error.provider_code, max_length=_MAX_ERROR_CODE_CHARS)
+            _redact_user_error_text(error.provider_code, max_length=_MAX_ERROR_CODE_CHARS)
             if error.provider_code
             else None
         )

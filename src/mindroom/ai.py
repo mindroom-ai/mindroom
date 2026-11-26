@@ -41,7 +41,7 @@ from mindroom.delegation.lifecycle import (
     running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
-from mindroom.error_handling import log_reply_error, model_error_labels
+from mindroom.error_handling import empty_response_error_info, log_reply_error, model_error_labels
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.failure_text import failure_text
 from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
@@ -1451,6 +1451,25 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         )
         return info.plain_text, info.to_wire()
 
+    def empty_reply_error_info(
+        *,
+        model_name: str | None,
+        record: AnyRunRecord,
+    ) -> dict[str, Any]:
+        active = sinks.active_model() if sinks.active_model is not None else None
+        model_label, provider = _agent_model_labels(
+            config,
+            model_name,
+            record,
+            active_model=active,
+            fallback_model_name=ctx.active_model_name,
+        )
+        return empty_response_error_info(
+            summary=EMPTY_RESPONSE_NOTICE,
+            model_label=model_label,
+            provider=provider,
+        )
+
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
@@ -1572,6 +1591,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             yield TextDelta(state.assistant_text[len(shown) :])
         completed_without_output = _stream_completed_without_visible_output(state, record)
         final_status = RunStatus.error if completed_without_output else RunStatus.completed
+        empty_error_info = (
+            empty_reply_error_info(model_name=prepared_run.runtime_model_name, record=record)
+            if completed_without_output
+            else None
+        )
         final_text = record.content or ""
         yield AttemptResolved(
             CompletedAttempt(
@@ -1592,6 +1616,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     final_status,
                     run_id=record.run_id,
                     prior_usage=tuple(run.prior_usage.values()),
+                    error_info=empty_error_info,
                 ),
             ),
         )
