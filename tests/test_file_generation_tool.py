@@ -99,3 +99,24 @@ def test_file_generation_refuses_output_directory_outside_the_workspace(tmp_path
     """An authored output directory must stay inside the workspace."""
     with pytest.raises(ValueError, match="inside the agent workspace"):
         file_generation_tools()(tool_output_workspace_root=tmp_path, output_directory=output_directory)
+
+
+def test_file_generation_rejects_bare_dict_for_csv_without_touching_existing_file(tmp_path: Path) -> None:
+    """Unsupported CSV payloads fail before saving so an existing CSV on disk is never overwritten."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "report.csv"
+    existing.write_text("name\nGrace\n", encoding="utf-8")
+    toolkit = file_generation_tools()(tool_output_workspace_root=workspace, save_files=True)
+
+    rejected = toolkit.generate_file(format="csv", content={"name": "Ada"}, filename="report.csv")
+
+    assert not rejected.files
+    assert "Error generating csv file:" in rejected.content
+    assert "CSV content must be" in rejected.content
+    assert existing.read_text(encoding="utf-8") == "name\nGrace\n"
+
+    valid = toolkit.generate_file(format="csv", content=[{"name": "Ada"}], filename="rows.csv")
+    assert len(valid.files) == 1
+    assert b"name" in valid.files[0].content
+    assert b"Ada" in valid.files[0].content

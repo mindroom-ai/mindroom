@@ -30,14 +30,19 @@ _CHART_META: dict[str, tuple[str, str, str, str]] = {
 
 def _normalize_series_data(data: Any) -> dict[str, float]:  # noqa: ANN401
     """Normalize dict, list of dicts, or list of numbers into label -> float pairs."""
+    if data is None:
+        msg = "data is required for bar, line, and pie charts"
+        raise ValueError(msg)
     if isinstance(data, str):
         with suppress(json.JSONDecodeError):
             data = json.loads(data)
     if isinstance(data, dict):
-        return {str(key): float(value) if isinstance(value, (int, float)) else 0.0 for key, value in data.items()}
-    if isinstance(data, list) and data:
+        result = {str(key): float(value) if isinstance(value, (int, float)) else 0.0 for key, value in data.items()}
+        if result:
+            return result
+    elif isinstance(data, list) and data:
         if isinstance(data[0], dict):
-            result: dict[str, float] = {}
+            result = {}
             for item in data:
                 if isinstance(item, dict) and len(item) >= 2:
                     keys = list(item.keys())
@@ -50,7 +55,8 @@ def _normalize_series_data(data: Any) -> dict[str, float]:  # noqa: ANN401
                 f"Item {idx + 1}": float(value) if isinstance(value, (int, float)) else 0.0
                 for idx, value in enumerate(data)
             }
-    return {"Data": 1.0}
+    msg = "data must be a non-empty dict, list, or JSON string"
+    raise ValueError(msg)
 
 
 def _extract_scatter_xy(
@@ -171,7 +177,16 @@ class VisualizationTools(Toolkit):
             filename: Optional plain filename (no directory components); defaults to `<type>_<n>.png`.
 
         """
-        report_type, default_title, default_x, default_y = _CHART_META[chart_type]
+        chart_meta = _CHART_META.get(chart_type)
+        if chart_meta is None:
+            return json.dumps(
+                {
+                    "chart_type": str(chart_type),
+                    "error": f"Unsupported chart_type: {chart_type}",
+                    "status": "error",
+                },
+            )
+        report_type, default_title, default_x, default_y = chart_meta
         if chart_type not in self._enabled_types:
             return json.dumps(
                 {
@@ -192,6 +207,10 @@ class VisualizationTools(Toolkit):
                 msg = "Saving charts requires an agent workspace"
                 raise ValueError(msg)  # noqa: TRY301
 
+            series = _normalize_series_data(data) if chart_type in {"bar", "line", "pie"} else None
+            scatter_xy = _extract_scatter_xy(data, x_data, y_data) if chart_type == "scatter" else None
+            histogram_values = _extract_histogram_values(data) if chart_type == "histogram" else None
+
             with (
                 open_directory_within_root(self._workspace_root, self._relative_output_dir, create=True) as directory,
                 tempfile.TemporaryDirectory(prefix="mindroom-visualization-") as staging,
@@ -200,9 +219,9 @@ class VisualizationTools(Toolkit):
                 staging_path = Path(staging, target_name)
                 extra_meta = self._draw_chart(
                     chart_type=chart_type,
-                    data=data,
-                    x_data=x_data,
-                    y_data=y_data,
+                    series=series,
+                    scatter_xy=scatter_xy,
+                    histogram_values=histogram_values,
                     title=resolved_title,
                     x_label=resolved_x,
                     y_label=resolved_y,
@@ -231,9 +250,9 @@ class VisualizationTools(Toolkit):
         self,
         *,
         chart_type: _ChartType,
-        data: Any,  # noqa: ANN401
-        x_data: list[int | float] | None,
-        y_data: list[int | float] | None,
+        series: dict[str, float] | None,
+        scatter_xy: tuple[list[int | float], list[int | float]] | None,
+        histogram_values: list[float] | None,
         title: str,
         x_label: str,
         y_label: str,
@@ -245,8 +264,7 @@ class VisualizationTools(Toolkit):
         figsize = (10, 8) if chart_type == "pie" else (10, 6)
         fig, ax = plt.subplots(figsize=figsize)
         try:
-            if chart_type in {"bar", "line", "pie"}:
-                series = _normalize_series_data(data)
+            if series is not None:
                 labels = list(series.keys())
                 values = list(series.values())
                 if chart_type == "bar":
@@ -265,8 +283,8 @@ class VisualizationTools(Toolkit):
                     ax.axis("equal")
                 ax.set_title(title)
                 meta: dict[str, Any] = {"data_points": len(series)}
-            elif chart_type == "scatter":
-                xs, ys = _extract_scatter_xy(data, x_data, y_data)
+            elif scatter_xy is not None:
+                xs, ys = scatter_xy
                 ax.scatter(xs, ys, alpha=0.7, s=50)
                 ax.set_title(title)
                 ax.set_xlabel(x_label)
@@ -274,13 +292,13 @@ class VisualizationTools(Toolkit):
                 ax.grid(True, alpha=0.3)
                 meta = {"data_points": len(xs)}
             else:
-                numeric_values = _extract_histogram_values(data)
-                ax.hist(numeric_values, bins=bins, alpha=0.7, edgecolor="black")
+                assert histogram_values is not None
+                ax.hist(histogram_values, bins=bins, alpha=0.7, edgecolor="black")
                 ax.set_title(title)
                 ax.set_xlabel(x_label)
                 ax.set_ylabel(y_label)
                 ax.grid(True, alpha=0.3)
-                meta = {"data_points": len(numeric_values), "bins": bins}
+                meta = {"data_points": len(histogram_values), "bins": bins}
 
             fig.tight_layout()
             fig.savefig(output_path, dpi=300, bbox_inches="tight")

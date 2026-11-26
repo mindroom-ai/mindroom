@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
@@ -169,3 +169,53 @@ async def test_visualization_scatter_dict_series_passes_validated_tool_entrypoin
     assert payload["chart_type"] == "scatter_plot"
     assert payload["data_points"] == 2
     assert (workspace / "charts" / "scatter_valid.png").read_bytes().startswith(_PNG_SIGNATURE)
+
+
+@pytest.mark.parametrize("chart_type", ["bar", "line", "pie"])
+@pytest.mark.parametrize("bad_data", [None, {}, [], ""])
+def test_visualization_requires_non_empty_data_for_series_charts(
+    tmp_path: Path,
+    chart_type: Literal["bar", "line", "pie"],
+    bad_data: dict[str, int | float | list[int | float]] | list[object] | str | None,
+) -> None:
+    """Bar, line, and pie charts reject missing or empty data without fabricating or saving a chart."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    toolkit = visualization_tools()(tool_output_workspace_root=workspace)
+
+    raw = toolkit.create_chart(chart_type) if bad_data is None else toolkit.create_chart(chart_type, data=bad_data)
+    result = json.loads(raw)
+
+    assert result["status"] == "error"
+    assert "data" in result["error"].lower()
+    assert not (workspace / "charts").exists()
+
+
+def test_visualization_scatter_still_works_without_data_when_xy_supplied(tmp_path: Path) -> None:
+    """Scatter charts keep data optional when x_data and y_data are provided."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    toolkit = visualization_tools()(tool_output_workspace_root=workspace)
+
+    result = json.loads(toolkit.create_chart("scatter", x_data=[1, 2], y_data=[3, 4], filename="xy.png"))
+
+    assert result["status"] == "success"
+    assert result["data_points"] == 2
+    assert (workspace / "charts" / "xy.png").read_bytes().startswith(_PNG_SIGNATURE)
+
+
+def test_visualization_rejects_invalid_chart_type_with_json_error(tmp_path: Path) -> None:
+    """Unknown chart types return an error JSON payload instead of raising KeyError."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    toolkit = visualization_tools()(tool_output_workspace_root=workspace)
+    invalid_type: Any = "radar"
+
+    result = json.loads(toolkit.create_chart(invalid_type, data={"a": 1}))
+
+    assert result == {
+        "chart_type": "radar",
+        "error": "Unsupported chart_type: radar",
+        "status": "error",
+    }
+    assert not (workspace / "charts").exists()

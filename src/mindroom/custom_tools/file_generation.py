@@ -104,7 +104,10 @@ def _render_json(content: Any) -> str:  # noqa: ANN401
 def _render_csv(content: Any, headers: list[str] | None) -> str:  # noqa: ANN401
     if isinstance(content, str):
         return content
-    if not isinstance(content, list) or not content:
+    if not isinstance(content, list):
+        msg = "CSV content must be a CSV string, list of rows, or list of dicts"
+        raise TypeError(msg)
+    if not content:
         return ""
     output = io.StringIO()
     writer = csv.writer(output)
@@ -116,15 +119,10 @@ def _render_csv(content: Any, headers: list[str] | None) -> str:  # noqa: ANN401
                 writer.writerow([row.get(field, "") for field in fieldnames])
             else:
                 writer.writerow([str(row), *([""] * (len(fieldnames) - 1))])
-    elif isinstance(content[0], list):
-        if headers:
-            writer.writerow(headers)
-        writer.writerows(content)
     else:
         if headers:
             writer.writerow(headers)
-        for item in content:
-            writer.writerow([str(item)])
+        writer.writerows(content if isinstance(content[0], list) else ([str(item)] for item in content))
     return output.getvalue()
 
 

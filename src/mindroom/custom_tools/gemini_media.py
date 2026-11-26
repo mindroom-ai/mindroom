@@ -58,9 +58,8 @@ class GeminiTools(Toolkit):
             msg = "GOOGLE_API_KEY not set. Please provide api_key or set the environment variable."
             raise ValueError(msg)
 
-        client_params: dict[str, Any] = {}
+        client_params: dict[str, Any] = {"vertexai": self.vertexai}
         if self.vertexai:
-            client_params["vertexai"] = True
             client_params["project"] = self.project_id
             client_params["location"] = self.location
         else:

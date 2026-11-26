@@ -328,7 +328,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of consolidated toolkits (scheduler, searxng, memory, todo, file_generation, visualization, lumalabs, unsplash).
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits (scheduler, searxng, memory, todo, file_generation, visualization, unsplash).
 # Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
 #   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
 #   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.

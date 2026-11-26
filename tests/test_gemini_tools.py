@@ -162,3 +162,59 @@ def test_gemini_explicit_vertexai_false_overrides_env_and_requires_api_key(
             runs_in_worker=False,
             worker_target=None,
         )
+
+
+def test_gemini_explicit_vertexai_false_routes_to_gemini_api_despite_process_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit vertexai=False must pass vertexai=False to genai.Client so requests hit Gemini API, not Vertex."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        part = {"inlineData": {"data": base64.b64encode(b"image-bytes").decode(), "mimeType": "image/png"}}
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [part]}}]})
+
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    real_client = gemini_media.Client
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        monkeypatch.setattr(
+            gemini_media,
+            "Client",
+            lambda **kwargs: real_client(**kwargs, http_options=types.HttpOptions(httpx_client=http_client)),
+        )
+        (tmp_path / "config.yaml").write_text("agents: {}\n")
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={
+                "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1",
+                "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                "GOOGLE_CLOUD_PROJECT": "demo-project",
+                "GOOGLE_CLOUD_LOCATION": "us-central1",
+                "GOOGLE_API_KEY": "test-key",
+            },
+        )
+
+        toolkit = get_tool_by_name(
+            "gemini",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            tool_config_overrides={"vertexai": False},
+            runs_in_worker=False,
+            worker_target=None,
+        )
+
+        assert isinstance(toolkit, GeminiTools)
+        assert toolkit.vertexai is False
+        assert toolkit.client._api_client.vertexai is False
+        result = toolkit.generate_image("A geometric Matrix room")
+
+    assert len(result.images) == 1
+    assert result.images[0].content == b"image-bytes"
+    assert [request.url.host for request in sent] == ["generativelanguage.googleapis.com"]
+    assert [request.url.path for request in sent] == [f"/v1beta/models/{toolkit.image_model}:generateContent"]
