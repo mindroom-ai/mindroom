@@ -196,7 +196,7 @@ eleven_labs = [
 email = []
 email_invite = []
 exa = [
-  "exa-py>=2.29.0",
+  "exa-py>=2.29",
 ]
 external_trigger_manager = []
 fal = [
