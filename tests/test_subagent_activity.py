@@ -247,20 +247,32 @@ def test_a_call_announced_again_keeps_its_one_row() -> None:
 def test_a_tool_row_keeps_when_its_call_first_started() -> None:
     """A row carries when its call started, which announcing it again on resume and completing it keep.
 
-    A completion with no row of its own appends a row that names no start.
+    Reusing a completed call's ID starts anew with the later start timestamp, and a completion with no row of its own
+    appends a row that names no start.
     """
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=100.0)
+    assert a.tool_progress("c1", "step 1") is True
     assert a.snapshot().items[0].started_at == 100.0
     a.add_text("Waiting")
     a.tool_started(ToolStarted(call=_call("c1")), now=200.0)
-    assert a.snapshot().items[0].started_at == 100.0
-    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
-    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
-    assert [(i.tool_call_id, i.state, i.started_at) for i in a.snapshot().items if i.kind == "tool"] == [
-        ("c1", "done", 100.0),
-        ("c9", "done", None),
+    assert (a.snapshot().items[0].started_at, a.snapshot().items[0].progress) == (100.0, "step 1")
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), now=150.0)
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")), now=160.0)
+    assert [(i.tool_call_id, i.state, i.started_at, i.ended_at) for i in a.snapshot().items if i.kind == "tool"] == [
+        ("c1", "done", 100.0, 150.0),
+        ("c9", "done", None, 160.0),
     ]
+    a.tool_started(ToolStarted(call=_call("c1")), now=300.0)
+    c1_restarted = a.snapshot().items[0]
+    assert (c1_restarted.state, c1_restarted.started_at, c1_restarted.ended_at, c1_restarted.progress) == (
+        "running",
+        300.0,
+        None,
+        None,
+    )
+    a.tool_completed(ToolCompleted(call=_call("c1", result="y")), now=350.0)
+    assert (a.snapshot().items[0].started_at, a.snapshot().items[0].ended_at) == (300.0, 350.0)
 
 
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
@@ -832,7 +844,7 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     last = await seen.wait_for_status("completed")
     assert observed_starts == [100.0, 200.0]
     assert observed_ends == [150.0, 250.0]
-    assert [(item.started_at, item.ended_at) for item in last.items if item.kind == "tool"] == [(100.0, 250.0)]
+    assert [(item.started_at, item.ended_at) for item in last.items if item.kind == "tool"] == [(200.0, 250.0)]
     assert reports[-1] == "add\nadd\nDone"
 
 
@@ -1588,9 +1600,10 @@ def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
     activity = _activity()
     activity.tool_started(ToolStarted(call=_call("c1")), now=10.0)
     activity.tool_started(ToolStarted(call=_call("c2")), now=11.0)
-    activity.tool_progress("c1", "Authorization: Bearer super-secret-token\n" + "z" * 1_200)
-    activity.tool_progress("c2", "working on c2")
-    activity.tool_progress("missing", "ignored")
+    assert activity.tool_progress("c1", "Authorization: Bearer super-secret-token\n" + "z" * 1_200) is True
+    assert activity.tool_progress("c2", "working on c2") is True
+    assert activity.tool_progress("c2", "working on c2") is False
+    assert activity.tool_progress("missing", "ignored") is False
 
     snap = activity.snapshot()
     c1, c2 = snap.items
@@ -1602,7 +1615,7 @@ def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
     assert c2.progress == "working on c2"
 
     activity.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=15.5)
-    activity.tool_progress("c1", "late progress ignored")
+    assert activity.tool_progress("c1", "late progress ignored") is False
     c1_done, c2_running = activity.snapshot().items
     assert (c1_done.started_at, c1_done.ended_at, c1_done.progress) == (10.0, 15.5, None)
     assert (c2_running.started_at, c2_running.ended_at, c2_running.progress) == (11.0, None, "working on c2")
@@ -1702,3 +1715,65 @@ def test_format_child_tool_activity_extracts_redacts_single_lines_and_clips() ->
 
     bare = lifecycle._format_child_tool_activity(ReportedCall("c4", "ping", {"count": 3}))
     assert bare == "ping\n"
+
+    oauth_query = lifecycle._format_child_tool_activity(
+        ReportedCall("c5", "web_search", {"query": "code=demo-code&state=demo-state"}),
+    )
+    assert oauth_query == "web_search: code=***redacted***&state=***redacted***\n"
+    assert "demo-code" not in oauth_query
+    assert "demo-state" not in oauth_query
+
+
+@pytest.mark.asyncio
+async def test_report_child_activity_redacts_oauth_query_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OAuth query params in `{"query": ...}` are masked before entering `_report_child_activity`."""
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+
+    async def noop_record(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(lifecycle, "record_child_event", noop_record)
+    observation = lifecycle.ChildRunObservation(child=_child(), audit=object())  # type: ignore[arg-type]
+    token = lifecycle._CHILD_RUN.set(observation)
+    try:
+        call = ReportedCall("call-oauth", "web_search", {"query": "code=demo-code&state=demo-state"})
+        await lifecycle.observe_child_event(ToolStarted(call=call))
+    finally:
+        lifecycle._CHILD_RUN.reset(token)
+
+    assert reports == ["web_search: code=***redacted***&state=***redacted***\n"]
+    assert observation.activity == "web_search: code=***redacted***&state=***redacted***\n"
+    assert "demo-code" not in observation.activity
+    assert "demo-state" not in observation.activity
+
+
+@pytest.mark.asyncio
+async def test_caller_tool_call_id_is_capped_on_start_and_resume() -> None:
+    """Oversized or non-string stored `parent_tool_call_id` values are bounded on start and resume."""
+    non_string = _SubagentActivity.start(
+        replace(_child(), parent_tool_call_id=3),  # type: ignore[arg-type]
+        parent_delegation_id=None,
+        root_caller_agent_name="lead",
+        now=1.0,
+    )
+    assert non_string.snapshot().caller_tool_call_id is None
+
+    seen = _Sink()
+    child = replace(_child(), parent_tool_call_id="a" * 500)
+    feed = ActivityFeed.open(child, parent_delegation_id=None, root_caller_agent_name="lead", sink=seen)
+    first = await seen.wait_for(1)
+    assert first.caller_tool_call_id == "a" * 256
+
+    feed.status("paused")
+    await seen.wait_for(2)
+    ActivityFeed.open(
+        replace(child, parent_tool_call_id="b" * 500),
+        parent_delegation_id=None,
+        root_caller_agent_name="lead",
+        sink=seen,
+    )
+    resumed = await seen.wait_for(3)
+    assert resumed.caller_tool_call_id == "b" * 256
+    feed.status("completed")
+    await seen.wait_for_status("completed")

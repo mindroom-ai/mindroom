@@ -48,7 +48,7 @@ from mindroom.live_frames import subagents as subagent_frames
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
+from mindroom.redaction import REDACTION_FAILED, redact_sensitive_data, redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.shell.background_scope import shell_background_scope
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
@@ -533,6 +533,7 @@ _MAX_CHILD_TOOL_ARG_PREVIEW_CHARS = 120
 def _primary_tool_arg_preview(tool_args: Mapping[str, object] | None) -> str | None:
     if not isinstance(tool_args, Mapping):
         return None
+    max_redacted_chars = _MAX_CHILD_TOOL_ARG_PREVIEW_CHARS * 4
     for key in _PRIMARY_TOOL_ARG_KEYS:
         value = tool_args.get(key)
         if not isinstance(value, str):
@@ -540,7 +541,12 @@ def _primary_tool_arg_preview(tool_args: Mapping[str, object] | None) -> str | N
         stripped = value.strip()
         if not stripped:
             continue
-        redacted = redact_sensitive_text(stripped, max_length=_MAX_CHILD_TOOL_ARG_PREVIEW_CHARS * 4)
+        redacted_mapping = redact_sensitive_data({key: stripped}, max_string_length=max_redacted_chars)
+        raw_redacted = redacted_mapping.get(key) if isinstance(redacted_mapping, Mapping) else None
+        redacted = redact_sensitive_text(
+            raw_redacted if isinstance(raw_redacted, str) else REDACTION_FAILED,
+            max_length=max_redacted_chars,
+        )
         single_line = " ".join(redacted.split())
         if not single_line:
             continue

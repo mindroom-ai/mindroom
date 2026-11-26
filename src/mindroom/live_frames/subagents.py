@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.delegation.activity import SubagentSnapshot, _SubagentItem
+    from mindroom.delegation.activity import SubagentSnapshot
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -60,6 +60,8 @@ _WORKING_STATUSES = frozenset({"running", "awaiting_approval"})
 _RELAY_OFF_SECONDS = 60.0
 # Each value of a run's model object, which config does not bound, so the frame without any text still fits.
 _MAX_MODEL_CHARACTERS = 200
+# Bound stored caller_tool_call_id metadata so a frame without any text always fits.
+_MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256
 
 type _Frame = dict[str, object]
 
@@ -94,7 +96,6 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, progress: bool = Tr
     """
     md = ""
     entries: list[ToolTraceEntry] = []
-    tool_items: list[_SubagentItem] = []
     for item in snapshot.items:
         if item.kind == "text":
             # Text items meet only where a cut or the tool row cap removed what was between them.
@@ -103,7 +104,6 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, progress: bool = Tr
             continue
         assert item.tool is not None
         entries.append(item.tool)
-        tool_items.append(item)
         call = ReportedCall(tool_call_id=item.tool_call_id or "", tool_name=item.tool.tool_name, tool_args=None)
         marker, _ = format_tool_started_event(call, len(entries))
         if item.state != "running":
@@ -130,7 +130,7 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, progress: bool = Tr
                 else {}
             ),
         }
-        for entry, item in zip(tools, tool_items, strict=True)
+        for entry, item in zip(tools, (item for item in snapshot.items if item.kind == "tool"), strict=True)
     )
     status = "streaming" if snapshot.status in _WORKING_STATUSES else "pending"
     return LiveDocs(md=md, reasoning="", tools=tools, status=status, activity="")
@@ -153,7 +153,7 @@ def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
         "ended_at": snapshot.ended_at,
     }
     if snapshot.caller_tool_call_id:
-        meta["caller_tool_call_id"] = snapshot.caller_tool_call_id
+        meta["caller_tool_call_id"] = snapshot.caller_tool_call_id[:_MAX_CALLER_TOOL_CALL_ID_CHARACTERS]
     if snapshot.interrupted_by_restart:
         meta["interrupted_by_restart"] = True
     if full:
@@ -303,8 +303,9 @@ class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
         """Return a snapshot frame within the size limit: without progress, then previews, then the oldest text.
 
-        The run's usage never costs the previews: a frame that would fit with them if it left the usage out keeps
-        both, without that much of the oldest text when the text is long enough.
+        Running progress is dropped before any text is cut. After that, the run's usage never costs the previews: a
+        frame that would fit with previews if it left the usage out keeps both, without that much of the oldest text
+        when the text is long enough.
         """
         text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
 
@@ -323,12 +324,12 @@ class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
 
         frame, docs = built(self.previews, self.previews, 0)
         if self.previews and not fits(frame):
-            if fits({**frame, "meta": _run_meta(snapshot, full=True)}):
-                frame, docs = cut(True, True)
-            if not fits(frame) and any(item.state == "running" and item.progress for item in snapshot.items):
+            keep_progress = True
+            if any(item.state == "running" and item.progress for item in snapshot.items):
+                keep_progress = False
                 frame, docs = built(True, False, 0)
-                if not fits(frame) and fits({**frame, "meta": _run_meta(snapshot, full=True)}):
-                    frame, docs = cut(True, False)
+            if not fits(frame) and fits({**frame, "meta": _run_meta(snapshot, full=True)}):
+                frame, docs = cut(True, keep_progress)
             if not fits(frame):
                 frame, docs = built(False, False, 0)
         # The frame without any text always fits, as the caps bound the rest.

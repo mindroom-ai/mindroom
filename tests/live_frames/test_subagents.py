@@ -887,3 +887,67 @@ async def test_oversized_running_progress_fits_without_stop(encrypted: bool) -> 
     assert all(entry["args_preview"] == f"command=run-{index}" for index, entry in enumerate(first_tools))
     final_tools = room.sent[-1]["snapshot"]["tools"]
     assert all(entry["ended_at"] == 1050.0 for entry in final_tools)
+
+
+@pytest.mark.asyncio
+async def test_a_huge_caller_tool_call_id_still_fits_the_room() -> None:
+    """An oversized `caller_tool_call_id` is bounded so a frame without text still fits encrypted rooms."""
+    room = FrameRoom(encrypted=True)
+    snapshot = replace(_activity().snapshot(), caller_tool_call_id="😀" * 5_000)
+    room.publish(snapshot)
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(replace(snapshot, status="completed", ended_at=1001.0))
+    await _until(_forgotten)
+
+    assert max(room.sent_bytes) <= _MAX_FRAME_BYTES
+    assert room.encrypted == []
+    assert [frame["meta"]["caller_tool_call_id"] for frame in room.sent] == ["😀" * 256] * 2
+
+
+@pytest.mark.asyncio
+async def test_fitting_drops_running_progress_before_cutting_oldest_text() -> None:
+    """When a snapshot with running progress and usage overflows, progress drops before any oldest text is cut."""
+    room = FrameRoom()
+    entry = ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", args_preview="command=pytest")
+    used = {"input_tokens": 100, "output_tokens": 10, "tool_calls": 1}
+
+    def run(run_id: str, text_length: int, *, progress: str, usage: dict[str, int] | None = None) -> SubagentSnapshot:
+        tool_item = replace(_tool(entry, "running"), progress=progress)
+        return make_snapshot(
+            delegation_id=run_id,
+            subagent_id=run_id,
+            items=(_text("a" * text_length), tool_item),
+            usage=usage,
+        )
+
+    # Size `at_the_cap` so the frame with running progress fits exactly without usage, then add usage (~55 bytes).
+    room.publish(run("d1", 1_000, progress="p" * 200))
+    await _until(lambda: len(room.sent) == 1)
+    at_the_cap = 1_000 + _MAX_FRAME_BYTES - room.sent_bytes[0]
+    room.publish(run("d2", at_the_cap, progress="p" * 200))
+    room.publish(run("d3", at_the_cap, progress="p" * 200, usage=used))
+    await _until(lambda: len(room.sent) == 3)
+
+    without_usage, with_usage = sorted(room.sent[1:], key=lambda frame: frame["run"])
+    assert room.sent_bytes[1] == _MAX_FRAME_BYTES
+    assert room.sent_bytes[2] <= _MAX_FRAME_BYTES
+    assert _frame_tools(without_usage)[0]["progress"] == "p" * 200
+    assert "progress" not in _frame_tools(with_usage)[0]
+    assert _frame_tools(with_usage)[0]["args_preview"] == "command=pytest"
+    assert with_usage["meta"]["usage"] == used
+    # Dropping progress alone made the frame fit, so none of the oldest text was cut.
+    assert with_usage["snapshot"]["md"] == without_usage["snapshot"]["md"]
+
+    # When dropping a short progress string is not enough to offset usage, previews still stay by cutting only the remainder.
+    room.publish(run("d4", 1_000, progress="ok"))
+    await _until(lambda: len(room.sent) == 4)
+    small_progress_cap = 1_000 + _MAX_FRAME_BYTES - room.sent_bytes[3]
+    room.publish(run("d5", small_progress_cap, progress="ok", usage=used))
+    await _until(lambda: len(room.sent) == 5)
+
+    trimmed = room.sent[4]
+    assert room.sent_bytes[4] <= _MAX_FRAME_BYTES
+    assert "progress" not in _frame_tools(trimmed)[0]
+    assert _frame_tools(trimmed)[0]["args_preview"] == "command=pytest"
+    assert trimmed["meta"]["usage"] == used
+    assert len(trimmed["snapshot"]["md"]) < small_progress_cap

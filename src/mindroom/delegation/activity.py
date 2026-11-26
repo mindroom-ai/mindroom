@@ -33,6 +33,7 @@ _MAX_TOOL_ITEMS = 20
 _MAX_TASK_CHARACTERS = 1_000
 _MAX_RESULT_CHARACTERS = 1_000
 _MAX_PREVIEW_CHARACTERS = 300
+_MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256
 # The raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
 _REDACTION_MARGIN = 4_000
 
@@ -50,8 +51,8 @@ class _SubagentItem:
     tool: ToolTraceEntry | None = None
     tool_call_id: str | None = None
     state: Literal["running", "done", "error"] | None = None
-    # kind "tool": Unix seconds when the call was first announced, kept when it resumes and completes; None for a row
-    # that only a completion made.
+    # kind "tool": Unix seconds when the call was first announced, kept when it resumes and completes, and reset when
+    # a new start reuses a finished call's ID; None for a row that only a completion made.
     started_at: float | None = None
     # kind "tool": Unix seconds when the call finished or settled; None while running.
     ended_at: float | None = None
@@ -97,7 +98,7 @@ class SubagentSnapshot:
     interrupted_by_restart: bool = False
     # What the call that started the sub-agent named it, on one line of at most 80 characters, redacted; empty for none.
     title: str = ""
-    # The parent's tool_call_id that launched this child turn, if any.
+    # The parent's tool_call_id that launched this child turn, at most 256 characters, if any.
     caller_tool_call_id: str | None = None
 
 
@@ -107,6 +108,11 @@ type SubagentSink = Callable[[SubagentSnapshot], None]
 def _clip(text: str, limit: int) -> str:
     """Return the redacted head of ``text``, at most ``limit`` characters, redacting only a head with a margin past it."""
     return redact_sensitive_text(text[: limit + _REDACTION_MARGIN])[:limit]
+
+
+def _caller_tool_call_id(value: object) -> str | None:
+    """Return ``value`` cut to the caller tool call ID cap, or None when empty or not text."""
+    return value[:_MAX_CALLER_TOOL_CALL_ID_CHARACTERS] if isinstance(value, str) and value else None
 
 
 def _cut_preview(preview: str | None) -> tuple[str | None, bool]:
@@ -215,7 +221,7 @@ class _SubagentActivity:
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
             # The child may come from stored metadata a worker could write, so its title is sanitized here.
             title=display_title(child.title),
-            caller_tool_call_id=child.parent_tool_call_id or None,
+            caller_tool_call_id=_caller_tool_call_id(child.parent_tool_call_id),
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )
@@ -260,7 +266,8 @@ class _SubagentActivity:
             ended_at=ended_at,
         )
 
-    def _update_tool_progress(self, tool_call_id: str, text: str) -> bool:
+    def tool_progress(self, tool_call_id: str, text: str) -> bool:
+        """Store the latest redacted progress on the newest matching running tool row; return whether it changed."""
         shown = shown_progress(text) or None
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
@@ -271,10 +278,6 @@ class _SubagentActivity:
                 return True
         return False
 
-    def tool_progress(self, tool_call_id: str, text: str) -> None:
-        """Store the latest redacted progress on the newest matching running tool row."""
-        self._update_tool_progress(tool_call_id, text)
-
     def _set_tool(
         self,
         tool_call_id: str,
@@ -284,16 +287,22 @@ class _SubagentActivity:
         started_at: float | None,
         ended_at: float | None = None,
     ) -> None:
-        """Update the call's newest row, keeping its start, else append one; past the cap, drop the oldest tool row."""
+        """Update the call's newest row, else append one; past the cap, drop the oldest tool row.
+
+        Updating a running row (on resume or completion) keeps its original ``started_at``; a new start after a
+        completed or errored row under a reused ID starts anew with ``started_at``.
+        """
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
             if item.kind == "tool" and item.tool_call_id == tool_call_id:
+                row_started_at = started_at if state == "running" and item.state != "running" else item.started_at
                 self._items[index] = replace(
                     item,
                     tool=entry,
                     state=state,
+                    started_at=row_started_at,
                     ended_at=ended_at,
-                    progress=item.progress if state == "running" else None,
+                    progress=item.progress if state == "running" and item.state == "running" else None,
                 )
                 return
         self._items.append(
@@ -431,7 +440,9 @@ class ActivityFeed:
             # The resumed attempt's sink publishes from now on, with the model it runs on.
             feed._sink = sink
             feed._activity.model_name = child.model_name
-            feed._activity.caller_tool_call_id = child.parent_tool_call_id or feed._activity.caller_tool_call_id
+            feed._activity.caller_tool_call_id = (
+                _caller_tool_call_id(child.parent_tool_call_id) or feed._activity.caller_tool_call_id
+            )
         _OPEN[child.delegation_id] = feed
         feed.status("running")
         return feed
@@ -458,7 +469,7 @@ class ActivityFeed:
 
     def tool_progress(self, tool_call_id: str, text: str) -> None:
         """Update a running tool row's latest progress; it goes out with the next window's snapshot."""
-        if self._activity._update_tool_progress(tool_call_id, text):
+        if self._activity.tool_progress(tool_call_id, text):
             self._mark()
 
     def model(self, model_name: str) -> None:
