@@ -102,9 +102,17 @@ async def load_usable_github_oauth_credentials(
     *,
     load_status: Callable[..., Awaitable[oauth_lc.OAuthCredentialsStatus]] = oauth_lc.load_oauth_credentials_status,
     is_usable: Callable[..., bool] = oauth_lc.oauth_credentials_usable,
+    fail_on_unreadable: bool = False,
 ) -> dict[str, Any] | None:
     """Return stored GitHub OAuth credentials while usable, without refreshing or creating a store."""
-    if context is None or not (creds := (await load_status(context, create_store=False)).credentials):
+    if context is None:
+        return None
+    status = await load_status(context, create_store=False)
+    if fail_on_unreadable and status.reset_required:
+        msg = "Stored GitHub OAuth credentials could not be read"
+        raise CredentialsUnreadableError(msg)
+    creds = status.credentials
+    if not creds:
         return None
     return creds if await asyncio.to_thread(is_usable, context.provider, context.runtime_paths, creds) else None
 
@@ -114,16 +122,29 @@ async def refresh_github_oauth_access_token(
     *,
     load_status: Callable[..., Awaitable[oauth_lc.OAuthCredentialsStatus]] = oauth_lc.load_oauth_credentials_status,
     is_usable: Callable[..., bool] = oauth_lc.oauth_credentials_usable,
+    fail_on_unreadable: bool = False,
 ) -> str | None:
     """Return a current GitHub OAuth access token, refreshing if needed, or None when unconnected."""
-    if not await load_usable_github_oauth_credentials(context, load_status=load_status, is_usable=is_usable):
+    if not await load_usable_github_oauth_credentials(
+        context,
+        load_status=load_status,
+        is_usable=is_usable,
+        fail_on_unreadable=fail_on_unreadable,
+    ):
         return None
     assert context is not None
-    with suppress(oauth_lc.OAuthCredentialUnreadableError, OAuthRefreshRejectedError):
+    try:
         creds = await oauth_lc.refresh_oauth_credentials(context)
-        if creds is not None and await asyncio.to_thread(is_usable, context.provider, context.runtime_paths, creds):
-            tok = creds.get("token") or creds.get("access_token")
-            return tok if isinstance(tok, str) and tok else None
+    except oauth_lc.OAuthCredentialUnreadableError as exc:
+        if fail_on_unreadable:
+            msg = "Stored GitHub OAuth credentials could not be read"
+            raise CredentialsUnreadableError(msg) from exc
+        return None
+    except OAuthRefreshRejectedError:
+        return None
+    if creds is not None and await asyncio.to_thread(is_usable, context.provider, context.runtime_paths, creds):
+        tok = creds.get("token") or creds.get("access_token")
+        return tok if isinstance(tok, str) and tok else None
     return None
 
 
@@ -137,7 +158,8 @@ async def resolve_owner_github_token(owner: str, config: Config | None, paths: R
     except CredentialsUnreadableError:
         logger.warning("github_token_unreadable")
         raise
-    return (tok, "app") if (tok := await refresh_github_oauth_access_token(ctx)) is not None else (None, "anonymous")
+    tok = await refresh_github_oauth_access_token(ctx, fail_on_unreadable=True)
+    return (tok, "app") if tok is not None else (None, "anonymous")
 
 
 def github_redirect_next(response: httpx.Response, method: str, content: bytes | None) -> _Hop | None:

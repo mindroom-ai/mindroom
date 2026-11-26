@@ -24,7 +24,7 @@ from mindroom.github_client import (
     parse_retry_after_seconds,
     resolve_owner_github_token,
 )
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,6 +105,15 @@ async def test_resolve_owner_github_token_priority_isolation_and_unreadable_pat(
         GITHUB_USER_TOKEN_SERVICE,
         {"token": "bad token with spaces", "login": "alice-gh"},
         replace_unreadable=True,
+    )
+    with pytest.raises(CredentialsUnreadableError):
+        await resolve_owner_github_token(_ALICE, config, paths)
+
+    # Deleting Alice's PAT and corrupting her GitHub App OAuth credentials also fails closed (never falls back to anonymous).
+    github_user_token_store(context).delete_credentials(GITHUB_USER_TOKEN_SERVICE)
+    corrupt_oauth_credential_payload(
+        next(paths.storage_root.rglob("github_oauth_credentials.sqlite3")),
+        b"not-a-payload",
     )
     with pytest.raises(CredentialsUnreadableError):
         await resolve_owner_github_token(_ALICE, config, paths)

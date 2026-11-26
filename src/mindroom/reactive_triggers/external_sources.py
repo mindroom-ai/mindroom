@@ -352,6 +352,7 @@ def fan_out_external_event(
     config: Config,
     runtime_paths: RuntimePaths,
     now: float | None = None,
+    on_github_pr_nudged: Callable[[], None] | None = None,
 ) -> int:
     """Enqueue deduplicated firings for all matching, authorized, unexpired rules subscribed to source_id."""
     if isinstance(source, GitHubEventSourceConfig) and event.kind == "ping" and "ping" not in source.allowed_events:
@@ -377,7 +378,7 @@ def fan_out_external_event(
             matched_count += 1
     repo = event.data.get("repo") if event.kind != "ping" else None
     if isinstance(source, GitHubEventSourceConfig) and isinstance(repo, str) and repo:
-        matched_count += nudge_github_pr_watches_for_webhook(
+        nudged = nudge_github_pr_watches_for_webhook(
             source_id=source_id,
             source=source,
             repo=repo,
@@ -386,6 +387,8 @@ def fan_out_external_event(
             runtime_paths=runtime_paths,
             now=current_time,
         )
+        if nudged > 0 and on_github_pr_nudged is not None:
+            on_github_pr_nudged()
     return matched_count
 
 

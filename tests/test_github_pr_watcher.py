@@ -335,7 +335,7 @@ def _deliver_gh(
     repo: str,
     delivery_id: str,
     now: float,
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, bool]:
     payload: dict[str, Any] = {"repository": {"full_name": repo}}
     if gh_event == "pull_request":
         pr = {"number": 5, "title": "Fix", "head": {"ref": "f", "sha": "sha1"}, "base": {"ref": "main"}}
@@ -351,7 +351,13 @@ def _deliver_gh(
         runtime_paths=paths,
         now=now,
     )
-    n = fan_out_external_event(
+    nudged = False
+
+    def _on_nudged() -> None:
+        nonlocal nudged
+        nudged = True
+
+    matched = fan_out_external_event(
         source_id="gh",
         source=src_cfg,
         event=ev,
@@ -359,8 +365,9 @@ def _deliver_gh(
         config=cfg,
         runtime_paths=paths,
         now=now,
+        on_github_pr_nudged=_on_nudged,
     )
-    return [r.trigger_id for r, _ in store.list_due_github_pr_triggers(now=now)], n
+    return [r.trigger_id for r, _ in store.list_due_github_pr_triggers(now=now)], matched, nudged
 
 
 @pytest.mark.asyncio
@@ -461,11 +468,15 @@ async def test_webhook_nudge_end_to_end_concurrent_nudge_and_revocation(
         )
         store.create_trigger(rec, initial_github_pr_checkpoint=GitHubPRCheckpoint(seeded=True, updated_at=1000.0))
 
-    assert _deliver_gh(src_cfg, cfg, paths, store, "ping", "org/owned", "d-ping", 2000.0) == ([], 0)
-    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/other", "d-other", 2001.0) == ([], 0)
+    assert _deliver_gh(src_cfg, cfg, paths, store, "ping", "org/owned", "d-ping", 2000.0) == ([], 0, False)
+    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/other", "d-other", 2001.0) == ([], 0, False)
 
     fake.set_json("/repos/org/owned/issues/5/timeline?per_page=100&page=1", [_cmt(50, "LGTM!")], etag='"w5t-2"')
-    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/owned", "d-hit1", 2010.0) == (["pr-wh-5"], 1)
+    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/owned", "d-hit1", 2010.0) == (
+        ["pr-wh-5"],
+        0,
+        True,
+    )
 
     nudged = False
 
@@ -490,6 +501,7 @@ async def test_webhook_nudge_end_to_end_concurrent_nudge_and_revocation(
 
     for expected, sources in (
         ("source_grant_revoked", {"gh": _gh_source(["org/other"])}),
+        ("source_grant_revoked", {"gh": _gh_source(["org/owned"], allowed_events=["pull_request"])}),
         ("source_subscriber_revoked", {"gh": _gh_source(["org/owned"], subscribers=[_OTHER])}),
         ("source_removed", {}),
     ):
@@ -804,8 +816,33 @@ async def test_disable_reenable_reseeds_silently_and_dry_run(
         assert created["status"] == "ok"
         assert (await _trig(tools, action="test", trigger_id="pr-40", kind="merge"))["matched"] is True
         assert (await _trig(tools, action="test", trigger_id="pr-40", kind="ci"))["matched"] is False
+        assert (await _trig(tools, action="test", trigger_id="pr-40", kind="ci_failure"))["matched"] is False
         ign_dry = await _trig(tools, action="test", trigger_id="pr-40", kind="activity", actor="noisy")
         assert (ign_dry["matched"], "ignored" in ign_dry["note"]) == (False, True)
+        upd_ok = await _trig(
+            tools,
+            action="test",
+            trigger_id="pr-40",
+            kind="github_pr.update",
+            sample_data={"items": [{"type": "comment", "actor": "alice"}]},
+        )
+        assert (upd_ok["status"], upd_ok["matched"], upd_ok["would_fire"]) == ("ok", True, True)
+        upd_ci = await _trig(
+            tools,
+            action="test",
+            trigger_id="pr-40",
+            kind="github_pr.update",
+            sample_data={"items": [{"type": "ci_failure", "name": "pytest"}]},
+        )
+        assert upd_ci["matched"] is False
+        upd_ign = await _trig(
+            tools,
+            action="test",
+            trigger_id="pr-40",
+            kind="github_pr.update",
+            sample_data={"items": [{"type": "comment", "actor": "noisy"}]},
+        )
+        assert (upd_ign["matched"], "ignored" in upd_ign["note"]) == (False, True)
 
         assert (await _trig(tools, action="set_enabled", enabled=False, trigger_id="pr-40"))["status"] == "ok"
         fake.set_json("/repos/org/owned/issues/40/timeline?per_page=100&page=1", [_cmt(999, "paused")], etag='"r40t-p"')
@@ -951,7 +988,8 @@ async def test_webhook_allowed_events_coverage_and_owner_quota_on_pr_closed_revi
         assert (all_wh["status"], all_wh["delivery_mode"], all_wh["webhook_source_id"]) == ("ok", "webhook", "gh")
     assert _deliver_gh(full_src, f_cfg, f_paths, f_store, "issue_comment", "org/owned", "d-ic1", 2050.0) == (
         ["pr-all"],
-        1,
+        0,
+        True,
     )
 
 

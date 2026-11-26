@@ -1825,6 +1825,25 @@ def _gh_pr_allowed(ctx: ToolRuntimeContext, owner: str, src: GitHubPRSourceSpec)
     return fn(owner_user_id=owner, source_spec=src, config=ctx.config, runtime_paths=ctx.runtime_paths) is None
 
 
+_GH_PR_DRY_RUN_CATEGORIES: dict[str, GitHubPREventType] = {
+    "activity": "activity",
+    "comment": "activity",
+    "review": "activity",
+    "review_comment": "activity",
+    "review_comments": "activity",
+    "ci": "ci",
+    "ci_failure": "ci",
+    "ci_passing": "ci",
+    "merge": "merge",
+    "merged": "merge",
+    "github_pr.merged": "merge",
+    "close": "close",
+    "closed": "close",
+    "github_pr.closed": "close",
+}
+_GH_PR_IGNORED_NOTE = "Dry run only (no state changed or message sent); activity from this actor is ignored."
+
+
 def _dry_run_github_pr(
     src: GitHubPRSourceSpec,
     args: _TriggerParams,
@@ -1832,24 +1851,63 @@ def _dry_run_github_pr(
     raw_kind: str | None,
     now: float,
 ) -> tuple[TriggerEvent, bool, str | None]:
-    cats = {"activity": "activity", "ci": "ci", "merge": "merge", "close": "close"}
-    cats |= {"github_pr.merged": "merge", "github_pr.closed": "close"}
     norm = raw_kind.strip().lower() if isinstance(raw_kind, str) and raw_kind.strip() else None
-    cat = (
-        cats.get(norm) if norm else (cats.get(str(extra["category"]).lower()) if "category" in extra else src.events[0])
+    explicit_cat = (
+        _GH_PR_DRY_RUN_CATEGORIES.get(str(extra["category"]).strip().lower()) if "category" in extra else None
     )
-    ekind = "github_pr.merged" if cat == "merge" else ("github_pr.closed" if cat == "close" else "github_pr.update")
-    data: dict[str, Any] = {"repo": src.repo, "number": src.number, "terminal": cat in {"merge", "close"}, **extra}
-    ev_d: dict[str, Any] = {"source_type": "github_pr", "source_id": src.repo.lower(), "kind": ekind, "data": data}
-    ev_d |= {"event_id": "dry_run", "timestamp": now, "actor": args["actor"], "title": f"{src.repo}#{src.number}"}
-    ev = TriggerEvent.model_validate({**ev_d, "text": args["text"]})
+    raw_items = extra.get("items")
+    items = [item for item in raw_items if isinstance(item, Mapping)] if isinstance(raw_items, list) else []
+
+    if norm == "github_pr.update":
+        ekind = "github_pr.update"
+        cat = explicit_cat or next((e for e in src.events if e in {"activity", "ci"}), None)
+    else:
+        cat = _GH_PR_DRY_RUN_CATEGORIES.get(norm) if norm else (explicit_cat or src.events[0])
+        ekind = "github_pr.merged" if cat == "merge" else ("github_pr.closed" if cat == "close" else "github_pr.update")
+
+    data: dict[str, Any] = {"repo": src.repo, "number": src.number, "terminal": ekind != "github_pr.update", **extra}
+    event = TriggerEvent.model_validate(
+        {
+            "source_type": "github_pr",
+            "source_id": src.repo.lower(),
+            "kind": ekind,
+            "data": data,
+            "event_id": "dry_run",
+            "timestamp": now,
+            "actor": args["actor"],
+            "title": f"{src.repo}#{src.number}",
+            "text": args["text"],
+        },
+    )
     repo_ok = isinstance(data.get("repo"), str) and data["repo"].lower() == src.repo.lower()
-    if not (cat in src.events and repo_ok and type(data.get("number")) is int and data["number"] == src.number):
-        return ev, False, None
-    atype = extra.get("actor_type") if isinstance(extra.get("actor_type"), str) else None
-    if cat == "activity" and ghpr.is_ignored_activity_actor(src, actor=args["actor"], actor_type=atype):
-        return ev, False, "Dry run only (no state changed or message sent); activity from this actor is ignored."
-    return ev, True, None
+    if not (repo_ok and type(data.get("number")) is int and data["number"] == src.number):
+        return event, False, None
+
+    top_actor_type = extra.get("actor_type") if isinstance(extra.get("actor_type"), str) else None
+    if norm in {None, "github_pr.update"} and items:
+        ignored_activity = False
+        for item in items:
+            item_type = str(item.get("type") or "").strip().lower()
+            item_cat = _GH_PR_DRY_RUN_CATEGORIES.get(item_type, "activity" if item_type else None)
+            if item_cat not in src.events:
+                continue
+            item_actor = item.get("actor") if isinstance(item.get("actor"), str) else args["actor"]
+            item_actor_type = item.get("actor_type") if isinstance(item.get("actor_type"), str) else top_actor_type
+            if item_cat == "activity" and ghpr.is_ignored_activity_actor(
+                src,
+                actor=item_actor,
+                actor_type=item_actor_type,
+            ):
+                ignored_activity = True
+                continue
+            return event, True, None
+        return event, False, (_GH_PR_IGNORED_NOTE if ignored_activity else None)
+
+    if cat not in src.events:
+        return event, False, None
+    if cat == "activity" and ghpr.is_ignored_activity_actor(src, actor=args["actor"], actor_type=top_actor_type):
+        return event, False, _GH_PR_IGNORED_NOTE
+    return event, True, None
 
 
 async def _read_thread_tag_present(

@@ -28,42 +28,73 @@ if TYPE_CHECKING:
     from mindroom.reactive_triggers.store import ReactiveTriggerStore
 
 logger = get_logger(__name__)
+
 # Excludes "cancelled" so cancel-in-progress workflows on new pushes never wake as CI failures or all-green passes.
 CI_FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
 CI_PASS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_IGN_A = "subscribed unsubscribed mentioned deployed head_ref_deleted head_ref_force_pushed committed"
-_IGNORED_TL = frozenset(f"{_IGN_A} base_ref_changed automatic_base_change_succeeded closed merged".split())
-_LIMIT, _MAX_PAGES, _MAX_BACKOFF = 500, 3, 3600.0
-_API_ERRS = (httpx.HTTPError, TimeoutError, ghc.GitHubClientError)
-type _Src = rm.GitHubPRSourceSpec
-type _Cp = rm.GitHubPRCheckpoint
-type _Rule = rm.ReactiveTriggerRecord
-type _Obj = dict[str, Any]
-type _Fetch = Callable[[str, str | None], Awaitable[ghc.GitHubGetResult]]
-type _Pairs = list[tuple[_Obj, str]]
-type _Sync = tuple[Literal["open", "closed", "merged"], str | None, _Obj, _Pairs]
-type _Http = httpx.AsyncClient
+_ACTIVITY_WEBHOOK_EVENTS = frozenset({"issue_comment", "pull_request_review", "pull_request_review_comment"})
+_CI_WEBHOOK_EVENTS = frozenset({"check_run", "check_suite"})
+_IGNORED_TIMELINE_EVENTS = frozenset(
+    [
+        "subscribed",
+        "unsubscribed",
+        "mentioned",
+        "deployed",
+        "head_ref_deleted",
+        "head_ref_force_pushed",
+        "committed",
+        "base_ref_changed",
+        "automatic_base_change_succeeded",
+        "closed",
+        "merged",
+    ],
+)
+_SEEN_AND_TEXT_LIMIT = 500
+_MAX_PAGES = 3
+_MAX_BACKOFF_SECONDS = 3600.0
+_API_ERRORS = (httpx.HTTPError, TimeoutError, ghc.GitHubClientError)
+
+type _JsonDict = dict[str, Any]
+type _FetchFn = Callable[[str, str | None], Awaitable[ghc.GitHubGetResult]]
+type _EventPairs = list[tuple[_JsonDict, str]]
+type _SyncResult = tuple[Literal["open", "closed", "merged"], str | None, _JsonDict, _EventPairs]
 
 
 class GitHubPRWatchError(ValueError):
     """Raised when a GitHub PR watch cannot be created or seeded."""
 
 
-class _RateLimitedError(RuntimeError): ...
+class _RateLimitedError(RuntimeError):
+    """Internal signal that a credential bucket is rate-limited until ``args[0]``."""
 
 
 class SeededPRState(NamedTuple):
     """Initial checkpoint and auth mode captured when creating a github_pr watch."""
 
-    checkpoint: _Cp
+    checkpoint: rm.GitHubPRCheckpoint
     auth_mode: ghc.GitHubAuthMode
 
 
-def is_ignored_activity_actor(source: _Src, *, actor: str | None, actor_type: str | None = None) -> bool:
+def is_ignored_activity_actor(
+    source: rm.GitHubPRSourceSpec,
+    *,
+    actor: str | None,
+    actor_type: str | None = None,
+) -> bool:
     """Return whether an activity actor should be ignored per ignore_actors / ignore_bots."""
-    low = (actor or "").lower()
-    listed = bool(low) and any(a.lower() == low for a in source.ignore_actors)
-    return listed or (source.ignore_bots and (low.endswith("[bot]") or (actor_type or "").lower() == "bot"))
+    normalized = (actor or "").lower()
+    if normalized and any(entry.lower() == normalized for entry in source.ignore_actors):
+        return True
+    return source.ignore_bots and (normalized.endswith("[bot]") or (actor_type or "").lower() == "bot")
+
+
+def _webhook_source_covers_events(source: GitHubEventSourceConfig, events: Sequence[rm.GitHubPREventType]) -> bool:
+    watched = set(events)
+    allowed_events = {event_name.lower() for event_name in source.allowed_events}
+    required = {"pull_request"} | (_ACTIVITY_WEBHOOK_EVENTS if "activity" in watched else set())
+    if not required <= allowed_events:
+        return False
+    return "ci" not in watched or bool(_CI_WEBHOOK_EVENTS & allowed_events)
 
 
 def find_covering_github_webhook_source(
@@ -74,35 +105,37 @@ def find_covering_github_webhook_source(
     paths: RuntimePaths,
 ) -> str | None:
     """Return the first authorized GitHub webhook source covering ``repo`` and ``events``, or None."""
-    low, evs = repo.lower(), set(events)
-    req = {"pull_request"} | (
-        {"issue_comment", "pull_request_review", "pull_request_review_comment"} if "activity" in evs else set()
-    )
-    for sid, src in sorted(config.external_trigger_policy.event_sources.items()):
-        if isinstance(src, GitHubEventSourceConfig) and any(r.lower() == low for r in src.allowed_repos):
-            alw = {e.lower() for e in src.allowed_events}
-            ev_ok = req <= alw and ("ci" not in evs or bool({"check_run", "check_suite"} & alw))
-            if ev_ok and is_source_subscriber_allowed(src, owner, config, paths):
-                return sid
+    target_repo = repo.lower()
+    for source_id, source in sorted(config.external_trigger_policy.event_sources.items()):
+        if not isinstance(source, GitHubEventSourceConfig):
+            continue
+        if not any(allowed_repo.lower() == target_repo for allowed_repo in source.allowed_repos):
+            continue
+        if _webhook_source_covers_events(source, events) and is_source_subscriber_allowed(source, owner, config, paths):
+            return source_id
     return None
 
 
 def check_github_pr_source_access(
     *,
     owner_user_id: str,
-    source_spec: _Src,
+    source_spec: rm.GitHubPRSourceSpec,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Verify current policy and webhook source grants for a github_pr rule."""
-    pol = config.external_trigger_policy
+    policy = config.external_trigger_policy
     if source_spec.webhook_source_id is None:
-        return None if pol.github_pr_polling_enabled else "github_pr_polling_disabled"
-    if not isinstance(gh := pol.event_sources.get(source_spec.webhook_source_id), GitHubEventSourceConfig):
+        return None if policy.github_pr_polling_enabled else "github_pr_polling_disabled"
+    github_source = policy.event_sources.get(source_spec.webhook_source_id)
+    if not isinstance(github_source, GitHubEventSourceConfig):
         return "source_removed"
-    if not is_source_subscriber_allowed(gh, owner_user_id, config, runtime_paths):
+    if not is_source_subscriber_allowed(github_source, owner_user_id, config, runtime_paths):
         return "source_subscriber_revoked"
-    return None if any(r.lower() == source_spec.repo.lower() for r in gh.allowed_repos) else "source_grant_revoked"
+    repo_allowed = any(repo.lower() == source_spec.repo.lower() for repo in github_source.allowed_repos)
+    if not repo_allowed or not _webhook_source_covers_events(github_source, source_spec.events):
+        return "source_grant_revoked"
+    return None
 
 
 def nudge_github_pr_watches_for_webhook(
@@ -116,15 +149,16 @@ def nudge_github_pr_watches_for_webhook(
     now: float,
 ) -> int:
     """Nudge enabled, unexpired, authorized webhook-backed github_pr watches for ``repo`` to poll now."""
-    ids = [
-        r.trigger_id
-        for r in store.list_triggers(include_disabled=False, source_type="github_pr", source_id=repo.lower())
-        if (r.expires_at is None or r.expires_at > now)
-        and isinstance(r.source, rm.GitHubPRSourceSpec)
-        and r.source.webhook_source_id == source_id
-        and is_source_subscriber_allowed(source, r.owner_user_id, config, runtime_paths)
+    trigger_ids = [
+        rule.trigger_id
+        for rule in store.list_triggers(include_disabled=False, source_type="github_pr", source_id=repo.lower())
+        if (rule.expires_at is None or rule.expires_at > now)
+        and isinstance(rule.source, rm.GitHubPRSourceSpec)
+        and rule.source.webhook_source_id == source_id
+        and _webhook_source_covers_events(source, rule.source.events)
+        and is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths)
     ]
-    return store.nudge_github_pr_checkpoints(ids, now=now)
+    return store.nudge_github_pr_checkpoints(trigger_ids, now=now)
 
 
 async def seed_github_pr_watch(
@@ -138,32 +172,44 @@ async def seed_github_pr_watch(
     poll_interval_seconds: int,
     webhook_source_id: str | None,
     now: float,
-    client: _Http | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> SeededPRState:
     """Validate an open PR and seed initial checkpoint state so baseline history does not replay."""
     try:
-        token, mode = await ghc.resolve_owner_github_token(owner_user_id, config, runtime_paths)
+        token, auth_mode = await ghc.resolve_owner_github_token(owner_user_id, config, runtime_paths)
     except (CredentialsUnreadableError, OAuthProviderError) as exc:
         _fail(f"Unable to resolve GitHub credentials for PR watch: {exc}", exc)
     async with AsyncExitStack() as stack:
-        cli = await _http(stack, client)
+        http_client = await _resolve_http_client(stack, client)
 
         async def _fetch(path: str, etag: str | None) -> ghc.GitHubGetResult:
-            got = await ghc.github_get_json(path, token=token, etag=etag, client=cli)
-            if got.status_code in {200, 304}:
-                return got
-            priv = mode == "anonymous" and got.status_code in {401, 403, 404}
-            hint = " Connect GitHub or save a GitHub token for private repos." if priv else ""
-            _fail(f"Failed to fetch GitHub PR {repo}#{number} (HTTP {got.status_code}).{hint}")
+            response = await ghc.github_get_json(path, token=token, etag=etag, client=http_client)
+            if response.status_code in {200, 304}:
+                return response
+            is_private = auth_mode == "anonymous" and response.status_code in {401, 403, 404}
+            hint = " Connect GitHub or save a GitHub token for private repos." if is_private else ""
+            _fail(f"Failed to fetch GitHub PR {repo}#{number} (HTTP {response.status_code}).{hint}")
 
-        src = rm.GitHubPRSourceSpec(repo=repo, number=number, events=list(events), webhook_source_id=webhook_source_id)
+        source_spec = rm.GitHubPRSourceSpec(
+            repo=repo,
+            number=number,
+            events=list(events),
+            webhook_source_id=webhook_source_id,
+        )
         try:
-            pr_st, sha, st, _ = await _sync_pr(src, None, _fetch, now=now, require_open=True)
-        except _API_ERRS as exc:
+            pr_state, head_sha, state, _ = await _sync_pr(source_spec, None, _fetch, now=now, require_open=True)
+        except _API_ERRORS as exc:
             _fail(f"Failed to reach GitHub API for {repo}#{number}: {exc}", exc)
-    nxt = None if webhook_source_id is not None else now + float(poll_interval_seconds)
-    cp = rm.GitHubPRCheckpoint(head_sha=sha, pr_state=pr_st, seeded=True, next_poll_at=nxt, state=st, updated_at=now)
-    return SeededPRState(cp, mode)
+    next_poll_at = None if webhook_source_id is not None else now + float(poll_interval_seconds)
+    checkpoint = rm.GitHubPRCheckpoint(
+        head_sha=head_sha,
+        pr_state=pr_state,
+        seeded=True,
+        next_poll_at=next_poll_at,
+        state=state,
+        updated_at=now,
+    )
+    return SeededPRState(checkpoint=checkpoint, auth_mode=auth_mode)
 
 
 class GitHubPRPoller:
@@ -176,304 +222,557 @@ class GitHubPRPoller:
         config_provider: Callable[[], Config],
         runtime_paths: RuntimePaths,
         on_enqueued: Callable[[], None] | None = None,
-        client: _Http | None = None,
+        client: httpx.AsyncClient | None = None,
         max_concurrency: int = 4,
     ) -> None:
-        self._store, self._cfg, self._paths, self._on_enqueued = store, config_provider, runtime_paths, on_enqueued
-        self._client, self._sem = client, asyncio.Semaphore(max(1, max_concurrency))
-        self._paused: dict[object, float] = {}
+        self._store = store
+        self._config_provider = config_provider
+        self._runtime_paths = runtime_paths
+        self._on_enqueued = on_enqueued
+        self._client = client
+        self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        self._bucket_paused_until: dict[object, float] = {}
 
     async def poll_due_once(self, *, now: float | None = None) -> int:
         """Poll all due (scheduled or webhook-nudged) github_pr triggers once and return enqueued count."""
-        cfg, ts = self._cfg(), time.time() if now is None else now
-        if not (cfg.external_trigger_policy.enabled and cfg.external_trigger_policy.reactive_enabled):
+        config = self._config_provider()
+        current_time = time.time() if now is None else now
+        policy = config.external_trigger_policy
+        if not (policy.enabled and policy.reactive_enabled):
             return 0
-        fn, poll_ok = self._store.list_due_github_pr_triggers, cfg.external_trigger_policy.github_pr_polling_enabled
-        if not (due := await asyncio.to_thread(fn, now=ts, limit=50, include_poll_only=poll_ok)):
+        due_watches = await asyncio.to_thread(
+            self._store.list_due_github_pr_triggers,
+            now=current_time,
+            limit=50,
+            include_poll_only=policy.github_pr_polling_enabled,
+        )
+        if not due_watches:
             return 0
         async with AsyncExitStack() as stack:
-            cli = await _http(stack, self._client)
-            res = await asyncio.gather(*(self._poll_rule(r, c, cfg, cli, ts) for r, c in due), return_exceptions=True)
-        for (rule, _), out in zip(due, res, strict=True):
-            if isinstance(out, Exception):
-                logger.warning("Unexpected github_pr poll error", trigger_id=rule.trigger_id, error=str(out))
-            elif isinstance(out, BaseException):
-                raise out
-        if (enq := sum(out is True for out in res)) and self._on_enqueued:
+            http_client = await _resolve_http_client(stack, self._client)
+            coros = (
+                self._poll_rule(rule, checkpoint, config, http_client, current_time) for rule, checkpoint in due_watches
+            )
+            outcomes = await asyncio.gather(*coros, return_exceptions=True)
+        for (rule, _), outcome in zip(due_watches, outcomes, strict=True):
+            if isinstance(outcome, Exception):
+                logger.warning("Unexpected github_pr poll error", trigger_id=rule.trigger_id, error=str(outcome))
+            elif isinstance(outcome, BaseException):
+                raise outcome
+        enqueued_count = sum(outcome is True for outcome in outcomes)
+        if enqueued_count and self._on_enqueued is not None:
             self._on_enqueued()
-        return enq
+        return enqueued_count
 
-    async def _poll_rule(self, rule: _Rule, cp: _Cp | None, cfg: Config, http: _Http, now: float) -> bool:
-        async with self._sem:
+    async def _poll_rule(
+        self,
+        rule: rm.ReactiveTriggerRecord,
+        checkpoint: rm.GitHubPRCheckpoint | None,
+        config: Config,
+        http_client: httpx.AsyncClient,
+        now: float,
+    ) -> bool:
+        async with self._semaphore:
             assert isinstance(rule.source, rm.GitHubPRSourceSpec)
-            src, chk = rule.source, check_github_pr_source_access
-            if chk(owner_user_id=rule.owner_user_id, source_spec=src, config=cfg, runtime_paths=self._paths):
-                if src.webhook_source_id and cp:
-                    await self._save(rule, cp, now, next_poll_at=None)
+            source_spec = rule.source
+            access_error = check_github_pr_source_access(
+                owner_user_id=rule.owner_user_id,
+                source_spec=source_spec,
+                config=config,
+                runtime_paths=self._runtime_paths,
+            )
+            if access_error is not None:
+                if source_spec.webhook_source_id and checkpoint is not None:
+                    await self._save_checkpoint(rule, checkpoint, now, next_poll_at=None)
                 return False
             try:
-                return await self._run_poll(rule, src, cp, cfg, http, now)
+                return await self._run_poll(rule, source_spec, checkpoint, config, http_client, now)
             except _RateLimitedError as exc:
-                await self._save(rule, cp, now, next_poll_at=float(exc.args[0]))
-            except (CredentialsUnreadableError, OAuthProviderError, *_API_ERRS) as exc:
-                logger.warning("GitHub PR poll failed", trigger_id=rule.trigger_id, repo=src.repo, error=str(exc))
-                errs = (cp.consecutive_errors if cp else 0) + 1
-                nxt = now + min(_MAX_BACKOFF, float(src.poll_interval_seconds) * (2 ** min(errs, 5)))
-                await self._save(rule, cp, now, consecutive_errors=errs, next_poll_at=nxt)
+                await self._save_checkpoint(rule, checkpoint, now, next_poll_at=float(exc.args[0]))
+            except (CredentialsUnreadableError, OAuthProviderError, *_API_ERRORS) as exc:
+                logger.warning(
+                    "GitHub PR poll failed",
+                    trigger_id=rule.trigger_id,
+                    repo=source_spec.repo,
+                    error=str(exc),
+                )
+                errors = (checkpoint.consecutive_errors if checkpoint is not None else 0) + 1
+                backoff = min(_MAX_BACKOFF_SECONDS, float(source_spec.poll_interval_seconds) * (2 ** min(errors, 5)))
+                await self._save_checkpoint(
+                    rule,
+                    checkpoint,
+                    now,
+                    consecutive_errors=errors,
+                    next_poll_at=now + backoff,
+                )
             return False
 
-    async def _run_poll(self, rule: _Rule, src: _Src, cp: _Cp | None, cfg: Config, http: _Http, now: float) -> bool:
-        tok, mode = await ghc.resolve_owner_github_token(rule.owner_user_id, cfg, self._paths)
-        bkt: object = "anonymous" if mode == "anonymous" else (rule.owner_user_id, mode)
-        if (paused := self._paused.get(bkt, 0.0)) > now:
-            raise _RateLimitedError(paused)
-        rem: list[int] = []
+    async def _run_poll(
+        self,
+        rule: rm.ReactiveTriggerRecord,
+        source_spec: rm.GitHubPRSourceSpec,
+        checkpoint: rm.GitHubPRCheckpoint | None,
+        config: Config,
+        http_client: httpx.AsyncClient,
+        now: float,
+    ) -> bool:
+        token, auth_mode = await ghc.resolve_owner_github_token(rule.owner_user_id, config, self._runtime_paths)
+        bucket: object = "anonymous" if auth_mode == "anonymous" else (rule.owner_user_id, auth_mode)
+        paused_until = self._bucket_paused_until.get(bucket, 0.0)
+        if paused_until > now:
+            raise _RateLimitedError(paused_until)
+        remaining_limits: list[int] = []
 
         async def _fetch(path: str, etag: str | None) -> ghc.GitHubGetResult:
-            res = await ghc.github_get_json(path, token=tok, etag=etag, client=http)
-            if (raw := res.headers.get("x-ratelimit-remaining", "").strip()).isascii() and raw.isdigit():
-                rem.append(int(raw))
-            if res.rate_limited:
-                resume = now + min(max(res.retry_after_seconds or 60.0, 1.0), _MAX_BACKOFF)
-                self._paused[bkt] = max(self._paused.get(bkt, 0.0), resume)
-                raise _RateLimitedError(resume)
-            if res.status_code not in {200, 304}:
-                msg = f"GitHub API {path} returned HTTP {res.status_code}"
+            response = await ghc.github_get_json(path, token=token, etag=etag, client=http_client)
+            raw_remaining = response.headers.get("x-ratelimit-remaining", "").strip()
+            if raw_remaining.isascii() and raw_remaining.isdigit():
+                remaining_limits.append(int(raw_remaining))
+            if response.rate_limited:
+                resume_at = now + min(max(response.retry_after_seconds or 60.0, 1.0), _MAX_BACKOFF_SECONDS)
+                self._bucket_paused_until[bucket] = max(self._bucket_paused_until.get(bucket, 0.0), resume_at)
+                raise _RateLimitedError(resume_at)
+            if response.status_code not in {200, 304}:
+                msg = f"GitHub API {path} returned HTTP {response.status_code}"
                 raise ghc.GitHubClientError(msg)
-            return res
+            return response
 
-        seed, prev_st = cp is None or not cp.seeded, "open" if cp is None or not cp.seeded else cp.pr_state
-        pr_st, sha, s, pairs = await _sync_pr(src, None if seed else cp, _fetch, now=now)
-        mult = 2.0 if rem and min(rem) < (10 if mode == "anonymous" else 100) else 1.0
-        delay = max(1.0, src.poll_interval_seconds * mult * random.uniform(0.9, 1.1))  # noqa: S311
-        nxt = None if src.webhook_source_id is not None else now + delay
-        nc = rm.GitHubPRCheckpoint(head_sha=sha, pr_state=pr_st, seeded=True, next_poll_at=nxt, state=s, updated_at=now)
-        ev = _build_event(rule.trigger_id, src, nc, pairs, now) if (not seed and pairs) else None
-        close = not ev and pr_st != "open" and src.auto_disable_on_close and (seed or prev_st == "open")
+        is_seed = checkpoint is None or not checkpoint.seeded
+        previous_pr_state = "open" if is_seed or checkpoint is None else checkpoint.pr_state
+        pr_state, head_sha, next_state, event_pairs = await _sync_pr(
+            source_spec,
+            None if is_seed else checkpoint,
+            _fetch,
+            now=now,
+        )
+        low_quota = 10 if auth_mode == "anonymous" else 100
+        slowdown = 2.0 if remaining_limits and min(remaining_limits) < low_quota else 1.0
+        delay = max(1.0, source_spec.poll_interval_seconds * slowdown * random.uniform(0.9, 1.1))  # noqa: S311
+        next_poll_at = None if source_spec.webhook_source_id is not None else now + delay
+        next_checkpoint = rm.GitHubPRCheckpoint(
+            head_sha=head_sha,
+            pr_state=pr_state,
+            seeded=True,
+            next_poll_at=next_poll_at,
+            state=next_state,
+            updated_at=now,
+        )
+        event = (
+            _build_event(rule.trigger_id, source_spec, next_checkpoint, event_pairs, now)
+            if (not is_seed and event_pairs)
+            else None
+        )
+        should_disable = (
+            event is None
+            and pr_state != "open"
+            and source_spec.auto_disable_on_close
+            and (is_seed or previous_pr_state == "open")
+        )
+        poll_started_at = (
+            checkpoint.next_poll_at if checkpoint is not None and checkpoint.next_poll_at is not None else now
+        )
         return await asyncio.to_thread(
             self._store.update_github_pr_checkpoint_and_enqueue,
             rule.trigger_id,
-            nc,
-            event=ev,
-            disable_reason="pr_closed" if close else None,
+            next_checkpoint,
+            event=event,
+            disable_reason="pr_closed" if should_disable else None,
             expected_rule_uid=rule.rule_uid,
-            poll_started_at=cp.next_poll_at if cp is not None and cp.next_poll_at is not None else now,
+            poll_started_at=poll_started_at,
         )
 
-    async def _save(self, rule: _Rule, cp: _Cp | None, now: float, **upd: object) -> None:
-        nxt = (cp or rm.GitHubPRCheckpoint(updated_at=now)).model_copy(update={"updated_at": now, **upd})
-        fn = self._store.upsert_github_pr_checkpoint
-        await asyncio.to_thread(fn, rule.trigger_id, nxt, expected_rule_uid=rule.rule_uid)
+    async def _save_checkpoint(
+        self,
+        rule: rm.ReactiveTriggerRecord,
+        checkpoint: rm.GitHubPRCheckpoint | None,
+        now: float,
+        **updates: object,
+    ) -> None:
+        base = checkpoint or rm.GitHubPRCheckpoint(updated_at=now)
+        updated = base.model_copy(update={"updated_at": now, **updates})
+        await asyncio.to_thread(
+            self._store.upsert_github_pr_checkpoint,
+            rule.trigger_id,
+            updated,
+            expected_rule_uid=rule.rule_uid,
+        )
 
 
-async def _sync_pr(src: _Src, cp: _Cp | None, fetch: _Fetch, *, now: float, require_open: bool = False) -> _Sync:
-    base = cp if cp is not None and cp.seeded else None
-    st, sha, prev_st = (dict(base.state), base.head_sha, base.pr_state) if base is not None else ({}, None, "open")
-    seed, pr_st, closed_at = base is None, prev_st, None
-    res = await fetch(f"/repos/{src.repo}/pulls/{src.number}", None if seed else _s(st.get("pr_etag")))
-    if res.status_code == 200 and isinstance(d := res.data, dict):
-        merged = d.get("merged") is True or d.get("merged_at") is not None
-        pr_st = "merged" if merged else ("closed" if (_s(d.get("state")) or "").lower() == "closed" else "open")
-        sha = _s(_d(d.get("head")).get("sha")) or sha
-        closed_at = _s(d.get("merged_at")) or _s(d.get("closed_at"))
-        st.update(pr_etag=res.etag, pr_title=_s(d.get("title"), _LIMIT), pr_url=_s(d.get("html_url")))
-    elif res.status_code == 304:
-        st["pr_etag"] = res.etag
+async def _sync_pr(
+    source_spec: rm.GitHubPRSourceSpec,
+    checkpoint: rm.GitHubPRCheckpoint | None,
+    fetch: _FetchFn,
+    *,
+    now: float,
+    require_open: bool = False,
+) -> _SyncResult:
+    base = checkpoint if checkpoint is not None and checkpoint.seeded else None
+    is_seed = base is None
+    state: _JsonDict = dict(base.state) if base is not None else {}
+    head_sha = base.head_sha if base is not None else None
+    previous_pr_state: Literal["open", "closed", "merged"] = base.pr_state if base is not None else "open"
+    pr_state = previous_pr_state
+    closed_at: str | None = None
+
+    pr_path = f"/repos/{source_spec.repo}/pulls/{source_spec.number}"
+    response = await fetch(pr_path, None if is_seed else _clean_str(state.get("pr_etag")))
+    if response.status_code == 200 and isinstance(payload := response.data, dict):
+        merged = payload.get("merged") is True or payload.get("merged_at") is not None
+        raw_state = (_clean_str(payload.get("state")) or "").lower()
+        pr_state = "merged" if merged else ("closed" if raw_state == "closed" else "open")
+        head_sha = _clean_str(_as_mapping(payload.get("head")).get("sha")) or head_sha
+        closed_at = _clean_str(payload.get("merged_at")) or _clean_str(payload.get("closed_at"))
+        state.update(
+            pr_etag=response.etag,
+            pr_title=_clean_str(payload.get("title"), _SEEN_AND_TEXT_LIMIT),
+            pr_url=_clean_str(payload.get("html_url")),
+        )
+    elif response.status_code == 304:
+        state["pr_etag"] = response.etag
     else:
-        msg = f"Unexpected PR payload for {src.repo}#{src.number}"
+        msg = f"Unexpected PR payload for {source_spec.repo}#{source_spec.number}"
         raise ghc.GitHubClientError(msg)
-    if require_open and pr_st != "open":
-        _fail(f"GitHub PR {src.repo}#{src.number} is already {pr_st}.")
-    pairs: _Pairs = []
-    if "activity" in src.events:
-        await _poll_timeline(src, st, fetch, pairs, seed_only=seed)
-        await _poll_review_comments(src, st, fetch, pairs, seed=seed, now=now)
-    if "ci" in src.events and pr_st == "open" and sha:
-        await _poll_check_runs(src, sha, st, fetch, pairs, seed_only=seed)
-    if not seed and prev_st == "open" and {"merged": "merge", "closed": "close"}.get(pr_st) in src.events:
-        msg = f"PR #{src.number} {'merged' if pr_st == 'merged' else 'closed without merge'}"
-        pairs.append(({"type": pr_st, "url": st.get("pr_url"), "summary": msg}, f"pr:{pr_st}:{closed_at or sha or ''}"))
-    return pr_st, sha, st, pairs
+
+    if require_open and pr_state != "open":
+        _fail(f"GitHub PR {source_spec.repo}#{source_spec.number} is already {pr_state}.")
+
+    pairs: _EventPairs = []
+    if "activity" in source_spec.events:
+        await _poll_timeline(source_spec, state, fetch, pairs, seed_only=is_seed)
+        await _poll_review_comments(source_spec, state, fetch, pairs, seed_only=is_seed, now=now)
+    if "ci" in source_spec.events and pr_state == "open" and head_sha:
+        await _poll_check_runs(source_spec, head_sha, state, fetch, pairs, seed_only=is_seed)
+    terminal_event_type = {"merged": "merge", "closed": "close"}.get(pr_state)
+    if not is_seed and previous_pr_state == "open" and terminal_event_type in source_spec.events:
+        summary = f"PR #{source_spec.number} {'merged' if pr_state == 'merged' else 'closed without merge'}"
+        occurrence_key = closed_at or head_sha or ""
+        terminal_item: _JsonDict = {"type": pr_state, "url": state.get("pr_url"), "summary": summary}
+        pairs.append((terminal_item, f"pr:{pr_state}:{occurrence_key}"))
+    return pr_state, head_sha, state, pairs
 
 
-def _load_seen(st: _Obj, key: str, *, seed: bool) -> dict[str, None]:
-    return {} if seed else dict.fromkeys(k for k in st.get(key, []) if isinstance(k, str))
+def _load_seen_ids(state: _JsonDict, key: str, *, seed_only: bool) -> dict[str, None]:
+    if seed_only:
+        return {}
+    return dict.fromkeys(entry for entry in state.get(key, []) if isinstance(entry, str))
 
 
-async def _poll_timeline(src: _Src, st: _Obj, fetch: _Fetch, out: _Pairs, *, seed_only: bool) -> None:
-    base = f"/repos/{src.repo}/issues/{src.number}/timeline?per_page=100&page="
-    seen = _load_seen(st, "seen_timeline_ids", seed=seed_only)
-    page = 1 if seed_only else max(1, int(st.get("timeline_page") or 1))
+async def _poll_timeline(
+    source_spec: rm.GitHubPRSourceSpec,
+    state: _JsonDict,
+    fetch: _FetchFn,
+    out: _EventPairs,
+    *,
+    seed_only: bool,
+) -> None:
+    base_url = f"/repos/{source_spec.repo}/issues/{source_spec.number}/timeline?per_page=100&page="
+    seen_ids = _load_seen_ids(state, "seen_timeline_ids", seed_only=seed_only)
+    page = 1 if seed_only else max(1, int(state.get("timeline_page") or 1))
     for step in range(1 if seed_only else _MAX_PAGES):
-        res = await fetch(f"{base}{page}", None if (seed_only or step) else _s(st.get("timeline_etag")))
-        if seed_only and res.last_page and res.last_page > 1:
-            page, res = res.last_page, await fetch(f"{base}{res.last_page}", None)
-        if res.status_code == 304:
-            st["timeline_etag"] = res.etag
+        request_etag = None if (seed_only or step > 0) else _clean_str(state.get("timeline_etag"))
+        response = await fetch(f"{base_url}{page}", request_etag)
+        if seed_only and response.last_page and response.last_page > 1:
+            page = response.last_page
+            response = await fetch(f"{base_url}{page}", None)
+        if response.status_code == 304:
+            state["timeline_etag"] = response.etag
             return
-        entries = [e for e in res.data if isinstance(e, Mapping)] if isinstance(res.data, list) else []
-        for e in entries:
-            ev, u = (_s(e.get("event")) or "").lower(), _d(e.get("user")) or _d(e.get("actor"))
-            ts = e.get("created_at") or e.get("submitted_at") or ""
-            key = f"{ev}:{e['id']}" if e.get("id") is not None else f"{ev}:{ts}:{u.get('login') or ''}"
-            if key not in seen:
-                seen[key] = None
-                if not seed_only and (fmt := _format_timeline(src, e, ev, u)) is not None:
-                    out.append((fmt, f"tl:{key}"))
-        nxt = res.next_page or (page + 1 if len(entries) >= 100 else None)
-        if seed_only or nxt is None or step + 1 >= _MAX_PAGES:
-            st.update(timeline_page=page if nxt is None else nxt, timeline_etag=res.etag if nxt is None else None)
+        entries = (
+            [item for item in response.data if isinstance(item, Mapping)] if isinstance(response.data, list) else []
+        )
+        for entry in entries:
+            event_name = (_clean_str(entry.get("event")) or "").lower()
+            user = _as_mapping(entry.get("user")) or _as_mapping(entry.get("actor"))
+            timestamp = entry.get("created_at") or entry.get("submitted_at") or ""
+            entry_id = entry.get("id")
+            dedupe_id = (
+                f"{event_name}:{entry_id}"
+                if entry_id is not None
+                else f"{event_name}:{timestamp}:{user.get('login') or ''}"
+            )
+            if dedupe_id not in seen_ids:
+                seen_ids[dedupe_id] = None
+                if not seed_only and (formatted := _format_timeline(source_spec, entry, event_name, user)) is not None:
+                    out.append((formatted, f"tl:{dedupe_id}"))
+        next_page = response.next_page or (page + 1 if len(entries) >= 100 else None)
+        if seed_only or next_page is None or step + 1 >= _MAX_PAGES:
+            state["timeline_page"] = page if next_page is None else next_page
+            state["timeline_etag"] = response.etag if next_page is None else None
             break
-        page = nxt
-    st["seen_timeline_ids"] = list(seen)[-_LIMIT:]
+        page = next_page
+    state["seen_timeline_ids"] = list(seen_ids)[-_SEEN_AND_TEXT_LIMIT:]
 
 
-async def _poll_review_comments(src: _Src, st: _Obj, fetch: _Fetch, out: _Pairs, *, seed: bool, now: float) -> None:
-    seen = _load_seen(st, "seen_review_comment_ids", seed=seed)
-    since, etag = (None, None) if seed else (_s(st.get("review_comments_since")), _s(st.get("review_comments_etag")))
-    base = (
-        f"/repos/{src.repo}/pulls/{src.number}/comments?sort=updated&direction={'desc' if seed else 'asc'}&per_page=100"
+async def _poll_review_comments(
+    source_spec: rm.GitHubPRSourceSpec,
+    state: _JsonDict,
+    fetch: _FetchFn,
+    out: _EventPairs,
+    *,
+    seed_only: bool,
+    now: float,
+) -> None:
+    seen_ids = _load_seen_ids(state, "seen_review_comment_ids", seed_only=seed_only)
+    since = None if seed_only else _clean_str(state.get("review_comments_since"))
+    request_etag = None if seed_only else _clean_str(state.get("review_comments_etag"))
+    direction = "desc" if seed_only else "asc"
+    base_url = (
+        f"/repos/{source_spec.repo}/pulls/{source_spec.number}/comments?sort=updated&direction={direction}&per_page=100"
     )
-    since_q, last_ts, rows, page, new_etag = f"&since={quote(since, safe=':-TZ.')}" if since else "", since, [], 1, None
-    for step in range(1 if seed else _MAX_PAGES):
-        res = await fetch(f"{base}{since_q}{f'&page={page}' if page > 1 else ''}", None if step else etag)
-        if res.status_code == 304:
-            st["review_comments_etag"] = res.etag
+    since_query = f"&since={quote(since, safe=':-TZ.')}" if since else ""
+    last_timestamp = since
+    new_rows: list[tuple[object, str | None, _JsonDict]] = []
+    page = 1
+    next_etag: str | None = None
+
+    for step in range(1 if seed_only else _MAX_PAGES):
+        page_query = f"&page={page}" if page > 1 else ""
+        response = await fetch(f"{base_url}{since_query}{page_query}", None if step > 0 else request_etag)
+        if response.status_code == 304:
+            state["review_comments_etag"] = response.etag
             return
-        comments = [c for c in res.data if isinstance(c, Mapping)] if isinstance(res.data, list) else []
-        for c in reversed(comments) if seed else comments:
-            if not isinstance(cid := c.get("id"), int) or isinstance(cid, bool):
+        comments = (
+            [item for item in response.data if isinstance(item, Mapping)] if isinstance(response.data, list) else []
+        )
+        for comment in reversed(comments) if seed_only else comments:
+            comment_id = comment.get("id")
+            if not isinstance(comment_id, int) or isinstance(comment_id, bool):
                 continue
-            if (ts := _s(c.get("updated_at") or c.get("created_at"))) and (last_ts is None or ts > last_ts):
-                last_ts = ts
-            if (sid := str(cid)) not in seen:
-                seen[sid], u = None, _d(c.get("user"))
-                actor = _s(u.get("login"))
-                if not seed and not is_ignored_activity_actor(src, actor=actor, actor_type=_s(u.get("type"))):
-                    e = {"id": cid, "path": c.get("path"), "body": _s(c.get("body"), _LIMIT), "url": c.get("html_url")}
-                    rows.append((c.get("pull_request_review_id"), actor, e))
-        if seed or res.next_page is None or step + 1 >= _MAX_PAGES:
-            ok_e = not seed and step == 0 and res.next_page is None and len(comments) < 100 and last_ts == since
-            new_etag = res.etag if ok_e else None
+            comment_ts = _clean_str(comment.get("updated_at") or comment.get("created_at"))
+            if comment_ts and (last_timestamp is None or comment_ts > last_timestamp):
+                last_timestamp = comment_ts
+            comment_key = str(comment_id)
+            if comment_key not in seen_ids:
+                seen_ids[comment_key] = None
+                user = _as_mapping(comment.get("user"))
+                actor = _clean_str(user.get("login"))
+                actor_type = _clean_str(user.get("type"))
+                if not seed_only and not is_ignored_activity_actor(source_spec, actor=actor, actor_type=actor_type):
+                    body = _clean_str(comment.get("body"), _SEEN_AND_TEXT_LIMIT)
+                    entry: _JsonDict = {
+                        "id": comment_id,
+                        "path": comment.get("path"),
+                        "body": body,
+                        "url": comment.get("html_url"),
+                    }
+                    new_rows.append((comment.get("pull_request_review_id"), actor, entry))
+        if seed_only or response.next_page is None or step + 1 >= _MAX_PAGES:
+            cacheable = (
+                not seed_only
+                and step == 0
+                and response.next_page is None
+                and len(comments) < 100
+                and last_timestamp == since
+            )
+            next_etag = response.etag if cacheable else None
             break
-        page = res.next_page
-    iso = datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    since_out = last_ts or (iso if seed else None)
-    ids = list(seen)[-_LIMIT:]
-    st.update(review_comments_since=since_out, review_comments_etag=new_etag, seen_review_comment_ids=ids)
-    _group_review_comments(rows, out)
+        page = response.next_page
+
+    if seed_only and last_timestamp is None:
+        last_timestamp = datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["review_comments_since"] = last_timestamp
+    state["review_comments_etag"] = next_etag
+    state["seen_review_comment_ids"] = list(seen_ids)[-_SEEN_AND_TEXT_LIMIT:]
+    _group_review_comments(new_rows, out)
 
 
-async def _poll_check_runs(s: _Src, sha: str, st: _Obj, fetch: _Fetch, out: _Pairs, *, seed_only: bool) -> None:
-    if seed_only or st.get("ci_head_sha") != sha:
-        st.update(ci_head_sha=sha, checks_etag=None, notified_failed_checks=[], last_ci_overall="none")
+async def _poll_check_runs(
+    source_spec: rm.GitHubPRSourceSpec,
+    head_sha: str,
+    state: _JsonDict,
+    fetch: _FetchFn,
+    out: _EventPairs,
+    *,
+    seed_only: bool,
+) -> None:
+    if seed_only or state.get("ci_head_sha") != head_sha:
+        state.update(ci_head_sha=head_sha, checks_etag=None, notified_failed_checks=[], last_ci_overall="none")
     runs: dict[str, Mapping[str, Any]] = {}
-    etag, single_etag, page, trunc = None if seed_only else _s(st.get("checks_etag")), None, 1, False
+    request_etag = None if seed_only else _clean_str(state.get("checks_etag"))
+    single_page_etag: str | None = None
+    page = 1
+    truncated = False
+
     for step in range(_MAX_PAGES):
-        res = await fetch(f"/repos/{s.repo}/commits/{sha}/check-runs?per_page=100&page={page}", None if step else etag)
-        if res.status_code == 304:
-            st["checks_etag"] = res.etag
+        check_path = f"/repos/{source_spec.repo}/commits/{head_sha}/check-runs?per_page=100&page={page}"
+        response = await fetch(check_path, None if step > 0 else request_etag)
+        if response.status_code == 304:
+            state["checks_etag"] = response.etag
             return
-        for r in raw if isinstance(raw := _d(res.data).get("check_runs"), list) else ():
-            if isinstance(r, Mapping):
-                runs.setdefault(str(r["id"]) if r.get("id") is not None else (_s(r.get("name")) or "check"), r)
-        single_etag = res.etag if step == 0 and res.next_page is None else single_etag
-        if res.next_page is None or step + 1 >= _MAX_PAGES:
-            trunc = res.next_page is not None
+        raw_runs = _as_mapping(response.data).get("check_runs")
+        for run in raw_runs if isinstance(raw_runs, list) else ():
+            if isinstance(run, Mapping):
+                run_key = str(run["id"]) if run.get("id") is not None else (_clean_str(run.get("name")) or "check")
+                runs.setdefault(run_key, run)
+        if step == 0 and response.next_page is None:
+            single_page_etag = response.etag
+        if response.next_page is None or step + 1 >= _MAX_PAGES:
+            truncated = response.next_page is not None
             break
-        page = res.next_page
-    failed, overall = _tally_checks(runs, truncated=trunc)
-    notified = set(failed) if seed_only else {k for k in st.get("notified_failed_checks", []) if isinstance(k, str)}
-    for k in sorted(set(failed) - notified):
-        msg = f"CI check '{failed[k]['name']}' finished with {failed[k]['conclusion']}"
-        out.append(({"type": "ci_failure", "id": k, "sha": sha, "summary": msg, **failed[k]}, f"ci:fail:{sha}:{k}"))
-    if not seed_only and overall == "passing" and st.get("last_ci_overall") != "passing":
-        msg = f"All {len(runs)} CI checks passed for {sha[:7]}"
-        out.append(({"type": "ci_passing", "sha": sha, "total": len(runs), "summary": msg}, f"ci:pass:{sha}"))
-    st.update(checks_etag=single_etag, notified_failed_checks=sorted(notified | set(failed)), last_ci_overall=overall)
+        page = response.next_page
+
+    failed, overall = _tally_checks(runs, truncated=truncated)
+    notified_failed = (
+        set(failed) if seed_only else {key for key in state.get("notified_failed_checks", []) if isinstance(key, str)}
+    )
+    for key in sorted(set(failed) - notified_failed):
+        summary = f"CI check '{failed[key]['name']}' finished with {failed[key]['conclusion']}"
+        failure_item: _JsonDict = {"type": "ci_failure", "id": key, "sha": head_sha, "summary": summary, **failed[key]}
+        out.append((failure_item, f"ci:fail:{head_sha}:{key}"))
+    if not seed_only and overall == "passing" and state.get("last_ci_overall") != "passing":
+        summary = f"All {len(runs)} CI checks passed for {head_sha[:7]}"
+        pass_item: _JsonDict = {"type": "ci_passing", "sha": head_sha, "total": len(runs), "summary": summary}
+        out.append((pass_item, f"ci:pass:{head_sha}"))
+    state["checks_etag"] = single_page_etag
+    state["notified_failed_checks"] = sorted(notified_failed | set(failed))
+    state["last_ci_overall"] = overall
 
 
-def _tally_checks(runs: dict[str, Mapping[str, Any]], *, truncated: bool) -> tuple[dict[str, _Obj], str]:
-    failed, pending, other = dict[str, _Obj](), False, False
-    for k, r in runs.items():
-        st, c = (_s(r.get("status")) or "").lower(), (_s(r.get("conclusion")) or "").lower()
-        if st != "completed":
-            pending = True
-        elif c in CI_FAIL_CONCLUSIONS:
-            u = _s(r.get("html_url") or r.get("url"))
-            failed[k] = {"name": _s(r.get("name")) or "check", "conclusion": c, "url": u}
-        elif c not in CI_PASS_CONCLUSIONS:
-            other = True
+def _tally_checks(runs: dict[str, Mapping[str, Any]], *, truncated: bool) -> tuple[dict[str, _JsonDict], str]:
+    failed: dict[str, _JsonDict] = {}
+    has_pending = False
+    has_non_passing = False
+    for key, run in runs.items():
+        status = (_clean_str(run.get("status")) or "").lower()
+        conclusion = (_clean_str(run.get("conclusion")) or "").lower()
+        if status != "completed":
+            has_pending = True
+        elif conclusion in CI_FAIL_CONCLUSIONS:
+            url = _clean_str(run.get("html_url") or run.get("url"))
+            failed[key] = {"name": _clean_str(run.get("name")) or "check", "conclusion": conclusion, "url": url}
+        elif conclusion not in CI_PASS_CONCLUSIONS:
+            has_non_passing = True
     if not runs or failed:
         return failed, "failing" if failed else "none"
-    return failed, "pending" if (pending or truncated) else ("non_passing" if other else "passing")
+    if has_pending or truncated:
+        return failed, "pending"
+    return failed, "non_passing" if has_non_passing else "passing"
 
 
-def _format_timeline(src: _Src, e: Mapping[str, Any], ev: str, u: Mapping[str, Any]) -> _Obj | None:
-    actor = _s(u.get("login"))
-    if not ev or ev in _IGNORED_TL or is_ignored_activity_actor(src, actor=actor, actor_type=_s(u.get("type"))):
+def _format_timeline(
+    source_spec: rm.GitHubPRSourceSpec,
+    entry: Mapping[str, Any],
+    event_name: str,
+    user: Mapping[str, Any],
+) -> _JsonDict | None:
+    actor = _clean_str(user.get("login"))
+    if not event_name or event_name in _IGNORED_TIMELINE_EVENTS:
         return None
-    body, who = _s(e.get("body"), _LIMIT), actor or "someone"
-    base, sfx = {"id": e.get("id"), "actor": actor, "url": e.get("html_url")}, f": {body}" if body else ""
-    if ev == "reviewed":
-        if (st := (_s(e.get("state")) or "").lower()) == "commented" and not body:
+    if is_ignored_activity_actor(source_spec, actor=actor, actor_type=_clean_str(user.get("type"))):
+        return None
+    body = _clean_str(entry.get("body"), _SEEN_AND_TEXT_LIMIT)
+    who = actor or "someone"
+    base: _JsonDict = {"id": entry.get("id"), "actor": actor, "url": entry.get("html_url")}
+    suffix = f": {body}" if body else ""
+    if event_name == "reviewed":
+        review_state = (_clean_str(entry.get("state")) or "").lower()
+        if review_state == "commented" and not body:
             return None
-        msg = f"Review ({st or 'submitted'}) by {who}{sfx}"
-        return {**base, "type": "review", "state": st, "body": body, "summary": msg}
-    if ev == "commented":
-        return {**base, "type": "comment", "body": body, "summary": f"Comment by {who}{sfx}"}
-    lbl = _s(_d(e.get("label")).get("name"))
-    return {**base, "type": ev, "summary": f"{who} {ev.replace('_', ' ')}{f' ({lbl})' if lbl else sfx}"}
+        summary = f"Review ({review_state or 'submitted'}) by {who}{suffix}"
+        return {**base, "type": "review", "state": review_state, "body": body, "summary": summary}
+    if event_name == "commented":
+        return {**base, "type": "comment", "body": body, "summary": f"Comment by {who}{suffix}"}
+    label_name = _clean_str(_as_mapping(entry.get("label")).get("name"))
+    detail = f" ({label_name})" if label_name else suffix
+    return {**base, "type": event_name, "summary": f"{who} {event_name.replace('_', ' ')}{detail}"}
 
 
-def _group_review_comments(rows: list[tuple[object, str | None, _Obj]], out: _Pairs) -> None:
-    grouped: dict[object, list[tuple[object, str | None, _Obj]]] = {}
+def _group_review_comments(rows: list[tuple[object, str | None, _JsonDict]], out: _EventPairs) -> None:
+    grouped: dict[object, list[tuple[object, str | None, _JsonDict]]] = {}
     for row in rows:
-        grouped.setdefault(("r", row[0]) if row[0] is not None else ("c", row[2]["id"]), []).append(row)
-    for grp in grouped.values():
-        rid, actor, es = grp[0][0], grp[0][1], [e for _, _, e in grp]
-        who, paths = actor or "someone", list(dict.fromkeys(p for e in es if (p := _s(e["path"]))))
-        p_txt, key = f" on {', '.join(paths[:3])}" if paths else "", "|".join(sorted(f"rc:{e['id']}" for e in es))
-        if len(grp) == 1:
-            msg = f"Inline comment by {who}{p_txt}{f': {es[0]["body"]}' if es[0]['body'] else ''}"
-            item: _Obj = {"type": "review_comment", **es[0], "summary": msg}
+        review_id, _, entry = row
+        group_key = ("r", review_id) if review_id is not None else ("c", entry["id"])
+        grouped.setdefault(group_key, []).append(row)
+    for group in grouped.values():
+        review_id = group[0][0]
+        actor = group[0][1]
+        entries = [entry for _, _, entry in group]
+        who = actor or "someone"
+        paths = list(dict.fromkeys(path for entry in entries if (path := _clean_str(entry["path"]))))
+        path_summary = f" on {', '.join(paths[:3])}" if paths else ""
+        dedupe_key = "|".join(sorted(f"rc:{entry['id']}" for entry in entries))
+        if len(group) == 1:
+            body_suffix = f": {entries[0]['body']}" if entries[0]["body"] else ""
+            summary = f"Inline comment by {who}{path_summary}{body_suffix}"
+            item: _JsonDict = {"type": "review_comment", **entries[0], "summary": summary}
         else:
-            item = {"type": "review_comments", "count": len(grp), "paths": paths, "comments": es, "url": es[0]["url"]}
-            item["summary"] = f"{len(grp)} inline comments by {who}{p_txt}"
-        out.append(({"review_id": rid, "actor": actor, **item}, key))
+            summary = f"{len(group)} inline comments by {who}{path_summary}"
+            item = {
+                "type": "review_comments",
+                "count": len(group),
+                "paths": paths,
+                "comments": entries,
+                "url": entries[0]["url"],
+                "summary": summary,
+            }
+        out.append(({"review_id": review_id, "actor": actor, **item}, dedupe_key))
 
 
-def _build_event(tid: str, src: _Src, cp: _Cp, pairs: _Pairs, now: float) -> rm.TriggerEvent:
-    items, keys = [it for it, _ in pairs], sorted(p for _, k in pairs for p in k.split("|"))
-    types = {it.get("type") for it in items}
-    kind = "github_pr.merged" if "merged" in types else "github_pr.closed" if "closed" in types else "github_pr.update"
-    dkey = f"ghpr:{hashlib.sha256(f'{tid}:{"|".join(keys)}'.encode()).hexdigest()[:32]}"
-    sums = [str(it["summary"]) for it in items if it.get("summary")]
-    data: _Obj = {"repo": src.repo, "number": src.number, "head_sha": cp.head_sha, "state": cp.pr_state}
-    data |= {"merged": cp.pr_state == "merged", "terminal": cp.pr_state != "open", "items": items}
-    data |= {"url": u} if (u := _s(cp.state.get("pr_url"))) else {}
-    ev: _Obj = {"source_type": "github_pr", "source_id": src.repo.lower(), "kind": kind, "event_id": dkey, "data": data}
-    actor = next((a for it in items if (a := _s(it.get("actor")))), None)
-    title = _s(cp.state.get("pr_title")) or f"{src.repo}#{src.number}"
-    ev |= {"timestamp": now, "actor": actor, "title": title, "summary": "\n".join(sums)[:2000] if sums else None}
-    return rm.TriggerEvent.model_validate(ev)
-
-
-async def _http(stack: AsyncExitStack, client: _Http | None) -> _Http:
-    return (
-        client
-        if client is not None
-        else await stack.enter_async_context(httpx.AsyncClient(timeout=20.0, follow_redirects=False))
+def _build_event(
+    trigger_id: str,
+    source_spec: rm.GitHubPRSourceSpec,
+    checkpoint: rm.GitHubPRCheckpoint,
+    pairs: _EventPairs,
+    now: float,
+) -> rm.TriggerEvent:
+    items = [item for item, _ in pairs]
+    keys = sorted(part for _, key in pairs for part in key.split("|"))
+    item_types = {item.get("type") for item in items}
+    kind = (
+        "github_pr.merged"
+        if "merged" in item_types
+        else "github_pr.closed"
+        if "closed" in item_types
+        else "github_pr.update"
     )
+    dedupe_key = f"ghpr:{hashlib.sha256(f'{trigger_id}:{"|".join(keys)}'.encode()).hexdigest()[:32]}"
+    summaries = [str(item["summary"]) for item in items if item.get("summary")]
+    data: _JsonDict = {
+        "repo": source_spec.repo,
+        "number": source_spec.number,
+        "head_sha": checkpoint.head_sha,
+        "state": checkpoint.pr_state,
+        "merged": checkpoint.pr_state == "merged",
+        "terminal": checkpoint.pr_state != "open",
+        "items": items,
+    }
+    if pr_url := _clean_str(checkpoint.state.get("pr_url")):
+        data["url"] = pr_url
+    actor = next((login for item in items if (login := _clean_str(item.get("actor")))), None)
+    title = _clean_str(checkpoint.state.get("pr_title")) or f"{source_spec.repo}#{source_spec.number}"
+    return rm.TriggerEvent.model_validate(
+        {
+            "source_type": "github_pr",
+            "source_id": source_spec.repo.lower(),
+            "kind": kind,
+            "event_id": dedupe_key,
+            "data": data,
+            "timestamp": now,
+            "actor": actor,
+            "title": title,
+            "summary": "\n".join(summaries)[:2000] if summaries else None,
+        },
+    )
+
+
+async def _resolve_http_client(stack: AsyncExitStack, client: httpx.AsyncClient | None) -> httpx.AsyncClient:
+    if client is not None:
+        return client
+    return await stack.enter_async_context(httpx.AsyncClient(timeout=20.0, follow_redirects=False))
 
 
 def _fail(msg: str, cause: Exception | None = None) -> NoReturn:
     raise GitHubPRWatchError(msg) from cause
 
 
-def _d(v: object) -> Mapping[str, Any]:
-    return v if isinstance(v, Mapping) else {}
+def _as_mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
-def _s(v: object, limit: int | None = None) -> str | None:
-    return (t[:limit] if limit else t) if isinstance(v, str) and (t := v.strip()) else None
+def _clean_str(value: object, limit: int | None = None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:limit] if limit is not None else stripped
