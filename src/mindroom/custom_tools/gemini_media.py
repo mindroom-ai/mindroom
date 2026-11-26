@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -10,8 +9,8 @@ from uuid import uuid4
 try:
     from google.genai import Client, types
 except ImportError as exc:
-    msg = "`google-genai` not installed. Install with: `pip install google-genai`"
-    raise ImportError(msg) from exc
+    _msg = "`google-genai` not installed. Install with: `pip install google-genai`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Image, Video
 from mindroom.logging_config import get_logger
@@ -43,10 +42,10 @@ class GeminiTools(Toolkit):
         enable_generate_video: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.vertexai = vertexai or os.getenv("GOOGLE_GENAI_USE_VERTEXAI") == "true"
+        self.vertexai = vertexai
         self.project_id = project_id
         self.location = location
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key
         if not self.vertexai and not self.api_key:
             msg = "GOOGLE_API_KEY not set. Please provide api_key or set the environment variable."
             raise ValueError(msg)
@@ -54,8 +53,8 @@ class GeminiTools(Toolkit):
         client_params: dict[str, Any] = {}
         if self.vertexai:
             client_params["vertexai"] = True
-            client_params["project"] = self.project_id or os.getenv("GOOGLE_CLOUD_PROJECT")
-            client_params["location"] = self.location or os.getenv("GOOGLE_CLOUD_LOCATION")
+            client_params["project"] = self.project_id
+            client_params["location"] = self.location
         else:
             client_params["api_key"] = self.api_key
 

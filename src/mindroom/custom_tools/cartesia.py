@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 try:
     import cartesia
 except ImportError as exc:
-    msg = "`cartesia` not installed. Install with: `pip install cartesia`"
-    raise ImportError(msg) from exc
+    _msg = "`cartesia` not installed. Install with: `pip install cartesia`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Audio
 from mindroom.logging_config import get_logger
@@ -24,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-SpeakerGender = Literal["male", "female"]
+_SpeakerGender = Literal["male", "female"]
 
 
 class CartesiaTools(Toolkit):
@@ -40,12 +39,11 @@ class CartesiaTools(Toolkit):
         enable_localize_voice: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        resolved_key = api_key or os.getenv("CARTESIA_API_KEY")
-        if not resolved_key:
+        if not api_key:
             msg = "CARTESIA_API_KEY not set. Please set the CARTESIA_API_KEY environment variable."
             raise ValueError(msg)
 
-        self.api_key: str = resolved_key
+        self.api_key: str = api_key
         self.client: Any = cartesia.Cartesia(api_key=self.api_key)
         self.model_id = model_id
         self.default_voice_id = default_voice_id
@@ -84,7 +82,7 @@ class CartesiaTools(Toolkit):
         name: str,
         description: str,
         language: str,
-        original_speaker_gender: SpeakerGender,
+        original_speaker_gender: _SpeakerGender,
         voice_id: str | None = None,
     ) -> str:
         """Create a localized Cartesia voice in another language.

@@ -15,8 +15,8 @@ try:
     from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoClip, VideoFileClip
     from moviepy.config import FFMPEG_BINARY
 except ImportError as exc:
-    msg = "`moviepy` not installed. Install with: `pip install moviepy`"
-    raise ImportError(msg) from exc
+    _msg = "`moviepy` not installed. Install with: `pip install moviepy`"
+    raise ImportError(_msg) from exc
 
 from PIL import ImageFont
 

@@ -90,13 +90,36 @@ def _agno_modules(tool_name: str) -> set[str]:
     return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
 
 
+def _native_modules(tool_name: str) -> set[str]:
+    """Return the native MindRoom toolkit modules that define a built-in tool's class and its bases."""
+    factory = builtin_tool_registry().entries[tool_name].factory
+    if factory is None:
+        return set()
+    toolkit_class = factory()
+    return {
+        klass.__module__
+        for klass in inspect.getmro(toolkit_class)
+        if klass.__module__.startswith("mindroom.") and klass.__module__ != "mindroom.tool_system.authoring"
+    }
+
+
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
+    """Agno toolkits match declared/allowlisted env reads; native env-configured toolkits read none directly."""
     modules = _agno_modules(tool_name)
+    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
+    if not modules and declared:
+        native_modules = _native_modules(tool_name)
+        assert native_modules, f"{tool_name} declares env fallbacks without a native toolkit module"
+        native_reads = set().union(*map(_module_env_reads, native_modules))
+        assert native_reads == set(), (
+            f"Native env-configured toolkit {tool_name} must receive env values via config/metadata.py, "
+            f"not direct environment reads: {sorted(native_reads)}"
+        )
+        return
+
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
-    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
 
     assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
         "undeclared": set(),

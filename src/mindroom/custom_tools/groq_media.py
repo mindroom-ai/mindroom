@@ -10,8 +10,8 @@ from uuid import uuid4
 try:
     from groq import Groq as GroqClient
 except ImportError as exc:
-    msg = "`groq` not installed. Install with: `pip install groq`"
-    raise ImportError(msg) from exc
+    _msg = "`groq` not installed. Install with: `pip install groq`"
+    raise ImportError(_msg) from exc
 
 from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio

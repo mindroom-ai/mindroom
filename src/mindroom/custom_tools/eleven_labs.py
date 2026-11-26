@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,8 +11,8 @@ from uuid import uuid4
 try:
     from elevenlabs import ElevenLabs
 except ImportError as exc:
-    msg = "`elevenlabs` not installed. Install with: `pip install elevenlabs`"
-    raise ImportError(msg) from exc
+    _msg = "`elevenlabs` not installed. Install with: `pip install elevenlabs`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Audio
 from mindroom.logging_config import get_logger
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-ElevenLabsAudioOutputFormat = Literal[
+_ElevenLabsAudioOutputFormat = Literal[
     "mp3_22050_32",
     "mp3_44100_32",
     "mp3_44100_64",
@@ -66,13 +65,13 @@ class ElevenLabsTools(Toolkit):
         api_key: str | None = None,
         target_directory: str | None = None,
         model_id: str = ELEVENLABS_TTS,
-        output_format: ElevenLabsAudioOutputFormat = "mp3_44100_64",
+        output_format: _ElevenLabsAudioOutputFormat = "mp3_44100_64",
         enable_get_voices: bool = True,
         enable_generate_sound_effect: bool = True,
         enable_text_to_speech: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key or os.getenv("ELEVEN_LABS_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.error("ELEVEN_LABS_API_KEY not set")
 

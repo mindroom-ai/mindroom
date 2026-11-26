@@ -12,8 +12,8 @@ from uuid import uuid4
 try:
     from openai import OpenAI as OpenAIClient
 except ImportError as exc:
-    msg = "`openai` not installed. Install with: `pip install openai`"
-    raise ImportError(msg) from exc
+    _msg = "`openai` not installed. Install with: `pip install openai`"
+    raise ImportError(_msg) from exc
 
 from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio, Image
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-OpenAIImageSize = Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"]
-OpenAIImageStyle = Literal["vivid", "natural"]
+_OpenAIImageSize = Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"]
+_OpenAIImageStyle = Literal["vivid", "natural"]
 
 
 class OpenAITools(Toolkit):
@@ -50,8 +50,8 @@ class OpenAITools(Toolkit):
         text_to_speech_format: str = "wav",
         image_model: str | None = OPENAI_IMAGE,
         image_quality: str | None = None,
-        image_size: OpenAIImageSize | None = None,
-        image_style: OpenAIImageStyle | None = None,
+        image_size: _OpenAIImageSize | None = None,
+        image_style: _OpenAIImageStyle | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",

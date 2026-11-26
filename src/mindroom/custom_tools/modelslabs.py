@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -24,7 +23,7 @@ logger = get_logger(__name__)
 _REQUEST_TIMEOUT_SECONDS = 60
 
 
-class ModelsLabFileType(StrEnum):
+class _ModelsLabFileType(StrEnum):
     """Supported ModelsLab output file formats."""
 
     MP4 = "mp4"
@@ -35,22 +34,22 @@ class ModelsLabFileType(StrEnum):
     JPG = "jpg"
 
 
-_MODELS_LAB_URLS: dict[ModelsLabFileType, str] = {
-    ModelsLabFileType.MP4: "https://modelslab.com/api/v6/video/text2video",
-    ModelsLabFileType.MP3: "https://modelslab.com/api/v6/voice/music_gen",
-    ModelsLabFileType.GIF: "https://modelslab.com/api/v6/video/text2video",
-    ModelsLabFileType.WAV: "https://modelslab.com/api/v6/voice/sfx",
-    ModelsLabFileType.PNG: "https://modelslab.com/api/v6/images/text2img",
-    ModelsLabFileType.JPG: "https://modelslab.com/api/v6/images/text2img",
+_MODELS_LAB_URLS: dict[_ModelsLabFileType, str] = {
+    _ModelsLabFileType.MP4: "https://modelslab.com/api/v6/video/text2video",
+    _ModelsLabFileType.MP3: "https://modelslab.com/api/v6/voice/music_gen",
+    _ModelsLabFileType.GIF: "https://modelslab.com/api/v6/video/text2video",
+    _ModelsLabFileType.WAV: "https://modelslab.com/api/v6/voice/sfx",
+    _ModelsLabFileType.PNG: "https://modelslab.com/api/v6/images/text2img",
+    _ModelsLabFileType.JPG: "https://modelslab.com/api/v6/images/text2img",
 }
 
-_MODELS_LAB_FETCH_URLS: dict[ModelsLabFileType, str] = {
-    ModelsLabFileType.MP4: "https://modelslab.com/api/v6/video/fetch",
-    ModelsLabFileType.MP3: "https://modelslab.com/api/v6/voice/fetch",
-    ModelsLabFileType.GIF: "https://modelslab.com/api/v6/video/fetch",
-    ModelsLabFileType.WAV: "https://modelslab.com/api/v6/voice/fetch",
-    ModelsLabFileType.PNG: "https://modelslab.com/api/v6/images/fetch",
-    ModelsLabFileType.JPG: "https://modelslab.com/api/v6/images/fetch",
+_MODELS_LAB_FETCH_URLS: dict[_ModelsLabFileType, str] = {
+    _ModelsLabFileType.MP4: "https://modelslab.com/api/v6/video/fetch",
+    _ModelsLabFileType.MP3: "https://modelslab.com/api/v6/voice/fetch",
+    _ModelsLabFileType.GIF: "https://modelslab.com/api/v6/video/fetch",
+    _ModelsLabFileType.WAV: "https://modelslab.com/api/v6/voice/fetch",
+    _ModelsLabFileType.PNG: "https://modelslab.com/api/v6/images/fetch",
+    _ModelsLabFileType.JPG: "https://modelslab.com/api/v6/images/fetch",
 }
 
 _RETRYABLE_ERROR_CODES = frozenset({"rate_limited", "upstream_unavailable", "server_error"})
@@ -89,13 +88,13 @@ def _finite_provider_eta(value: object) -> int | float | None:
         return None
 
 
-def _resolve_file_type(file_type: ModelsLabFileType | str | None) -> ModelsLabFileType:
-    if isinstance(file_type, ModelsLabFileType):
+def _resolve_file_type(file_type: _ModelsLabFileType | str | None) -> _ModelsLabFileType:
+    if isinstance(file_type, _ModelsLabFileType):
         return file_type
     if isinstance(file_type, str):
         normalized = file_type.strip().lower()
-        return ModelsLabFileType(normalized) if normalized else ModelsLabFileType.MP4
-    return ModelsLabFileType.MP4
+        return _ModelsLabFileType(normalized) if normalized else _ModelsLabFileType.MP4
+    return _ModelsLabFileType.MP4
 
 
 class ModelsLabTools(Toolkit):
@@ -107,7 +106,7 @@ class ModelsLabTools(Toolkit):
         wait_for_completion: bool = False,
         add_to_eta: float = 15,
         max_wait_time: float = 60,
-        file_type: ModelsLabFileType | str | None = ModelsLabFileType.MP4,
+        file_type: _ModelsLabFileType | str | None = _ModelsLabFileType.MP4,
         model_id: str | None = None,
         width: int = 512,
         height: int = 512,
@@ -122,7 +121,7 @@ class ModelsLabTools(Toolkit):
         self.model_id = model_id
         self.width = width
         self.height = height
-        self.api_key = api_key or os.getenv("MODELS_LAB_API_KEY")
+        self.api_key = api_key
 
         if not self.api_key:
             logger.error("MODELS_LAB_API_KEY not set")
@@ -136,7 +135,7 @@ class ModelsLabTools(Toolkit):
             "webhook": None,
             "track_id": None,
         }
-        if self.file_type in {ModelsLabFileType.PNG, ModelsLabFileType.JPG}:
+        if self.file_type in {_ModelsLabFileType.PNG, _ModelsLabFileType.JPG}:
             payload |= {
                 "model_id": self.model_id or "flux",
                 "width": self.width,
@@ -145,7 +144,7 @@ class ModelsLabTools(Toolkit):
                 "num_inference_steps": 30,
                 "safety_checker": "no",
             }
-        elif self.file_type in {ModelsLabFileType.MP4, ModelsLabFileType.GIF}:
+        elif self.file_type in {_ModelsLabFileType.MP4, _ModelsLabFileType.GIF}:
             payload |= {
                 "height": self.height,
                 "width": self.width,
@@ -155,7 +154,7 @@ class ModelsLabTools(Toolkit):
                 "instant_response": False,
                 "output_type": self.file_type.value,
             }
-        elif self.file_type is ModelsLabFileType.WAV:
+        elif self.file_type is _ModelsLabFileType.WAV:
             payload |= {
                 "duration": 10,
                 "output_format": "wav",
@@ -178,9 +177,9 @@ class ModelsLabTools(Toolkit):
         audios: list[Audio] = []
         for media_url in url_links:
             media_id = str(uuid4())
-            if self.file_type in {ModelsLabFileType.PNG, ModelsLabFileType.JPG, ModelsLabFileType.GIF}:
+            if self.file_type in {_ModelsLabFileType.PNG, _ModelsLabFileType.JPG, _ModelsLabFileType.GIF}:
                 images.append(Image(id=media_id, url=media_url))
-            elif self.file_type is ModelsLabFileType.MP4:
+            elif self.file_type is _ModelsLabFileType.MP4:
                 videos.append(Video(id=media_id, url=media_url, eta=eta_text))
             else:
                 audios.append(Audio(id=media_id, url=media_url))
@@ -280,9 +279,9 @@ class ModelsLabTools(Toolkit):
 
     def _resolve_generation_result(self, result: dict[str, Any]) -> ToolValue:
         if result.get("status") == "success" or self.file_type in {
-            ModelsLabFileType.PNG,
-            ModelsLabFileType.JPG,
-            ModelsLabFileType.WAV,
+            _ModelsLabFileType.PNG,
+            _ModelsLabFileType.JPG,
+            _ModelsLabFileType.WAV,
         }:
             url_links: list[str] | tuple[str, ...] = result.get("output") or result.get("future_links", [])
         else:
@@ -327,7 +326,7 @@ class ModelsLabTools(Toolkit):
         return wait_result.content, resolved_urls, wait_result.rejected
 
     def _immediate_message(self, raw_eta: object) -> str:
-        if self.file_type in {ModelsLabFileType.PNG, ModelsLabFileType.JPG} and raw_eta is None:
+        if self.file_type in {_ModelsLabFileType.PNG, _ModelsLabFileType.JPG} and raw_eta is None:
             return f"Image generated successfully ({self.file_type.value.upper()})"
         if raw_eta is not None:
             return (

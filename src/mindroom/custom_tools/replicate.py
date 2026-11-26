@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -13,8 +12,8 @@ try:
     import replicate
     from replicate.helpers import FileOutput
 except ImportError as exc:
-    msg = "`replicate` not installed. Install with: `pip install replicate`"
-    raise ImportError(msg) from exc
+    _msg = "`replicate` not installed. Install with: `pip install replicate`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Image, Video
 from mindroom.logging_config import get_logger
@@ -49,7 +48,7 @@ class ReplicateTools(Toolkit):
         enable_generate_media: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key or os.getenv("REPLICATE_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.error("REPLICATE_API_KEY not set")
         self.model = model

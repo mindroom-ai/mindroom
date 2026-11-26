@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -31,7 +30,7 @@ class GiphyTools(Toolkit):
         enable_search_gifs: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key or os.getenv("GIPHY_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.error("No Giphy API key provided")
         self.limit = limit

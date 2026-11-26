@@ -17,7 +17,7 @@ from mindroom.tool_system.authoring import Toolkit
 
 logger = get_logger(__name__)
 
-ChartType = Literal["bar", "line", "pie", "scatter", "histogram"]
+_ChartType = Literal["bar", "line", "pie", "scatter", "histogram"]
 
 _CHART_META: dict[str, tuple[str, str, str, str]] = {
     "bar": ("bar_chart", "Bar Chart", "Categories", "Values"),
@@ -143,7 +143,7 @@ class VisualizationTools(Toolkit):
 
     def create_chart(
         self,
-        chart_type: ChartType,
+        chart_type: _ChartType,
         data: dict[str, int | float] | list[Any] | str | None = None,
         x_data: list[int | float] | None = None,
         y_data: list[int | float] | None = None,
@@ -230,7 +230,7 @@ class VisualizationTools(Toolkit):
     def _draw_chart(
         self,
         *,
-        chart_type: ChartType,
+        chart_type: _ChartType,
         data: Any,  # noqa: ANN401
         x_data: list[int | float] | None,
         y_data: list[int | float] | None,

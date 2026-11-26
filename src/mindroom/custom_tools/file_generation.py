@@ -20,12 +20,12 @@ from mindroom.tool_system.tool_function import ToolValue
 
 logger = get_logger(__name__)
 
-FileFormat = Literal["json", "csv", "pdf", "docx", "html", "txt", "code"]
+_FileFormat = Literal["json", "csv", "pdf", "docx", "html", "txt", "code"]
 
 _WINDOWS_RESERVED_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.IGNORECASE)
 _WINDOWS_PREFIX_RE = re.compile(r"^(?:[A-Za-z]:|\\\\)")
 
-CODE_LANGUAGE_MAP: dict[str, tuple[str, str]] = {
+_CODE_LANGUAGE_MAP: dict[str, tuple[str, str]] = {
     "python": ("py", "text/x-python"),
     "py": ("py", "text/x-python"),
     "javascript": ("js", "text/javascript"),
@@ -180,8 +180,8 @@ def _resolve_code_type(language: str | None, filename: str | None) -> tuple[str,
     mime_type: str | None = None
     if language:
         normalized = language.strip().lower()
-        if normalized in CODE_LANGUAGE_MAP:
-            file_type, mime_type = CODE_LANGUAGE_MAP[normalized]
+        if normalized in _CODE_LANGUAGE_MAP:
+            file_type, mime_type = _CODE_LANGUAGE_MAP[normalized]
     if filename:
         basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
         if "." in basename:
@@ -196,7 +196,7 @@ def _resolve_code_type(language: str | None, filename: str | None) -> tuple[str,
 
 def _render_payload(
     *,
-    format: FileFormat,  # noqa: A002
+    format: _FileFormat,  # noqa: A002
     content: Any,  # noqa: ANN401
     filename: str | None,
     title: str | None,
@@ -346,7 +346,7 @@ class FileGenerationTools(Toolkit):
 
     def generate_file(
         self,
-        format: FileFormat,  # noqa: A002
+        format: _FileFormat,  # noqa: A002
         content: str | dict[str, Any] | list[Any],
         filename: str | None = None,
         title: str | None = None,

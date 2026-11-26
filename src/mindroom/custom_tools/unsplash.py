@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Literal
 
 import httpx
@@ -13,9 +12,9 @@ from mindroom.tool_system.authoring import Toolkit
 
 logger = get_logger(__name__)
 
-UnsplashAction = Literal["search", "get", "random", "download"]
-UnsplashOrientation = Literal["landscape", "portrait", "squarish"]
-UnsplashColor = Literal[
+_UnsplashAction = Literal["search", "get", "random", "download"]
+_UnsplashOrientation = Literal["landscape", "portrait", "squarish"]
+_UnsplashColor = Literal[
     "black_and_white",
     "black",
     "white",
@@ -70,7 +69,7 @@ class UnsplashTools(Toolkit):
         all: bool = False,  # noqa: A002
         timeout: int = 30,
     ) -> None:
-        self.access_key = access_key or os.getenv("UNSPLASH_ACCESS_KEY")
+        self.access_key = access_key
         if not self.access_key:
             logger.warning("No Unsplash API key provided; set UNSPLASH_ACCESS_KEY")
         self.timeout = timeout
@@ -101,13 +100,13 @@ class UnsplashTools(Toolkit):
 
     def unsplash(
         self,
-        action: UnsplashAction,
+        action: _UnsplashAction,
         query: str | None = None,
         photo_id: str | None = None,
         count: int | None = None,
         page: int = 1,
-        orientation: UnsplashOrientation | None = None,
-        color: UnsplashColor | None = None,
+        orientation: _UnsplashOrientation | None = None,
+        color: _UnsplashColor | None = None,
     ) -> str:
         """Search, fetch, pick random photos, or track downloads on Unsplash.
 
@@ -151,8 +150,8 @@ class UnsplashTools(Toolkit):
         query: str | None,
         count: int | None,
         page: int,
-        orientation: UnsplashOrientation | None,
-        color: UnsplashColor | None,
+        orientation: _UnsplashOrientation | None,
+        color: _UnsplashColor | None,
     ) -> str:
         if not query:
             return "Error: Please provide a search query."
@@ -193,7 +192,7 @@ class UnsplashTools(Toolkit):
         self,
         *,
         query: str | None,
-        orientation: UnsplashOrientation | None,
+        orientation: _UnsplashOrientation | None,
         count: int | None,
     ) -> str:
         params: dict[str, Any] = {"count": min(max(1, 1 if count is None else count), 30)}

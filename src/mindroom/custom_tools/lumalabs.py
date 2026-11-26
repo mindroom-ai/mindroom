@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -10,8 +9,8 @@ from uuid import uuid4
 try:
     from lumaai import LumaAI
 except ImportError as exc:
-    msg = "`lumaai` not installed. Install with: `pip install lumaai`"
-    raise ImportError(msg) from exc
+    _msg = "`lumaai` not installed. Install with: `pip install lumaai`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Video
 from mindroom.logging_config import get_logger
@@ -23,8 +22,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-LumaModel = Literal["ray-2", "ray-flash-2"]
-LumaAspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
+_LumaModel = Literal["ray-2", "ray-flash-2"]
+_LumaAspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
 
 
 class LumaLabTools(Toolkit):
@@ -39,13 +38,13 @@ class LumaLabTools(Toolkit):
         enable_generate_video: bool = True,
         enable_image_to_video: bool = True,
         all: bool = False,  # noqa: A002
-        model: LumaModel | None = "ray-2",
+        model: _LumaModel | None = "ray-2",
     ) -> None:
         self.wait_for_completion = wait_for_completion
         self.poll_interval = poll_interval
         self.max_wait_time = max_wait_time
-        self.api_key = api_key or os.getenv("LUMAAI_API_KEY")
-        self.model: LumaModel = "ray-2" if model is None else model
+        self.api_key = api_key
+        self.model: _LumaModel = "ray-2" if model is None else model
         self._allow_text_to_video = all or enable_generate_video
         self._allow_image_to_video = all or enable_image_to_video
 
@@ -65,7 +64,7 @@ class LumaLabTools(Toolkit):
         start_image_url: str | None = None,
         end_image_url: str | None = None,
         loop: bool = False,
-        aspect_ratio: LumaAspectRatio = "16:9",
+        aspect_ratio: _LumaAspectRatio = "16:9",
         keyframes: dict[str, dict[str, str]] | None = None,
     ) -> ToolValue:
         """Generate a video from a text prompt and optional start/end images or keyframes.

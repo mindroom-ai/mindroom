@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 try:
     import fal_client
 except ImportError as exc:
-    msg = "`fal_client` not installed. Install with: `pip install fal-client`"
-    raise ImportError(msg) from exc
+    _msg = "`fal_client` not installed. Install with: `pip install fal-client`"
+    raise ImportError(_msg) from exc
 
 from mindroom.llm.media import Image, Video
 from mindroom.logging_config import get_logger
@@ -37,7 +36,7 @@ class FalTools(Toolkit):
         enable_image_to_image: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key or os.getenv("FAL_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
             logger.error("FAL_API_KEY not set")
         self.model = model

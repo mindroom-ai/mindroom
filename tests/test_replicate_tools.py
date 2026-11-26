@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -118,7 +119,7 @@ def _tool(tmp_path: Path, stored_key: str | None = None, *, model: str = _MODEL)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+        process_env={**os.environ, "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
     )
     credentials = CredentialsManager(tmp_path / "credentials")
     if stored_key is not None:
