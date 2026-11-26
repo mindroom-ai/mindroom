@@ -10,7 +10,7 @@ import httpx
 import newspaper
 import pytest
 
-import mindroom.tools.agno_compat_newspaper4k as compat
+import mindroom.tools.newspaper4k as newspaper4k_module
 from mindroom.tools.newspaper4k import newspaper4k_tools
 from tests.public_fetch_helpers import serve_routes
 
@@ -111,7 +111,7 @@ def test_newspaper_refuses_a_page_over_its_size_limit(
     """A page larger than the download limit is refused instead of buffered and parsed."""
     url = "https://example.com/article"
     serve_routes(monkeypatch, {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=_ARTICLE_HTML)})
-    monkeypatch.setattr(compat, "_MAX_PAGE_BYTES", 64)
+    monkeypatch.setattr(newspaper4k_module, "_MAX_PAGE_BYTES", 64)
 
     result = newspaper4k_tools()().read_article(url)
 

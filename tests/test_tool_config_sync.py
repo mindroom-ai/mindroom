@@ -61,8 +61,6 @@ IGNORED_AGNO_PARAMS = {
     "reddit": {"reddit_instance"},
     "sql": {"db_engine", "tables"},
     "wikipedia": {"knowledge"},
-    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
-    "newspaper": {"include_summary"},
     # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
     "reasoning": {"add_instructions"},
     "zep": {"add_instructions"},

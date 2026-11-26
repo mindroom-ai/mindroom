@@ -10,13 +10,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-import agno.tools.trafilatura as agno_trafilatura
 import httpx
 import pytest
 from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
-import mindroom.tools.agno_compat_trafilatura as compat
+import mindroom.tools.trafilatura as trafilatura_module
 from mindroom import public_fetch
 from mindroom.tools.trafilatura import trafilatura_tools
 from tests.public_fetch_helpers import TrickleBody, public_dns, serve, serve_routes
@@ -207,7 +206,7 @@ def test_trafilatura_rejects_oversized_download(monkeypatch: pytest.MonkeyPatch)
     """Responses beyond Trafilatura's size limit should not be buffered or extracted."""
     url = "https://example.com/large"
     serve_routes(monkeypatch, {url: httpx.Response(200, text=_ARTICLE_HTML)})
-    monkeypatch.setattr(compat, "_MAX_FILE_SIZE", 64)
+    monkeypatch.setattr(trafilatura_module, "_MAX_FILE_SIZE", 64)
 
     result = trafilatura_tools()().extract_text(url)
 
@@ -338,7 +337,7 @@ def test_trafilatura_crawler_called_outside_the_toolkit_keeps_crawling_with_its_
 ) -> None:
     """Code that calls Trafilatura's crawler directly, not through the toolkit, still crawls with the crawler's store."""
     trafilatura_tools()
-    monkeypatch.setattr(compat, "_process_url_store", compat._new_url_store())
+    monkeypatch.setattr(trafilatura_module, "_process_url_store", trafilatura_module._new_url_store())
     serve_routes(
         monkeypatch,
         {
@@ -366,17 +365,17 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
 def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A download that keeps trickling ends at the call's time limit, and no later download starts."""
     elapsed = [0.0]
-    monkeypatch.setattr(compat, "CALL_SECONDS", 0.3)
+    monkeypatch.setattr(trafilatura_module, "CALL_SECONDS", 0.3)
     # Each download's own deadline lies past the test's timeout, so only the call's limit can end the trickle.
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 3600)
 
     def trickle(_request: httpx.Request) -> httpx.Response:
-        elapsed[0] = compat.CALL_SECONDS
+        elapsed[0] = trafilatura_module.CALL_SECONDS
         return httpx.Response(200, stream=TrickleBody())
 
     # The call's clock spends the whole limit once the first download starts, which still trickles for the 0.3 s it
     # was given, so how fast the machine runs changes nothing.
-    monkeypatch.setattr(compat, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    monkeypatch.setattr(trafilatura_module, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
     requests = serve(monkeypatch, trickle)
     urls = [f"https://example.com/{index}" for index in range(3)]
 
@@ -397,7 +396,7 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
         elapsed[0] += seconds
 
     # The call's clock moves only while the crawl pauses, so how fast the machine runs changes nothing.
-    monkeypatch.setattr(compat, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=pause))
+    monkeypatch.setattr(trafilatura_module, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=pause))
     homepage = "https://example.com/"
     serve_routes(
         monkeypatch,
@@ -412,7 +411,7 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
 
     crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
 
-    assert elapsed[0] == compat.CALL_SECONDS / 2
+    assert elapsed[0] == trafilatura_module.CALL_SECONDS / 2
     (unvisited,) = crawl["to_visit"]
     assert unvisited in {"https://example.com/docs", "https://example.com/guide"}
     assert "Configure a bridge" in crawl["extracted_content"][unvisited]
@@ -422,8 +421,7 @@ def test_trafilatura_factory_installs_guarded_fetchers() -> None:
     """Every downloader reachable from TrafilaturaTools should be the guarded one."""
     trafilatura_tools()
 
-    assert agno_trafilatura.fetch_url is compat._fetch_url
-    assert spider.fetch_url is compat._fetch_url
-    assert spider.fetch_response is compat._crawl_fetch_response
-    assert spider.crawl_page is compat._crawl_page
-    assert spider.sleep is compat._pause
+    assert spider.fetch_url is trafilatura_module._fetch_url
+    assert spider.fetch_response is trafilatura_module._crawl_fetch_response
+    assert spider.crawl_page is trafilatura_module._crawl_page
+    assert spider.sleep is trafilatura_module._pause

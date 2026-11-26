@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.tools.agentql import AgentQLTools
+    from mindroom.tools.agentql import AgentQLTools
 
 _CUSTOM_QUERY = "{ title links[] { href label } metadata { count enabled missing } }"
 _URL = "https://example.org/source"
@@ -647,10 +647,10 @@ def test_agentql_malformed_success_retains_parse_error(
 
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
     sdk = importlib.import_module("agentql")
-    compat = importlib.import_module("mindroom.custom_tools.agno_compat_agentql")
+    agentql_module = importlib.import_module("mindroom.tools.agentql")
     legacy_page = sdk.wrap(_BrowserPage(agentql_boundary))
     legacy_page.goto(_URL)
-    scoped_page = compat._CredentialedPage.for_service(
+    scoped_page = agentql_module._credentialed_page_for_service(
         _BrowserPage(agentql_boundary),
         api_host="https://api.agentql.test",
         api_key="scoped-key",
