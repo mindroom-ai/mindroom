@@ -779,8 +779,8 @@ async def _prepare_turn_memory(
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn; a persona recalls none."""
-    if ctx.persona is not None:
+    """Recall memories for a configured agent turn; personas and minimal turns recall none automatically."""
+    if ctx.persona is not None or ctx.agent_mode == "minimal":
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
         ctx.prompt,
