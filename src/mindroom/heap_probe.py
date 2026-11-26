@@ -10,9 +10,9 @@ bots a config reload replaced are collected at the next refreeze instead of
 staying frozen. A refreeze touches every object, so it first reads swapped-out
 memory back in on a worker thread; otherwise the whole process would wait on
 swap one page fault at a time while the collector holds the GIL. After each
-freeze, glibc's ``malloc_trim(0)`` returns freed arena pages to the OS (off the
-event loop during refreezes) so dead free lists stay unmapped instead of
-remaining pinned across arenas. After the first refreeze the primary also
+freeze, glibc's ``malloc_trim(0)`` returns eligible freed arena pages to the OS
+(off the event loop during refreezes) instead of leaving them resident across
+arenas. After the first refreeze the primary also
 raises CPython's full-collection threshold,
 because each routine full collection walks the whole unfrozen heap to find
 little garbage; how much rarer they get depends on the workload.
