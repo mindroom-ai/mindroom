@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#unsplash",
     helper_text="Get a free API key from [Unsplash Developers](https://unsplash.com/developers)",
     function_names=("unsplash",),
+    action_scoped_grants=("unsplash",),
 )
 def unsplash_tools() -> type[UnsplashTools]:
     """Return Unsplash tools for image search."""

@@ -74,15 +74,30 @@ class ApprovalGrantScope:
     invoking_agent: str
 
 
-_ACTION_SCOPED_TOOL_ARGS: dict[str, str] = {
-    "triggers": "action",
-    "memory": "action",
-    "todo": "action",
-    "scheduler": "action",
-    "unsplash": "action",
-    "generate_file": "format",
-    "create_chart": "chart_type",
+_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler"})
+_TOOLKIT_DISPATCH_SCOPED_ARGS: dict[tuple[str, str], str] = {
+    ("file_generation", "generate_file"): "format",
+    ("visualization", "create_chart"): "chart_type",
 }
+
+
+def _toolkit_dispatch_scope(
+    tool_name: str,
+    *,
+    tools: ToolRegistry | None,
+    toolkit_name: str | None,
+) -> tuple[str, str] | None:
+    if toolkit_name is not None:
+        dispatch_arg = _TOOLKIT_DISPATCH_SCOPED_ARGS.get((toolkit_name, tool_name))
+        if dispatch_arg is not None and (tools is None or toolkit_name in tools.entries):
+            return toolkit_name, dispatch_arg
+        return None
+    if tools is None:
+        return None
+    for (owner_toolkit, owner_tool), dispatch_arg in _TOOLKIT_DISPATCH_SCOPED_ARGS.items():
+        if owner_tool == tool_name and owner_toolkit in tools.entries:
+            return owner_toolkit, dispatch_arg
+    return None
 
 
 def _action_scoped_tool(
@@ -91,18 +106,21 @@ def _action_scoped_tool(
     tools: ToolRegistry | None,
     toolkit_name: str | None,
 ) -> tuple[str, str] | None:
-    if (dispatch_arg := _ACTION_SCOPED_TOOL_ARGS.get(tool_name)) is not None:
-        return tool_name, dispatch_arg
+    if tool_name in _ACTION_SCOPED_TOOLS:
+        return tool_name, "action"
+    if (
+        toolkit_name is not None
+        and (dispatch_scope := _toolkit_dispatch_scope(tool_name, tools=tools, toolkit_name=toolkit_name)) is not None
+    ):
+        return dispatch_scope
     if tools is None:
         return None
     if toolkit_name is not None:
         metadata = tools.entries.get(toolkit_name)
-        if metadata is not None and tool_name in metadata.action_scoped_grants:
-            return toolkit_name, "action"
-        return None
+        return (toolkit_name, "action") if metadata is not None and tool_name in metadata.action_scoped_grants else None
     if any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values()):
         return tool_name, "action"
-    return None
+    return _toolkit_dispatch_scope(tool_name, tools=tools, toolkit_name=None)
 
 
 def grant_operation(
