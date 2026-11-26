@@ -675,23 +675,31 @@ class LockedTurns:
         if (
             message_id is None
             or handle is None
-            or handle.stop_button_started
+            or handle.stop_button_in_flight
             or handle.reply.stop_button_event_id is not None
             or not handle.reply.running
             or request.quiet
             or not self.deps.runtime.config.defaults.show_stop_button
         ):
             return
-        handle.stop_button_started = True
+        client = self.client()
+        handle.stop_button_in_flight = True
+
+        async def show_stop_button() -> None:
+            try:
+                await add_stop_button_if_wanted(
+                    client=client,
+                    logger=self.deps.logger,
+                    show_stop_button=True,
+                    user_id=request.user_id,
+                    message_id=message_id,
+                    add_stop_button=partial(self.deps.delivery_gateway.add_reply_stop_button, handle),
+                )
+            finally:
+                handle.stop_button_in_flight = False
+
         create_background_task(
-            add_stop_button_if_wanted(
-                client=self.client(),
-                logger=self.deps.logger,
-                show_stop_button=True,
-                user_id=request.user_id,
-                message_id=message_id,
-                add_stop_button=partial(self.deps.delivery_gateway.add_reply_stop_button, handle),
-            ),
+            show_stop_button(),
             name=f"stop_button:{handle.span_id}",
             owner=self.deps.runtime,
         )
@@ -714,7 +722,7 @@ class LockedTurns:
                 logger=self.deps.logger,
                 show_stop_button=lambda: (
                     show_stop_button
-                    and not handle.stop_button_started
+                    and not handle.stop_button_in_flight
                     and handle.reply.stop_button_event_id is None
                     and self.deps.runtime.config.defaults.show_stop_button
                 ),

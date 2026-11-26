@@ -260,7 +260,8 @@ class ResponseAttemptRunner:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 # What failed around the attempt, such as recording its Stop button, must not leave the attempt
                 # running after its span ends, where a Stop no longer reaches it.
-                await _forward_cancel_to_attempt_task(task, asyncio.CancelledError(), logger=self.deps.logger)
+                if not task.done():
+                    await _forward_cancel_to_attempt_task(task, asyncio.CancelledError(), logger=self.deps.logger)
                 raise
 
     async def _reply_event_while_running(

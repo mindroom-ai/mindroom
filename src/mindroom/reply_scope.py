@@ -87,8 +87,8 @@ class SpanHandle:
     unconfirmed_progress: rl.ProgressConfirmation | None = None
     # Set once the reply shows an event in the room, which the span's Stop button goes on.
     reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
-    # Whether a background task already started deciding and showing this span's Stop button.
-    stop_button_started: bool = False
+    # Whether a background task is currently deciding and showing this span's Stop button.
+    stop_button_in_flight: bool = False
     # The automatic compactions this span's answer ran, which every write of it carries, its terminal note included.
     compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
     # The active model payload this span's writes carry until settled run metadata replaces it.

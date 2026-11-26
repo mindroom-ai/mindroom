@@ -2873,6 +2873,66 @@ async def test_stop_button_appears_during_post_placeholder_preparation_and_redac
     assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
 
 
+async def test_stop_button_retries_during_generation_after_offline_preparation_check(
+    tmp_path: Path,
+) -> None:
+    """An offline preparation check does not suppress showing the Stop button once generation starts."""
+    bot = await _streaming_bot(tmp_path)
+    original_prepare = ResponseRunner._prepare_claimed_request
+    first_check_done = asyncio.Event()
+    checks = 0
+
+    async def online_after_preparation(*_args: object, **_kwargs: object) -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            first_check_done.set()
+            return False
+        return True
+
+    async def prepare_after_first_check(self: ResponseRunner, *args: object, **kwargs: object) -> object:
+        await asyncio.wait_for(first_check_done.wait(), timeout=5)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+        return await original_prepare(self, *args, **kwargs)
+
+    shown_during_generation: str | None = None
+
+    async def answer_after_button(*_args: object, **_kwargs: object) -> str:
+        nonlocal shown_during_generation
+
+        async def recorded_button() -> str:
+            while (current := await _reply(bot)).stop_button_event_id is None:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            return current.stop_button_event_id
+
+        shown_during_generation = await asyncio.wait_for(recorded_button(), timeout=5)
+        return "An answer."
+
+    with (
+        patch("mindroom.response_attempt.is_user_online", new=online_after_preparation),
+        patch.object(ResponseRunner, "_prepare_claimed_request", new=prepare_after_first_check),
+    ):
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer_after_button)) == Owned()
+
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+    assert checks == 2
+    assert shown_during_generation is not None
+    buttons = [
+        (f"$sent{index}", call.kwargs["content"])
+        for index, call in enumerate(bot.client.room_send.await_args_list, start=1)
+        if call.kwargs["message_type"] == "m.reaction"
+    ]
+    assert len(buttons) == 1
+    assert buttons[0][0] == shown_during_generation
+    assert buttons[0][1]["m.relates_to"]["key"] == "🛑"
+    settled = await _reply(bot)
+    assert settled.state is rl.ReplyState.COMPLETED
+    assert buttons[0][1]["m.relates_to"]["event_id"] == settled.event_id
+    assert settled.stop_button_event_id is None
+    assert settled.redaction_pending == ()
+    assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [shown_during_generation]
+
+
 async def test_terminal_driving_edit_redaction_during_preparation_settles_without_cancelled_lifecycle(
     tmp_path: Path,
 ) -> None:

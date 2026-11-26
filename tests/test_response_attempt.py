@@ -651,3 +651,31 @@ async def test_run_cancellable_span_work_forwards_preexisting_outer_cancel_and_r
     assert registered[0].cancelled()
     with pytest.raises(asyncio.CancelledError, match=SYNC_RESTART_CANCEL_MSG):
         registered[0].result()
+
+
+@pytest.mark.asyncio
+async def test_response_attempt_ordinary_error_reraises_without_unwind_failure_log() -> None:
+    """An attempt raising an ordinary error logs it once without reporting a forwarded-cancel unwind failure."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, span = _runner()
+
+    async def failing_response(_message_id: str | None) -> None:
+        msg = "model failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="model failed"):
+        await runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=failing_response,
+                span=span.attempt(),
+                existing_event_id="$existing",
+            ),
+        )
+
+    runner.deps.logger.exception.assert_called_once_with("Error during response generation", error="model failed")
+    assert all(
+        call.args != ("Response attempt task failed while unwinding forwarded cancellation",)
+        for call in runner.deps.logger.error.call_args_list
+    )
+    runner.deps.logger.error.assert_not_called()
