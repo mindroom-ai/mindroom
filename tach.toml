@@ -7929,6 +7929,7 @@ expose = [
     "send_room_event_result",
     "send_runtime_encrypted_media_message",
     "upload_media_bytes_as_mxc",
+    "upload_media_bytes_as_mxc_outcome",
 ]
 from = ["mindroom.matrix.client_delivery"]
 

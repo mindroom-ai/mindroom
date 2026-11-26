@@ -23,11 +23,13 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio, File, Video, is_document_mime_type, named_mime_type
 from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
     MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
     resolve_room_encryption_outcome,
-    send_file_message,
+    send_file_message_outcome,
     send_runtime_encrypted_media_message,
-    upload_media_bytes_as_mxc,
+    upload_media_bytes_as_mxc_outcome,
 )
 from mindroom.matrix.inline_media import register_inline_media
 from mindroom.matrix.media import resolve_image_mime_type
@@ -341,6 +343,12 @@ def resolve_send_attachment(
     return record, newly_registered
 
 
+def _too_large_detail(outcome: object) -> str | None:
+    if isinstance(outcome, MatrixDeliveryFailure) and outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+        return outcome.detail
+    return None
+
+
 async def send_resolved_attachments(
     context: ToolRuntimeContext,
     *,
@@ -371,7 +379,7 @@ async def send_resolved_attachments(
         extra_content[SUPPRESS_PUSH_KEY] = True
     for attachment in attachments:
         if isinstance(attachment, AttachmentRecord):
-            attachment_event_id = await send_file_message(
+            outcome = await send_file_message_outcome(
                 context.client,
                 room_id,
                 attachment.local_path,
@@ -381,6 +389,9 @@ async def send_resolved_attachments(
                 latest_thread_event_id=latest_thread_event_id,
                 extra_content=dict(extra_content),
             )
+            if (too_large := _too_large_detail(outcome)) is not None:
+                return attachment_event_ids, too_large
+            attachment_event_id = outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
         else:
             attachment_event_id = await send_runtime_encrypted_media_message(
                 context.client,
@@ -795,15 +806,19 @@ class AttachmentTools(Toolkit):
             if mime_type is None:
                 return _attachment_tool_payload("error", message="Attachment bytes are not a recognized image.")
             filename = record.filename or record.local_path.name
-            mxc_uri, upload_payload = await upload_media_bytes_as_mxc(
+            upload_outcome = await upload_media_bytes_as_mxc_outcome(
                 context.client,
                 context.room_id,
                 data,
                 filename=filename,
                 mimetype=mime_type,
             )
-            if mxc_uri is None or upload_payload is None:
-                return _attachment_tool_payload("error", message="Failed to upload inline image.")
+            if isinstance(upload_outcome, MatrixDeliveryFailure):
+                return _attachment_tool_payload(
+                    "error",
+                    message=_too_large_detail(upload_outcome) or "Failed to upload inline image.",
+                )
+            mxc_uri, upload_payload = upload_outcome
             if room_encrypted or "file" in upload_payload:
                 encrypted_file = upload_payload.get("file")
                 if not isinstance(encrypted_file, dict) or encrypted_file.get("url") != mxc_uri:

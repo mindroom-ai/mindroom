@@ -142,7 +142,7 @@ async def test_inline_image_encrypted_upload_registers_and_attaches_only_referen
         ],
     )
     with (
-        patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc", new=uploads),
+        patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome", new=uploads),
         tool_runtime_context(ctx),
     ):
         res1 = json.loads(await AttachmentTools().inline_image(rec1.attachment_id, alt="Chart"))
@@ -193,7 +193,7 @@ async def test_inline_image_reuses_runtime_encrypted_media_in_encrypted_room(tmp
     )
     register_tool_runtime_media_attachment(ctx, media)
     with (
-        patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc", new=AsyncMock()) as upload,
+        patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome", new=AsyncMock()) as upload,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await AttachmentTools().inline_image("att_screen", alt="Desktop"))
