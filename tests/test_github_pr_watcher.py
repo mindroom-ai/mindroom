@@ -39,6 +39,7 @@ from mindroom.reactive_triggers.models import (
 from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
+from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -177,7 +178,7 @@ def _tool_ctx(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
 
 
 async def _watch(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads(await cast("Any", tool).watch_pr(**kwargs)))
+    return cast("dict[str, Any]", json.loads(await cast("Any", tool).triggers(action="watch_pr", **kwargs)))
 
 
 async def _trig(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
@@ -395,6 +396,12 @@ async def test_watch_pr_delivery_mode_validation_limits_and_unreadable_pat(
             "token",
         )
         assert (wh["trigger"]["target"]["reopen_on_fire"], wh["trigger"]["target"]["thread_id"]) == (True, _THREAD)
+        assert (wh["trigger"]["source"]["ignore_bots"], wh["trigger"]["source"]["auto_disable_on_close"]) == (
+            True,
+            True,
+        )
+        assert wh["trigger"]["expires_at"] is not None
+        assert abs((wh["trigger"]["expires_at"] - wh["trigger"]["created_at"]) - 720.0 * 3600.0) < 1.0
         assert (_cp(store, "pr-wh").seeded, _cp(store, "pr-wh").next_poll_at) == (True, None)
         assert store.list_due_github_pr_triggers(now=time.time() + 1_000) == []
 
@@ -403,16 +410,47 @@ async def test_watch_pr_delivery_mode_validation_limits_and_unreadable_pat(
         assert polled["trigger"]["source"]["poll_interval_seconds"] == 120
         assert _cp(store, "pr-poll").next_poll_at is not None
 
-        assert (await _watch(tool, repo="bad-repo", number=1))["status"] == "error"
-        assert (await _watch(tool, repo="ext/repo", number=True))["status"] == "error"
-        assert (await _watch(tool, repo="ext/repo", number=2, poll_interval_seconds=True))["status"] == "error"
+        for bad_kwargs, expected in (
+            ({"number": 1}, "repo is required"),
+            ({"repo": "   ", "number": 1}, "repo is required"),
+            ({"repo": "bad-repo", "number": 1}, "Invalid GitHub repository"),
+            ({"repo": "ext/repo"}, "number is required"),
+            ({"repo": "ext/repo", "number": True}, "positive integer"),
+            ({"repo": "ext/repo", "number": False}, "positive integer"),
+            ({"repo": "ext/repo", "number": 0}, "positive integer"),
+            ({"repo": "ext/repo", "number": -2}, "positive integer"),
+            ({"repo": "ext/repo", "number": "2"}, "positive integer"),
+            ({"repo": "ext/repo", "number": 2, "poll_interval_seconds": True}, "integer"),
+            ({"repo": "ext/repo", "number": 2, "room_id": _ROOM}, "Unsupported parameter(s)"),
+            ({"repo": "ext/repo", "number": 2, "triage_instructions": "only prod"}, "Unsupported parameter(s)"),
+            ({"repo": "ext/repo", "number": 2, "thread_key": "k"}, "Unsupported parameter(s)"),
+            ({"repo": "ext/repo", "number": 2, "include_disabled": False}, "Unsupported parameter(s)"),
+        ):
+            bad_res = await _watch(tool, **bad_kwargs)
+            assert bad_res["status"] == "error", (bad_kwargs, bad_res)
+            assert expected in bad_res["message"], (bad_kwargs, bad_res)
+
         merged_err = await _watch(tool, repo="ext/repo", number=3)
         assert (merged_err["status"], "already merged" in merged_err["message"]) == ("error", True)
         quota_err = await _watch(tool, repo="ext/repo", number=2, trigger_id="pr-over")
         assert (quota_err["status"], "GitHub PR watch limit" in quota_err["message"]) == ("error", True)
 
         assert (await _trig(tool, action="set_enabled", enabled=False, trigger_id="pr-poll"))["status"] == "ok"
-        assert (await _watch(tool, repo="ext/repo", number=2, trigger_id="pr-2b"))["status"] == "ok"
+        pr_2b = await _watch(
+            tool,
+            repo="ext/repo",
+            number=2,
+            trigger_id="pr-2b",
+            include_bots=True,
+            reopen_on_fire=False,
+            auto_disable_on_close=False,
+        )
+        assert pr_2b["status"] == "ok"
+        assert (
+            pr_2b["trigger"]["source"]["ignore_bots"],
+            pr_2b["trigger"]["source"]["auto_disable_on_close"],
+            pr_2b["trigger"]["target"]["reopen_on_fire"],
+        ) == (False, False, False)
         reen_err = await _trig(tool, action="set_enabled", enabled=True, trigger_id="pr-poll")
         assert (reen_err["status"], "GitHub PR watch limit" in reen_err["message"]) == ("error", True)
 
@@ -550,7 +588,7 @@ async def test_poller_etag_304_timeline_pagination_and_grouped_review_comments(
             number=10,
             events=["activity"],
             ignore_actors=["muted"],
-            ignore_bots=True,
+            include_bots=False,
             trigger_id="pr-10",
         )
         assert created["status"] == "ok"
@@ -876,25 +914,33 @@ async def test_disable_reenable_reseeds_silently_and_dry_run(
 
 
 @pytest.mark.asyncio
-async def test_watch_pr_approval_alias_governed_by_triggers_rules(tmp_path: Path) -> None:
-    """Approval alias `match: triggers` governs `watch_pr` for both require_approval and auto_approve."""
+async def test_watch_pr_action_governed_by_triggers_approval_rules(tmp_path: Path) -> None:
+    """`triggers(action="watch_pr", ...)` is governed natively by `triggers` rules and action-scoped grants."""
     cfg, paths = _config(tmp_path)
     req_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="require_approval")])
     auto_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="auto_approve")])
     req_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": req_rules}), paths)
     auto_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": auto_rules}), paths)
 
-    alias = toolkit_approval_alias(req_cfg, builtin_tool_registry(), "triggers", "watch_pr")
-    assert alias is not None
-    assert alias.judged_as == "triggers"
-    assert tool_may_require_approval(req_cfg, "watch_pr", alias) is True
-    assert (
-        await evaluate_tool_approval(req_cfg, paths, "watch_pr", {"repo": "org/owned", "number": 40}, "dev", alias)
-    )[0] is True
-    assert tool_may_require_approval(auto_cfg, "watch_pr", alias) is False
-    assert (
-        await evaluate_tool_approval(auto_cfg, paths, "watch_pr", {"repo": "org/owned", "number": 40}, "dev", alias)
-    )[0] is False
+    registry = builtin_tool_registry()
+    meta = registry.entries["triggers"]
+    assert meta.function_names == ("triggers",)
+    assert meta.approval_aliases == {}
+    assert toolkit_approval_alias(req_cfg, registry, "triggers", "watch_pr") is None
+
+    args: dict[str, object] = {"action": "watch_pr", "repo": "org/owned", "number": 40}
+    assert tool_may_require_approval(req_cfg, "triggers") is True
+    assert (await evaluate_tool_approval(req_cfg, paths, "triggers", args, "dev", None))[0] is True
+    assert tool_may_require_approval(auto_cfg, "triggers") is False
+    assert (await evaluate_tool_approval(auto_cfg, paths, "triggers", args, "dev", None))[0] is False
+
+    watch_pr_op = grant_operation(req_cfg, "triggers", args)
+    list_op = grant_operation(req_cfg, "triggers", {"action": "list"})
+    assert watch_pr_op is not None
+    assert list_op is not None
+    assert watch_pr_op.mcp_server_id == "triggers"
+    assert watch_pr_op.mcp_tool_name == "watch_pr"
+    assert watch_pr_op != list_op
 
 
 @pytest.mark.asyncio

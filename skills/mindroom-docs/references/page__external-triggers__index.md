@@ -4,11 +4,11 @@ Triggers let MindRoom wake an agent or team automatically in response to eventsâ
 
 Use them for:
 
-- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `subscribe_event`) or `watch_pr(...)`, to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes `triggers(action=...)` and `watch_pr(...)`.
+`triggers` is the canonical toolkit name and exposes the single `triggers(action=...)` tool.
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](https://docs.mindroom.chat/tools/dynamic-tools/).
 
@@ -60,7 +60,7 @@ external_trigger_policy:
 | Field | Type | Default | Valid values | Meaning |
 | --- | --- | --- | --- | --- |
 | `enabled` | bool | `true` | | Master switch. When `false`, every direct trigger, callback, and shared event-source endpoint answers not found, `callback_manager` refuses to mint callbacks, and reactive trigger delivery is disabled. |
-| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
+| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
 | `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new direct signed triggers that do not set their own window. |
 | `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any direct trigger's replay window. |
 | `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new direct triggers that do not set their own. |
@@ -434,9 +434,9 @@ The `triggers(action=...)` tool provides unified lifecycle, observability, and t
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
 - `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
-### Watching GitHub Pull Requests (`watch_pr`)
+### Watching GitHub Pull Requests (`action="watch_pr"`)
 
-The `triggers` toolkit also exposes `watch_pr(repo, number, events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+Use `triggers(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
 
 - **Delivery modes (`delivery_mode`):**
   - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
