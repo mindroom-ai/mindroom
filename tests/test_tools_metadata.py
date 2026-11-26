@@ -1979,7 +1979,7 @@ def test_a_config_s_plugin_view_does_not_outlive_the_config(tmp_path: Path) -> N
 
 def test_code_execution_tools_declare_unconfined_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
-    for name in ("shell", "python", "docker", "claude_agent"):
+    for name in ("shell", "docker", "claude_agent"):
         assert _BUILTINS.entries[name].file_access is ToolFileAccess.UNCONFINED, name
         assert _BUILTINS.entries[name].executes_code, name
 
@@ -2009,7 +2009,6 @@ def test_only_code_execution_tools_execute_code() -> None:
     assert {name for name, metadata in _BUILTINS.entries.items() if metadata.executes_code} == {
         "claude_agent",
         "docker",
-        "python",
         "script",
         "shell",
         "terminal",
@@ -2167,7 +2166,7 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
 
 def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
     """The removed per-tool restriction field points authors to the agent file_access setting."""
-    for tool_name in ("filesystem", "python"):
+    for tool_name in ("filesystem",):
         with pytest.raises(
             ToolConfigOverrideError,
             match=rf"agents\.a\.tools\.{tool_name}\.restrict_to_base_dir was removed; use agents\.<name>\.file_access",

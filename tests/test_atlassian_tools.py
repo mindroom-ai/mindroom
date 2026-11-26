@@ -99,13 +99,11 @@ def test_registered_metadata_matches_the_toolkit() -> None:
 
 
 def test_toolkit_registers_every_function_under_its_catalog_name(tmp_path: Path) -> None:
-    """Jira and Confluence functions are async and keep names that cannot collide with the API-token tools."""
+    """Jira and Confluence functions are async and match the registered names."""
     paths = runtime_paths(tmp_path)
     tool = _tool(paths, save_client_config(paths))
 
     assert tuple(tool.functions) == atlassian_function_names()
-    assert not set(tool.functions) & set(builtin_tool_registry().entries["jira"].function_names)
-    assert not set(tool.functions) & set(builtin_tool_registry().entries["confluence"].function_names)
 
 
 @pytest.mark.asyncio

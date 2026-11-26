@@ -427,24 +427,6 @@ wheels = [
 ]
 
 [[package]]
-name = "atlassian-python-api"
-version = "5.0.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "beautifulsoup4" },
-    { name = "deprecated" },
-    { name = "jmespath" },
-    { name = "oauthlib" },
-    { name = "requests" },
-    { name = "requests-oauthlib" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/46/85/786f01d20ad6fddd95d01bd0585a39aad7cfe0cff9e63530770e817152ae/atlassian_python_api-5.0.5.tar.gz", hash = "sha256:ae7f34349939ec0674ffb9bea812bc3f4acb4b6ace9a7cf1c15141719669f3bb", size = 1989565, upload-time = "2026-09-14T20:20:45.87Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/81/a91c05174ef68e44e7ce53a6ce8eeb647cbd80dc40c267b089a9e351729e/atlassian_python_api-5.0.5-py3-none-any.whl", hash = "sha256:647b650ff04f186bad1495caaed9772c249a2416a685fbacc1dfa340fa6376ab", size = 346005, upload-time = "2026-09-14T20:20:42.429Z" },
-]
-
-[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3234,23 +3216,6 @@ wheels = [
 ]
 
 [[package]]
-name = "jira"
-version = "3.10.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "defusedxml" },
-    { name = "packaging" },
-    { name = "requests" },
-    { name = "requests-oauthlib" },
-    { name = "requests-toolbelt" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/65/73/ee4daa7cf4eea457180de0ea78b730b44bb5ad2829dae49cf708a1460819/jira-3.10.5.tar.gz", hash = "sha256:2d09ae3bf4741a2787dd889dfea5926a5d509aac3b28ab3b98c098709e6ee72d", size = 105870, upload-time = "2025-07-28T12:18:22.796Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/57/ad078d7379e390798559446607e413fc953c7510711462ab34194dba5924/jira-3.10.5-py3-none-any.whl", hash = "sha256:d4da1385c924ee693d6cc9838e56a34e31d74f0d6899934ef35bbd0d2d33997f", size = 79250, upload-time = "2025-07-28T12:18:21.368Z" },
-]
-
-[[package]]
 name = "jiter"
 version = "0.19.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4126,9 +4091,6 @@ config-manager = [
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-confluence = [
-    { name = "atlassian-python-api" },
-]
 crawl4ai = [
     { name = "crawl4ai" },
 ]
@@ -4254,9 +4216,6 @@ homeassistant = [
 jina = [
     { name = "httpx" },
     { name = "pydantic" },
-]
-jira = [
-    { name = "jira" },
 ]
 knowledge-graph = [
     { name = "graphiti-core", extra = ["falkordblite"] },
@@ -4471,7 +4430,6 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'", specifier = ">=4.1" },
-    { name = "atlassian-python-api", marker = "extra == 'confluence'", specifier = ">=5.0.5" },
     { name = "authlib", specifier = ">=1.9.9" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },
     { name = "beautifulsoup4", marker = "extra == 'website'" },
@@ -4553,7 +4511,6 @@ requires-dist = [
     { name = "humanize", specifier = ">=4.12.3" },
     { name = "idna", specifier = ">=3.13" },
     { name = "jinja2", specifier = ">=3.1" },
-    { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
     { name = "jsonschema", specifier = ">=4.26" },
     { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=37" },
@@ -4660,7 +4617,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3,<4" },
 ]
-provides-extras = ["agent-manager", "agentql", "airflow", "apify", "approved-egress", "arxiv", "atlassian", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "chromadb", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "contacts", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "egress-credentials", "eleven-labs", "email", "email-invite", "exa", "external-trigger-manager", "fal", "file", "file-generation", "filesystem", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "google-tasks", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "knowledge-graph", "kubernetes", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-user", "matrix-voice-message", "mem0", "memory", "microsoft-files", "microsoft-meetings", "microsoft-onenote", "microsoft-people", "microsoft-sharepoint", "microsoft-teams", "microsoft-todo", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "numpy", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "outlook-calendar", "outlook-mail", "oxylabs", "pandas", "postgres", "pubmed", "python", "react", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shared-directories", "shell", "shopify", "skill-manage", "slack", "sleep", "spider", "spotify", "sql", "stop-reply", "supabase", "tavily", "telegram", "temporary-secrets", "terminal", "thread-model", "thread-move", "thread-resolution", "thread-snooze", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "triggers", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "workflow", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agent-manager", "agentql", "airflow", "apify", "approved-egress", "arxiv", "atlassian", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "chromadb", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "contacts", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "egress-credentials", "eleven-labs", "email", "email-invite", "exa", "external-trigger-manager", "fal", "file", "file-generation", "filesystem", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "google-tasks", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "knowledge-graph", "kubernetes", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-user", "matrix-voice-message", "mem0", "memory", "microsoft-files", "microsoft-meetings", "microsoft-onenote", "microsoft-people", "microsoft-sharepoint", "microsoft-teams", "microsoft-todo", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "numpy", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "outlook-calendar", "outlook-mail", "oxylabs", "pandas", "postgres", "pubmed", "react", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shared-directories", "shell", "shopify", "skill-manage", "slack", "sleep", "spider", "spotify", "sql", "stop-reply", "supabase", "tavily", "telegram", "temporary-secrets", "terminal", "thread-model", "thread-move", "thread-resolution", "thread-snooze", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "triggers", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "webex", "website", "whatsapp", "wikipedia", "workflow", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 desktop-helper = [

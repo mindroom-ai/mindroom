@@ -61,6 +61,7 @@ from mindroom.config.legacy_fields import (
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
     retired_dynamic_workflow_approval_error,
+    retired_tool_message,
     retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
@@ -1571,6 +1572,10 @@ class Config(BaseModel):
             validate_authored_tool_entry_overrides,
         )
 
+        if guidance := retired_tool_message(entry.name):
+            msg = f"{config_path_prefix}: {guidance}"
+            raise ToolConfigOverrideError(msg)
+
         tool_validation_snapshot = tools.validation_snapshot
         validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
@@ -1628,6 +1633,7 @@ class Config(BaseModel):
                 config_path_prefix=config_path_prefix,
                 tools=tools,
             )
+        self._validate_retired_worker_tools()
         self._validate_listen_tools(tools)
         self._validate_tailnet_ssh_tools(tools)
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
@@ -1692,6 +1698,18 @@ class Config(BaseModel):
                         "List 'shell' first."
                     )
                     raise ToolConfigOverrideError(msg)
+
+    def _validate_retired_worker_tools(self) -> None:
+        """Reject retired names in worker routing without routing any replacement implicitly."""
+        scopes = [
+            ("defaults", self.defaults.worker_tools),
+            *((f"agents.{name}", agent.worker_tools) for name, agent in self.agents.items()),
+        ]
+        for scope, names in scopes:
+            for index, name in enumerate(names or ()):
+                if guidance := retired_tool_message(name):
+                    msg = f"{scope}.worker_tools[{index}]: {guidance}"
+                    raise ConfigRuntimeValidationError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.

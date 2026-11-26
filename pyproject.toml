@@ -153,10 +153,6 @@ config_manager = [
   "pydantic>=2",
   "pyyaml>=6",
 ]
-confluence = [
-  # tools/agno_compat_confluence.py builds on the v1 client in atlassian.confluence.server, new in 5.
-  "atlassian-python-api>=5.0.5",
-]
 contacts = []
 crawl4ai = [
   "crawl4ai>=0.7.3",
@@ -289,9 +285,6 @@ jina = [
   "httpx>=0.27",
   "pydantic>=2",
 ]
-jira = [
-  "jira>=3.10.5",
-]
 knowledge_graph = [
   "graphiti-core[falkordblite]==0.31.2",
   # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
@@ -379,7 +372,6 @@ postgres = [
 pubmed = [
   "httpx>=0.27",
 ]
-python = []
 react = []
 reasoning = []
 reddit = [
@@ -470,7 +462,6 @@ usage_stats = []
 visualization = [
   "matplotlib",
 ]
-web_browser_tools = []
 webex = [
   "webexpythonsdk",
 ]

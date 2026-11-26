@@ -56,7 +56,6 @@ from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
 from mindroom.tools.composio import composio_tools
 from mindroom.tools.config_manager import config_manager_tools
-from mindroom.tools.confluence import confluence_tools
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.csv import csv_tools
 from mindroom.tools.custom_api import custom_api_tools
@@ -93,7 +92,6 @@ from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
 from mindroom.tools.invite_router import invite_router_tools
 from mindroom.tools.jina import jina_tools
-from mindroom.tools.jira import jira_tools
 from mindroom.tools.linear import linear_tools
 from mindroom.tools.linkup import linkup_tools
 from mindroom.tools.lumalabs import lumalabs_tools
@@ -125,7 +123,6 @@ from mindroom.tools.oxylabs import oxylabs_tools
 from mindroom.tools.pandas import pandas_tools
 from mindroom.tools.postgres import postgres_tools
 from mindroom.tools.pubmed import pubmed_tools
-from mindroom.tools.python import python_tools
 from mindroom.tools.react import react_tools
 from mindroom.tools.reasoning import reasoning_tools
 from mindroom.tools.reddit import reddit_tools
@@ -166,7 +163,6 @@ from mindroom.tools.unsplash import unsplash_tools
 from mindroom.tools.update_awareness import update_awareness_tools
 from mindroom.tools.usage_stats import usage_stats_tools
 from mindroom.tools.visualization import visualization_tools
-from mindroom.tools.web_browser_tools import web_browser_tools
 from mindroom.tools.webex import webex_tools
 from mindroom.tools.website import website_tools
 from mindroom.tools.whatsapp import whatsapp_tools

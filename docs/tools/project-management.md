@@ -13,10 +13,8 @@ Use it to choose a tool, connect its account, and understand its limits.
 - [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, templates, and automatic nudges for idle agents.
 - [`bitbucket`] - One Bitbucket repository's details, commits, pull requests, and issues.
 - [`atlassian`](atlassian.md) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
-- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs with one shared account.
 - [`linear`] - Linear teams, issues, and issue updates.
 - [`clickup`] - ClickUp spaces, lists, and tasks.
-- [`confluence`] - Confluence spaces and page lookup, creation, and updates with one shared account.
 - [`notion`] - Pages in one Notion database.
 - [`trello`] - Trello boards, lists, cards, and card moves.
 - [`todoist`] - Todoist tasks and projects.
@@ -211,37 +209,6 @@ agents:
 - Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
 - `create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
-## [`jira`]
-
-`jira` provides `get_issue()`, `create_issue()`, `search_issues()` with JQL, `add_comment()`, and `add_worklog()` through one shared Jira account.
-For per-requester Jira Cloud access, use [`atlassian`](atlassian.md) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`; required unless `JIRA_SERVER_URL` is set. |
-| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. Also read from `JIRA_USERNAME`. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Jira. Also read from `JIRA_PASSWORD`. |
-| `token` | `password` | `no` | `null` | Jira or Atlassian API token; used instead of `password` when both are set. Also read from `JIRA_TOKEN`. |
-| `enable_get_issue` | `boolean` | `no` | `true` | Enable `get_issue()`. |
-| `enable_create_issue` | `boolean` | `no` | `true` | Enable `create_issue()`. |
-| `enable_search_issues` | `boolean` | `no` | `true` | Enable `search_issues()`. |
-| `enable_add_comment` | `boolean` | `no` | `true` | Enable `add_comment()`. |
-| `enable_add_worklog` | `boolean` | `no` | `true` | Enable `add_worklog()`. |
-| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
-
-```yaml
-agents:
-  delivery:
-    tools:
-      - jira:
-          server_url: https://example.atlassian.net
-          username: bot@example.com
-          enable_add_worklog: false
-```
-
-- For Atlassian Cloud, use `username` plus `token`.
-- Without `username` and a `token` or `password`, the tool connects anonymously, which most Jira sites reject.
-
 ## [`linear`]
 
 `linear` reads the current user, teams, issues, assigned issues, workflow-state issues, and high-priority issues, and creates and updates issues.
@@ -283,32 +250,6 @@ agents:
 - `list_tasks()` returns tasks from every list in a space.
 - `create_task()` always creates the task in the first list of the matched space, so check `list_lists()` when placement matters.
 - `update_task()` passes any field updates through to the ClickUp API.
-
-## [`confluence`]
-
-`confluence` lists spaces and their pages, and reads, creates, and updates pages through one shared account.
-Spaces can be named by title or key.
-For per-requester Confluence Cloud access, use [`atlassian`](atlassian.md) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `url` | `url` | `no` | `null` | Confluence base URL; required unless `CONFLUENCE_URL` is set. |
-| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email; required unless `CONFLUENCE_USERNAME` is set. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Confluence. Also read from `CONFLUENCE_PASSWORD`. |
-| `api_key` | `password` | `no` | `null` | Confluence API key; used instead of `password` when both are set. Also read from `CONFLUENCE_API_KEY`. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates; disable only for self-signed internal deployments. |
-
-```yaml
-agents:
-  docs:
-    tools:
-      - confluence:
-          url: https://example.atlassian.net/wiki
-          username: docs@example.com
-```
-
-- One of `api_key` or `password` is required; use `api_key` for Atlassian Cloud.
-- Page bodies are read and written in Confluence storage format, such as `<p>Initial draft</p>`.
 
 ## [`notion`]
 
