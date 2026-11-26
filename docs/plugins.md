@@ -341,7 +341,6 @@ Annotations are read when an agent is built, so import the types they name at ru
 An agent leaves out a toolkit with a refused parameter or an annotation that does not resolve, and logs `Could not load tool for agent construction`.
 `mindroom plugins check` reports both for the `@tool` methods of a `mindroom.plugin_api.Toolkit` class, naming the tool and function.
 `instructions` is guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions.
-A factory may also return an Agno toolkit class, for example to offer one of Agno's own toolkits.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
@@ -405,15 +404,14 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there, which decide `files` as [Workspace Files](workspace-files.md#who-may-open-and-change-a-workspace) describes; a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.19"` |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
-| `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Toolkit functions whose unused `agent` parameter can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
 | `action_scoped_grants` | sequence of strings | `()` | Action-dispatched function names whose timed approval grants bind to `(tool_name, action)` instead of only `tool_name` (and whose scheduled calls never offer approving any arguments); a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 | `retired_functions` | dict of retired name to replacement name | `None` | Retired function names mapped to their replacement function name so config validation fails closed when `tool_approval.rules` still decides a retired name differently from its replacement; a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
-An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
-If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
+If a function accepts an unused `agent` parameter, list it in `worker_inert_agent_functions`; never do this for functions that depend on agent identity, configuration, or session state.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
 
 ### Approval aliases
@@ -1087,7 +1085,6 @@ See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin ex
 ## MCP servers
 
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](mcp.md).
-MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## HTTP routes
 

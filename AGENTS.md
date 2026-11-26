@@ -35,7 +35,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
   Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
 - **Default to no change in user docs**, meaning the `zensical.toml` nav pages outside `docs/architecture/`.
-  Bug fixes that restore documented behavior, refactors, and hardening or internal limits that normal use never reaches need none; contributor pages such as the code map, `security-posture.md`, `migrations.md`, and `agno-compatibility.md` follow their own update rules.
+  Bug fixes that restore documented behavior, refactors, and hardening or internal limits that normal use never reaches need none; contributor pages such as the code map, `security-posture.md`, and `migrations.md` follow their own update rules.
   Change docs only when configuration, user-visible behavior, or an operator procedure changes, and then add only the sentences that change an answer to a user question.
 - **Name the question before writing a sentence**: keep it only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
   If you cannot name that question, the sentence does not belong in user docs.
@@ -48,7 +48,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
   User docs name implementation details only when a documented procedure needs them.
 - **Design and architecture documents** (`docs/architecture/` and the design records in `docs/dev/`) hold only what the code cannot show: reasons, decisions and rejected alternatives, assumptions, external constraints and wire contracts, refuted theories, evidence, limitations, invariant purposes, linked operator procedures, and open questions.
-  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, the plaintext inventory in `matrix-event-journal-security.md`, and the Agno upstream map.
+  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, and the plaintext inventory in `matrix-event-journal-security.md`.
   Name each dated record `docs/dev/YYYY-MM-DD-<title>.md` after its creation date.
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.
@@ -95,28 +95,6 @@ Design migrations around that assumption rather than adding machinery to coordin
   The last release that accepted old data is not the last native writer release.
   State unreleased, unversioned external input, no tagged native model, or schema-based recovery explicitly when no single release cutoff exists.
 - Source comments own each rule's provenance and test references; `docs/architecture/migrations.md` holds only cross-cutting migration decisions and dependency-owned migrations.
-
-### Agno Compatibility Policy
-
-- MindRoom owns its run loop, providers, storage, teams, history, knowledge readers and chunkers, tool schemas, and the tool authoring API its tools use (`tool_system/authoring.py`; tools return text or `ToolValue`); Agno stays only as the vendor tool library.
-  What stays Agno: vendor toolkits with MindRoom's overrides, and Agno's `Toolkit`, `Function`, and `@tool` for them and for plugins built on them (the adapter reads their `ToolResult` once; `@tool` derives its own schema).
-- The agent loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `toolkit_function` in `tool_system/agno_toolkits.py`; only it, vendor subclasses, and `oauth/agno_compat_google_auth.py` read Agno toolkits.
-  Only the modules `tests/test_agno_boundary.py` allows may import Agno; others use the adapter and MindRoom's types, never Agno's agent, team, model, run, storage, or learning layers.
-- The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
-  Isolate substantive workarounds in `agno_compat_<subject>.py` beside their owning module; a tiny override may stay in a cohesive adapter.
-- Mark each independently removable workaround with a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap.
-  Follow the marker with these fields:
-  - `Reason`: the concrete upstream behavior or missing extension point and its effect on MindRoom.
-  - `Upstream issue`: a verified issue URL, or an explicit tracking gap and why the boundary is needed.
-  - `Upstream PR`: a verified fix or API proposal URL when one exists; state when none is identified or the linked PR covers only part of the workaround.
-  - `Remove when`: the exact upstream behavior that allows removal, including any MindRoom behavior that must remain.
-  - `Coverage`: repository-relative regression test paths, preferably exact test node IDs.
-- Distinguish upstream bugs from missing extension points and MindRoom policy; never invent a tracking link or treat a related PR as a complete fix.
-  Treat a tracking gap as unfinished upstream work, and search for existing tracking before opening a new item.
-- For an upstream contribution, reduce the problem to an Agno-only reproducer, keep MindRoom policy out of the fix, and keep local coverage for the behavior MindRoom requires.
-- Keep the weakness-to-upstream map in `docs/architecture/agno-compatibility.md` aligned with the markers; source comments own exact upstream links and test references.
-- On each Agno upgrade, run `tests/tool_system/`, whose goldens pin vendor tool schemas and argument coercion, verify which fixes the pinned release includes, and run each marker's coverage.
-  Remove a workaround only when its tests pass without it; a merged PR alone is insufficient.
 
 ### Security Trust Model
 

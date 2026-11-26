@@ -131,4 +131,3 @@ Headless runs send MindRoom's log records to Python's `logging` module, under th
 Until your program configures `logging`, Python prints only warnings and errors, on stderr.
 To see more, configure it, for example with `logging.basicConfig(level=logging.INFO)`; `DEBUG` records include the full prompts sent to the model.
 Your program's structlog configuration applies to its own records, not to MindRoom's.
-Agno, the tool library MindRoom uses, prints its own log lines to stdout; `logging.getLogger("agno").handlers.clear()` after importing `mindroom.headless` keeps them off stdout and leaves only its warnings and errors, on stderr.
