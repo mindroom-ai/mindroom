@@ -538,7 +538,7 @@ See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the q
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](https://docs.mindroom.chat/cli/#doctor).
 
 See [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `docker`, `filesystem`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+To run worker-routed execution tools such as `docker`, `filesystem`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 
 
@@ -1482,7 +1482,6 @@ Not included:
         tools:
           - openclaw_compat
           - memory
-          - python
 
     memory:
       search:
@@ -1937,7 +1936,7 @@ agents:
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](https://docs.mindroom.chat/streaming/#reasoning) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell` and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
 | `terminals` | string | `none` | What people in the agent's rooms may do with its [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none` shows them nothing, `watch` lets them watch, and `type` also lets people who may post open, close, and type in them where the agent's shell runs in a worker that mounts its workspace, and lets them only watch in a worker that does not. It applies to this agent only and is not inherited from `defaults`; the agent's own use of the `terminal` toolkit does not depend on it |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
@@ -2091,7 +2090,7 @@ A silent turn calls only the tools it names, but each keeps its usual effects, h
 
 - `scheduler`, one of the default agent tools, schedules a later turn of the agent, and can edit or cancel any pending task in the room; an edited task becomes the agent's own.
   A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
-- `filesystem`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
+- `filesystem` and `shell` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script` and `shell` run code with the agent's worker and credentials.
 - A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
 - `report_publishing` publishes workspace files at a public link.
 - A tool that starts a turn starts it with all of the agent's tools, as the agent's own account, and a tool that checks who asked sees that account, because no person asked for a silent turn.
@@ -2150,7 +2149,7 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 defaults:
   tools: [scheduler]
   max_tool_calls_per_turn: 200
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   enable_streaming: true
   max_preload_file_chars: 30000
 ```
@@ -3880,11 +3879,11 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 
 | Backend | What it does | Use it when |
 |---|---|---|
-| `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
+| `mem0` (default) | Vector memory: relevant memories are retrieved before each standard-mode reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
-Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+In standard mode, before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt (in minimal mode, agents read memory files or call the `memory` tool on demand instead).
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
 With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](https://docs.mindroom.chat/knowledge/#reranking), a reranker chooses the semantic matches instead.
 `memory(action="search", ...)` returns up to its own `limit` in every mode.
@@ -3943,7 +3942,7 @@ A `file` member of a team that uses Mem0 does not see that team's Mem0 memories 
 
 ## Backend: `mem0`
 
-Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
+Before each standard-mode reply, Mem0 retrieves memories relevant to the message and adds them to the prompt (in minimal mode, automatic recall is skipped; on-demand recall uses the `memory` tool when configured).
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
@@ -4091,7 +4090,7 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+Before each standard-mode reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message (in minimal mode, agents read `MEMORY.md` and `memory/` or call the `memory` tool on demand instead).
 An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
@@ -4138,8 +4137,8 @@ Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker
 With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `memory(action="search", ...)` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
-A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
-So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every standard-mode reply.
+So with an `openai_decisions` or `typesafe` reranker, every standard-mode reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false` (minimal turns skip automatic recall; explicit memory and knowledge searches can still rerank).
 With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
@@ -6602,7 +6601,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
-| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply |
 
 ```python
 list_attachments()
@@ -6639,7 +6638,7 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem` or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
@@ -6654,8 +6653,9 @@ The alt text defaults to the filename.
 
 Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
 up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
-Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
-In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
+In encrypted rooms, MindRoom encrypts the upload (or reuses turn-scoped encrypted image media)
+and attaches decryption keys under `io.mindroom.inline_media` for each embedded image.
+When `inline_image` refuses, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 
@@ -7204,10 +7204,10 @@ What a person may do there follows the agent's tools, as its turns build them wi
 
 | Access | When |
 |--------|------|
-| `read` | The agent has a tool that takes local file paths or runs code, such as `filesystem`, `shell`, or `python` |
+| `read` | The agent has a tool that takes local file paths or runs code, such as `filesystem` or `shell` |
 | `write` | One of those tools can change files in the workspace, and the person may post messages in the room |
 
-A tool can change files when the agent's settings leave on one of its writing functions, such as `write_file` or `edit_file` of `filesystem`, or when it runs code, as `shell`, `python`, and `script` do.
+A tool can change files when the agent's settings leave on one of its writing functions, such as `write_file` or `edit_file` of `filesystem`, or when it runs code, as `shell` and `script` do.
 So `filesystem` with `exclude_tools: [write_file, edit_file]` gives only `read`, with or without `enable_delete_file: true`.
 A tool changes files in the workspace where it runs in the primary process, in a dedicated Docker or Kubernetes worker, or on a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); on a `static_runner` that sees only its own storage it changes that storage instead, so it gives only `read`.
 An agent with none of these tools opens no workspace.
@@ -9348,12 +9348,12 @@ mcp_servers:
   team_wiki:
     display_name: Team Wiki
     summary: Search and edit team documentation
-    icon: SiConfluence
+    icon: SiAtlassian
     transport: streamable-http
     url: https://wiki.example.com/mcp
 ```
 
-`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
+`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiAtlassian` or `SiGooglecalendar`.
 Without a usable icon, Connections picks one matching the server's name, or a plug icon.
 
 ## Server Options
@@ -9937,7 +9937,7 @@ The `script` tool lets an agent start a Python program that keeps running after 
 Use it for watchers, polling loops, and other small automations that should wake the agent only when something changes.
 The script can call a chosen subset of the agent's tools through the `MindRoomTools` SDK, with the same hooks, approval rules, worker routing, and audit trail as an ordinary tool call.
 
-Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `script` as trusted arbitrary code with authority comparable to `shell`.
 `allowed_tools` limits only calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script.
 
 ## Enable The Tool
@@ -10222,7 +10222,7 @@ Every `agent()`, `tool()` and `shell()` call of the script is saved with its res
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
 A run that a MindRoom restart interrupts is resumed the same way on its own.
 
-Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `workflow` as trusted arbitrary code with authority comparable to `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
 Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
 Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
@@ -11654,7 +11654,6 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
-- [`python`] - Python code execution and package installation.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
@@ -11670,18 +11669,17 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 
 ### Where these tools run
 
-`filesystem`, `shell`, `python`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+`filesystem`, `shell` and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
-With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls and worker-routed `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
-Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
+Only a worker isolates `shell` and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
 
 Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
-It is the working directory (`base_dir`) of `filesystem`, `shell`, and worker-routed `python`, and generated files and charts are saved inside it.
-`python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
+It is the working directory (`base_dir`) of `filesystem` and `shell`, and generated files and charts are saved inside it.
 `base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; a [headless run](https://docs.mindroom.chat/headless/#files) can point it at a directory the caller chooses.
 
 Supported tools also take an optional `mindroom_output_path` argument.
@@ -11951,7 +11949,7 @@ Errors:
 
 ### Per-workspace environment
 
-An agent can set its own environment variables for worker-routed `shell` and `python`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
+An agent can set its own environment variables for worker-routed `shell`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
 The hook's behavior, limits, and the variables it cannot override are described in [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh).
 
 ```bash
@@ -12029,29 +12027,6 @@ agents:
       - temporary_secrets
 ```
 
-## [`python`]
-
-`python` provides `run_python_code()`, `save_to_file_and_run()`, `run_python_file_return_variable()`, `pip_install_package()`, `uv_pip_install_package()`, `read_file()`, and `list_files()`.
-It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
-Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
-Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - python
-```
-
-```python
-run_python_code("total = sum(i * i for i in range(10))", variable_to_return="total")
-save_to_file_and_run("scripts/demo.py", "result = 6 * 7", variable_to_return="result")
-run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
-pip_install_package("rich")
-```
-
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
@@ -12063,7 +12038,7 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
    Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
    Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
 2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell` or `filesystem`.
-3. Give each reading agent `shell`, `python`, or `filesystem`.
+3. Give each reading agent `shell` or `filesystem`.
    It also needs `shared_directories` to accept invitations from users who cannot use it, as in [Sharing between personal agents](#sharing-between-personal-agents).
 4. When the user who asks for the invitation can use the reading agent outside the current room, the invitation applies at once, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
@@ -12142,16 +12117,15 @@ Where tools run decides who reaches a shared directory:
 | Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
 | No workers, through `filesystem` under `file_access: workspace` | Read and write | Read only | No access |
 
-`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+`shell` and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
 The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.
 A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
 ## [`docker`]
 
-`docker` manages containers with functions such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
-It also manages images, volumes, and networks with functions such as `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
+`docker` splits read-only introspection from mutations across three functions: `docker_inspect(action, ...)` (`list_containers`, `inspect_container`, `get_container_logs`, `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`), `docker_container(action, ...)` (`run`, `exec`, `start`, `stop`, `remove`), and `docker_resource(action, ...)` (`pull_image`, `build_image`, `tag_image`, `remove_image`, `create_volume`, `remove_volume`, `create_network`, `remove_network`, `connect_network`, `disconnect_network`).
 Docker daemon access is privileged host control, so `docker` runs in a worker by default, and the runtime that runs it needs a reachable Docker daemon or socket.
-`get_container_logs(stream=True)` returns a message asking for non-streaming mode instead of a live stream.
+The client is isolated from host `~/.docker/config.json` / `DOCKER_CONFIG` registry credentials and proxies, and `include_tools` accepts the consolidated names `docker_inspect`, `docker_container`, and `docker_resource`.
 
 ### Configuration
 
@@ -12169,14 +12143,14 @@ agents:
 ```
 
 ```python
-list_containers()
-run_container("postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
-get_container_logs("postgres", tail=50)
+docker_inspect("list_containers")
+docker_container("run", image="postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
+docker_inspect("get_container_logs", target="postgres", tail=50)
 ```
 
 ## [`calculator`]
 
-`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without the risk of `python`.
+`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without running arbitrary code.
 Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
 `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
 `calculator` has no configuration fields.
@@ -12218,11 +12192,11 @@ agents:
 
 ## [`file_generation`]
 
-`file_generation` provides `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
-Each function returns the generated file in its tool result.
+`file_generation` provides a unified `generate_file(format, content, filename=None, title=None, headers=None, language=None)` tool supporting `json`, `csv`, `pdf`, `docx`, `html`, `txt`, and `code`.
+Each call returns the generated file in its tool result.
 Filenames are generated when omitted, and a missing extension is added for the export type.
-`generate_json_file()` accepts dicts, lists, or strings, and wraps a string that is not valid JSON.
-PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavailable, even if enabled in config.
+`format="json"` accepts dicts, lists, or strings, and wraps a string that is not valid JSON.
+PDF and DOCX generation require `reportlab` or `python-docx`.
 
 Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
 Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
@@ -12234,14 +12208,14 @@ Saved files go into `output_directory` inside the agent workspace, or the worksp
 | --- | --- | --- | --- | --- |
 | `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
 | `save_files` | `boolean` | `no` | `false` | Save generated files; when `output_directory` is unset, they go to the workspace root. |
-| `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
-| `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
-| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()`. |
-| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()`. |
-| `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
-| `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
-| `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()`. |
-| `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
+| `enable_json_generation` | `boolean` | `no` | `true` | Enable `format="json"` in `generate_file()`. |
+| `enable_csv_generation` | `boolean` | `no` | `true` | Enable `format="csv"` in `generate_file()`. |
+| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `format="pdf"` in `generate_file()`. |
+| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `format="docx"` in `generate_file()`. |
+| `enable_txt_generation` | `boolean` | `no` | `true` | Enable `format="txt"` in `generate_file()`. |
+| `enable_html_generation` | `boolean` | `no` | `true` | Enable `format="html"` in `generate_file()`. |
+| `enable_code_generation` | `boolean` | `no` | `true` | Enable `format="code"` in `generate_file()`. |
+| `all` | `boolean` | `no` | `false` | Enable all formats in `generate_file()`. |
 
 ### Example
 
@@ -12254,16 +12228,16 @@ agents:
 ```
 
 ```python
-generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
-generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
-generate_docx_file("Quarterly summary", filename="report.docx", title="Q1 Report")
+generate_file("csv", [{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
+generate_file("pdf", "Quarterly summary", filename="report.pdf", title="Q1 Report")
+generate_file("docx", "Quarterly summary", filename="report.docx", title="Q1 Report")
 ```
 
 ## [`visualization`]
 
-`visualization` provides `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
-Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scatter plots take x and y lists, and histograms take a list of numbers.
-Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
+`visualization` provides a unified `create_chart(chart_type, ...)` tool supporting `bar`, `line`, `pie`, `scatter`, and `histogram`.
+Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scatter plots take `x_data`/`y_data` (or `data`), and histograms take a list of numbers.
+Each call saves a PNG in `output_dir` inside the agent workspace and returns the file path.
 A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
 Charts overwrite files of the same name, and `output_dir` is created when missing.
 Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
@@ -12273,19 +12247,19 @@ Because charts are in the workspace, `attachments` and `matrix_message` can send
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_dir` | `text` | `no` | `"charts"` | Directory inside the agent workspace where charts are saved; absolute paths and `..` are rejected. |
-| `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `create_bar_chart()`. |
-| `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `create_line_chart()`. |
-| `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `create_pie_chart()`. |
-| `enable_create_scatter_plot` | `boolean` | `no` | `true` | Enable `create_scatter_plot()`. |
-| `enable_create_histogram` | `boolean` | `no` | `true` | Enable `create_histogram()`. |
-| `all` | `boolean` | `no` | `false` | Enable all chart functions. |
+| `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `chart_type="bar"` in `create_chart()`. |
+| `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `chart_type="line"` in `create_chart()`. |
+| `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `chart_type="pie"` in `create_chart()`. |
+| `enable_create_scatter_plot` | `boolean` | `no` | `true` | Enable `chart_type="scatter"` in `create_chart()`. |
+| `enable_create_histogram` | `boolean` | `no` | `true` | Enable `chart_type="histogram"` in `create_chart()`. |
+| `all` | `boolean` | `no` | `false` | Enable all chart types in `create_chart()`. |
 
 ### Example
 
 ```python
-create_bar_chart({"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
-create_scatter_plot(x=[1, 2, 3], y=[2, 5, 7], title="Experiment results")
-create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
+create_chart("bar", data={"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
+create_chart("scatter", x_data=[1, 2, 3], y_data=[2, 5, 7], title="Experiment results")
+create_chart("histogram", data=[1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 ```
 
 ## [`sleep`]
@@ -12338,11 +12312,12 @@ Missing Python dependencies install automatically on first use; see [Automatic D
 
 ## [`sql`]
 
-`sql` provides `list_tables()`, `describe_table(table_name)`, and `run_sql_query(query, limit=10)`.
+`sql` provides `sql_inspect(action, table_name=None)` (actions `list_tables`, `describe_table`) and `run_sql_query(query, limit=10)`.
 `run_sql_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
 Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
 The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
 For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
+PostgreSQL URLs require an explicit host (including Unix-socket `?host=...`), username, password, and database, and reject ambient libpq `passfile`, `PGSERVICE`, and `PGHOSTADDR` fallbacks.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12353,16 +12328,16 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
+| `enable_list_tables` | `boolean` | `true` | Enable the `list_tables` action on `sql_inspect()`. |
+| `enable_describe_table` | `boolean` | `true` | Enable the `describe_table` action on `sql_inspect()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`postgres`]
 
-`postgres` provides `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`postgres` provides `postgres_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 The connection is read-only, so queries cannot modify the database.
-`inspect_query()` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
+`postgres_inspect(action="inspect_query", ...)` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
 `export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
 
 | Option | Type | Required | Default | Notes |
@@ -12387,11 +12362,12 @@ agents:
 
 ## [`redshift`]
 
-`redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`redshift` provides `redshift_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
 Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
 With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
+IAM mode requires an explicit `profile` or both `access_key_id` and `secret_access_key` rather than falling back to ambient AWS default credential chains.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -12425,7 +12401,7 @@ agents:
 
 ## [`neo4j`]
 
-`neo4j` provides `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
+`neo4j` provides `neo4j_inspect(action)` (actions `list_labels`, `list_relationship_types`, `get_schema`) and `run_cypher_query()`.
 Set `enable_run_cypher: false` to give an agent schema visibility without free-form graph queries.
 
 | Option | Type | Required | Default | Notes |
@@ -12434,9 +12410,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 | `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
 | `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
-| `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
-| `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
-| `enable_get_schema` | `boolean` | no | `true` | Enable `get_schema()`. |
+| `enable_list_labels` | `boolean` | no | `true` | Enable the `list_labels` action on `neo4j_inspect()`. |
+| `enable_list_relationships` | `boolean` | no | `true` | Enable the `list_relationship_types` action on `neo4j_inspect()`. |
+| `enable_get_schema` | `boolean` | no | `true` | Enable the `get_schema` action on `neo4j_inspect()`. |
 | `enable_run_cypher` | `boolean` | no | `true` | Enable `run_cypher_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
@@ -12454,9 +12430,9 @@ agents:
 ## [`duckdb`]
 
 `duckdb` is the best choice for repeatable local analytics over files.
-It provides `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
+It provides `duckdb_inspect(action, ...)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`, `full_text_search`), `run_query()`, and `duckdb_manage(action, ...)` (actions `load_path`, `export_table`, `create_fts_index`).
 Without `db_path`, the database lives in memory and is not saved.
-`export_table_to_path()` writes Parquet unless the call passes another format such as `CSV`.
+`duckdb_manage(action="export_table", ...)` writes Parquet unless the call passes `CSV` or `JSON`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12473,23 +12449,23 @@ agents:
 ```
 
 ```python
-create_table_from_path("/workspace/data/orders.parquet", table="orders", replace=True)
+duckdb_manage("load_path", path="/workspace/data/orders.parquet", table="orders", replace=True)
 run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
-export_table_to_path("orders", format="CSV", path="/tmp")
+duckdb_manage("export_table", table="orders", file_format="CSV", path="/tmp")
 ```
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
+`csv` provides `csv_inspect(action, csv_name=None, row_limit=None)` (actions `list`, `columns`, `read`) and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
-| `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
-| `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
-| `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
+| `row_limit` | `number` | `null` | Default row cap for `csv_inspect(action="read", ...)`. |
+| `enable_read_csv_file` | `boolean` | `true` | Enable the `read` action on `csv_inspect()`. |
+| `enable_list_csv_files` | `boolean` | `true` | Enable the `list` action on `csv_inspect()`. |
+| `enable_get_columns` | `boolean` | `true` | Enable the `columns` action on `csv_inspect()`. |
 | `enable_query_csv_file` | `boolean` | `true` | Enable `query_csv_file()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
@@ -12659,21 +12635,21 @@ agents:
 
 ## [`openbb`]
 
-`openbb` provides `get_stock_price(symbol)`, `search_company_symbol()`, `get_company_news(symbol, num_stories=10)`, `get_company_profile()`, and `get_price_targets()`.
+`openbb` provides `openbb_get(action, symbol=None, company_name=None, num_stories=10)` with actions `stock_price`, `search_symbol`, `company_news`, `company_profile`, and `price_targets`.
 Symbols can be comma-separated, such as `AAPL,MSFT`.
-The default `yfinance` provider works without an OpenBB account; set `openbb_pat` or the `OPENBB_PAT` environment variable for premium providers.
+The default `yfinance` provider works out of the box without credentials; credentialed providers are not supported via `openbb_pat` (or `OPENBB_PAT`) in OpenBB 4.7.2 (which removed `obb.account.login`) and fail closed rather than reading host environment variables or `~/.openbb_platform/user_settings.json`.
 Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data providers.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
-| `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
-| `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |
-| `enable_get_company_profile` | `boolean` | `false` | Enable `get_company_profile()`. |
-| `enable_get_price_targets` | `boolean` | `false` | Enable `get_price_targets()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_get_stock_price` | `boolean` | `true` | Enable the `stock_price` action. |
+| `enable_search_company_symbol` | `boolean` | `false` | Enable the `search_symbol` action. |
+| `enable_get_company_news` | `boolean` | `false` | Enable the `company_news` action. |
+| `enable_get_company_profile` | `boolean` | `false` | Enable the `company_profile` action. |
+| `enable_get_price_targets` | `boolean` | `false` | Enable the `price_targets` action. |
+| `all` | `boolean` | `false` | Enable every action. |
 
 ```yaml
 agents:
@@ -12686,21 +12662,21 @@ agents:
 
 ## [`yfinance`]
 
-`yfinance` reads Yahoo Finance data with no credentials.
-Only the current stock price is enabled by default, so enable each additional function the agent needs.
+`yfinance` reads Yahoo Finance data with no credentials through `yfinance_get(action, symbol, period=None, interval="1d", num_stories=3)`.
+Only `stock_price` is enabled by default, so enable each additional action the agent needs.
 
-| Option | Type | Default | Enables |
+| Option | Type | Default | Enables action |
 | --- | --- | --- | --- |
-| `enable_stock_price` | `boolean` | `true` | `get_current_stock_price()` |
-| `enable_company_info` | `boolean` | `false` | `get_company_info()` |
-| `enable_stock_fundamentals` | `boolean` | `false` | `get_stock_fundamentals()` |
-| `enable_income_statements` | `boolean` | `false` | `get_income_statements()` |
-| `enable_key_financial_ratios` | `boolean` | `false` | `get_key_financial_ratios()` |
-| `enable_analyst_recommendations` | `boolean` | `false` | `get_analyst_recommendations()` |
-| `enable_company_news` | `boolean` | `false` | `get_company_news()` |
-| `enable_technical_indicators` | `boolean` | `false` | `get_technical_indicators()` |
-| `enable_historical_prices` | `boolean` | `false` | `get_historical_stock_prices()` |
-| `all` | `boolean` | `false` | Every function |
+| `enable_stock_price` | `boolean` | `true` | `stock_price` |
+| `enable_company_info` | `boolean` | `false` | `company_info` |
+| `enable_stock_fundamentals` | `boolean` | `false` | `fundamentals` |
+| `enable_income_statements` | `boolean` | `false` | `income_statements` |
+| `enable_key_financial_ratios` | `boolean` | `false` | `financial_ratios` |
+| `enable_analyst_recommendations` | `boolean` | `false` | `analyst_recommendations` |
+| `enable_company_news` | `boolean` | `false` | `company_news` |
+| `enable_technical_indicators` | `boolean` | `false` | `technical_indicators` |
+| `enable_historical_prices` | `boolean` | `false` | `historical_prices` |
+| `all` | `boolean` | `false` | Every action |
 
 ```yaml
 agents:
@@ -12714,7 +12690,7 @@ agents:
 
 ## [`financial_datasets_api`]
 
-`financial_datasets_api` reads structured data from Financial Datasets through `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
+`financial_datasets_api` reads structured data from Financial Datasets through `financial_datasets_financials(action, ticker, ...)` (actions `income_statements`, `balance_sheets`, `cash_flow_statements`, `segmented_financials`, `financial_metrics`, `company_info`, `earnings`, `insider_trades`, `institutional_ownership`, `sec_filings`) and `financial_datasets_market(action, ...)` (actions `stock_prices`, `crypto_prices`, `news`, `search_tickers`).
 Set `api_key` or the `FINANCIAL_DATASETS_API_KEY` environment variable; without a key, every call returns `API key not set`.
 
 | Option | Type | Default | Notes |
@@ -13062,7 +13038,6 @@ Use it to pick a tool, configure it, and understand why a URL was refused.
 | [`agentql`](#agentql) | AgentQL query extraction in a local browser | `AGENTQL_API_KEY` |
 | [`browserbase`](#browserbase) | Hosted remote browser sessions for navigation, screenshots, and page reads | `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` |
 | [`browser`](#browser) | Multi-step automation of MindRoom's browser or the user's own signed-in browser | None |
-| [`web_browser_tools`](#web_browser_tools) | Opening a URL in the host computer's browser for a person | None |
 
 Each credential can be stored as the tool's `api_key` (or `apify_api_token`, `username`, and `password`) through the dashboard or credential store, or supplied as the environment variable shown.
 Keep password fields out of inline YAML.
@@ -13279,7 +13254,7 @@ Function names derive from the Actor ID, so check the agent's tool list for the 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `apify_api_token` | `password` | `null` | Falls back to `APIFY_API_TOKEN`. |
-| `actors` | `text` | `null` | One Actor ID, such as `apify/rag-web-browser`; a comma-separated list is treated as a single ID. |
+| `actors` | `text` | `null` | One Actor ID or comma-separated list of Actor IDs, such as `apify/rag-web-browser,compass/crawler-google-places`. |
 
 ```yaml
 agents:
@@ -13459,17 +13434,6 @@ browser_control(action="open", target="desktop", targetUrl="https://matrix.org/b
 browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
-### [`web_browser_tools`]
-
-`web_browser_tools` exposes `open_page(url, new_window=False)`, which opens an `http` or `https` URL in a tab or window of the host computer's browser for a person to use.
-It refuses `file:` paths, other schemes, and scheme-less strings, and returns no page content, so it is not a scraper.
-It only works on a host with a desktop browser.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `enable_open_page` | `boolean` | `true` | Enable `open_page()`. |
-| `all` | `boolean` | `false` | Enable every function. |
-
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
@@ -13506,7 +13470,7 @@ Use [Web Search](https://docs.mindroom.chat/tools/web-search/) for broader web d
 | `enable_search_arxiv` | `boolean` | `true` | Enable `search_arxiv_and_return_articles(query, num_articles=10)`. |
 | `enable_read_arxiv_papers` | `boolean` | `true` | Enable `read_arxiv_papers(id_list, pages_to_read=None)`. |
 | `all` | `boolean` | `false` | Enable both functions. |
-| `download_dir` | `text` | unset | Directory where downloaded PDFs are stored; when unset, PDFs go to an `arxiv_pdfs` directory inside the installed Agno package. |
+| `download_dir` | `text` | unset | Directory that retains downloaded PDFs when set; when unset, PDFs use a writable temporary directory that is cleaned up after extraction. |
 
 Search returns JSON with each paper's title, ID, authors, categories, publish date, PDF URL, summary, and comment.
 `read_arxiv_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
@@ -13665,7 +13629,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
@@ -13737,7 +13701,7 @@ It works only with models that accept a single `prompt` field and return files w
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Falls back to `FAL_API_KEY`. |
+| `api_key` | `password` | `null` | Falls back to `FAL_API_KEY` or `FAL_KEY`. |
 | `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `generate_media()`. |
 | `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `false` | Enable `image_to_image()`. |
@@ -13745,7 +13709,7 @@ It works only with models that accept a single `prompt` field and return files w
 
 ## `cartesia`
 
-`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
+`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
 `localize_voice()` creates a new voice in another language from an existing one.
 Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
 `text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
@@ -13764,7 +13728,7 @@ Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the
 
 `eleven_labs` provides `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`.
 The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
-Audio attachments are always labeled MP3 (`audio/mpeg`), even when `output_format` selects PCM or u-law.
+`text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `generate_sound_effect()` returns MP3 (`audio/mpeg`).
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13781,9 +13745,9 @@ Audio attachments are always labeled MP3 (`audio/mpeg`), even when `output_forma
 ## `lumalabs`
 
 `lumalabs` provides `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-`image_to_video()` animates between one or two remote image URLs; local file paths are not accepted.
+`image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
 Both functions wait for the video until it finishes or `max_wait_time` passes.
-Keep `wait_for_completion: true`, because `false` makes both functions return `Async generation unsupported` without a job handle.
+Keep `wait_for_completion: true`, because `false` returns `Async generation unsupported` without a job handle.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13960,26 +13924,26 @@ agents:
 
 ## [`unsplash`]
 
-`unsplash` returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
+`unsplash` provides a unified `unsplash(action, ...)` tool that returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
 
-- `search_photos(query, per_page=10, page=1, orientation=None, color=None)` returns the total match count and a list of photos with author and image URLs.
-- `get_photo(photo_id)` adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
-- `get_random_photo(query=None, orientation=None, count=1)` returns one or more random photos, optionally matching a query.
-- `download_photo(photo_id)` reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
+- `action="search"` (`query`, optional `count`, `page`, `orientation`, `color`) returns the total match count and a list of photos with author and image URLs.
+- `action="get"` (`photo_id`) adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
+- `action="random"` (optional `query`, `orientation`, `count`) returns one or more random photos, optionally matching a query.
+- `action="download"` (`photo_id`) reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `access_key` | `password` | `null` | Required Unsplash access key; falls back to `UNSPLASH_ACCESS_KEY`. Get one from [Unsplash Developers](https://unsplash.com/developers). |
-| `enable_search_photos` | `boolean` | `true` | Enable `search_photos()`. |
-| `enable_get_photo` | `boolean` | `true` | Enable `get_photo()`. |
-| `enable_get_random_photo` | `boolean` | `true` | Enable `get_random_photo()`. |
-| `enable_download_photo` | `boolean` | `false` | Enable `download_photo()`. |
-| `all` | `boolean` | `false` | Enable all functions. |
+| `enable_search_photos` | `boolean` | `true` | Enable `action="search"` in `unsplash()`. |
+| `enable_get_photo` | `boolean` | `true` | Enable `action="get"` in `unsplash()`. |
+| `enable_get_random_photo` | `boolean` | `true` | Enable `action="random"` in `unsplash()`. |
+| `enable_download_photo` | `boolean` | `false` | Enable `action="download"` in `unsplash()`. |
+| `all` | `boolean` | `false` | Enable all actions in `unsplash()`. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 
 ```python
-search_photos("conference stage lighting", per_page=5, orientation="landscape")
-get_random_photo(query="workspace desk", count=3)
+unsplash("search", query="conference stage lighting", count=5, orientation="landscape")
+unsplash("random", query="workspace desk", count=3)
 ```
 
 ## [`brandfetch`]
@@ -14726,7 +14690,6 @@ chat_ui.open_panel(panel="computer")  # shows it again, for example for a login
 ```
 
 To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
-`web_browser_tools` opens a browser on the host operating system and does not show anything in Chat.
 
 The Computer panel needs an enabled [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/), which owns the worker, browser, proxy, and Chat configuration and describes watching, taking control, and handing back.
 If the computer is unavailable, Chat shows an unavailable state in the notice.
@@ -14830,27 +14793,27 @@ Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
 
 `discord` sends messages, reads channel messages and info, lists a server's channels, and deletes messages through the Discord REST API with a bot token.
 It does not run a live Discord bot, so it cannot receive messages, handle slash commands, or set presence.
-Functions take Discord IDs such as channel, server, and message IDs, not names.
+`discord_read`, `discord_send`, and `discord_manage` take IDs, not channel or server names.
 Deletion is enabled by default; set `enable_delete_message: false` for read and send access only.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `bot_token` | `password` | `null` | Discord bot token, or `DISCORD_BOT_TOKEN`; required. |
-| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
-| `enable_get_channel_messages` | `boolean` | `true` | Enable `get_channel_messages()`. |
-| `enable_get_channel_info` | `boolean` | `true` | Enable `get_channel_info()`. |
-| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
-| `enable_delete_message` | `boolean` | `true` | Enable `delete_message()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_send_message` | `boolean` | `true` | Send messages. |
+| `enable_get_channel_messages` | `boolean` | `true` | Read channel history. |
+| `enable_get_channel_info` | `boolean` | `true` | Read channel details. |
+| `enable_list_channels` | `boolean` | `true` | List server channels. |
+| `enable_delete_message` | `boolean` | `true` | Delete messages. |
+| `all` | `boolean` | `false` | Enable all actions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 ## [`telegram`]
 
 `telegram` sends messages from a Telegram bot to the one chat or channel set in `chat_id` or `TELEGRAM_CHAT_ID`, so calls never choose a destination.
 For several Telegram destinations, configure the tool separately per agent or credential scope.
-Only `send_message()` is enabled by default.
-Optional functions send photos, documents, video, audio, animations, and stickers, edit, delete, and pin messages, react with emoji, read chat details with `get_chat()`, and download files with `get_file()`.
-`get_file()` returns file content unless `save_downloads` or `output_directory` is set, in which case it saves the file and returns its path.
+Only `telegram_send(action="message")` is enabled by default; media sends take base64 bytes, not local paths.
+`telegram_manage` edits, deletes, reacts to, and pins messages, and `telegram_read` reads chat details or downloads a file.
+`telegram_read(action="get_file")` returns base64 content unless `save_downloads` or `output_directory` is set, in which case it saves the file and returns its path.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -14858,20 +14821,20 @@ Optional functions send photos, documents, video, audio, animations, and sticker
 | `token` | `password` | no | `null` | Bot token, or `TELEGRAM_TOKEN`; required in practice. |
 | `output_directory` | `text` | no | `null` | Directory for downloaded files; setting it also enables saving. |
 | `save_downloads` | `boolean` | no | `false` | Save downloads to disk; without `output_directory`, files go to the current working directory. |
-| `enable_send_message` | `boolean` | no | `true` | Enable `send_message()`. |
-| `enable_send_photo` | `boolean` | no | `false` | Enable `send_photo()`. |
-| `enable_send_document` | `boolean` | no | `false` | Enable `send_document()`. |
-| `enable_send_video` | `boolean` | no | `false` | Enable `send_video()`. |
-| `enable_send_audio` | `boolean` | no | `false` | Enable `send_audio()`. |
-| `enable_send_animation` | `boolean` | no | `false` | Enable `send_animation()`. |
-| `enable_send_sticker` | `boolean` | no | `false` | Enable `send_sticker()`. |
-| `enable_edit_message` | `boolean` | no | `false` | Enable `edit_message()`. |
-| `enable_delete_message` | `boolean` | no | `false` | Enable `delete_message()`. |
-| `enable_react_with_emoji` | `boolean` | no | `false` | Enable `react_with_emoji()`. |
-| `enable_pin_message` | `boolean` | no | `false` | Enable `pin_message()`. |
-| `enable_get_chat` | `boolean` | no | `false` | Enable `get_chat()`. |
-| `enable_get_file` | `boolean` | no | `false` | Enable `get_file()`. |
-| `all` | `boolean` | no | `false` | Enable every function. |
+| `enable_send_message` | `boolean` | no | `true` | Send text. |
+| `enable_send_photo` | `boolean` | no | `false` | Send photos. |
+| `enable_send_document` | `boolean` | no | `false` | Send documents. |
+| `enable_send_video` | `boolean` | no | `false` | Send videos. |
+| `enable_send_audio` | `boolean` | no | `false` | Send audio. |
+| `enable_send_animation` | `boolean` | no | `false` | Send animations. |
+| `enable_send_sticker` | `boolean` | no | `false` | Send stickers. |
+| `enable_edit_message` | `boolean` | no | `false` | Edit messages. |
+| `enable_delete_message` | `boolean` | no | `false` | Delete messages. |
+| `enable_react_with_emoji` | `boolean` | no | `false` | React with emoji. |
+| `enable_pin_message` | `boolean` | no | `false` | Pin messages. |
+| `enable_get_chat` | `boolean` | no | `false` | Read chat details. |
+| `enable_get_file` | `boolean` | no | `false` | Download files. |
+| `all` | `boolean` | no | `false` | Enable all actions. |
 
 ```yaml
 agents:
@@ -14884,7 +14847,7 @@ agents:
 
 ## [`whatsapp`]
 
-`whatsapp` sends messages through the WhatsApp Business (Meta Graph) API.
+`whatsapp_send` sends messages through the WhatsApp Business (Meta Graph) API.
 Text and template messages are enabled by default; reply buttons, list messages, images, documents, locations, and reactions are opt-in.
 Template sends need a template name approved in WhatsApp Business.
 Set `recipient_waid` or `WHATSAPP_RECIPIENT_WAID` to give calls a default recipient; otherwise, every call must name one.
@@ -14896,15 +14859,15 @@ Set `recipient_waid` or `WHATSAPP_RECIPIENT_WAID` to give calls a default recipi
 | `version` | `text` | `v22.0` | Graph API version, or `WHATSAPP_VERSION`. |
 | `recipient_waid` | `text` | `null` | Default recipient phone number or WhatsApp ID. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
-| `enable_send_text_message` | `boolean` | `true` | Enable `send_text_message()`. |
-| `enable_send_template_message` | `boolean` | `true` | Enable `send_template_message()`. |
-| `enable_send_reply_buttons` | `boolean` | `false` | Enable `send_reply_buttons()`. |
-| `enable_send_list_message` | `boolean` | `false` | Enable `send_list_message()`. |
-| `enable_send_image` | `boolean` | `false` | Enable `send_image()`. |
-| `enable_send_document` | `boolean` | `false` | Enable `send_document()`. |
-| `enable_send_location` | `boolean` | `false` | Enable `send_location()`. |
-| `enable_send_reaction` | `boolean` | `false` | Enable `send_reaction()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_send_text_message` | `boolean` | `true` | Send text. |
+| `enable_send_template_message` | `boolean` | `true` | Send templates. |
+| `enable_send_reply_buttons` | `boolean` | `false` | Send reply buttons. |
+| `enable_send_list_message` | `boolean` | `false` | Send list messages. |
+| `enable_send_image` | `boolean` | `false` | Send images. |
+| `enable_send_document` | `boolean` | `false` | Send documents. |
+| `enable_send_location` | `boolean` | `false` | Send locations. |
+| `enable_send_reaction` | `boolean` | `false` | Send reactions. |
+| `all` | `boolean` | `false` | Enable all actions. |
 
 ```yaml
 agents:
@@ -14917,7 +14880,7 @@ agents:
 
 ## [`twilio`]
 
-`twilio` sends SMS with `send_sms()`, looks up calls with `get_call_details()`, and lists recent messages with `list_messages()`.
+`twilio` sends SMS with `send_sms` and reads call details or recent messages with `twilio_read`.
 Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
 `send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
@@ -14931,22 +14894,22 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
 | `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
-| `enable_get_call_details` | `boolean` | `true` | Enable `get_call_details()`. |
-| `enable_list_messages` | `boolean` | `true` | Enable `list_messages()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_get_call_details` | `boolean` | `true` | Read call details. |
+| `enable_list_messages` | `boolean` | `true` | List recent SMS. |
+| `all` | `boolean` | `false` | Enable all actions. |
 
 ## [`webex`]
 
-`webex` sends messages to Webex rooms with `send_message()` and lists rooms with `list_rooms()`.
+`webex_send` sends messages to Webex rooms, and `webex_read` lists rooms.
 It does not manage meetings.
 Send to room IDs, not room titles.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `access_token` | `password` | `null` | Webex access token, or `WEBEX_ACCESS_TOKEN`; required. |
-| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
-| `enable_list_rooms` | `boolean` | `true` | Enable `list_rooms()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_send_message` | `boolean` | `true` | Send room messages. |
+| `enable_list_rooms` | `boolean` | `true` | List rooms. |
+| `all` | `boolean` | `false` | Enable both functions. |
 
 ## [`resend`]
 
@@ -14963,9 +14926,9 @@ Use `gmail` instead when the agent needs to read or reply within a mailbox.
 
 ## [`email`]
 
-`email` sends plain-text mail with `email_user(subject, body)` to the single address in `receiver_email`; calls cannot choose another recipient.
+`email` sends plain-text mail with `smtp_send_email(subject, body)` to the single address in `receiver_email`; calls cannot choose another recipient.
 It always signs in to Gmail SMTP (`smtp.gmail.com:465`), so the sender must be a Gmail or Google Workspace account, usually with an app password, and other SMTP servers cannot be configured.
-All four fields are required; a missing one makes the call return an error such as `error: No receiver email provided`.
+All four SMTP connection fields are required.
 Use `gmail` for mailbox access or `resend` for HTML transactional mail.
 
 | Option | Type | Default | Notes |
@@ -14974,8 +14937,8 @@ Use `gmail` for mailbox access or `resend` for HTML transactional mail.
 | `sender_name` | `text` | `null` | Display name in the `From` header. |
 | `sender_email` | `text` | `null` | Gmail address used to sign in and send. |
 | `sender_passkey` | `password` | `null` | Gmail app password. |
-| `enable_email_user` | `boolean` | `true` | Enable `email_user()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_email_user` | `boolean` | `true` | Send SMTP mail. |
+| `all` | `boolean` | `false` | Enable SMTP sending. |
 
 ```yaml
 agents:
@@ -14989,9 +14952,9 @@ agents:
 
 ## [`x`]
 
-`x` creates posts, replies to posts, sends DMs, looks up users, reads the home timeline, and searches recent posts.
+`x_write` creates posts, replies, and DMs; `x_read` looks up users, reads the home timeline, and searches recent posts.
 A bearer token is enough for search and lookups, but posting, replying, DMs, and the home timeline generally need the four OAuth user credentials.
-`search_posts()` accepts a result limit of 10 to 100, and may return fewer matches.
+`x_read(action="search_posts")` clamps the result limit to 10 to 100, and may return fewer matches.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -15029,7 +14992,7 @@ agents:
 
 ## [`zoom`]
 
-`zoom` schedules, lists, inspects, and deletes Zoom meetings and reads meeting recordings.
+`zoom_read` lists and inspects meetings and recordings; `zoom_manage` schedules and deletes meetings.
 It uses the credentials of a Zoom Server-to-Server OAuth app, so there is no browser connect step.
 Meetings are scheduled for the app account's own user with fixed settings: automatic recording is off, and participants cannot join before the host.
 
@@ -15056,10 +15019,8 @@ Use it to choose a tool, connect its account, and understand its limits.
 - [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, templates, and automatic nudges for idle agents.
 - [`bitbucket`] - One Bitbucket repository's details, commits, pull requests, and issues.
 - [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
-- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs with one shared account.
 - [`linear`] - Linear teams, issues, and issue updates.
 - [`clickup`] - ClickUp spaces, lists, and tasks.
-- [`confluence`] - Confluence spaces and page lookup, creation, and updates with one shared account.
 - [`notion`] - Pages in one Notion database.
 - [`trello`] - Trello boards, lists, cards, and card moves.
 - [`todoist`] - Todoist tasks and projects.
@@ -15254,37 +15215,6 @@ agents:
 - Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
 - `bitbucket_create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
-## [`jira`]
-
-`jira` provides `get_issue()`, `create_issue()`, `search_issues()` with JQL, `add_comment()`, and `add_worklog()` through one shared Jira account.
-For per-requester Jira Cloud access, use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`; required unless `JIRA_SERVER_URL` is set. |
-| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. Also read from `JIRA_USERNAME`. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Jira. Also read from `JIRA_PASSWORD`. |
-| `token` | `password` | `no` | `null` | Jira or Atlassian API token; used instead of `password` when both are set. Also read from `JIRA_TOKEN`. |
-| `enable_get_issue` | `boolean` | `no` | `true` | Enable `get_issue()`. |
-| `enable_create_issue` | `boolean` | `no` | `true` | Enable `create_issue()`. |
-| `enable_search_issues` | `boolean` | `no` | `true` | Enable `search_issues()`. |
-| `enable_add_comment` | `boolean` | `no` | `true` | Enable `add_comment()`. |
-| `enable_add_worklog` | `boolean` | `no` | `true` | Enable `add_worklog()`. |
-| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
-
-```yaml
-agents:
-  delivery:
-    tools:
-      - jira:
-          server_url: https://example.atlassian.net
-          username: bot@example.com
-          enable_add_worklog: false
-```
-
-- For Atlassian Cloud, use `username` plus `token`.
-- Without `username` and a `token` or `password`, the tool connects anonymously, which most Jira sites reject.
-
 ## [`linear`]
 
 `linear` provides `linear_read()` (`viewer`, `teams`, `issue`, `user_issues`, `workflow_issues`, `high_priority`) and `linear_write()` (`create_issue`, `update_issue`).
@@ -15326,32 +15256,6 @@ agents:
 - `clickup_read(action="list_tasks")` returns tasks from every list in a space.
 - `clickup_write(action="create_task")` uses `list_name` when given and falls back to the first list of the matched space, so check `clickup_read(action="list_lists")` when placement matters.
 - `clickup_write(action="update_task")` passes any field updates through to the ClickUp API.
-
-## [`confluence`]
-
-`confluence` lists spaces and their pages, and reads, creates, and updates pages through one shared account.
-Spaces can be named by title or key.
-For per-requester Confluence Cloud access, use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `url` | `url` | `no` | `null` | Confluence base URL; required unless `CONFLUENCE_URL` is set. |
-| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email; required unless `CONFLUENCE_USERNAME` is set. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Confluence. Also read from `CONFLUENCE_PASSWORD`. |
-| `api_key` | `password` | `no` | `null` | Confluence API key; used instead of `password` when both are set. Also read from `CONFLUENCE_API_KEY`. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates; disable only for self-signed internal deployments. |
-
-```yaml
-agents:
-  docs:
-    tools:
-      - confluence:
-          url: https://example.atlassian.net/wiki
-          username: docs@example.com
-```
-
-- One of `api_key` or `password` is required; use `api_key` for Atlassian Cloud.
-- Page bodies are read and written in Confluence storage format, such as `<p>Initial draft</p>`.
 
 ## [`notion`]
 
@@ -15461,7 +15365,6 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
   <source src="https://github.com/user-attachments/assets/5a12e5b4-f8cd-4e88-9837-80e2f7678036" type="video/mp4">
 </video>
 
-The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
 Their function names do not collide with the `atlassian` functions, so an agent can have both.
 
 ## What It Does
@@ -15596,7 +15499,7 @@ agents:
 - A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
 - `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
-- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
 
 ## Connect An Account
 
@@ -16834,7 +16737,7 @@ These built-in tools let an agent hand tasks to other agents, publish reports th
 Related tools documented elsewhere:
 
 - [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` calls and worker-routed `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -16963,7 +16866,7 @@ Common errors:
 
 ### Dedicated Workers
 
-With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
+With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell` and `filesystem`, in a worker of its own instead of the worker it shares with its agent's other subagents.
 Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
 Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
 The runtime must also run idle-worker cleanup, because every such subagent gets a new worker: the API server runs it when `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is above 0, which both Helm charts set, so `mindroom run --no-api` offers no dedicated workers.
@@ -16974,7 +16877,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem]
 ```
 
 ```python
@@ -17089,7 +16992,7 @@ If a custom or plugin tool already declares that application parameter, exclude 
 The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and vendor toolkits whose connection lasts only for one run always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -17609,19 +17512,20 @@ agents:
 ## [`e2b`]
 
 `e2b` runs code in a hosted E2B sandbox.
-The tool creates one sandbox when it loads and reuses it for its calls.
-It fails to load when sandbox creation fails or no key is available, which reports `E2B_API_KEY not set. Please set the E2B_API_KEY environment variable.`
+The tool creates one sandbox lazily on its first call and reuses it across calls in the reply.
+It fails to load when no API key is available, reporting `E2B API key is required.`
+Requests pin the `e2b.app` domain (ignoring ambient `E2B_DOMAIN`) and fail closed when ambient `E2B_DEBUG=true` is set.
 It provides:
 
-- Code and commands: `run_python_code()`, `run_command()`, `stream_command()`, `run_background_command()`, and `kill_background_command()`.
-- Results of the most recent `run_python_code()` call: `download_png_result()` and `download_chart_data()`.
-- Sandbox files: `upload_file()`, `download_file_from_sandbox()`, `list_files()`, `read_file_content()`, `write_file_content()`, and `watch_directory()`.
-- Servers and lifecycle: `run_server()`, `get_public_url()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
+- `e2b_run(action, ...)`: `python`, `command`, `stream_command`, `background_command`, `kill_background`, and `server`.
+- `e2b_inspect(action, ...)`: `list_files`, `read_file`, `watch_directory`, `status`, `list_sandboxes`, and `public_url`.
+- `e2b_files(action, ...)`: `write`, `upload`, `download`, `download_png`, and `download_chart`.
+- `e2b_lifecycle(action, ...)`: `set_timeout` and `shutdown`.
 
-`upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
-`download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
-`run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
+`e2b_files(action="upload", ...)` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
+`e2b_files(action="download", ...)` and `e2b_inspect(action="read_file", ...)` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
+`e2b_run()` refuses Python and command output larger than 64 MiB with a tool error, so write larger output to a sandbox file instead.
+Downloads and execution artifacts always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -17639,14 +17543,14 @@ agents:
 ## [`daytona`]
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
-It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
+It provides `daytona_run(action, ...)` (`code`, `shell`), `daytona_inspect(action, ...)` (`read_file`, `list_files`), and `daytona_files(action, ...)` (`create_file`, `delete_file`, `change_directory`).
 With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
-Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
+Change it with `daytona_files(action="change_directory", ...)` or a standalone `daytona_run(action="shell", command="cd <directory>")` call.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
-The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
+Set `instructions` to override the default sandbox instructions in the agent prompt.
 
-`verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
+`verify_ssl: false` disables TLS certificate checks for that Daytona toolkit instance, exposing its API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
 
 | Option | Type | Default | Notes |
@@ -17813,19 +17717,19 @@ google_maps_places(action="validate_address", address="1600 Amphitheatre Pkwy, M
 
 ## `openweather`
 
-`openweather` provides `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
-`get_forecast()` returns 3-hour entries for up to 5 days.
+`openweather` provides `openweather_get(action, location, days=5, limit=1)` with actions `current_weather`, `forecast`, `air_pollution`, and `geocode`.
+The `forecast` action returns 3-hour entries for up to 5 days.
 Weather lookups use the first geocoding match for the location name, so ambiguous names such as "Springfield" can resolve to an unexpected place; add a region or country to the query.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
-| `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
-| `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
-| `enable_air_pollution` | `boolean` | `true` | Enable `get_air_pollution()`. |
-| `enable_geocoding` | `boolean` | `true` | Enable `geocode_location()`. |
-| `all` | `boolean` | `false` | Enable all four functions regardless of the `enable_*` options. |
+| `enable_current_weather` | `boolean` | `true` | Enable the `current_weather` action. |
+| `enable_forecast` | `boolean` | `true` | Enable the `forecast` action. |
+| `enable_air_pollution` | `boolean` | `true` | Enable the `air_pollution` action. |
+| `enable_geocoding` | `boolean` | `true` | Enable the `geocode` action. |
+| `all` | `boolean` | `false` | Enable all four actions regardless of the `enable_*` options. |
 | `timeout` | `number` | `30` | Per-request timeout in seconds. |
 
 ```yaml
@@ -17838,9 +17742,9 @@ agents:
 ```
 
 ```python
-get_current_weather("San Francisco")
-get_forecast("Chicago", days=3)
-geocode_location("Reykjavik", limit=3)
+openweather_get("current_weather", "San Francisco")
+openweather_get("forecast", "Chicago", days=3)
+openweather_get("geocode", "Reykjavik", limit=3)
 ```
 
 ## `shopify`
@@ -18662,7 +18566,7 @@ Services whose access the user does not grant on the consent screen stay unconne
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
-An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
+An agent's shell commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
 Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored).
 While the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) is on, the portal and its Agent Keys page link to each other.
@@ -18919,7 +18823,7 @@ To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
 Without `GOOGLE_DELEGATED_USER`, Google Cloud tools run as the service account itself, so grant it the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
-With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only` plus the OpenID, email, and profile identity scopes.
+With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only`.
 
 ## Production Verification Follow-up
 
@@ -18967,7 +18871,7 @@ Tools that run arbitrary programs cannot be confined inside their own process, b
 MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure; it isolates them only by routing them to a worker with `worker_tools`.
 
 An agent whose code-execution tools run in the primary process is trusted with everything that process can reach, so restricting its other tools protects nothing.
-The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; `python` and the other code-execution tools have no such setting.
+The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; other code-execution tools have no such setting.
 
 An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
 Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive` run in the primary process by default even then, so they follow the agent's [`file_access`](#file-access) setting, which by default keeps them inside the agent workspace.
@@ -19012,7 +18916,7 @@ Knowledge indexes, including private agents' indexes and their publication and r
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
-When the broker is enabled, the `shell` calls and worker-routed `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
+When the broker is enabled, the `shell` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
 Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
@@ -19163,14 +19067,14 @@ Every tool, including plugin tools, must declare one of these file access classe
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `slack` uploads, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `filesystem` | Follow the agent's `file_access`; reads, writes, edits, and deletes refuse replaced workspace roots and swapped files, while listing and searches walk by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
-| Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
+| Unconfined tools | Code-execution tools (`shell`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Other tools | Everything else | Take no local file paths |
 
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above, `script`, `workflow`, and `terminal` carry it.
-A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
+A worker isolates the unconfined tools that support worker routing (`shell`, `docker`, `csv`, `postgres`, `redshift`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
 `script` also runs in the primary process, but there it only reads the one source file it launches, from the agent workspace through no-follow descriptors whatever the agent's `file_access`, so it declares no file access; its scripts run on the worker backend.
 `workflow` runs in the primary process in the same way: it reads only the one source file a run starts from, and declares no file access.
@@ -19274,6 +19178,8 @@ So any page holding a user's session can act on GitHub as that user: with a save
 Such a page can also replace the saved token, so later calls go out as the account of a token it chose, or remove it, so they fall back to the App connection.
 `GET /api/github/status` reports which of the two calls go out with, and its login, from stored state, without refreshing it or calling GitHub.
 The route's own log lines name the method, the path's kind (such as `/repos/{owner}/{repo}/pulls`), and GitHub's status, never the token or a body; httpx and httpcore may log the full URL, including the repository and query, as they do for every outbound call.
+`github_pr` reactive triggers created with `triggers(action="watch_pr", ...)`—whether poll-backed or webhook-nudged—reuse the same owner-scoped credential resolution on the primary: they authenticate with the trigger owner's own `github_user_token` or GitHub App OAuth connection—never another user's credentials or a process environment token—fail closed when a saved personal access token is unreadable, and fall back to anonymous public requests only when neither is configured.
+Their outbound ETag REST polls stay pinned to `https://api.github.com` with at most 3 same-host redirects (no userinfo or non-default port), webhook-nudged watches recheck their bound webhook source grant fail-closed without falling back to periodic polling, and observed PR facts are delivered inside `<untrusted_event_data>` boundaries only to Matrix rooms and agents the trigger owner is authorized to address.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
@@ -19345,7 +19251,7 @@ Do not report or "fix" these; they are deliberate.
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
-- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
+- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a workflow `agent()` call, runs as its caller with the caller's tools, credentials, workspace, and approval rules; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, start time, and the subagent ID and run ID of a subagent job or the tool call ID of a tool job, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the owner account also publishes, while the API is on and the origin is usable, its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, also in an encrypted room.
@@ -19534,17 +19440,16 @@ Python `urllib` and Node `fetch` only send `Proxy-Authorization` when both the u
 The password is not a secret.
 
 **Agents opt in with the `egress_credentials` tool, not by having a shell.**
-Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
+Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
 
-**A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
+**A shell that runs in the primary process gets the broker environment too.**
 Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
 The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment, so the broker adds convenience there and no new exposure.
 Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
 It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
 Those files keep the certificates of the CA files the primary's own variables name, because they replace those variables for the command.
-A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
 
 **A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
 The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
@@ -22672,11 +22577,11 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with the unified `triggers(action=...)` tool (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes a single `triggers(action=...)` function.
+`triggers` is the canonical toolkit name and exposes the single `triggers(action=...)` tool.
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](https://docs.mindroom.chat/tools/dynamic-tools/).
 
@@ -22728,7 +22633,7 @@ external_trigger_policy:
 | Field | Type | Default | Valid values | Meaning |
 | --- | --- | --- | --- | --- |
 | `enabled` | bool | `true` | | Master switch. When `false`, every direct trigger, callback, and shared event-source endpoint answers not found, `callback_manager` refuses to mint callbacks, and reactive trigger delivery is disabled. |
-| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
+| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
 | `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new direct signed triggers that do not set their own window. |
 | `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any direct trigger's replay window. |
 | `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new direct triggers that do not set their own. |
@@ -22920,7 +22825,7 @@ external_trigger_policy:
 | `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
 | `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
 | `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
-| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `allowed_events` | `["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
 | `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 
@@ -23073,14 +22978,16 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
 | `description` | `""` | Human-readable purpose. |
 | `target_agent` | current agent | Agent or team to wake; only administrators can choose another. |
 | `target_room_id` | current room | Room to post in; only administrators can choose another. |
-| `target_thread_id` | none | Post every delivery into this existing thread. |
+| `target_thread_id` | current thread (in current room) | Post every delivery into this existing thread, or pass `"room"` to explicitly post to the room's main timeline. |
 | `new_thread` | `false` | Post each delivery as a new room-level message so the agent answers in a fresh thread with a fresh session. |
+| `reopen_on_fire` | `false` | Automatically clear the `resolved` tag on a fixed target thread before delivering a trigger firing. |
 | `allowed_kinds` | any | Accepted `kind` values; others are rejected. |
 | `replay_window_seconds` | policy default | Maximum signature age, capped by policy. |
 | `max_body_bytes` | policy default | Request body limit, capped by policy. |
 
 `target_thread_id` and `new_thread` are mutually exclusive.
-Without either, deliveries post to the room's main timeline.
+When `target_thread_id` is omitted and the target room is the current room, deliveries default to the current thread (or the room's main timeline when called outside a thread).
+Pass `target_thread_id="room"` to force room-timeline delivery from inside a thread.
 
 The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
 An administrator who creates a trigger for another agent or room still owns it.
@@ -23099,6 +23006,17 @@ The `triggers(action=...)` tool provides unified lifecycle, observability, and t
 - `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
 - `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+
+### Watching GitHub Pull Requests (`action="watch_pr"`)
+
+Use `triggers(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+
+- **Delivery modes (`delivery_mode`):**
+  - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
+  - **`"poll"`:** Selected at creation when no covering webhook source exists and `external_trigger_policy.github_pr_polling_enabled` is `true` (interval clamped to `min_github_pr_poll_interval_seconds..86400`, default `300s`).
+- **CI scope (`"ci"`):** Tracks GitHub Check Runs (fail-fast on failed runs and one all-green notification when every Check Run passes); legacy GitHub Commit Statuses are not tracked.
+- **Auth modes (`auth_mode`):** Uses the watch owner's connected GitHub credentials (`"app"` or `"token"`), falling back to `"anonymous"` only when no owner credentials exist. Unreadable owner credential stores fail closed and never downgrade to anonymous requests.
+- **Auto-disable (`pr_closed`):** When `auto_disable_on_close=True` (default), closing or merging the PR disables the watch with `disabled_reason="pr_closed"` once any terminal firing settles (or immediately if close/merge is not subscribed). Retired `pr_closed` watches do not consume `max_reactive_triggers_per_owner` or `max_github_pr_watches_per_owner`, and re-enabling enforces both quotas and silently re-seeds the checkpoint.
 
 ## Sending Events
 
@@ -23519,7 +23437,7 @@ print(result.text)
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
-| `workdir` | The existing directory where `shell` runs and `filesystem` and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
+| `workdir` | The existing directory where `shell` runs and `filesystem` resolves paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 | `request_headers` | A function that takes a `HeadlessRun` and returns the headers that run's model requests carry; see [Request headers](#request-headers). |
 
@@ -23595,16 +23513,15 @@ They run in standard mode; [minimal mode](https://docs.mindroom.chat/tools/agent
 ## Files
 
 With a `workdir`, the files that `shell` and `filesystem` write land there, and MindRoom's own files stay under `storage`.
-Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `filesystem` to the `workdir` instead of the workspace.
 An agent with the [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `filesystem` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.
-The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
+The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` given absolute paths.
 In `shell` commands, `$MINDROOM_AGENT_WORKSPACE` holds the agent's workspace, not the `workdir`.
 
-All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
+All tools run with the calling process's permissions, and `shell` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
 
 ## Logging
 
@@ -24487,7 +24404,7 @@ Optional features:
 
 ## Worker Backends
 
-Worker-routed tools such as `docker`, `filesystem`, `python`, and `shell` run in one of two backends.
+Worker-routed tools such as `docker`, `filesystem`, and `shell` run in one of two backends.
 Which tools are routed and how `worker_scope` shares workers are described in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 | Helm value | Behavior | Best for |
@@ -24763,7 +24680,7 @@ See [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/#secrets
 
 # Sandbox Proxy Isolation
 
-Code-execution tools such as `shell`, `file`, and `python` can read and modify anything their process can reach, including config files, credentials, and application code.
+Code-execution tools such as `shell` can read and modify anything their process can reach, including config files, credentials, and application code.
 The **sandbox proxy** runs these tools in a separate worker runtime that has none of the primary runtime's secrets.
 Use it whenever agents may run untrusted code; without it, the operator trusts every agent with code-execution tools completely.
 This page covers the worker backends and how to deploy them, which tools run in workers, worker scopes and isolation, the shell environment inside workers, credential leases, brokered egress, and the environment variable reference.
@@ -24808,7 +24725,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
     networks:
       - mindroom-network
 
@@ -24883,7 +24800,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
 mindroom run
 ```
 
@@ -24930,15 +24847,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 
   research:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -25029,13 +24946,13 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, filesystem, python]
-    worker_tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
+    worker_tools: [shell, filesystem]
 ```
 
 
 
-The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, `python`, and `shell`.
+The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
@@ -25093,7 +25010,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-`shell`, `filesystem`, and `python` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell` and `filesystem` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -25119,7 +25036,6 @@ Configured MCP `mcp_<server_id>` tools work on every worker scope (see [MCP](htt
 
 Worker-routed `shell` receives only a small non-secret system environment by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale, proxy, and certificate path variables.
 Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are not forwarded.
-Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
@@ -25129,7 +25045,7 @@ A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-com
 
 ### Workspace home contract
 
-For worker-routed `shell` and `python` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
+For worker-routed `shell` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
 As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
@@ -25137,7 +25053,7 @@ For example, after `get_attachment("att_...", mindroom_output_path="incoming/fil
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
 
-Agents can set custom environment variables for worker-routed `shell` and `python` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
+Agents can set custom environment variables for worker-routed `shell` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
 It works the same with every worker backend.
 For an example, see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
@@ -25182,7 +25098,7 @@ For shell authentication, use [environment passthrough](#shell-environment-and-p
 
 ## Agent Keys (egress broker)
 
-To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
+To let worker-routed `shell` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
 There are two supported shapes:
 
@@ -25198,7 +25114,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 
 ## Stopping and background commands
 
-Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+Stopping a response also stops its in-flight worker calls, such as `run_shell_command`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
 By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
@@ -25478,7 +25394,7 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool), and each of its `python` calls that runs in a worker, gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool) gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
@@ -25834,7 +25750,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`, or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -26003,7 +25919,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
 Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
-The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
+The provider's tools ask for approval before they write, but an allowed account lets the agent's shell commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or requester-scoped Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
@@ -26133,10 +26049,9 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: such an agent's `shell` calls, wherever they run, and its `python` calls that run in a worker go through the broker and get keys, and only such agents appear on the Agent Keys pages.
+Adding the `egress_credentials` tool to an agent with `shell` opts it into Agent Keys: its `shell` calls go through the broker and get keys, and only such agents appear on the Agent Keys pages.
 A `shell` in the primary process, for example under `worker_tools: []`, works the same as one in a worker, but there the broker keeps nothing from the agent (see [Code in the primary process](#what-the-broker-cannot-protect-against)).
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
-So does an agent whose only command tool is `python` running in the primary process, which runs inside MindRoom itself where the broker cannot reach it: the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 
 ```yaml
@@ -26374,7 +26289,7 @@ A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
 
-**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), or its `shell` and `python` run in the primary process, so its calls get no broker environment; add the tool, or route `shell` or `python` to a worker with `worker_tools`.
+**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool) or does not have `shell`; add both tools, and make sure the broker listener is reachable from where `shell` runs.
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.
@@ -26420,7 +26335,7 @@ The default is passthrough; you may have explicitly set it to `deny`.
 
 Approved egress blocks direct internet access from dedicated Kubernetes workers and sends their traffic through a policy-enforcing HTTP proxy.
 A worker can reach a hostname only when it is on the static allowlist or a human has approved a temporary grant in Matrix.
-Use it when worker-routed tools such as `shell` and `python` must not reach arbitrary hosts.
+Use it when worker-routed tools such as `shell` must not reach arbitrary hosts.
 
 ## Enable with the Runtime Chart
 
@@ -27354,7 +27269,7 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` and `worker_cold_start` are `info` records, so keep `LOG_LEVEL` at `INFO` or lower, or raise only their loggers with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO,mindroom.workers.progress:INFO`.
-`agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
+`event_loop_stall_detected` and `event_loop_stall_ongoing` are `error` records, `agent_error` is `warning` for `ModelSafeguardRefusal` and `error` otherwise, and the other stable events below are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
@@ -27676,7 +27591,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
 - `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
-- `ModelSafeguardRefusal`: the model's safeguards refused the request.
+- `ModelSafeguardRefusal`: the model's safeguards refused the request (logged at `warning` rather than `error`).
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
 - `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 
@@ -27738,6 +27653,16 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading from retired browser, Atlassian, and Python toolkits
+
+Remove the old names from `tools` and `worker_tools` before upgrading. MindRoom does not grant replacement capabilities automatically.
+
+- Replace `web_browser_tools` with [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) and configure the Chromium or desktop target you intend to use.
+- Replace the shared-token `jira` and `confluence` tools with [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) and connect the requester's Atlassian Cloud account. Old API tokens and Data Center configurations do not carry over.
+- Run Python through a worker-routed [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell), and use [`filesystem`](https://docs.mindroom.chat/tools/execution-and-coding/#filesystem) to read and write files.
+
+Recheck approval rules and any saved scripts that called the old functions.
+
 ## Upgrading to the `filesystem` toolkit
 
 The `file` and `coding` tools are now one toolkit, [`filesystem`](https://docs.mindroom.chat/tools/execution-and-coding/#filesystem), with the functions `coding` had.
@@ -27746,7 +27671,7 @@ An agent whose `tools`, together with the `defaults.tools` it takes, name the to
 Nothing saved for the old tools is translated, so before upgrading, change what the list below names:
 
 - A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` are removed and, where they were off, become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; remove `all`, and set `enable_delete_file: true` only if `all` had turned deletion on and you still want it; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
-- [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
+- [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because other toolkits still offer that function, and no longer covers `ls`.
 - Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you delete them, saving any you still want under `filesystem`; settings of the earlier `file` toolkit saved under `filesystem` stop it the same way.
 - A contact's tools, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
 - A `script` `allowed_tools` list that names `file` or `coding` makes every script launch fail until it names `filesystem`.

@@ -956,3 +956,84 @@ async def test_move_thread_names_the_sending_account_of_a_delegated_agent(tmp_pa
         payload = await _run()
 
     assert payload["message"] == "Invite general to the target room before moving a thread there."
+
+
+@pytest.mark.asyncio
+async def test_move_thread_encrypted_to_encrypted_carries_filtered_inline_media_and_keeps_it_on_edit(
+    tmp_path: Path,
+) -> None:
+    """Encrypted moves carry only referenced inline media and register it in the target room for later edits."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.constants import INLINE_MEDIA_CONTENT_KEY  # noqa: PLC0415
+    from mindroom.matrix.client_delivery import edit_message_outcome  # noqa: PLC0415
+    from mindroom.matrix.encrypted_file import encrypted_file_content_from_values  # noqa: PLC0415
+    from mindroom.matrix.inline_media import _REGISTRY, attach_inline_media  # noqa: PLC0415
+    from mindroom.matrix.message_builder import build_message_content  # noqa: PLC0415
+
+    _REGISTRY.clear()
+    try:
+        move = _move(tmp_path)
+        used = encrypted_file_content_from_values(
+            url="mxc://hs/used",
+            key="k1",
+            iv="iv1",
+            sha256="s1",
+            mime_type="image/png",
+            size=10,
+        )
+        unused = encrypted_file_content_from_values(
+            url="mxc://hs/unused",
+            key="k2",
+            iv="iv2",
+            sha256="s2",
+            mime_type="image/png",
+            size=10,
+        )
+        history = _thread(move)
+        history[1] = _message(
+            move.ids["code"],
+            {
+                "msgtype": "m.text",
+                "body": "See ![chart](mxc://hs/used)",
+                "format": "org.matrix.custom.html",
+                "formatted_body": '<p>See <img src="mxc://hs/used" alt="chart"></p>',
+                INLINE_MEDIA_CONTENT_KEY: {"mxc://hs/used": used, "mxc://hs/unused": unused},
+            },
+            "$code:localhost",
+        )
+        sends = _delivered_sends()
+
+        async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+            attached = attach_inline_media(content, room_id, room_encrypted=True)
+            return await sends(client, room_id, attached, **kwargs)
+
+        with _matrix(move, history, encryption=(True, True), send=AsyncMock(side_effect=send)) as mocks:
+            payload = await _run()
+
+        assert payload["status"] == "ok"
+        copied_reply = mocks.send.await_args_list[1].args[2]
+        assert copied_reply[INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/used": used}
+
+        target_client = make_matrix_client_mock(user_id=move.ids["general"])
+        target_client.olm = SimpleNamespace(device_id="DEV1")
+        target_room = nio.MatrixRoom(TARGET_ROOM_ID, move.ids["general"])
+        target_room.encrypted = True
+        target_client.rooms = {TARGET_ROOM_ID: target_room}
+        target_client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse(event_id="$edit1", room_id=TARGET_ROOM_ID),
+        )
+
+        edited_body = "Updated caption: ![chart](mxc://hs/used) ![stale](mxc://hs/unused)"
+        await edit_message_outcome(
+            target_client,
+            TARGET_ROOM_ID,
+            "$copied2:localhost",
+            build_message_content(edited_body),
+            edited_body,
+        )
+        sent_edit = target_client.room_send.await_args.kwargs["content"]
+        assert INLINE_MEDIA_CONTENT_KEY not in sent_edit
+        assert sent_edit["m.new_content"][INLINE_MEDIA_CONTENT_KEY] == {"mxc://hs/used": used}
+    finally:
+        _REGISTRY.clear()

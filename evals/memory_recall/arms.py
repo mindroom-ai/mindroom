@@ -32,7 +32,7 @@ from mindroom.constants import runtime_paths_with_storage_root
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.memory_entries import split_memory_entries
+from mindroom.knowledge.memory_entries import MEMORY_ENTRIES_STRATEGY_ID, split_memory_entries
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT, _RECALL_SELECTION, _retrieve_memories
@@ -488,8 +488,11 @@ def _corpus_hash(corpus: dict[str, bytes], config: Config, arm: Arm) -> str:
     if arm.shipped:
         # Only the shipped overlay changes the key, so the other arms keep the indexes they cached before it existed.
         overlay = _file_memory(Path(), config, arm)
+        base = overlay.config.knowledge_bases[overlay.base_id]
         digest.update(b"shipped overlay")
-        digest.update(overlay.config.knowledge_bases[overlay.base_id].model_dump_json(exclude={"path"}).encode())
+        digest.update(base.model_dump_json(exclude={"path"}).encode())
+        if base.chunk_strategy == "memory_entries":
+            digest.update(MEMORY_ENTRIES_STRATEGY_ID.encode())
     for relative in sorted(corpus):
         digest.update(json.dumps([relative, hashlib.sha256(corpus[relative]).hexdigest()]).encode())
     return digest.hexdigest()[:16]

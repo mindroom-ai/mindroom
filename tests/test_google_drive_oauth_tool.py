@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -250,8 +251,7 @@ def test_google_drive_missing_credentials_returns_connect_instruction(tmp_path: 
     )
 
     result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
-    model_entrypoint = tool.functions["google_drive_search_files"].entrypoint
-    assert model_entrypoint is not None
+    model_entrypoint = tool.functions["google_drive_search_files"]
     model_result = json.loads(model_entrypoint(query="name contains 'plan'", max_results=1))
 
     assert "Google Drive is not connected for this agent" in result["error"]
@@ -324,7 +324,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
     }
 
     assert write_functions <= enabled_tool.functions.keys()
-    assert not enabled_tool.async_functions
+    assert all(not inspect.iscoroutinefunction(fn) for fn in enabled_tool.functions.values())
     assert write_functions.isdisjoint(disabled_tool.functions)
     assert "google_drive_delete_file" not in enabled_tool.functions
 
@@ -1891,3 +1891,102 @@ def test_google_drive_upload_refuses_file_swapped_for_link_after_check(
 
     assert "error" in result
     assert service.files_resource.create_kwargs is None
+
+
+def test_google_drive_explicit_scopes_enforce_read_and_write_operations(tmp_path: Path) -> None:
+    write_capable_creds = _valid_credentials()
+
+    with pytest.raises(ValueError, match="read scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            write=False,
+            scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+
+    with pytest.raises(ValueError, match="read scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            tool_output_workspace_root=tmp_path,
+            list_files=False,
+            search_files=False,
+            read_file=False,
+            download_file=True,
+            write=False,
+            scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+
+    with pytest.raises(ValueError, match="write scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            write=True,
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        )
+
+    read_only_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        tool_output_workspace_root=tmp_path,
+        write=False,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    assert set(read_only_tool.functions) == {
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
+        "google_drive_download_file",
+    }
+
+    write_only_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        list_files=False,
+        search_files=False,
+        read_file=False,
+        download_file=False,
+        write=True,
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    assert set(write_only_tool.functions) == {
+        "google_drive_upload_file",
+        "google_drive_update_file",
+        "google_drive_create_folder",
+        "google_drive_move_file",
+        "google_drive_trash_file",
+    }
+
+    full_drive_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        tool_output_workspace_root=tmp_path,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    assert "google_drive_list_files" in full_drive_tool.functions
+    assert "google_drive_upload_file" in full_drive_tool.functions
+
+
+def test_google_drive_explicit_none_toggles_disable_operations(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_drive",
+        _runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"write": None, "download_file": None},
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(tool, GoogleDriveTools)
+    assert set(tool.functions) == {
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
+    }

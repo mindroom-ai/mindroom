@@ -319,54 +319,51 @@ def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instruct
     assert adapt_toolkit(vendor).instructions == adapt_toolkit(vendor).guidance == vendor.instructions
 
 
-@pytest.mark.parametrize(
-    ("tool_name", "offering", "leaving_one_out"),
-    [
-        ("daytona", {}, {"exclude_tools": ["delete_file"]}),
-        ("gmail", {}, {"send_email": False}),
-        ("google_calendar", {}, {"allow_update": False}),
-        ("reasoning", {}, {"enable_think": False}),
-        ("zep", {}, {"enable_add_zep_message": False}),
-    ],
-)
-def test_agno_default_instructions_show_only_while_every_function_they_name_is_offered(
-    tool_name: str,
-    offering: dict[str, object],
-    leaving_one_out: dict[str, object],
+def test_with_offered_instructions_keeps_authored_settings_and_narrows_scoped_toolkits(
     golden_runtime: tuple[Path, Config, RuntimePaths],
 ) -> None:
-    """Agno's default instructions show while the agent offers every function they name; authored ones always show."""
+    """Instructions set in a tool's settings always show, while FunctionScopedInstructions narrow to offered tools."""
     root, config, runtime_paths = golden_runtime
-    authorable = any(
-        field.name == "instructions" for field in builtin_tool_registry().entries[tool_name].config_fields or ()
-    )
+    authored_text = "Always verify memory context before answering."
     with support.isolated_process(root):
-        if (missing := support.missing_dependencies(tool_name)) is not None:
-            pytest.skip(f"{tool_name} needs {missing}")
-        full = support.build_toolkit(tool_name, config, runtime_paths, offering or None)
-        narrowed = support.build_toolkit(tool_name, config, runtime_paths, leaving_one_out or None)
-        # Authored text naming every function, the one left out too, still shows.
-        authored_text = "Use " + ", ".join(function.name for function in adapt_toolkit(full).functions) + "."
-        authored = (
-            support.build_toolkit(
-                tool_name,
-                config,
-                runtime_paths,
-                {**leaving_one_out, "instructions": authored_text},
-            )
-            if authorable
-            else None
+        if (missing := support.missing_dependencies("zep")) is not None:
+            pytest.skip(f"zep needs {missing}")
+        zep = support.build_toolkit(
+            "zep",
+            config,
+            runtime_paths,
+            {"enable_add_zep_message": False, "instructions": authored_text},
         )
 
-    shown = with_offered_instructions(full, adapt_toolkit(full), authored_instructions=False)
-    assert shown.instructions == shown.guidance == full.instructions
-    assert adapt_toolkit(narrowed).instructions == full.instructions
-    hidden = with_offered_instructions(narrowed, adapt_toolkit(narrowed), authored_instructions=False)
-    assert (hidden.instructions, hidden.guidance) == (None, None)
-    assert len(hidden.functions) < len(shown.functions)
-    if authored is not None:
-        kept = with_offered_instructions(authored, adapt_toolkit(authored), authored_instructions=True)
-        assert kept.instructions == authored_text
+    kept = with_offered_instructions(zep, adapt_toolkit(zep))
+    assert (kept.instructions, kept.guidance) == (authored_text, authored_text)
+
+    class _ScopedToolkit(OwnedToolkit):
+        def __init__(self) -> None:
+            super().__init__(name="scoped", tools=[self.alpha, self.beta], instructions="default")
+
+        @tool
+        def alpha(self) -> str:
+            """Alpha."""
+            return "a"
+
+        @tool
+        def beta(self) -> str:
+            """Beta."""
+            return "b"
+
+        def instructions_for(self, function_names: object) -> str:
+            names = tuple(function_names) if isinstance(function_names, (list, tuple)) else ()
+            return f"Use {', '.join(names)}." if names else ""
+
+    scoped = _ScopedToolkit()
+    adapted = adapt_toolkit(scoped)
+    full = with_offered_instructions(scoped, adapted)
+    assert (full.instructions, full.guidance) == ("Use alpha, beta.", "Use alpha, beta.")
+    narrowed = with_offered_instructions(scoped, replace(adapted, functions=adapted.functions[:1]))
+    assert (narrowed.instructions, narrowed.guidance) == ("Use alpha.", "Use alpha.")
+    empty = with_offered_instructions(scoped, replace(adapted, functions=()))
+    assert (empty.instructions, empty.guidance) == (None, None)
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:

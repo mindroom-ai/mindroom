@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.hackernews import HackerNewsTools
+    from mindroom.custom_tools.hackernews import HackerNewsTools
 
 
 @register_tool_with_metadata(
@@ -57,6 +57,6 @@ if TYPE_CHECKING:
 )
 def hackernews_tools() -> type[HackerNewsTools]:
     """Return Hacker News tools for getting stories and user details."""
-    from agno.tools.hackernews import HackerNewsTools
+    from mindroom.custom_tools.hackernews import HackerNewsTools
 
     return HackerNewsTools

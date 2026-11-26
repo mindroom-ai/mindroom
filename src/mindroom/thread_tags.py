@@ -58,6 +58,7 @@ __all__ = [
     "parse_thread_tag_record",
     "parse_thread_tag_state_key",
     "remove_thread_tag",
+    "reopen_thread_if_resolved",
     "set_thread_tag",
     "set_thread_tags_if_empty",
     "snooze_until",
@@ -1107,6 +1108,43 @@ async def _remove_thread_tag_under_lock(
         f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
     )
     raise ThreadTagsError(msg)
+
+
+async def reopen_thread_if_resolved(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    *,
+    requester_user_id: str | None = None,
+) -> bool:
+    """Remove the ``resolved`` tag from a thread if currently set.
+
+    Fast-paths with one state GET so open threads incur zero extra reads or writes.
+    """
+    normalized_thread_root_id = _require_non_empty_string(
+        thread_root_id,
+        field_name="thread_root_id",
+    )
+    content = await get_thread_tag_content(
+        client,
+        room_id,
+        normalized_thread_root_id,
+        RESOLVED_THREAD_TAG,
+    )
+    if content is None:
+        return False
+    record = parse_thread_tag_record(RESOLVED_THREAD_TAG, content)
+    if record is None:
+        return False
+    state = await remove_thread_tag(
+        client,
+        room_id,
+        normalized_thread_root_id,
+        RESOLVED_THREAD_TAG,
+        requester_user_id=requester_user_id,
+        expected_record=record,
+    )
+    return RESOLVED_THREAD_TAG not in state.tags
 
 
 async def list_tagged_threads(

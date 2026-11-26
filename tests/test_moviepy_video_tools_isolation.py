@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path.cwd() / "src"))
-module_names = ("agno.tools.moviepy_video", "mindroom.custom_tools.agno_compat_moviepy")
+module_names = ("mindroom.custom_tools.moviepy_video",)
 assert not any(name in sys.modules for name in ("moviepy", *module_names))
 if sys.argv[1] == "warm":
     for name in module_names:
@@ -30,7 +30,7 @@ for name in module_names:
     for factory in ("TextClip", "ColorClip", "CompositeVideoClip", "VideoFileClip"):
         assert getattr(module, factory) is getattr(moviepy, factory), (name, factory)
 
-adapter = importlib.import_module(module_names[1])
+adapter = importlib.import_module(module_names[0])
 clip = adapter.ColorClip((2, 2), color=(17, 34, 51), duration=1)
 try:
     frame = clip.get_frame(0)

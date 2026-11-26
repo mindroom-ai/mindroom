@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -10,21 +11,20 @@ import httpx
 import pytest
 import replicate
 import replicate.client as replicate_client
-from agno.tools.function import ToolResult
 
 import mindroom.tools.replicate  # noqa: F401  # register the real tool factory
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
-from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from agno.tools.replicate import ReplicateTools
+    from mindroom.custom_tools.replicate import ReplicateTools
 
 _MODEL = "test-owner/media"
 _IMAGE = "https://media.example.org/result.png"
@@ -107,7 +107,6 @@ def replicate_transport(monkeypatch: pytest.MonkeyPatch) -> Iterator[_ReplicateT
         return client
 
     monkeypatch.setattr(replicate_client, "_build_httpx_client", build_client)
-    # Keep the real SDK run method, with no transport or credential state from another test.
     monkeypatch.setattr(replicate, "run", replicate.Client().run)
     try:
         yield transport
@@ -120,7 +119,7 @@ def _tool(tmp_path: Path, stored_key: str | None = None, *, model: str = _MODEL)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+        process_env={**os.environ, "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
     )
     credentials = CredentialsManager(tmp_path / "credentials")
     if stored_key is not None:
@@ -158,16 +157,15 @@ def test_replicate_request_uses_resolved_api_key(
     sdk_token: str | None,
     expected_authorization: str,
 ) -> None:
-    """The key selected by MindRoom and Agno must reach the SDK Authorization header."""
+    """The resolved toolkit key must reach the SDK Authorization header."""
     if env_key is not None:
         monkeypatch.setenv("REPLICATE_API_KEY", env_key)
     if sdk_token is not None:
         monkeypatch.setenv("REPLICATE_API_TOKEN", sdk_token)
     tool = _tool(tmp_path, stored_key)
 
-    result = tool.generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    result = tool.generate_media(prompt="A red fox")
 
-    assert result.images is not None
     assert [image.url for image in result.images] == [_IMAGE]
     assert len(replicate_transport.requests) == 1
     assert replicate_transport.requests[0].headers.get("Authorization") == expected_authorization
@@ -184,11 +182,11 @@ def test_missing_replicate_key_does_not_make_a_request(
     if sdk_token is not None:
         monkeypatch.setenv("REPLICATE_API_TOKEN", sdk_token)
 
-    result = _tool(tmp_path).generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    result = _tool(tmp_path).generate_media(prompt="A red fox")
 
     assert result.content == "API key is not set."
-    assert result.images is None
-    assert result.videos is None
+    assert not result.images
+    assert not result.videos
     assert replicate_transport.requests == []
     assert replicate_transport.clients == []
 
@@ -217,7 +215,7 @@ def test_missing_replicate_key_does_not_make_a_request(
         ),
     ],
 )
-def test_replicate_retains_upstream_media_output_contract(
+def test_replicate_retains_media_output_contract(
     tmp_path: Path,
     replicate_transport: _ReplicateTransport,
     output: object,
@@ -228,35 +226,33 @@ def test_replicate_retains_upstream_media_output_contract(
     """Credential routing must retain the established FileOutput and error result shapes."""
     replicate_transport.output = output
 
-    result = _tool(tmp_path, "stored-key").generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    result = _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
 
     assert result.content == expected_content
-    assert [image.url for image in result.images or []] == image_urls
-    assert [video.url for video in result.videos or []] == video_urls
-    assert bool(result.images) == bool(image_urls)
-    assert bool(result.videos) == bool(video_urls)
+    assert [image.url for image in result.images] == image_urls
+    assert [video.url for video in result.videos] == video_urls
 
 
 @pytest.mark.parametrize("failure", ["http-error", "model-error"])
-def test_replicate_provider_failures_remain_tool_results(
+def test_replicate_provider_failures_remain_tool_values(
     tmp_path: Path,
     replicate_transport: _ReplicateTransport,
     failure: str,
 ) -> None:
-    """Both HTTP and model failures remain error ToolResults without attachments."""
+    """Both HTTP and model failures remain error ToolValues without attachments."""
     if failure == "http-error":
         replicate_transport.status_code = 401
     else:
         replicate_transport.prediction_status = "failed"
         replicate_transport.prediction_error = "Synthetic provider refusal"
 
-    result = _tool(tmp_path, "stored-key").generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    result = _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
 
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     assert result.content.startswith("Error:")
     assert "Synthetic provider refusal" in result.content
-    assert result.images is None
-    assert result.videos is None
+    assert not result.images
+    assert not result.videos
 
 
 @pytest.mark.parametrize("outcome", ["success", "http-error", "parse-error"])
@@ -271,7 +267,7 @@ def test_replicate_closes_owned_request_client(
     elif outcome == "parse-error":
         replicate_transport.output = "https://media.example.org/result.bin"
 
-    _tool(tmp_path, "stored-key").generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
 
     assert len(replicate_transport.clients) == 1
     assert replicate_transport.clients[0].is_closed
@@ -288,7 +284,7 @@ def test_separate_replicate_toolkits_keep_their_own_credentials(
     second = _tool(tmp_path / "second", "second-key")
 
     for tool in (first, second, first):
-        tool.generate_media(agent=ToolCallActor(session_state={}), prompt="A red fox")
+        tool.generate_media(prompt="A red fox")
 
     assert [request.headers.get("Authorization") for request in replicate_transport.requests] == [
         "Bearer first-key",
@@ -304,29 +300,24 @@ def test_replicate_materializes_sdk_iterator_outputs(
     """SDK iterator outputs remain usable until all image and video artifacts are parsed."""
     replicate_transport.output = [_IMAGE, _VIDEO]
 
-    result = _tool(tmp_path, "stored-key", model=f"{_MODEL}:test-version").generate_media(
-        agent=ToolCallActor(session_state={}),
-        prompt="A red fox",
-    )
+    result = _tool(tmp_path, "stored-key", model=f"{_MODEL}:test-version").generate_media(prompt="A red fox")
 
-    assert result.images is not None
-    assert result.videos is not None
     assert [image.url for image in result.images] == [_IMAGE]
     assert [video.url for video in result.videos] == [_VIDEO]
     assert [request.method for request in replicate_transport.requests] == ["POST", "GET"]
 
 
-def test_registered_replicate_function_retains_framework_agent_parameter(
+def test_registered_replicate_function_exposes_prompt_only(
     tmp_path: Path,
     replicate_transport: _ReplicateTransport,
 ) -> None:
-    """The adapted function hides its injected agent from the model and runs with the stand-in the loop injects."""
+    """The native function exposes only prompt with no injected framework parameter."""
     function = toolkit_offers(_tool(tmp_path, "stored-key"), "generate_media")
     assert set(function.parameters["properties"]) == {"prompt"}
+    assert function.injected_params == {}
 
-    result = function.entrypoint(agent=ToolCallActor(session_state={}), prompt="A red fox")
+    result = function.entrypoint(prompt="A red fox")
 
-    assert isinstance(result, ToolResult)
-    assert result.images is not None
+    assert isinstance(result, ToolValue)
     assert [image.url for image in result.images] == [_IMAGE]
     assert len(replicate_transport.requests) == 1

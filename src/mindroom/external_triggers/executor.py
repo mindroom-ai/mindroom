@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_matrix_message
+from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.thread_tags import reopen_thread_if_resolved
 
 if TYPE_CHECKING:
     import nio
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.models import ExternalTriggerPayload
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.matrix.conversation_reads import ConversationReader
+
+logger = get_logger(__name__)
 
 _EXTERNAL_TRIGGER_ID_KEY = "io.mindroom.external_trigger.id"
 _EXTERNAL_TRIGGER_KIND_KEY = "io.mindroom.external_trigger.kind"
@@ -91,6 +95,23 @@ async def execute_external_trigger(
             per_fire_root=snapshot.target.new_thread and continue_thread_event_id is None,
         ),
     )
+    if snapshot.target.reopen_on_fire and thread_event_id is not None:
+        try:
+            await reopen_thread_if_resolved(
+                client,
+                room_id,
+                thread_event_id,
+                requester_user_id=snapshot.owner_user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to auto-reopen resolved thread before external trigger delivery",
+                trigger_id=snapshot.trigger_id,
+                room_id=room_id,
+                thread_id=thread_event_id,
+                exc_info=True,
+            )
+
     delivered = await send_matrix_message(client, room_id, content)
     if delivered is None:
         return None

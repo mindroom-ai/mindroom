@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -21,19 +23,17 @@ from mindroom.tool_system.registry import builtin_tool_registry
 
 # Variables Agno toolkits read that no config field declares, by the Agno module that reads them.
 UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
-    # Agno counts only the exact text `true` and google-genai also counts `1`, while the boolean `vertexai` field
-    # accepts only `true` and `false`, so a declaration would fail builds that work.
-    "agno.tools.models.gemini": frozenset({"GOOGLE_GENAI_USE_VERTEXAI"}),
     # Read while building the service or logging in interactively, which MindRoom's Google toolkits replace; no
     # constructor parameter backs them.
     "agno.tools.google.base": frozenset({"GOOGLE_API_TIMEOUT", "GOOGLE_PROJECT_ID"}),
     # MindRoom's Google Drive toolkit reads it from the runtime environment itself and passes it on.
     "agno.tools.google.drive": frozenset({"GOOGLE_CLOUD_QUOTA_PROJECT_ID"}),
-    # The provider key import supplies it for unscoped agents. Scoped agents get no environment fallback on purpose:
-    # they need the granted shared key or their own saved setting, so no field declares it.
-    "agno.tools.openai": frozenset({"OPENAI_API_KEY"}),
-    # Undeclared for the same reason as `OPENAI_API_KEY`: scoped agents need the granted shared key or their own setting.
-    "agno.tools.models.groq": frozenset({"GROQ_API_KEY"}),
+}
+
+# Non-config process IPC variables native toolkits read directly from os.environ.
+UNDECLARED_NATIVE_ENV_READS: dict[str, frozenset[str]] = {
+    # Internal sandbox-runner IPC socket injected into tool subprocesses, not an end-user tool setting.
+    "mindroom.tools.shell": frozenset({"SHELL_SUPERVISOR_SOCKET_ENV"}),
 }
 
 
@@ -57,61 +57,63 @@ def _env_reads(source: str) -> set[str]:
             name = node.slice
         else:
             continue
-        assert isinstance(name, ast.Constant), f"line {node.lineno} reads a variable it does not name"
-        assert isinstance(name.value, str)
-        names.add(name.value)
+        assert isinstance(name, ast.Constant | ast.Name), f"line {node.lineno} reads a variable it does not name"
+        if isinstance(name, ast.Constant):
+            assert isinstance(name.value, str)
+            names.add(name.value)
+        else:
+            names.add(name.id)
     return names
 
 
 def _module_env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads, from its source file."""
+    """Return the variables one module reads from the process environment, from its source file."""
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     assert spec.origin is not None
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
-_SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
-# Native tools that read one named internal runtime variable directly (never a user credential).
-_ALLOWED_NATIVE_ENV_VARS: dict[str, frozenset[str]] = {
-    "mindroom.tools.shell": frozenset({"SHELL_SUPERVISOR_SOCKET_ENV"}),
-}
+def _imported_module_names(source: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return names
 
 
-def _mindroom_module_path(module_name: str) -> Path | None:
-    candidate = _SRC_ROOT / Path(*module_name.split("."))
-    if candidate.with_suffix(".py").is_file():
-        return candidate.with_suffix(".py")
-    if (candidate / "__init__.py").is_file():
-        return candidate / "__init__.py"
-    return None
+def _classify_imports(source: str, agno_modules: set[str], pending: list[str]) -> None:
+    for imported in _imported_module_names(source):
+        if imported == "agno" or imported.startswith("agno."):
+            agno_modules.add(imported)
+        elif imported.startswith(("mindroom.custom_tools.", "mindroom.tools.")):
+            pending.append(imported)
 
 
-def _ast_referenced_modules(module_name: str) -> tuple[set[str], set[str]]:
-    """Collect referenced local tool modules and Agno modules by AST without importing optional SDKs."""
-    visited: set[str] = set()
-    local_modules: set[str] = set()
+def _ast_tool_modules(factory: Any) -> tuple[set[str], set[str]]:  # noqa: ANN401
+    """Collect imported ``agno.*`` and owned ``mindroom.(tools|custom_tools).*`` modules via AST only."""
     agno_modules: set[str] = set()
-    pending = [module_name]
+    owned_modules: set[str] = set()
+    pending: list[str] = []
+    seen: set[str] = set()
+    if factory.__module__ == "mindroom.tools":
+        _classify_imports(textwrap.dedent(inspect.getsource(factory)), agno_modules, pending)
+    else:
+        pending.append(factory.__module__)
+
     while pending:
         current = pending.pop()
-        if current in visited:
+        if current in seen or current == "mindroom.tools":
             continue
-        visited.add(current)
-        path = _mindroom_module_path(current)
-        if path is None:
+        seen.add(current)
+        spec = importlib.util.find_spec(current)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
             continue
-        local_modules.add(current)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                if node.module.startswith("agno.tools."):
-                    agno_modules.add(node.module)
-                elif node.module.startswith(("mindroom.tools.", "mindroom.custom_tools.")) and not node.module.endswith(
-                    ".__init__",
-                ):
-                    pending.append(node.module)
-    return local_modules, agno_modules
+        owned_modules.add(current)
+        _classify_imports(Path(spec.origin).read_text(encoding="utf-8"), agno_modules, pending)
+    return agno_modules, owned_modules
 
 
 def _agno_modules(tool_name: str) -> set[str]:
@@ -119,62 +121,95 @@ def _agno_modules(tool_name: str) -> set[str]:
     factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
         return set()
-    _, ast_agno = _ast_referenced_modules(factory.__module__)
+    ast_agno, _owned_modules = _ast_tool_modules(factory)
     if not ast_agno:
         return set()
     try:
         toolkit_class = factory()
     except ImportError:
         return ast_agno
-    return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+    mro_agno = {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+    return mro_agno or ast_agno
 
 
-def _native_env_reads(module_name: str) -> set[str]:
-    """Return direct os.getenv/os.environ reads in a native MindRoom tool module via AST."""
-    path = _mindroom_module_path(module_name)
-    if path is None:
+def _imported_mindroom_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("mindroom."):
+            if node.module != "mindroom.tool_system.authoring":
+                modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("mindroom.") and alias.name != "mindroom.tool_system.authoring":
+                    modules.add(alias.name)
+    return modules
+
+
+def _native_base_modules(module_name: str) -> set[str]:
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
         return set()
-    allowed = _ALLOWED_NATIVE_ENV_VARS.get(module_name, frozenset())
-    reads: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Call) and (
-            (isinstance(node.func, ast.Name) and node.func.id == "getenv")
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == "getenv")
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == "get" and _is_environ(node.func.value))
-        ):
-            target = node.args[0]
-        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) and _is_environ(node.value):
-            target = node.slice
-        else:
+    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    symbol_modules: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("mindroom."):
+            for alias in node.names:
+                symbol_modules[alias.asname or alias.name] = node.module
+    base_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                base_name = base.id if isinstance(base, ast.Name) else None
+                if (
+                    base_name is not None
+                    and (base_mod := symbol_modules.get(base_name)) is not None
+                    and base_mod != "mindroom.tool_system.authoring"
+                ):
+                    base_modules.add(base_mod)
+    return base_modules
+
+
+def _native_modules(tool_name: str) -> set[str]:
+    """Return native MindRoom toolkit modules via source AST without importing optional SDKs."""
+    factory = builtin_tool_registry().entries[tool_name].factory
+    if factory is None:
+        return set()
+    factory_tree = ast.parse(textwrap.dedent(inspect.getsource(factory)))
+    pending = _imported_mindroom_modules(factory_tree)
+    if not pending and factory.__module__ != "mindroom.tools":
+        pending = {factory.__module__}
+    discovered: set[str] = set()
+    while pending:
+        module_name = pending.pop()
+        if module_name in discovered:
             continue
-        if isinstance(target, ast.Name) and target.id in allowed:
-            continue
-        if isinstance(target, ast.Constant) and isinstance(target.value, str):
-            reads.add(target.value)
-        else:
-            reads.add(f"<dynamic line {node.lineno}>")
-    return reads
+        discovered.add(module_name)
+        pending.update(_native_base_modules(module_name) - discovered)
+    return discovered
 
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Agno toolkits declare every env var they read; native toolkits never read os.environ directly."""
-    factory = builtin_tool_registry().entries[tool_name].factory
+    """Agno toolkits match declared/allowlisted env reads; native toolkits read none directly unless allowlisted."""
     modules = _agno_modules(tool_name)
+    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
     if not modules:
-        if factory is None:
-            return
-        # mindroom.tools.__init__ registers multiple built-in tools; only scan dedicated tool modules directly.
-        if factory.__module__ == "mindroom.tools":
-            return
-        local_modules, _ = _ast_referenced_modules(factory.__module__)
-        direct_reads = {mod: reads for mod in sorted(local_modules) if (reads := _native_env_reads(mod))}
-        assert direct_reads == {}, f"Native toolkit {tool_name!r} must not read os.environ directly: {direct_reads}"
+        factory = builtin_tool_registry().entries[tool_name].factory
+        owned_modules = _ast_tool_modules(factory)[1] if factory is not None else set()
+        native_modules = _native_modules(tool_name) | owned_modules
+        if declared:
+            assert native_modules, f"{tool_name} declares env fallbacks without a native toolkit module"
+        native_reads = set().union(*map(_module_env_reads, native_modules)) if native_modules else set()
+        allowlisted_native = set().union(*(UNDECLARED_NATIVE_ENV_READS.get(module, ()) for module in native_modules))
+        unexpected_native_reads = native_reads - allowlisted_native
+        assert unexpected_native_reads == set(), (
+            f"Native toolkit {tool_name} must receive env values via config/metadata.py or runtime_paths, "
+            f"not direct environment reads: {sorted(unexpected_native_reads)}"
+        )
         return
 
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
-    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
 
     assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
         "undeclared": set(),
@@ -186,6 +221,30 @@ def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_nam
 def test_each_undeclared_agno_read_is_still_in_agno(module_name: str) -> None:
     """An allowlisted read leaves the list once Agno stops reading it."""
     assert _module_env_reads(module_name) >= UNDECLARED_AGNO_ENV_READS[module_name]
+
+
+@pytest.mark.parametrize("module_name", sorted(UNDECLARED_NATIVE_ENV_READS))
+def test_each_undeclared_native_read_is_still_in_mindroom(module_name: str) -> None:
+    """An allowlisted native read leaves the list once MindRoom stops reading it."""
+    assert _module_env_reads(module_name) >= UNDECLARED_NATIVE_ENV_READS[module_name]
+
+
+def test_native_module_scan_works_without_importing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inspecting native modules via AST succeeds even if the optional SDK cannot be imported."""
+    real_import = __import__
+
+    def fail_cartesia(name: str, *args: object, **kwargs: object) -> object:
+        if name == "cartesia" or name.startswith("cartesia."):
+            msg = "simulated missing cartesia SDK"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "cartesia", raising=False)
+    monkeypatch.delitem(sys.modules, "mindroom.custom_tools.cartesia", raising=False)
+    monkeypatch.setattr("builtins.__import__", fail_cartesia)
+
+    assert _agno_modules("cartesia") == set()
+    assert _native_modules("cartesia") == {"mindroom.custom_tools.cartesia"}
 
 
 def test_the_source_scan_finds_every_way_a_module_reads_the_environment() -> None:
@@ -362,3 +421,61 @@ def test_a_number_setting_from_the_env_file_reaches_the_toolkit_as_a_number(tmp_
 
     assert tool.limit == 42
     assert isinstance(tool.limit, int)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "env_var"),
+    [("openai", "OPENAI_API_KEY"), ("groq", "GROQ_API_KEY")],
+)
+def test_provider_backed_media_tools_honor_unscoped_fallback_and_scoped_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    env_var: str,
+) -> None:
+    """Unscoped and granted agents receive provider keys; ungranted scoped agents fail closed despite ambient env."""
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target  # noqa: PLC0415
+
+    # Set ambient host env too, proving native toolkits cannot bypass MindRoom's scoped credential isolation.
+    monkeypatch.setenv(env_var, "ambient-host-secret")
+    (tmp_path / "config.yaml").write_text("agents: {}\n")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", env_var: "provider-shared-key"},
+    )
+    tools = builtin_tool_registry()
+
+    unscoped = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tools=tools,
+        runs_in_worker=False,
+        worker_target=None,
+    )
+    assert unscoped.api_key == "provider-shared-key"
+
+    scoped_target = resolve_worker_target(
+        "user",
+        "alpha",
+        ToolExecutionIdentity("matrix", "alpha", "@alice:example.test", None, None, None, None, tenant_id="t"),
+    )
+    with pytest.raises(ValueError, match=f"{env_var} not set"):
+        get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tools=tools,
+            runs_in_worker=False,
+            worker_target=scoped_target,
+            allowed_shared_services=frozenset(),
+        )
+
+    granted = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tools=tools,
+        runs_in_worker=False,
+        worker_target=scoped_target,
+        allowed_shared_services=frozenset({tool_name}),
+    )
+    assert granted.api_key == "provider-shared-key"

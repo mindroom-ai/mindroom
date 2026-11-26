@@ -146,6 +146,7 @@ class Toolkit:
 
     name: str = "toolkit"
     instructions: str | None = None
+    requires_connect: bool = False
 
     def __init__(
         self,
@@ -179,6 +180,12 @@ class Toolkit:
         function that requires confirmation.
         """
         return function
+
+    def connect(self) -> None:
+        """Open a run-scoped connection when ``requires_connect`` is True."""
+
+    def close(self) -> None:
+        """Close a run-scoped connection when ``requires_connect`` is True."""
 
 
 def tool_attributes(cls: type[Toolkit]) -> tuple[str, ...]:

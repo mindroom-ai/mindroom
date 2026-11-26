@@ -130,7 +130,7 @@ class MCPServerConfig(BaseModel):
     )
     icon: OptionalNonBlankStr = Field(
         default=None,
-        description="Optional dashboard icon name, such as SiConfluence or Calendar",
+        description="Optional dashboard icon name, such as SiAtlassian or Calendar",
     )
     description: OptionalNonBlankStr = Field(
         default=None,

@@ -7,14 +7,15 @@ from typing import TYPE_CHECKING
 
 import nio
 import pytest
-from agno.tools.calculator import CalculatorTools
 
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.message_target import MessageTarget
 from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
@@ -96,7 +97,7 @@ def _local_execution_sinks(monkeypatch: pytest.MonkeyPatch) -> None:
         return "local:calculator"
 
     monkeypatch.setattr(shell_module, "run_command", run_command)
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "add", tool(add))
     monkeypatch.delenv("MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET", raising=False)
 
 

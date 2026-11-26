@@ -17,6 +17,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
+from mindroom.matrix.inline_media import strip_inline_media_from_content
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix.thread_mutation_impact import (
@@ -1182,12 +1183,18 @@ class MatrixApiTools(Toolkit):
                     message="Matrix returned malformed event data.",
                     response=response,
                 )
+            event_data = (
+                {**raw_event, "content": stripped}
+                if isinstance(raw_content := raw_event.get("content"), dict)
+                and (stripped := strip_inline_media_from_content(raw_content)) is not raw_content
+                else raw_event
+            )
             payload: dict[str, object] = {
                 "action": "get_event",
                 "room_id": room_id,
                 "event_id": normalized_event_id,
                 "found": True,
-                "event": raw_event,
+                "event": event_data,
             }
             if "type" in raw_event:
                 payload["event_type"] = raw_event["type"]

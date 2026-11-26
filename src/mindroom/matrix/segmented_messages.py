@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
+    INLINE_MEDIA_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_VISIBLE_BODY_KEY,
     TOOL_TRACE_CONTENT_KEY,
 )
+from mindroom.matrix.inline_media import copy_referenced_inline_media
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -47,6 +49,7 @@ SEGMENT_COUNT_KEY = "io.mindroom.segment_count"
 _INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, REASONING_CONTENT_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
+    INLINE_MEDIA_CONTENT_KEY,
     "body",
     "format",
     "formatted_body",
@@ -57,6 +60,7 @@ _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
 _MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
 _CODE_REGION_PATTERN = re.compile(r"(<code\b[^>]*>.*?</code>)", re.DOTALL)
 _FENCE_LINE_PATTERN = re.compile(r"[ \t]*((?:>[ \t]{0,3})*)(`{3,}|~{3,})(.*)")
+_INLINE_MXC_IMAGE_PATTERN = re.compile(r"!\[(?:\\.|[^\]\\])*\]\(mxc://[^)\s]+\)")
 
 
 def _user_id_boundary_pattern(user_ids: list[str]) -> re.Pattern[str]:
@@ -157,6 +161,7 @@ def _rich_text_content(
     content["body"] = body
     content["format"] = "org.matrix.custom.html"
     content["formatted_body"] = _render_segment_html(source, body, enable_footnotes=enable_footnotes)
+    copy_referenced_inline_media(source, content)
     mentions = _chunk_mentions(source, body)
     if mentions is not None:
         content["m.mentions"] = mentions
@@ -328,6 +333,16 @@ def _fitting_end(text: str, start: int, build: Callable[[str], dict[str, Any]], 
         end = start + max(1, int((end - start) * budget / used * _SEGMENT_SHRINK_MARGIN))
 
 
+def _back_up_past_inline_image(text: str, offset: int, end: int) -> int | None:
+    """Keep any ``![alt](mxc://...)`` token straddling ``end`` intact, or return None if it starts at ``offset``."""
+    for match in _INLINE_MXC_IMAGE_PATTERN.finditer(text, offset):
+        if match.start() >= end:
+            return end
+        if match.end() > end:
+            return None if match.start() == offset else match.start()
+    return end
+
+
 def _split_body(
     text: str,
     first_build: Callable[[str], dict[str, Any]],
@@ -335,6 +350,7 @@ def _split_body(
     *,
     first_target: int,
     continuation_target: int,
+    keep_inline_media_tokens: bool = False,
 ) -> list[str] | None:
     """Split text at fitting Markdown boundaries while retaining every character."""
     chunks: list[str] = []
@@ -346,6 +362,11 @@ def _split_body(
             return None
         if end < len(text):
             end = _preferred_boundary(text, offset, end)
+            if keep_inline_media_tokens:
+                adjusted = _back_up_past_inline_image(text, offset, end)
+                if adjusted is None:
+                    return None
+                end = adjusted
         fence_start = _unclosed_fence_start(text, offset, end)
         if fence_start is not None:
             if fence_start == offset:
@@ -436,12 +457,14 @@ def segment_matrix_content(
         continuation_reply_to_event_id=continuation_reply_to_event_id,
         enable_footnotes=True,
     )
+    keep_inline_media_tokens = INLINE_MEDIA_CONTENT_KEY in source
     chunks = _split_body(
         source["body"],
         first_build,
         continuation_build,
         first_target=first_target,
         continuation_target=continuation_target,
+        keep_inline_media_tokens=keep_inline_media_tokens,
     )
     if chunks is not None and len(chunks) > 1 and "[^" in source["body"]:
         # Splitting across events can separate `[^1]` from `[^1]: ...`, which would make footnote_plugin drop
@@ -460,6 +483,7 @@ def segment_matrix_content(
             continuation_build,
             first_target=first_target,
             continuation_target=continuation_target,
+            keep_inline_media_tokens=keep_inline_media_tokens,
         )
     if chunks is None:
         return None

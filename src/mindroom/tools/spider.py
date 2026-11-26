@@ -1,14 +1,130 @@
-"""Spider tool configuration."""
+"""Spider web search, scraping, and crawling toolkit."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, Any
 
+from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.spider import SpiderTools
+    from collections.abc import Callable
+
+logger = get_logger(__name__)
+
+
+def _require_spider() -> type[Any]:
+    """Import and return ``spider.Spider``, raising a helpful ImportError when absent."""
+    try:
+        from spider import Spider
+    except ImportError as exc:
+        msg = "`spider-client` not installed. Please install using `pip install spider-client`"
+        raise ImportError(msg) from exc
+    return Spider
+
+
+class _SpiderTools(Toolkit):
+    """Search, scrape, and crawl websites using Spider."""
+
+    def __init__(
+        self,
+        max_results: int | None = None,
+        url: str | None = None,
+        optional_params: dict[str, Any] | None = None,
+        enable_search: bool = True,
+        enable_scrape: bool = True,
+        enable_crawl: bool = True,
+        all: bool = False,  # noqa: A002
+    ) -> None:
+        _require_spider()
+        self.max_results = max_results
+        self.url = url
+        self.optional_params = optional_params or {}
+
+        tools: list[Callable[..., Any]] = []
+        if enable_search or all:
+            tools.append(self.search_web)
+        if enable_scrape or all:
+            tools.append(self.scrape)
+        if enable_crawl or all:
+            tools.append(self.crawl)
+
+        super().__init__(name="spider", tools=tools)
+
+    def search_web(self, query: str, max_results: int | None = None) -> str:
+        """Use this function to search the web.
+
+        Args:
+            query: The query to search the web with.
+            max_results: The maximum number of results to return. Defaults to the value set on the toolkit, or 5.
+
+        Returns:
+            The results of the search.
+
+        """
+        spider_cls = _require_spider()
+        app = spider_cls()
+        try:
+            num_results = self.max_results if self.max_results is not None else 5
+            options = {"fetch_page_content": False, "num": num_results, **self.optional_params}
+            # Applied after the optional_params spread so an explicit call argument always wins.
+            if max_results is not None:
+                options["num"] = max_results
+            logger.info("spider_search", query=query, max_results=options["num"])
+            results = app.search(query, options)
+            return json.dumps(results)
+        except Exception as exc:
+            logger.exception("spider_search_failed")
+            return f"Error fetching results from spider: {exc}"
+
+    def scrape(self, url: str) -> str:
+        """Use this function to scrape the content of a webpage.
+
+        Args:
+            url: The URL of the webpage to scrape.
+
+        Returns:
+            Markdown of the webpage.
+
+        """
+        spider_cls = _require_spider()
+        app = spider_cls()
+        logger.info("spider_scrape", url=url)
+        try:
+            options = {"return_format": "markdown", **self.optional_params}
+            results = app.scrape_url(url, options)
+            return json.dumps(results)
+        except Exception as exc:
+            logger.exception("spider_scrape_failed", url=url)
+            return f"Error fetching content from spider: {exc}"
+
+    def crawl(self, url: str, limit: int | None = None) -> str:
+        """Use this function to crawl the web.
+
+        Args:
+            url: The URL of the webpage to crawl.
+            limit: The maximum number of pages to crawl. Defaults to 10.
+
+        Returns:
+            The results of the crawl.
+
+        """
+        spider_cls = _require_spider()
+        app = spider_cls()
+        logger.info("spider_crawl", url=url)
+        try:
+            options = {"return_format": "markdown", "limit": 10, **self.optional_params}
+            # Applied after the optional_params spread so an explicit call argument always wins.
+            if limit is not None:
+                options["limit"] = limit
+            results = app.crawl_url(url, options)
+            return json.dumps(results)
+        except Exception as exc:
+            logger.exception("spider_crawl_failed", url=url)
+            return f"Error fetching content from spider: {exc}"
 
 
 @register_tool_with_metadata(
@@ -70,8 +186,7 @@ if TYPE_CHECKING:
     helper_text="Get your API key from the [Spider dashboard](https://spider.cloud)",
     function_names=("crawl", "scrape", "search_web"),
 )
-def spider_tools() -> type[SpiderTools]:
+def spider_tools() -> type[Toolkit]:
     """Return Spider tools for web scraping and crawling."""
-    from agno.tools.spider import SpiderTools
-
-    return SpiderTools
+    _require_spider()
+    return _SpiderTools

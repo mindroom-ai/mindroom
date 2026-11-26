@@ -32,7 +32,7 @@ def test_multi_user_values_example_renders_runtime_chart() -> None:
     env = _env_by_name(container)
 
     assert env["MINDROOM_WORKER_BACKEND"]["value"] == "kubernetes"
-    assert env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"] == "shell,file,python,coding,browser"
+    assert env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"] == "shell,file,coding,browser"
     assert env["MINDROOM_EGRESS_BROKER_PORT"]["value"] == "8768"
 
     config_mount = next(mount for mount in container["volumeMounts"] if mount["name"] == "config")

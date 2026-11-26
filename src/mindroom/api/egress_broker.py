@@ -356,7 +356,7 @@ async def allow_service_account_reuse(
 ) -> None:
     """Let Agent Keys use a config service's connected account for the selected scope, at the body's `access`.
 
-    The body must confirm that the agent's shell and python then act as the account without approval prompts (422
+    The body must confirm that the agent's shell then act as the account without approval prompts (422
     without it). Raises 404 and 409 like the disconnect route, and 409 for `read` on a service that does not offer
     it. Allowing it again changes the level. A requester-scoped account is the dashboard user's own.
     """

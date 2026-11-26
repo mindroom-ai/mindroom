@@ -145,11 +145,11 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert [registered.__name__ for registered in tool.tools] == [
+    assert list(tool.functions) == [
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
     ]
-    assert "batch_update_sheet" in tool.functions
 
 
 def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
@@ -178,12 +178,12 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert {registered.__name__ for registered in tool.tools} == {
+    assert set(tool.functions) == {
         "read_sheet",
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
     }
-    assert "batch_update_sheet" in tool.functions
 
 
 class _FakeSheetsRequest:
@@ -194,10 +194,28 @@ class _FakeSheetsRequest:
         return self._response
 
 
+class _FakeValuesResource:
+    def __init__(self) -> None:
+        self.get_kwargs: dict[str, object] | None = None
+        self.update_kwargs: dict[str, object] | None = None
+
+    def get(self, **kwargs: object) -> _FakeSheetsRequest:
+        self.get_kwargs = kwargs
+        return _FakeSheetsRequest({"values": [["ok"]]})
+
+    def update(self, **kwargs: object) -> _FakeSheetsRequest:
+        self.update_kwargs = kwargs
+        return _FakeSheetsRequest({"updatedRange": kwargs["range"]})
+
+
 class _FakeSpreadsheetsResource:
     def __init__(self) -> None:
         self.batch_update_kwargs: dict[str, object] | None = None
         self.batch_update_error: HttpError | None = None
+        self.values_resource = _FakeValuesResource()
+
+    def values(self) -> _FakeValuesResource:
+        return self.values_resource
 
     def batchUpdate(self, **kwargs: object) -> _FakeSheetsRequest:  # noqa: N802
         self.batch_update_kwargs = kwargs
@@ -214,10 +232,17 @@ class _FakeSheetsService:
         return self.spreadsheets_resource
 
 
-def _connected_sheets_tool(tmp_path: Path) -> tuple[GoogleSheetsTools, _FakeSheetsService]:
+def _connected_sheets_tool(
+    tmp_path: Path,
+    *,
+    spreadsheet_id: str | None = None,
+    spreadsheet_range: str | None = None,
+) -> tuple[GoogleSheetsTools, _FakeSheetsService]:
     tool = GoogleSheetsTools(
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        spreadsheet_id=spreadsheet_id,
+        spreadsheet_range=spreadsheet_range,
         creds=GoogleOAuthCredentials(
             token="valid-access-token",  # noqa: S106
             refresh_token="valid-refresh-token",  # noqa: S106
@@ -298,3 +323,164 @@ def test_google_sheets_batch_update_returns_sanitized_http_error(tmp_path: Path)
     result = json.loads(tool.batch_update_sheet("sheet-id", [{"deleteSheet": {"sheetId": 7}}]))
 
     assert result == {"error": "Google Sheets request failed (HTTP 400)"}
+
+
+def test_google_sheets_update_sheet_targets_explicit_call_args_over_configured_read_defaults(tmp_path: Path) -> None:
+    tool, service = _connected_sheets_tool(
+        tmp_path,
+        spreadsheet_id="read-sheet-id",
+        spreadsheet_range="ReadSheet!A1:B2",
+    )
+
+    write_result = tool.update_sheet(
+        data=[["Item", 42]],
+        spreadsheet_id="write-sheet-id",
+        range_name="WriteSheet!C3:D4",
+    )
+
+    assert write_result == "Sheet updated successfully: write-sheet-id"
+    assert service.spreadsheets_resource.values_resource.update_kwargs == {
+        "spreadsheetId": "write-sheet-id",
+        "range": "WriteSheet!C3:D4",
+        "valueInputOption": "RAW",
+        "body": {"values": [["Item", 42]]},
+    }
+
+    read_result = json.loads(tool.read_sheet(spreadsheet_id="ignored-read-id", spreadsheet_range="Ignored!Z9"))
+
+    assert read_result == [["ok"]]
+    assert service.spreadsheets_resource.values_resource.get_kwargs == {
+        "spreadsheetId": "read-sheet-id",
+        "range": "ReadSheet!A1:B2",
+    }
+
+
+@pytest.mark.parametrize(
+    ("spreadsheet_id", "range_name"),
+    [
+        (None, None),
+        ("write-sheet-id", None),
+        (None, "WriteSheet!C3:D4"),
+        ("   ", "WriteSheet!C3:D4"),
+        ("write-sheet-id", "   "),
+    ],
+)
+def test_google_sheets_update_sheet_requires_explicit_args_even_with_read_defaults(
+    tmp_path: Path,
+    spreadsheet_id: str | None,
+    range_name: str | None,
+) -> None:
+    tool, service = _connected_sheets_tool(
+        tmp_path,
+        spreadsheet_id="read-sheet-id",
+        spreadsheet_range="ReadSheet!A1:B2",
+    )
+
+    result = tool.update_sheet(data=[["Item", 42]], spreadsheet_id=spreadsheet_id, range_name=range_name)
+
+    assert "must be provided" in result
+    assert service.spreadsheets_resource.values_resource.update_kwargs is None
+
+
+def test_google_sheets_readonly_scopes_reject_write_operations_even_with_write_creds(tmp_path: Path) -> None:
+    write_capable_creds = GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("https://www.googleapis.com/auth/spreadsheets",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
+
+    with pytest.raises(ValueError, match=r"https://www\.googleapis\.com/auth/spreadsheets"):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        )
+
+    read_only_tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        create=False,
+        update=False,
+    )
+    assert set(read_only_tool.functions) == {"read_sheet"}
+
+    writable_tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    assert "update_sheet" in writable_tool.functions
+
+
+def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) -> None:
+    direct_read_only = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        create=None,
+        update=None,
+    )
+    assert set(direct_read_only.functions) == {"read_sheet"}
+    assert direct_read_only.scopes == ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+    direct_alias_read_only = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        create_sheet=None,
+        update_sheet=None,
+    )
+    assert set(direct_alias_read_only.functions) == {"read_sheet"}
+
+    direct_all_disabled = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        read=None,
+        create=None,
+        update=None,
+        create_duplicate_sheet=None,
+    )
+    assert direct_all_disabled.functions == {}
+    assert direct_all_disabled.scopes == []
+
+    with pytest.raises(ValueError, match="received both 'create' and 'create_sheet'"):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            create=None,
+            create_sheet=None,
+        )
+
+    override_tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"create": None, "update": None},
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(override_tool, GoogleSheetsTools)
+    assert set(override_tool.functions) == {"read_sheet"}
+
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_sheets",
+        {"create": None, "update": None, "_source": "ui"},
+    )
+    saved_config_tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(saved_config_tool, GoogleSheetsTools)
+    assert set(saved_config_tool.functions) == {"read_sheet"}

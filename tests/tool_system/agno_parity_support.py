@@ -94,7 +94,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "browserbase": {"api_key": _KEY, "project_id": _KEY},
     "cartesia": {"api_key": _KEY},
     "clickup": {"api_key": _KEY, "master_space_id": _KEY},
-    "confluence": {"url": _URL, "username": _KEY, "api_key": _KEY},
     "daytona": {"api_key": _KEY},
     "discord": {"bot_token": _KEY},
     "e2b": {"api_key": _KEY},
@@ -105,7 +104,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     # The client rejects keys without Google's prefix.
     "google_maps": {"key": "AIza-golden-dummy"},
     "groq": {"api_key": _KEY},
-    "jira": {"server_url": _URL, "username": _KEY, "token": _KEY},
     "linear": {"api_key": _KEY},
     "linkup": {"api_key": _KEY},
     "lumalabs": {"api_key": _KEY},
@@ -127,11 +125,7 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "zep": {"api_key": _KEY},
 }
 # SDK clients that contact their service while a toolkit is constructed, replaced so it registers its functions offline.
-OFFLINE_CLIENTS = {
-    "e2b": "agno.tools.e2b.Sandbox",
-    "jira": "agno.tools.jira.JIRA",
-    "neo4j": "agno.tools.neo4j.GraphDatabase",
-}
+OFFLINE_CLIENTS: dict[str, str] = {}
 # HTTP requests a toolkit sends while constructed, refused before they dial; the goldens record the refused outcome.
 REFUSED_REQUESTS = {
     # Its instructions report the PyPI release check, which fails offline.

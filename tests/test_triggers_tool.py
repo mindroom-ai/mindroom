@@ -264,6 +264,7 @@ async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp
         "thread_id": "origin",
         "new_thread": False,
         "thread_key": None,
+        "reopen_on_fire": False,
         "prompt": "Alert me on urgent deploys.",
     }
     assert trigger["triage"]["provider"] == "llm"
@@ -674,6 +675,8 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
     assert meta.requires_primary_runtime is True
     assert meta.requires_room_context is True
     assert meta.function_names == ("triggers",)
+    assert meta.approval_aliases == {}
+    assert "GitHub PRs" in meta.description
 
     runtime_paths = _runtime_paths(tmp_path)
     built_by_alias = get_tool_by_name(
@@ -1114,6 +1117,10 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
         cases: list[tuple[dict[str, Any], str]] = [
             ({"action": "watch_room"}, "prompt is required"),
             ({"action": "watch_thread"}, "prompt is required"),
+            ({"action": "watch_pr"}, "repo is required"),
+            ({"action": "watch_pr", "repo": "org/repo"}, "number is required"),
+            ({"action": "watch_pr", "repo": "org/repo", "number": True}, "positive integer"),
+            ({"action": "watch_pr", "repo": "org/repo", "number": 0}, "positive integer"),
             ({"action": "subscribe_event", "kind": "push", "prompt": "Go"}, "source_id is required"),
             ({"action": "subscribe_event", "source_id": "gh", "prompt": "Go"}, "kind is required"),
             ({"action": "subscribe_event", "source_id": "gh", "kind": "push"}, "prompt is required"),
@@ -1167,6 +1174,37 @@ async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path
         assert bool_defaults_res["status"] == "error"
         assert bool_defaults_res["message"] == (
             "Unsupported parameter(s) for triggers(action='delete'): include_disabled, new_thread"
+        )
+
+        watch_pr_unsup = _payload(
+            await tool.triggers(
+                action="watch_pr",
+                repo="org/repo",
+                number=1,
+                room_id="!lobby:example.org",
+                triage_instructions="Only prod",
+            ),
+        )
+        assert watch_pr_unsup["status"] == "error"
+        assert watch_pr_unsup["message"] == (
+            "Unsupported parameter(s) for triggers(action='watch_pr'): room_id, triage_instructions"
+        )
+
+        list_pr_unsup = _payload(
+            await tool.triggers(
+                action="list",
+                repo="org/repo",
+                number=1,
+                events=["ci"],
+                ignore_actors=["bot"],
+                auto_disable_on_close=False,
+                poll_interval_seconds=60,
+            ),
+        )
+        assert list_pr_unsup["status"] == "error"
+        assert list_pr_unsup["message"] == (
+            "Unsupported parameter(s) for triggers(action='list'): "
+            "auto_disable_on_close, events, ignore_actors, number, poll_interval_seconds, repo"
         )
 
 
@@ -1585,6 +1623,7 @@ def _load_trigger_approval_rules(tmp_path: Path, *rules: str | tuple[str, str]) 
     [
         ("watch_room", "watch_room is now triggers"),
         ("watch_thread", "watch_thread is now triggers"),
+        ("watch_pr", "watch_pr is now triggers"),
         ("subscribe_event", "subscribe_event is now triggers"),
         ("create_trigger", "create_trigger is now triggers"),
         ("list_triggers", "list_triggers is now triggers"),
@@ -1713,6 +1752,8 @@ def test_retired_trigger_approval_rule_fails_even_when_another_toolkit_offers_sa
     "overrides",
     [
         {"exclude_tools": ["create_trigger"]},
+        {"exclude_tools": ["watch_pr"]},
+        {"include_tools": ["watch_pr"]},
         {"include_tools": "watch_room, list_triggers"},
     ],
 )
@@ -2533,3 +2574,56 @@ async def test_history_paginates_past_more_than_100_revoked_external_source_firi
     assert unscoped["status"] == "ok"
     assert unscoped["count"] == 1
     assert [row["dedupe_key"] for row in unscoped["firings"]] == ["$pr_repo_a"]
+
+
+@pytest.mark.asyncio
+async def test_reactive_triggers_room_escape_and_reopen_on_fire(tmp_path: Path) -> None:
+    """All reactive create actions support target_thread_id='room' and reopen_on_fire; update toggles reopen_on_fire."""
+    _record_rooms(tmp_path)
+    config = _config(
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["org/repo"],
+                allowed_events=["pull_request"],
+                subscribers=["@owner:example.org"],
+            ),
+        },
+    )
+    tool = TriggersTools()
+    cases: list[dict[str, Any]] = [
+        {"action": "watch_room", "trigger_id": "wr-room", "prompt": "Watch room"},
+        {"action": "watch_thread", "trigger_id": "wt-room", "prompt": "Watch thread"},
+        {
+            "action": "subscribe_event",
+            "trigger_id": "se-room",
+            "source_id": "github",
+            "kind": "pull_request.merged",
+            "prompt": "PR merged",
+        },
+    ]
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        for kwargs in cases:
+            created = _payload(await tool.triggers(**kwargs, target_thread_id="room", reopen_on_fire=True))
+            assert created["status"] == "ok", (kwargs, created)
+            assert created["trigger"]["target"]["thread_id"] is None
+            assert created["trigger"]["target"]["reopen_on_fire"] is True
+
+            conflict = _payload(
+                await tool.triggers(
+                    **{k: v for k, v in kwargs.items() if k != "trigger_id"},
+                    target_thread_id="room",
+                    new_thread=True,
+                ),
+            )
+            assert conflict["status"] == "error"
+            assert "mutually exclusive" in conflict["message"]
+
+        off = _payload(await tool.triggers(action="update", trigger_id="wr-room", reopen_on_fire=False))
+        assert (off["status"], off["trigger"]["target"]["reopen_on_fire"]) == ("ok", False)
+        on = _payload(await tool.triggers(action="update", trigger_id="wr-room", reopen_on_fire=True))
+        assert (on["status"], on["trigger"]["target"]["reopen_on_fire"]) == ("ok", True)
+
+        bad = _payload(await tool.triggers(action="list", reopen_on_fire=True))
+        assert bad["status"] == "error"
+        assert "Unsupported parameter(s)" in bad["message"]

@@ -21,6 +21,7 @@ from mindroom.constants import (
     CALL_TRANSCRIPT_CONTENT_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
+    INLINE_MEDIA_CONTENT_KEY,
     NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
@@ -44,6 +45,7 @@ from mindroom.constants import (
 from mindroom.live_frames.frames import utf16_length
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
+from mindroom.matrix.inline_media import copy_referenced_inline_media
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.state_failures import is_transient_homeserver_status, response_http_status
@@ -51,7 +53,7 @@ from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import has_placeholder_body, html_block_spans, tool_markers_out_of_text
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 logger = get_logger(__name__)
 
@@ -88,6 +90,7 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
+        INLINE_MEDIA_CONTENT_KEY,
         CALL_TRANSCRIPT_CONTENT_KEY,
         TODO_POKE_CONTENT_KEY,
         TOOL_TRACE_CONTENT_KEY,
@@ -381,6 +384,7 @@ def _build_nonterminal_streaming_edit_preview(
     preview_text: str,
     *,
     room_encrypted: bool,
+    inline_media_source: Mapping[str, Any] | None = None,
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     original_size: int,
@@ -409,6 +413,7 @@ def _build_nonterminal_streaming_edit_preview(
             file_info=file_info,
             original_size=original_size,
         )
+        copy_referenced_inline_media(inline_media_source, preview_content)
         modified_content: dict[str, Any] = {
             "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {preview}",
@@ -448,6 +453,7 @@ def _build_terminal_edit_preview(
     *,
     continuation_indicator: str,
     calculate_event_size: Callable[[dict[str, Any]], int],
+    inline_media_source: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fit a terminal edit after all replacement and wrapper metadata is present."""
 
@@ -466,6 +472,7 @@ def _build_terminal_edit_preview(
         preview_text,
         continuation_indicator=continuation_indicator,
         calculate_event_size=lambda inner_content: calculate_event_size(build_event(inner_content, 0)),
+        inline_media_source=inline_media_source,
     )
     outer_limit = _largest_fitting_limit(
         len(fitted_inner["body"].encode("utf-8")),
@@ -482,6 +489,7 @@ def _fit_preview(
     *,
     continuation_indicator: str,
     calculate_event_size: Callable[[dict[str, Any]], int],
+    inline_media_source: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the preview whose event fits, shrinking its text in proportion to the overshoot.
 
@@ -495,6 +503,7 @@ def _fit_preview(
         preview = dict(preview_content)
         text = _create_preview(preview_text, limit, continuation_indicator=continuation_indicator) if limit > 0 else ""
         _set_preview_text(preview, text, preview_text)
+        copy_referenced_inline_media(inline_media_source, preview)
         return preview
 
     overhead = calculate_event_size(build(0))
@@ -867,12 +876,14 @@ def _fit_large_message_preview(
     preview_text: str,
     *,
     is_edit: bool,
+    room_encrypted: bool,
     continuation_indicator: str,
     calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
     """Attach relations and fit one regular or replacement preview."""
     if "m.relates_to" in content:
         preview_content["m.relates_to"] = content["m.relates_to"]
+    inline_media_source = source_content if room_encrypted else None
 
     if is_edit and "m.new_content" in content:
         return _build_terminal_edit_preview(
@@ -882,12 +893,14 @@ def _fit_large_message_preview(
             preview_text,
             continuation_indicator=continuation_indicator,
             calculate_event_size=calculate_event_size,
+            inline_media_source=inline_media_source,
         )
     return _fit_preview(
         preview_content,
         preview_text,
         continuation_indicator=continuation_indicator,
         calculate_event_size=calculate_event_size,
+        inline_media_source=inline_media_source,
     )
 
 
@@ -1116,6 +1129,7 @@ async def prepare_large_message(
             source_content,
             fallback_text if mxc_uri is None else preview_text,
             room_encrypted=encrypted_delivery_safe,
+            inline_media_source=source_content if room_encrypted else None,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -1195,6 +1209,7 @@ async def prepare_large_message(
             modified_content,
             preview_text if sidecar_usable else fallback_text,
             is_edit=is_edit,
+            room_encrypted=room_encrypted,
             continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
             calculate_event_size=calculate_delivery_event_size,
         )
@@ -1223,6 +1238,7 @@ async def prepare_large_message(
             text_fallback,
             fallback_text,
             is_edit=is_edit,
+            room_encrypted=room_encrypted,
             continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
             calculate_event_size=calculate_delivery_event_size,
         )

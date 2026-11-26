@@ -55,19 +55,19 @@ google_maps_places(action="validate_address", address="1600 Amphitheatre Pkwy, M
 
 ## `openweather`
 
-`openweather` provides `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
-`get_forecast()` returns 3-hour entries for up to 5 days.
+`openweather` provides `openweather_get(action, location, days=5, limit=1)` with actions `current_weather`, `forecast`, `air_pollution`, and `geocode`.
+The `forecast` action returns 3-hour entries for up to 5 days.
 Weather lookups use the first geocoding match for the location name, so ambiguous names such as "Springfield" can resolve to an unexpected place; add a region or country to the query.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
-| `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
-| `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
-| `enable_air_pollution` | `boolean` | `true` | Enable `get_air_pollution()`. |
-| `enable_geocoding` | `boolean` | `true` | Enable `geocode_location()`. |
-| `all` | `boolean` | `false` | Enable all four functions regardless of the `enable_*` options. |
+| `enable_current_weather` | `boolean` | `true` | Enable the `current_weather` action. |
+| `enable_forecast` | `boolean` | `true` | Enable the `forecast` action. |
+| `enable_air_pollution` | `boolean` | `true` | Enable the `air_pollution` action. |
+| `enable_geocoding` | `boolean` | `true` | Enable the `geocode` action. |
+| `all` | `boolean` | `false` | Enable all four actions regardless of the `enable_*` options. |
 | `timeout` | `number` | `30` | Per-request timeout in seconds. |
 
 ```yaml
@@ -80,9 +80,9 @@ agents:
 ```
 
 ```python
-get_current_weather("San Francisco")
-get_forecast("Chicago", days=3)
-geocode_location("Reykjavik", limit=3)
+openweather_get("current_weather", "San Francisco")
+openweather_get("forecast", "Chicago", days=3)
+openweather_get("geocode", "Reykjavik", limit=3)
 ```
 
 ## `shopify`

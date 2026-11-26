@@ -36,6 +36,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.guarded_rooms import allowed_send
+from mindroom.matrix.inline_media import strip_inline_media_from_content
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
@@ -69,12 +70,13 @@ def _message_payload(
     payload = message.to_dict()
     if room_id is not None and message.room_id not in (None, room_id):
         payload = {**payload, "room_id": message.room_id}
+    stripped = strip_inline_media_from_content(message.content)
     if not has_tool_trace(message.content):
-        return payload
+        return {**payload, "content": stripped} if stripped is not message.content else payload
     body = strip_visible_tool_markers(message.body)
     # The rendered HTML and the streaming canonical body repeat the markers, and the plain body carries the text.
     dropped = {"format", "formatted_body", STREAM_VISIBLE_BODY_KEY}
-    content = {key: value for key, value in message.content.items() if key not in dropped}
+    content = {key: value for key, value in stripped.items() if key not in dropped}
     content["body"] = strip_visible_tool_markers(str(content.get("body", "")))
     return {**payload, "body": body, "content": content}
 

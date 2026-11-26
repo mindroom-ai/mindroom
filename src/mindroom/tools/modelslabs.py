@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.models_labs import ModelsLabTools
+    from mindroom.custom_tools.modelslabs import ModelsLabTools
 
 
 @register_tool_with_metadata(
@@ -17,12 +17,11 @@ if TYPE_CHECKING:
     display_name="ModelsLabs",
     description="AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
-    setup_type=SetupType.API_KEY,  # Uses api_key parameter
-    icon="Video",  # React icon for video generation
-    icon_color="text-purple-600",  # Purple color for creative/AI tools
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="Video",
+    icon_color="text-purple-600",
     config_fields=[
-        # Authentication parameter
         ConfigField(
             name="api_key",
             env=("MODELS_LAB_API_KEY",),
@@ -33,13 +32,11 @@ if TYPE_CHECKING:
             placeholder="your-modelslabs-api-key",
             description="The ModelsLab API key for authentication",
         ),
-        # Media generation parameters
         ConfigField(
             name="file_type",
             label="File Type",
             type="text",
             required=False,
-            # The agno default is FileType.MP4, which has value "mp4"
             default="mp4",
             placeholder="mp4",
             description="The type of file to generate (png, jpg, mp4, gif, mp3, or wav)",
@@ -71,7 +68,6 @@ if TYPE_CHECKING:
             placeholder="512",
             description="Output image height in pixels",
         ),
-        # Timing and completion parameters
         ConfigField(
             name="wait_for_completion",
             label="Wait for Completion",
@@ -99,47 +95,12 @@ if TYPE_CHECKING:
             description="Cap on polling attempts, rounded up; zero skips polling and HTTP request time is additional",
         ),
     ],
-    dependencies=["requests"],  # Already in pyproject.toml
+    dependencies=["requests"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#modelslabs",
     function_names=("generate_media",),
 )
 def modelslabs_tools() -> type[ModelsLabTools]:
     """Return ModelsLabs tool for AI-powered media generation."""
-    from agno.models.response import FileType
+    from mindroom.custom_tools.modelslabs import ModelsLabTools
 
-    from mindroom.tools.agno_compat_modelslabs import ModelsLabCompletionTools
-
-    class MindRoomModelsLabTools(ModelsLabCompletionTools):
-        """ModelsLab toolkit that accepts authored string file types."""
-
-        def __init__(
-            self,
-            api_key: str | None = None,
-            wait_for_completion: bool = False,
-            add_to_eta: int = 15,
-            max_wait_time: int = 60,
-            file_type: FileType | str | None = FileType.MP4,
-            model_id: str | None = None,
-            width: int = 512,
-            height: int = 512,
-            **kwargs: Any,  # noqa: ANN401 - forwarded to ModelsLabTools, whose options have several types
-        ) -> None:
-            if isinstance(file_type, str):
-                normalized_file_type = file_type.strip().lower()
-                resolved_file_type = FileType(normalized_file_type) if normalized_file_type else FileType.MP4
-            else:
-                resolved_file_type = file_type or FileType.MP4
-            super().__init__(
-                api_key=api_key,
-                wait_for_completion=wait_for_completion,
-                add_to_eta=add_to_eta,
-                max_wait_time=max_wait_time,
-                file_type=resolved_file_type,
-                model_id=model_id,
-                width=width,
-                height=height,
-                **kwargs,
-            )
-
-    MindRoomModelsLabTools.__init__.__annotations__["file_type"] = FileType | str | None
-    return MindRoomModelsLabTools
+    return ModelsLabTools

@@ -3017,7 +3017,7 @@ def test_runtime_chart_uses_default_worker_auth_secret() -> None:
 
 @pytest.mark.parametrize(
     ("proxy_tools_args", "proxy_tools"),
-    [((), "shell,file,python,coding"), (("workers.sandbox.proxyTools=*",), "*")],
+    [((), "shell,file,coding"), (("workers.sandbox.proxyTools=*",), "*")],
 )
 def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     proxy_tools_args: tuple[str, ...],
@@ -3543,7 +3543,7 @@ def test_instance_chart_static_runner_proxies_every_default_worker_execution_too
     env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-tenant42"), "mindroom"))
 
     assert env["MINDROOM_SANDBOX_EXECUTION_MODE"]["value"] == "selective"
-    assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "python", "coding"}
+    assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "coding"}
 
 
 _EGRESS_BROKER_NAME = "mindroom-runtime-egress-broker"

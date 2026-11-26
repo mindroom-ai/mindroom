@@ -11,9 +11,9 @@ import pytest
 import requests
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.modelslabs import ModelsLabTools
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.agno_compat_modelslabs import ModelsLabCompletionTools
 from mindroom.tools.modelslabs import modelslabs_tools
 
 if TYPE_CHECKING:
@@ -421,7 +421,7 @@ def test_fractional_polling_settings_from_runtime_config(
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    assert isinstance(tool, ModelsLabCompletionTools)
+    assert isinstance(tool, ModelsLabTools)
 
     result = tool.generate_media("Make a test pattern")
 
@@ -759,3 +759,57 @@ def test_retry_after_without_retryable_failure_does_not_stop_polling(provider: _
     assert "success" in result.content.lower()
     assert result.images is not None
     assert [item.url for item in result.images] == [media_url]
+
+
+@pytest.mark.parametrize(
+    ("wait_for_completion", "payloads", "expected_timeouts"),
+    [
+        pytest.param(
+            False,
+            [
+                {
+                    "status": "processing",
+                    "id": 74123,
+                    "eta": 10,
+                    "future_links": ["https://media.example.test/queued.mp4"],
+                },
+            ],
+            [120],
+            id="non-waiting-120s",
+        ),
+        pytest.param(
+            True,
+            [
+                {
+                    "status": "processing",
+                    "id": 74123,
+                    "eta": 1,
+                    "future_links": ["https://media.example.test/queued.mp4"],
+                },
+                {"status": "success", "output": ["https://media.example.test/final.mp4"]},
+            ],
+            [60, 60],
+            id="waiting-60s",
+        ),
+    ],
+)
+def test_submission_read_timeout_depends_on_wait_for_completion(
+    provider: _ModelsLabTransport,
+    wait_for_completion: bool,
+    payloads: list[dict[str, object]],
+    expected_timeouts: list[int],
+) -> None:
+    """Non-waiting submissions preserve the 120s read timeout while waiting submissions use 60s."""
+    provider.payloads = payloads
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="mp4",
+        wait_for_completion=wait_for_completion,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test video")
+
+    assert provider.timeouts == expected_timeouts
+    assert result.videos

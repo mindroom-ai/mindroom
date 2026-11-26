@@ -9,18 +9,21 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.error_handling import (
+    _MAX_ERROR_DETAIL_CHARS,
     _ReplyErrorInfo,
     describe_reply_error,
     empty_response_error_info,
     log_reply_error,
     minimal_mode_failure_message,
     model_error_labels,
+    with_error_fallback,
 )
 from mindroom.llm.errors import (
     CONNECTION_ERROR,
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     QUOTA_EXHAUSTED,
+    SAFEGUARD_REFUSAL,
     STREAM_STALLED,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
@@ -392,6 +395,7 @@ def test_stream_stalled_formats_duration_and_model_label(error_text: str, expect
         "provider": "OpenRouter",
         "retryable": True,
         "action": "continue",
+        "fallback": f"⚠️ Neon stopped responding — {expected_summary}",
     }
     assert info.plain_text == f"⚠️ Neon stopped responding — {expected_summary}"
 
@@ -443,7 +447,8 @@ def test_describe_reply_error_covers_every_kind_and_omits_empty_wire_fields() ->
         assert wire["kind"] == kind
         assert wire["retryable"] is retryable
         assert wire.get("action") == action
-        for optional_key in ("detail", "code", "status_code", "provider", "action"):
+        assert wire["fallback"] == info.plain_text
+        for optional_key in ("detail", "code", "status_code", "provider", "action", "fallback"):
             if optional_key in wire:
                 assert wire[optional_key] not in (None, "")
 
@@ -485,6 +490,38 @@ def test_log_reply_error_returns_unprefixed_plain_text_and_logs_structured_field
     assert entry["agent"] == "mindroom_dev"
     assert entry["error_code"] == STREAM_STALLED
     assert entry["status_code"] == 504
+
+
+def test_log_reply_error_logs_safeguard_refusal_at_warning_and_other_errors_at_error() -> None:
+    """log_reply_error logs ModelSafeguardRefusal at warning with all structured fields and other errors at error."""
+    refusal = ModelSafeguardRefusal(provider="OpenRouter", usage=MessageMetrics(), provider_code="content_filter")
+    unavailable = ProviderUnavailable("gateway error", provider="OpenRouter", status_code=503)
+
+    with capture_logs() as logs:
+        log_reply_error(refusal, "mindroom_dev", model_label="Neon")
+        log_reply_error(unavailable, "mindroom_dev", model_label="Neon")
+
+    refusal_entry, unavailable_entry = [log for log in logs if log["event"] == "agent_error"]
+    assert refusal_entry == {
+        "event": "agent_error",
+        "log_level": "warning",
+        "agent": "mindroom_dev",
+        "error_type": "ModelSafeguardRefusal",
+        "error": repr(refusal),
+        "error_code": SAFEGUARD_REFUSAL,
+        "status_code": None,
+        "provider": "OpenRouter",
+    }
+    assert unavailable_entry == {
+        "event": "agent_error",
+        "log_level": "error",
+        "agent": "mindroom_dev",
+        "error_type": "ProviderUnavailable",
+        "error": repr(unavailable),
+        "error_code": None,
+        "status_code": 503,
+        "provider": "OpenRouter",
+    }
 
 
 def test_model_error_labels_prefers_display_name_over_id() -> None:
@@ -592,6 +629,7 @@ def test_empty_response_error_info_matches_notice_and_handles_missing_labels() -
         "provider": "OpenRouter",
         "retryable": True,
         "action": "retry",
+        "fallback": EMPTY_RESPONSE_NOTICE,
     }
     assert not with_labels["summary"].startswith("⚠️")
 
@@ -602,6 +640,7 @@ def test_empty_response_error_info_matches_notice_and_handles_missing_labels() -
         "summary": EMPTY_RESPONSE_NOTICE,
         "retryable": True,
         "action": "retry",
+        "fallback": f"⚠️ {EMPTY_RESPONSE_NOTICE}",
     }
 
 
@@ -624,6 +663,7 @@ def test_transport_provider_unavailable_says_provider_could_not_be_reached(code:
         "provider": "OpenAI",
         "retryable": True,
         "action": "retry",
+        "fallback": _NETWORK_ERROR_MESSAGE,
     }
     assert "OpenAI" not in info.title
     assert "OpenAI" not in info.summary
@@ -652,3 +692,28 @@ def test_non_transport_provider_unavailable_keeps_provider_unavailable_message()
     )
     assert stalled_info.plain_text == "⚠️ The model stopped responding — OpenAI stopped sending data."
     assert stalled_info.kind == "stream_stalled"
+
+
+def test_error_fallback_bounding_and_with_error_fallback() -> None:
+    """to_wire and with_error_fallback include bounded fallbacks and omit empty or oversized ones."""
+    info = describe_reply_error(RuntimeError("boom"))
+    exact_limit = "x" * _MAX_ERROR_DETAIL_CHARS
+    oversized = "x" * (_MAX_ERROR_DETAIL_CHARS + 1)
+
+    assert info.to_wire(fallback=f"  {exact_limit}  ")["fallback"] == exact_limit
+    assert "fallback" not in info.to_wire(fallback="")
+    assert "fallback" not in info.to_wire(fallback="   ")
+    assert "fallback" not in info.to_wire(fallback=oversized)
+    oversized_info = _ReplyErrorInfo(kind="runtime_error", title="Reply failed", summary=oversized)
+    assert "fallback" not in oversized_info.to_wire()
+
+    base = info.to_wire()
+    assert with_error_fallback(None, "ignored") is None
+    overridden = with_error_fallback(base, "  **[Response interrupted by an error: boom]**  ")
+    assert overridden is not None
+    assert overridden["fallback"] == "**[Response interrupted by an error: boom]**"
+    assert base["fallback"] == "⚠️ boom"
+    for dropped in (None, "", "   ", oversized):
+        stripped = with_error_fallback(base, dropped)
+        assert stripped is not None
+        assert "fallback" not in stripped

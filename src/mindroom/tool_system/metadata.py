@@ -979,8 +979,7 @@ def get_tool_by_name(
             if routed
             else None,
         )
-        authored = bool(init_kwargs.get("instructions"))
-        return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))
+        return bind_toolkit_construction(toolkit, construction)
 
     return _build_with_tool_dependencies(tool_name, metadata, runtime_paths, build)
 

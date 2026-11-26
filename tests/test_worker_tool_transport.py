@@ -14,13 +14,13 @@ import httpx
 import pytest
 import yaml
 from agno.run import RunContext
-from agno.tools import openai as agno_openai
 
 from mindroom.agents import create_agent
-from mindroom.api import sandbox_runner, sandbox_runner_app
+from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools import openai_media
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
@@ -37,8 +37,8 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.tools import agno_compat_openai
 from mindroom.voice.openai_realtime_speech import pcm_to_wav
+from mindroom.workers.protocol import LeaseRequest
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
 from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -75,7 +75,7 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "worker" / "config.yaml",
         storage_path=tmp_path / "worker" / "storage",
-        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true", "OPENAI_API_KEY": _TOOL_KEY},
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
     )
     config = Config.validate_with_runtime({}, runtime_paths)
     client_type = httpx.Client
@@ -86,10 +86,23 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
             # A runner that started no eager setup has no setup state to report.
             runner = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
             return httpx.Response(200, json=asyncio.run(sandbox_runner_app.healthz(runner)))
+        if request.url.path.endswith("/leases"):
+            lease_request = LeaseRequest.model_validate(json.loads(request.content))
+            lease_response = asyncio.run(sandbox_runner.create_credential_lease(lease_request))
+            return httpx.Response(200, json=lease_response.model_dump(mode="json"))
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
         fields = {name: value for name, value in payload.items() if name != "protocol"}
+        credential_overrides = (
+            sandbox_worker_prep.consume_credential_lease(
+                fields["lease_id"],
+                tool_name=fields["tool_name"],
+                function_name=fields["function_name"],
+            )
+            if fields.get("lease_id") is not None
+            else None
+        )
         # The primary sends its live config; the runner reads the agents it routes from it, as the endpoint does.
         snapshot = fields.get("config_snapshot")
         call_config = (
@@ -98,7 +111,9 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
             else sandbox_runner._primary_validated_config(snapshot, runtime_paths, log_skipped_plugins=False)
         )
         response = asyncio.run(
-            sandbox_runner._execute_request_inprocess(execute_call(runtime_paths, call_config, **fields)),
+            sandbox_runner._execute_request_inprocess(
+                execute_call(runtime_paths, call_config, credential_overrides=credential_overrides, **fields),
+            ),
         )
         return httpx.Response(200, json=response.model_dump(mode="json"))
 
@@ -107,7 +122,6 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
         "Client",
         lambda **kwargs: client_type(transport=httpx.MockTransport(execute), **kwargs),
     )
-    monkeypatch.setenv("OPENAI_API_KEY", _TOOL_KEY)
     return requests
 
 
@@ -553,13 +567,14 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         ),
         audio=SimpleNamespace(speech=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(content=content))),
     )
-    monkeypatch.setattr(agno_openai, "OpenAIClient", lambda **_kwargs: provider)
-    monkeypatch.setattr(agno_compat_openai, "synthesize_realtime_speech", AsyncMock(return_value=content))
+    monkeypatch.setattr(openai_media, "OpenAIClient", lambda **_kwargs: provider)
+    monkeypatch.setattr(openai_media, "synthesize_realtime_speech", AsyncMock(return_value=content))
     agent = _create_routing_agent(
         tmp_path / "primary",
         {
             "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
+            "OPENAI_API_KEY": _TOOL_KEY,
         },
         agent_settings={
             "tools": [
@@ -581,11 +596,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
     assert not response.is_error
     assert len(worker_requests) == 1
     assert _MODEL_KEY not in json.dumps(worker_requests)
-    if media_kind == "audio":
-        # A Realtime model's speech takes no agent.
-        assert "agent" not in worker_requests[0]["kwargs"]
-    if media_kind == "speech_endpoint_audio":
-        assert worker_requests[0]["kwargs"]["agent"] is None
+    assert "agent" not in worker_requests[0]["kwargs"]
     media = response.images if media_kind == "image" else response.audios
     assert len(media) == 1
     assert media[0].content == (pcm_to_wav(content) if media_kind == "audio" else content)

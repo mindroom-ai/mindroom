@@ -398,7 +398,7 @@ class PutSecretRequest(BaseModel):
 class OAuthReuseRequest(BaseModel):
     """Body that lets Agent Keys use a service's connected account, or changes the level it may use it at.
 
-    The account's tools ask for approval before they write, but the agent's shell and python then act as the account
+    The account's tools ask for approval before they write, but the agent's shell then act as the account
     with its access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`). `access` is
     `read_write` or, for a service that declares `read_only`, `read` (see `require_access_offered`).
     """

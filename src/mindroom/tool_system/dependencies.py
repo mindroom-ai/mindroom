@@ -101,7 +101,6 @@ def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None
 # Packages where the pip install name differs from the Python import name.
 # Only includes cases where replacing dashes with underscores is insufficient.
 _PIP_TO_IMPORT: dict[str, str] = {
-    "atlassian-python-api": "atlassian",
     "beautifulsoup4": "bs4",
     "composio-core": "composio",
     "firecrawl-py": "firecrawl",

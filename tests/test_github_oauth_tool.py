@@ -6,10 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
-import io
 import json
-import logging
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -21,12 +18,11 @@ from urllib.parse import urlsplit
 
 import pytest
 import requests
-from agno.tools import github as agno_github_module
-from agno.utils import log as agno_log_module
 from github import Auth, BadCredentialsException, Github, GithubException
 from github.GithubRetry import GithubRetry
 from github.Requester import Requester
 from requests.adapters import HTTPAdapter
+from structlog.testing import capture_logs
 from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -35,8 +31,6 @@ from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     scoped_credentials_path,
 )
-from mindroom.custom_tools import github as mindroom_github_module
-from mindroom.custom_tools.agno_compat_github_errors import _PROVIDER_DETAIL_LOG_PREFIXES
 from mindroom.custom_tools.github import GithubTools
 from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
@@ -62,13 +56,6 @@ MANUAL_ACCESS_TOKEN = "manual-access"  # noqa: S105
 OLD_REFRESH_TOKEN = "old-refresh"  # noqa: S105
 ROTATED_REFRESH_TOKEN = "rotated-refresh"  # noqa: S105
 ENV_ACCESS_TOKEN = "environment-access"  # noqa: S105
-
-
-def test_agno_github_log_redaction_prefixes_match_pinned_upstream() -> None:
-    """An Agno wording change must fail tests before it can reopen provider-detail logs."""
-    upstream_source = inspect.getsource(agno_github_module.GithubTools)
-
-    assert all(prefix in upstream_source for prefix in _PROVIDER_DETAIL_LOG_PREFIXES)
 
 
 def _publish_oauth_credentials(
@@ -240,11 +227,7 @@ class _CapturedNestedProviderFailureRepository(_FakeRepositoryStats):
 
     def get_issues(self, *, state: str) -> list[object]:
         assert state == "open"
-        raise mindroom_github_module._MindRoomGithubRequester.createException(
-            self.status_code,
-            {},
-            {"message": self.sentinel},
-        )
+        raise GithubException(self.status_code, {"message": self.sentinel})
 
 
 class _CapturedNestedProviderFailureGithub:
@@ -937,13 +920,7 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
         captured.update(kwargs)
         return _FakeGithub()
 
-    with (
-        patch("mindroom.custom_tools.github.Github", side_effect=github_factory),
-        patch(
-            "mindroom.custom_tools.github._install_github_provider_failure_capture",
-            side_effect=lambda client: client,
-        ),
-    ):
+    with patch("mindroom.custom_tools.github.Github", side_effect=github_factory):
         tool = tool_class(
             access_token=MANUAL_ACCESS_TOKEN,
             base_url="https://github.example.test/api/v3",
@@ -1000,7 +977,7 @@ def _fake_github_http_response(request: requests.PreparedRequest) -> requests.Re
 
 
 def test_language_tools_drop_pygithub_injected_url_over_http(tmp_path: Path) -> None:
-    """PyGithub adds the GET URL to the languages map; Agno's tools must still see only byte counts."""
+    """PyGithub adds the GET URL to the languages map; the GitHub tools must still see only byte counts."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(
@@ -1030,25 +1007,6 @@ def test_language_tools_drop_pygithub_injected_url_over_http(tmp_path: Path) -> 
     assert stats["topics"] == ["example"]
     assert stats["stargazers_count"] == 4
     assert "/repos/example/project/languages" in requested_paths
-
-
-def test_provider_failure_capture_keeps_github_retry_settings() -> None:
-    """Swapping in the capturing retry must keep PyGithub's rate-limit wait settings."""
-    client = Github(
-        auth=Auth.Token(MANUAL_ACCESS_TOKEN),
-        retry=GithubRetry(secondary_rate_wait=7, max_rate_limit_wait=30, total=3),
-    )
-    try:
-        mindroom_github_module._install_github_provider_failure_capture(client)
-        requester = client._Github__requester
-        retry = requester.kwargs["retry"]
-    finally:
-        client.close()
-
-    assert isinstance(requester, mindroom_github_module._MindRoomGithubRequester)
-    assert isinstance(retry, mindroom_github_module._GithubProviderFailureRetry)
-    assert (retry.secondary_rate_wait, retry.max_rate_limit_wait, retry.total) == (7, 30, 3)
-    assert retry.new(total=2).max_rate_limit_wait == 30
 
 
 def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> None:
@@ -1086,27 +1044,12 @@ def test_github_partial_results_do_not_log_nested_provider_details(tmp_path: Pat
     )
     sentinel = "provider-controlled-nested-secret"
     tool.g = _NestedProviderFailureGithub(sentinel)
-    agno_log_output = io.StringIO()
-    agno_logger = agno_log_module.team_logger
-    original_log_level = agno_logger.level
-    agno_logger.setLevel(logging.DEBUG)
-    agno_handler = logging.StreamHandler(agno_log_output)
-    agno_logger.addHandler(agno_handler)
-
-    try:
-        with (
-            patch.object(agno_log_module, "logger", agno_logger),
-            patch.object(agno_log_module, "debug_on", True),
-        ):
-            result = tool.get_repository_with_stats("example/project")
-    finally:
-        agno_logger.removeHandler(agno_handler)
-        agno_logger.setLevel(original_log_level)
-        agno_handler.close()
+    with capture_logs() as captured_logs:
+        result = tool.get_repository_with_stats("example/project")
 
     assert json.loads(result)["actual_open_issues"] is None
     assert sentinel not in result
-    assert sentinel not in agno_log_output.getvalue()
+    assert sentinel not in repr(captured_logs)
 
 
 @pytest.mark.parametrize("status_code", [401, 403])
@@ -1342,10 +1285,6 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     with (
         patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=refresh_credentials),
         patch("mindroom.custom_tools.github.Github", return_value=_FakeGithub()),
-        patch(
-            "mindroom.custom_tools.github._install_github_provider_failure_capture",
-            side_effect=lambda client: client,
-        ),
     ):
         tool = tool_class(
             runtime_paths=runtime_paths,
@@ -1361,7 +1300,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     assert stored["refresh_token"] == "rotated-refresh"  # noqa: S105
 
 
-def test_oauth_refresh_works_when_agno_calls_sync_tool_on_running_loop(tmp_path: Path) -> None:
+def test_oauth_refresh_works_when_sync_tool_called_on_running_loop(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -1471,7 +1410,7 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
     )
     tool = _build_tool(runtime_paths, manager, target)
     revoked_client = _RevokedTokenGithub()
-    tool.g = revoked_client
+    tool.authenticate = lambda: revoked_client
 
     result = tool.list_repositories()
     payload = json.loads(result)
@@ -1518,28 +1457,19 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
     github_message = f"GitHub explanation for {operation}"
     tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, github_message)
     mindroom_logger = _CapturingLogger()
-    agno_log_output = io.StringIO()
-    agno_handler = logging.StreamHandler(agno_log_output)
-    agno_handler.setFormatter(logging.Formatter("%(message)s"))
-    agno_github_module.logger.addHandler(agno_handler)
-
-    try:
-        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
-            if operation == "list_repositories":
-                result = tool.list_repositories()
-            elif operation == "update_file":
-                result = tool.update_file("example/project", "notes.txt", "body", "Update", "old-sha")
-            elif operation == "delete_file":
-                result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
-            elif operation == "edit_issue":
-                result = tool.edit_issue("example/project", 7, title="Updated")
-            elif operation == "get_pull_request_count":
-                result = tool.get_pull_request_count("example/project")
-            else:
-                result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
-    finally:
-        agno_github_module.logger.removeHandler(agno_handler)
-        agno_handler.close()
+    with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+        if operation == "list_repositories":
+            result = tool.list_repositories()
+        elif operation == "update_file":
+            result = tool.update_file("example/project", "notes.txt", "body", "Update", "old-sha")
+        elif operation == "delete_file":
+            result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
+        elif operation == "edit_issue":
+            result = tool.edit_issue("example/project", 7, title="Updated")
+        elif operation == "get_pull_request_count":
+            result = tool.get_pull_request_count("example/project")
+        else:
+            result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
 
     payload = json.loads(result)
     if status_code == 401:
@@ -1551,7 +1481,6 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
         assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}")
         assert payload["error"].endswith(f". GitHub said: {github_message}")
     captured_logs = (
-        agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
         repr(mindroom_logger.exception_calls),
     )
@@ -1566,8 +1495,8 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
 def _create_rejected_pull_request(
     tmp_path: Path,
     github: _RejectedPullRequestGithub,
-) -> tuple[str, _CapturingLogger, str]:
-    """Run create_pull_request through the wrapped tool and return its result and both log streams."""
+) -> tuple[str, _CapturingLogger]:
+    """Run create_pull_request through the tool and return its result and structured log stream."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(
@@ -1578,18 +1507,9 @@ def _create_rejected_pull_request(
     )
     tool.g = github
     mindroom_logger = _CapturingLogger()
-    agno_log_output = io.StringIO()
-    agno_handler = logging.StreamHandler(agno_log_output)
-    agno_handler.setFormatter(logging.Formatter("%(message)s"))
-    agno_github_module.logger.addHandler(agno_handler)
-
-    try:
-        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
-            result = tool.create_pull_request("example/project", "Add notes", "Body", "feature", "main")
-    finally:
-        agno_github_module.logger.removeHandler(agno_handler)
-        agno_handler.close()
-    return result, mindroom_logger, agno_log_output.getvalue()
+    with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+        result = tool.create_pull_request("example/project", "Add notes", "Body", "feature", "main")
+    return result, mindroom_logger
 
 
 def test_github_validation_failure_tells_agent_why_github_rejected_the_request(tmp_path: Path) -> None:
@@ -1611,7 +1531,7 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
         {"x-github-request-id": header_sentinel},
     )
 
-    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, github)
+    result, mindroom_logger = _create_rejected_pull_request(tmp_path, github)
 
     assert json.loads(result) == {
         "error": "GitHub request failed with HTTP 422. GitHub said: Validation Failed; "
@@ -1630,8 +1550,7 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
             },
         ),
     ]
-    assert "operation=create_pull_request" in agno_log_text
-    assert "already exists" not in agno_log_text
+    assert mindroom_logger.exception_calls == []
 
 
 _FAKE_GITHUB_TOKEN = "ghp_" + "a1B2c3D4" * 5
@@ -1676,7 +1595,7 @@ def test_github_provider_detail_is_redacted_single_line_and_bounded(
     truncated: bool,
 ) -> None:
     """GitHub's text reaches the agent only redacted, on one line, within 500 characters, and never in logs."""
-    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, _RejectedPullRequestGithub(data))
+    result, mindroom_logger = _create_rejected_pull_request(tmp_path, _RejectedPullRequestGithub(data))
 
     status_text, detail = json.loads(result)["error"].split(". GitHub said: ", 1)
     assert status_text == "GitHub request failed with HTTP 422"
@@ -1686,7 +1605,7 @@ def test_github_provider_detail_is_redacted_single_line_and_bounded(
     assert detail.endswith("... [truncated]") is truncated
     for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD):
         assert secret[:12] not in result
-    process_logs = (agno_log_text, repr(mindroom_logger.warning_calls), repr(mindroom_logger.exception_calls))
+    process_logs = (repr(mindroom_logger.warning_calls), repr(mindroom_logger.exception_calls))
     assert all("GitHub explanation" not in output for output in process_logs)
     assert all(
         secret[:12] not in output for output in process_logs for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD)
@@ -1770,23 +1689,17 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "provider-controlled-secret-with-logging-disabled"
-    previous_disabled = agno_github_module.logger.disabled
-    agno_github_module.logger.disabled = True
 
-    try:
-        with patch.object(
-            Requester,
-            "requestJson",
-            return_value=(
-                500,
-                {"x-github-request-id": sentinel},
-                json.dumps({"message": "Server Error", "documentation_url": f"https://docs.example.org/{sentinel}"}),
-            ),
-        ):
-            tool.g = tool.authenticate()
-            result = tool.list_repositories()
-    finally:
-        agno_github_module.logger.disabled = previous_disabled
+    with patch.object(
+        Requester,
+        "requestJson",
+        return_value=(
+            500,
+            {"x-github-request-id": sentinel},
+            json.dumps({"message": "Server Error", "documentation_url": f"https://docs.example.org/{sentinel}"}),
+        ),
+    ):
+        result = tool.list_repositories()
 
     assert json.loads(result) == {"error": "GitHub request failed with HTTP 500. GitHub said: Server Error"}
     assert sentinel not in result
@@ -1807,18 +1720,11 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    client = tool.authenticate()
-    retry = cast("Retry", client._Github__requester.kwargs["retry"])
-    client.close()
+    retry = cast("Retry", GithubRetry())
     sentinel = "provider-controlled-retry-secret-with-logging-disabled"
     tool.authenticate = lambda: _RetryProviderFailureGithub(retry, sentinel)
-    previous_disabled = agno_github_module.logger.disabled
-    agno_github_module.logger.disabled = True
 
-    try:
-        result = tool.list_repositories()
-    finally:
-        agno_github_module.logger.disabled = previous_disabled
+    result = tool.list_repositories()
 
     assert json.loads(result)["error"].startswith("GitHub request failed with HTTP 403")
     assert sentinel not in result
@@ -1871,19 +1777,13 @@ def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabl
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "revoked-provider-controlled-secret-with-logging-disabled"
-    previous_disabled = agno_github_module.logger.disabled
-    agno_github_module.logger.disabled = True
 
-    try:
-        with patch.object(
-            Requester,
-            "requestJson",
-            return_value=(401, {}, json.dumps({"message": "Bad credentials", "detail": sentinel})),
-        ):
-            tool.g = tool.authenticate()
-            result = tool.list_repositories()
-    finally:
-        agno_github_module.logger.disabled = previous_disabled
+    with patch.object(
+        Requester,
+        "requestJson",
+        return_value=(401, {}, json.dumps({"message": "Bad credentials", "detail": sentinel})),
+    ):
+        result = tool.list_repositories()
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
