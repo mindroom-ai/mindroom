@@ -72,10 +72,7 @@ IGNORED_AGNO_PARAMS = {
 # reads the null words as left out.
 BOOLEAN_WORDS = ("true", "False")
 NULL_WORDS = ("None", "null", " NULL ")
-IGNORED_EXTRA_CONFIG_FIELDS = {
-    # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
-    "docker": {"include_tools"},
-}
+IGNORED_EXTRA_CONFIG_FIELDS: dict[str, set[str]] = {}
 
 
 def test_youtube_languages_accepts_authored_string_list() -> None:
@@ -143,7 +140,7 @@ def test_a_saved_value_for_an_object_valued_setting_is_ignored(tmp_path: Path) -
         worker_target=None,
     )
 
-    assert json.loads(blocking_entrypoint(tool, "list_tables")()) == ["orders"]
+    assert json.loads(blocking_entrypoint(tool, "sql_inspect")(action="list_tables")) == ["orders"]
     tool.db_engine.dispose()
 
 
@@ -162,7 +159,7 @@ def test_authored_csv_paths_register_each_file(tmp_path: Path) -> None:
         worker_target=None,
     )
 
-    assert json.loads(blocking_entrypoint(tool, "list_csv_files")()) == ["orders"]
+    assert json.loads(blocking_entrypoint(tool, "csv_inspect")(action="list")) == ["orders"]
 
 
 def test_authored_duckdb_init_commands_run_when_the_connection_opens(tmp_path: Path) -> None:
@@ -284,46 +281,31 @@ def test_modelslabs_blank_file_type_uses_mp4_default(authored_file_type: str | N
     assert tool.file_type.value == "mp4"
 
 
-def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dashboard-authored Daytona values should reach Agno with its declared types."""
-    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
-
-    captured: dict[str, object] = {}
-
-    def capture_init(_self: object, **kwargs: object) -> None:
-        captured.update(kwargs)
-
-    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+def test_daytona_converts_authored_sandbox_values() -> None:
+    """Dashboard-authored Daytona values should normalize cleanly to their declared types."""
     tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
-    tool_class(
+    tool = tool_class(
+        api_key="dt-test",
         sandbox_language="PYTHON",
         sandbox_env_vars='{"TOKEN": "value"}',
         sandbox_labels='{"team": "agents"}',
     )
 
-    assert getattr(captured["sandbox_language"], "value", None) == "python"
-    assert captured["sandbox_env_vars"] == {"TOKEN": "value"}
-    assert captured["sandbox_labels"] == {"team": "agents"}
+    assert tool.sandbox_language == "python"
+    assert tool.sandbox_env_vars == {"TOKEN": "value"}
+    assert tool.sandbox_labels == {"team": "agents"}
 
 
-def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_daytona_blank_optional_sandbox_values_become_none() -> None:
     """Cleared dashboard fields should preserve Daytona's optional defaults."""
-    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
-
-    captured: dict[str, object] = {}
-
-    def capture_init(_self: object, **kwargs: object) -> None:
-        captured.update(kwargs)
-
-    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
     tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
-    tool_class(sandbox_language="", sandbox_env_vars="", sandbox_labels="")
+    tool = tool_class(api_key="dt-test", sandbox_language="", sandbox_env_vars="", sandbox_labels="")
 
-    assert captured["sandbox_language"] is None
-    assert captured["sandbox_env_vars"] is None
-    assert captured["sandbox_labels"] is None
+    assert tool.sandbox_language is None
+    assert tool.sandbox_env_vars is None
+    assert tool.sandbox_labels is None
 
 
 @pytest.mark.parametrize(
@@ -331,25 +313,16 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     [({}, True), ({"verify_ssl": None}, True), ({"verify_ssl": True}, True), ({"verify_ssl": False}, False)],
 )
 def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
-    monkeypatch: pytest.MonkeyPatch,
     overrides: dict[str, object],
     *,
     expected: bool,
 ) -> None:
     """Only an explicit false may disable certificate checks for Daytona's API key traffic; unset and null verify."""
-    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
-
-    captured: dict[str, object] = {}
-
-    def capture_init(_self: object, **kwargs: object) -> None:
-        captured.update(kwargs)
-
-    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
     tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
-    tool_class(api_key="dt-test", **overrides)
+    tool = tool_class(api_key="dt-test", **overrides)
 
-    assert captured["verify_ssl"] is expected
+    assert tool.verify_ssl is expected
     fields = {field.name: field for field in _BUILTINS.entries["daytona"].config_fields or []}
     assert fields["verify_ssl"].default is True
 

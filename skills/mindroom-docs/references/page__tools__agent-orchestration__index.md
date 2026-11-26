@@ -270,7 +270,7 @@ If a custom or plugin tool already declares that application parameter, exclude 
 The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and vendor toolkits whose connection lasts only for one run always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 

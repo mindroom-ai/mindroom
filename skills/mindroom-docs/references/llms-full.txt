@@ -12123,10 +12123,9 @@ A `worker_scope: user` worker serves several agents, so each of them reaches eve
 
 ## [`docker`]
 
-`docker` manages containers with functions such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
-It also manages images, volumes, and networks with functions such as `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
+`docker` splits read-only introspection from mutations across three functions: `docker_inspect(action, ...)` (`list_containers`, `inspect_container`, `get_container_logs`, `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`), `docker_container(action, ...)` (`run`, `exec`, `start`, `stop`, `remove`), and `docker_resource(action, ...)` (`pull_image`, `build_image`, `tag_image`, `remove_image`, `create_volume`, `remove_volume`, `create_network`, `remove_network`, `connect_network`, `disconnect_network`).
 Docker daemon access is privileged host control, so `docker` runs in a worker by default, and the runtime that runs it needs a reachable Docker daemon or socket.
-`get_container_logs(stream=True)` returns a message asking for non-streaming mode instead of a live stream.
+The client is isolated from host `~/.docker/config.json` / `DOCKER_CONFIG` registry credentials and proxies, and `include_tools` accepts the consolidated names `docker_inspect`, `docker_container`, and `docker_resource`.
 
 ### Configuration
 
@@ -12144,9 +12143,9 @@ agents:
 ```
 
 ```python
-list_containers()
-run_container("postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
-get_container_logs("postgres", tail=50)
+docker_inspect("list_containers")
+docker_container("run", image="postgres:16", name="postgres", detach=True, environment={"POSTGRES_PASSWORD": "example"})
+docker_inspect("get_container_logs", target="postgres", tail=50)
 ```
 
 ## [`calculator`]
@@ -12313,11 +12312,12 @@ Missing Python dependencies install automatically on first use; see [Automatic D
 
 ## [`sql`]
 
-`sql` provides `list_tables()`, `describe_table(table_name)`, and `run_sql_query(query, limit=10)`.
+`sql` provides `sql_inspect(action, table_name=None)` (actions `list_tables`, `describe_table`) and `run_sql_query(query, limit=10)`.
 `run_sql_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
 Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
 The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
 For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
+PostgreSQL URLs require an explicit host (including Unix-socket `?host=...`), username, password, and database, and reject ambient libpq `passfile`, `PGSERVICE`, and `PGHOSTADDR` fallbacks.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12328,16 +12328,16 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
+| `enable_list_tables` | `boolean` | `true` | Enable the `list_tables` action on `sql_inspect()`. |
+| `enable_describe_table` | `boolean` | `true` | Enable the `describe_table` action on `sql_inspect()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`postgres`]
 
-`postgres` provides `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`postgres` provides `postgres_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 The connection is read-only, so queries cannot modify the database.
-`inspect_query()` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
+`postgres_inspect(action="inspect_query", ...)` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
 `export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
 
 | Option | Type | Required | Default | Notes |
@@ -12362,11 +12362,12 @@ agents:
 
 ## [`redshift`]
 
-`redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`redshift` provides `redshift_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
 Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
 With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
+IAM mode requires an explicit `profile` or both `access_key_id` and `secret_access_key` rather than falling back to ambient AWS default credential chains.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -12400,7 +12401,7 @@ agents:
 
 ## [`neo4j`]
 
-`neo4j` provides `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
+`neo4j` provides `neo4j_inspect(action)` (actions `list_labels`, `list_relationship_types`, `get_schema`) and `run_cypher_query()`.
 Set `enable_run_cypher: false` to give an agent schema visibility without free-form graph queries.
 
 | Option | Type | Required | Default | Notes |
@@ -12409,9 +12410,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 | `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
 | `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
-| `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
-| `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
-| `enable_get_schema` | `boolean` | no | `true` | Enable `get_schema()`. |
+| `enable_list_labels` | `boolean` | no | `true` | Enable the `list_labels` action on `neo4j_inspect()`. |
+| `enable_list_relationships` | `boolean` | no | `true` | Enable the `list_relationship_types` action on `neo4j_inspect()`. |
+| `enable_get_schema` | `boolean` | no | `true` | Enable the `get_schema` action on `neo4j_inspect()`. |
 | `enable_run_cypher` | `boolean` | no | `true` | Enable `run_cypher_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
@@ -12429,9 +12430,9 @@ agents:
 ## [`duckdb`]
 
 `duckdb` is the best choice for repeatable local analytics over files.
-It provides `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
+It provides `duckdb_inspect(action, ...)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`, `full_text_search`), `run_query()`, and `duckdb_manage(action, ...)` (actions `load_path`, `export_table`, `create_fts_index`).
 Without `db_path`, the database lives in memory and is not saved.
-`export_table_to_path()` writes Parquet unless the call passes another format such as `CSV`.
+`duckdb_manage(action="export_table", ...)` writes Parquet unless the call passes `CSV` or `JSON`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12448,23 +12449,23 @@ agents:
 ```
 
 ```python
-create_table_from_path("/workspace/data/orders.parquet", table="orders", replace=True)
+duckdb_manage("load_path", path="/workspace/data/orders.parquet", table="orders", replace=True)
 run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
-export_table_to_path("orders", format="CSV", path="/tmp")
+duckdb_manage("export_table", table="orders", file_format="CSV", path="/tmp")
 ```
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
+`csv` provides `csv_inspect(action, csv_name=None, row_limit=None)` (actions `list`, `columns`, `read`) and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
-| `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
-| `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
-| `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
+| `row_limit` | `number` | `null` | Default row cap for `csv_inspect(action="read", ...)`. |
+| `enable_read_csv_file` | `boolean` | `true` | Enable the `read` action on `csv_inspect()`. |
+| `enable_list_csv_files` | `boolean` | `true` | Enable the `list` action on `csv_inspect()`. |
+| `enable_get_columns` | `boolean` | `true` | Enable the `columns` action on `csv_inspect()`. |
 | `enable_query_csv_file` | `boolean` | `true` | Enable `query_csv_file()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
@@ -12634,21 +12635,21 @@ agents:
 
 ## [`openbb`]
 
-`openbb` provides `get_stock_price(symbol)`, `search_company_symbol()`, `get_company_news(symbol, num_stories=10)`, `get_company_profile()`, and `get_price_targets()`.
+`openbb` provides `openbb_get(action, symbol=None, company_name=None, num_stories=10)` with actions `stock_price`, `search_symbol`, `company_news`, `company_profile`, and `price_targets`.
 Symbols can be comma-separated, such as `AAPL,MSFT`.
-The default `yfinance` provider works without an OpenBB account; set `openbb_pat` or the `OPENBB_PAT` environment variable for premium providers.
+The default `yfinance` provider works out of the box without credentials; credentialed providers are not supported via `openbb_pat` (or `OPENBB_PAT`) in OpenBB 4.7.2 (which removed `obb.account.login`) and fail closed rather than reading host environment variables or `~/.openbb_platform/user_settings.json`.
 Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data providers.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
-| `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
-| `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |
-| `enable_get_company_profile` | `boolean` | `false` | Enable `get_company_profile()`. |
-| `enable_get_price_targets` | `boolean` | `false` | Enable `get_price_targets()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_get_stock_price` | `boolean` | `true` | Enable the `stock_price` action. |
+| `enable_search_company_symbol` | `boolean` | `false` | Enable the `search_symbol` action. |
+| `enable_get_company_news` | `boolean` | `false` | Enable the `company_news` action. |
+| `enable_get_company_profile` | `boolean` | `false` | Enable the `company_profile` action. |
+| `enable_get_price_targets` | `boolean` | `false` | Enable the `price_targets` action. |
+| `all` | `boolean` | `false` | Enable every action. |
 
 ```yaml
 agents:
@@ -12661,21 +12662,21 @@ agents:
 
 ## [`yfinance`]
 
-`yfinance` reads Yahoo Finance data with no credentials.
-Only the current stock price is enabled by default, so enable each additional function the agent needs.
+`yfinance` reads Yahoo Finance data with no credentials through `yfinance_get(action, symbol, period=None, interval="1d", num_stories=3)`.
+Only `stock_price` is enabled by default, so enable each additional action the agent needs.
 
-| Option | Type | Default | Enables |
+| Option | Type | Default | Enables action |
 | --- | --- | --- | --- |
-| `enable_stock_price` | `boolean` | `true` | `get_current_stock_price()` |
-| `enable_company_info` | `boolean` | `false` | `get_company_info()` |
-| `enable_stock_fundamentals` | `boolean` | `false` | `get_stock_fundamentals()` |
-| `enable_income_statements` | `boolean` | `false` | `get_income_statements()` |
-| `enable_key_financial_ratios` | `boolean` | `false` | `get_key_financial_ratios()` |
-| `enable_analyst_recommendations` | `boolean` | `false` | `get_analyst_recommendations()` |
-| `enable_company_news` | `boolean` | `false` | `get_company_news()` |
-| `enable_technical_indicators` | `boolean` | `false` | `get_technical_indicators()` |
-| `enable_historical_prices` | `boolean` | `false` | `get_historical_stock_prices()` |
-| `all` | `boolean` | `false` | Every function |
+| `enable_stock_price` | `boolean` | `true` | `stock_price` |
+| `enable_company_info` | `boolean` | `false` | `company_info` |
+| `enable_stock_fundamentals` | `boolean` | `false` | `fundamentals` |
+| `enable_income_statements` | `boolean` | `false` | `income_statements` |
+| `enable_key_financial_ratios` | `boolean` | `false` | `financial_ratios` |
+| `enable_analyst_recommendations` | `boolean` | `false` | `analyst_recommendations` |
+| `enable_company_news` | `boolean` | `false` | `company_news` |
+| `enable_technical_indicators` | `boolean` | `false` | `technical_indicators` |
+| `enable_historical_prices` | `boolean` | `false` | `historical_prices` |
+| `all` | `boolean` | `false` | Every action |
 
 ```yaml
 agents:
@@ -12689,7 +12690,7 @@ agents:
 
 ## [`financial_datasets_api`]
 
-`financial_datasets_api` reads structured data from Financial Datasets through `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
+`financial_datasets_api` reads structured data from Financial Datasets through `financial_datasets_financials(action, ticker, ...)` (actions `income_statements`, `balance_sheets`, `cash_flow_statements`, `segmented_financials`, `financial_metrics`, `company_info`, `earnings`, `insider_trades`, `institutional_ownership`, `sec_filings`) and `financial_datasets_market(action, ...)` (actions `stock_prices`, `crypto_prices`, `news`, `search_tickers`).
 Set `api_key` or the `FINANCIAL_DATASETS_API_KEY` environment variable; without a key, every call returns `API key not set`.
 
 | Option | Type | Default | Notes |
@@ -16990,7 +16991,7 @@ If a custom or plugin tool already declares that application parameter, exclude 
 The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and vendor toolkits whose connection lasts only for one run always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -17510,19 +17511,20 @@ agents:
 ## [`e2b`]
 
 `e2b` runs code in a hosted E2B sandbox.
-The tool creates one sandbox when it loads and reuses it for its calls.
-It fails to load when sandbox creation fails or no key is available, which reports `E2B_API_KEY not set. Please set the E2B_API_KEY environment variable.`
+The tool creates one sandbox lazily on its first call and reuses it across calls in the reply.
+It fails to load when no API key is available, reporting `E2B API key is required.`
+Requests pin the `e2b.app` domain (ignoring ambient `E2B_DOMAIN`) and fail closed when ambient `E2B_DEBUG=true` is set.
 It provides:
 
-- Code and commands: `run_python_code()`, `run_command()`, `stream_command()`, `run_background_command()`, and `kill_background_command()`.
-- Results of the most recent `run_python_code()` call: `download_png_result()` and `download_chart_data()`.
-- Sandbox files: `upload_file()`, `download_file_from_sandbox()`, `list_files()`, `read_file_content()`, `write_file_content()`, and `watch_directory()`.
-- Servers and lifecycle: `run_server()`, `get_public_url()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
+- `e2b_run(action, ...)`: `python`, `command`, `stream_command`, `background_command`, `kill_background`, and `server`.
+- `e2b_inspect(action, ...)`: `list_files`, `read_file`, `watch_directory`, `status`, `list_sandboxes`, and `public_url`.
+- `e2b_files(action, ...)`: `write`, `upload`, `download`, `download_png`, and `download_chart`.
+- `e2b_lifecycle(action, ...)`: `set_timeout` and `shutdown`.
 
-`upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
-`download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
-`run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
+`e2b_files(action="upload", ...)` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
+`e2b_files(action="download", ...)` and `e2b_inspect(action="read_file", ...)` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
+`e2b_run()` refuses Python and command output larger than 64 MiB with a tool error, so write larger output to a sandbox file instead.
+Downloads and execution artifacts always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -17540,14 +17542,14 @@ agents:
 ## [`daytona`]
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
-It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
+It provides `daytona_run(action, ...)` (`code`, `shell`), `daytona_inspect(action, ...)` (`read_file`, `list_files`), and `daytona_files(action, ...)` (`create_file`, `delete_file`, `change_directory`).
 With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
-Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
+Change it with `daytona_files(action="change_directory", ...)` or a standalone `daytona_run(action="shell", command="cd <directory>")` call.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
-The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
+Set `instructions` to override the default sandbox instructions in the agent prompt.
 
-`verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
+`verify_ssl: false` disables TLS certificate checks for that Daytona toolkit instance, exposing its API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
 
 | Option | Type | Default | Notes |
@@ -17715,19 +17717,19 @@ validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 
 ## `openweather`
 
-`openweather` provides `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
-`get_forecast()` returns 3-hour entries for up to 5 days.
+`openweather` provides `openweather_get(action, location, days=5, limit=1)` with actions `current_weather`, `forecast`, `air_pollution`, and `geocode`.
+The `forecast` action returns 3-hour entries for up to 5 days.
 Weather lookups use the first geocoding match for the location name, so ambiguous names such as "Springfield" can resolve to an unexpected place; add a region or country to the query.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
-| `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
-| `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
-| `enable_air_pollution` | `boolean` | `true` | Enable `get_air_pollution()`. |
-| `enable_geocoding` | `boolean` | `true` | Enable `geocode_location()`. |
-| `all` | `boolean` | `false` | Enable all four functions regardless of the `enable_*` options. |
+| `enable_current_weather` | `boolean` | `true` | Enable the `current_weather` action. |
+| `enable_forecast` | `boolean` | `true` | Enable the `forecast` action. |
+| `enable_air_pollution` | `boolean` | `true` | Enable the `air_pollution` action. |
+| `enable_geocoding` | `boolean` | `true` | Enable the `geocode` action. |
+| `all` | `boolean` | `false` | Enable all four actions regardless of the `enable_*` options. |
 | `timeout` | `number` | `30` | Per-request timeout in seconds. |
 
 ```yaml
@@ -17740,9 +17742,9 @@ agents:
 ```
 
 ```python
-get_current_weather("San Francisco")
-get_forecast("Chicago", days=3)
-geocode_location("Reykjavik", limit=3)
+openweather_get("current_weather", "San Francisco")
+openweather_get("forecast", "Chicago", days=3)
+openweather_get("geocode", "Reykjavik", limit=3)
 ```
 
 ## `shopify`

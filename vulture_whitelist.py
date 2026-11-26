@@ -377,10 +377,6 @@ _.exchange_authorization_code  # MCP SDK OAuth provider callback (src/mindroom/m
 _.exchange_refresh_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 _.revoke_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 
-_.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
-_.read_file_content  # E2BTools registers this override as a sandbox file-read tool (src/mindroom/custom_tools/e2b.py)
-_.run_python_code  # E2BTools registers this override as a code-execution tool (src/mindroom/custom_tools/e2b.py)
-_.download_chart_data  # E2BTools registers this override as a chart-export tool (src/mindroom/custom_tools/e2b.py)
 _.save_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
 _.read_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
 
@@ -489,3 +485,8 @@ _.validate_rule_uid  # Pydantic field validator (src/mindroom/reactive_triggers/
 _.validate_origin_target  # Pydantic model validator (src/mindroom/reactive_triggers/models.py)
 _.get_github_pr_checkpoint  # Public store inspection method exercised by tests (src/mindroom/reactive_triggers/store.py)
 _._validate_spec  # Pydantic model validator (src/mindroom/reactive_triggers/models.py)
+_._general_configs  # Docker APIClient general config cleared to isolate DOCKER_CONFIG (src/mindroom/tools/docker.py)
+_._proxy_configs  # Docker APIClient proxy config cleared to isolate DOCKER_CONFIG (src/mindroom/tools/docker.py)
+_._auth_configs  # Docker APIClient auth config pinned empty so pull/build never reload DOCKER_CONFIG (src/mindroom/tools/docker.py)
+_.rest_client  # Daytona ApiClient REST pool rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
+_._toolbox_api_client  # Daytona SDK toolbox client rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)

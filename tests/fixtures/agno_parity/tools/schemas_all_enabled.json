@@ -1459,18 +1459,38 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_csv_file",
-        "description": "Use this function to read the contents of a csv file `name` without the extension.",
+        "name": "csv_inspect",
+        "description": "Inspect configured CSV files by filename stem.\nActions:\n- `list`: list available CSV names (stems).\n- `columns`: return column names for `csv_name`.\n- `read`: return rows of `csv_name` as JSON, capped by `row_limit` or configured default.",
         "parameters": {
           "type": "object",
           "properties": {
-            "csv_name": {
+            "action": {
               "type": "string",
-              "description": "(str) The name of the csv file to read without the extension."
+              "enum": [
+                "list",
+                "columns",
+                "read"
+              ]
+            },
+            "csv_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "row_limit": {
-              "type": "integer",
-              "description": "(Optional[int]) The number of rows to return. None returns all rows. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1486,63 +1506,7 @@
             }
           },
           "required": [
-            "csv_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_csv_files",
-        "description": "Returns a list of available csv files",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_columns",
-        "description": "Use this function to get the columns of the csv file `csv_name` without the extension.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "csv_name": {
-              "type": "string",
-              "description": "(str) The name of the csv file to get the columns from without the extension."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "csv_name"
+            "action"
           ]
         },
         "strict": false,
@@ -1551,17 +1515,15 @@
       },
       {
         "name": "query_csv_file",
-        "description": "Use this function to run a SQL query on csv file `csv_name` without the extension.\nThe Table name is the name of the csv file without the extension.\nThe SQL Query should be a valid DuckDB SQL query.\nAlways wrap column names with double quotes if they contain spaces or special characters\nRemember to escape the quotes in th e JSON string (use \")\nUse single quotes for string values",
+        "description": "Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`).",
         "parameters": {
           "type": "object",
           "properties": {
             "csv_name": {
-              "type": "string",
-              "description": "(str) The name of the csv file to query"
+              "type": "string"
             },
             "sql_query": {
-              "type": "string",
-              "description": "(str) The SQL Query to run on the csv file."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4074,11 +4036,19 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_labels",
-        "description": "Retrieve all node labels present in the connected Neo4j database.",
+        "name": "neo4j_inspect",
+        "description": "Inspect Neo4j graph metadata and schema.\nActions:\n- `list_labels`: return all node labels.\n- `list_relationship_types`: return all relationship types.\n- `get_schema`: return graph schema visualization data.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_labels",
+                "list_relationship_types",
+                "get_schema"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -4092,57 +4062,9 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_relationship_types",
-        "description": "Retrieve all relationship types present in the connected Neo4j database.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_schema",
-        "description": "Retrieve a visualization of the database schema, including nodes and relationships.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -4150,13 +4072,12 @@
       },
       {
         "name": "run_cypher_query",
-        "description": "Execute an arbitrary Cypher query against the connected Neo4j database.",
+        "description": "Execute a Cypher query against the Neo4j database and return JSON records.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) The Cypher query string to execute."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4460,16 +4381,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_stock_price",
-        "description": "Use this function to get the current stock price for a stock symbol or list of symbols.",
+        "name": "openbb_get",
+        "description": "Fetch equity data from the configured OpenBB provider.\n\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).\n- `search_symbol`: search ticker symbols matching `company_name`.\n- `company_news`: recent news for `symbol` (up to `num_stories`).\n- `company_profile`: company overview for `symbol`.\n- `price_targets`: consensus price targets and recommendations for `symbol`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "symbol": {
+            "action": {
               "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
+              "enum": [
+                "stock_price",
+                "search_symbol",
+                "company_news",
+                "company_profile",
+                "price_targets"
+              ]
             },
-            "mindroom_output_path": {
+            "symbol": {
               "anyOf": [
                 {
                   "type": "string"
@@ -4477,30 +4404,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_company_symbol",
-        "description": "Use this function to get a list of ticker symbols for a company.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
             "company_name": {
-              "type": "string",
-              "description": "(str) The name of the company."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -4508,32 +4414,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "company_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_news",
-        "description": "Use this function to get company news for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
+              ]
             },
             "num_stories": {
-              "type": "integer",
-              "description": "(int) The number of news stories to return. Defaults to 10."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4549,69 +4433,7 @@
             }
           },
           "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_profile",
-        "description": "Use this function to get company profile and overview for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_price_targets",
-        "description": "Use this function to get consensus price target and recommendations for a stock symbol or list of symbols.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
+            "action"
           ]
         },
         "strict": false,
@@ -4632,115 +4454,28 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_current_weather",
-        "description": "Get current weather data for a location.",
+        "name": "openweather_get",
+        "description": "Query OpenWeatherMap for `location` (city, optionally with state/country).\nActions:\n- `current_weather`: current weather conditions.\n- `forecast`: 3-hour forecast entries for `days` (1-5).\n- `air_pollution`: current air pollution and AQI metrics.\n- `geocode`: resolve `location` to up to `limit` coordinate matches.",
         "parameters": {
           "type": "object",
           "properties": {
-            "location": {
+            "action": {
               "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "enum": [
+                "current_weather",
+                "forecast",
+                "air_pollution",
+                "geocode"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_forecast",
-        "description": "Get weather forecast for a location.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "type": "string"
             },
             "days": {
-              "type": "integer",
-              "description": "(int) Number of days for forecast (max 5). Default is 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_air_pollution",
-        "description": "Get current air pollution data for a location.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "location"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "geocode_location",
-        "description": "Convert a location name to geographic coordinates.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {
-              "type": "string",
-              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
+              "type": "integer"
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) Maximum number of location results. Default is 1."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4756,6 +4491,7 @@
             }
           },
           "required": [
+            "action",
             "location"
           ]
         },
@@ -4776,25 +4512,29 @@
     "functions": [
       {
         "name": "create_pandas_dataframe",
-        "description": "Creates a pandas dataframe named `dataframe_name` by running a function `create_using_function` with the parameters `function_parameters`.\nReturns the created dataframe name as a string if successful, otherwise returns an error message.\n\nFor Example:\n- To create a dataframe `csv_data` by reading a CSV file, use: {\"dataframe_name\": \"csv_data\", \"create_using_function\": \"read_csv\", \"function_parameters\": {\"filepath_or_buffer\": \"data.csv\"}}\n- To create a dataframe `csv_data` by reading a JSON file, use: {\"dataframe_name\": \"json_data\", \"create_using_function\": \"read_json\", \"function_parameters\": {\"path_or_buf\": \"data.json\"}}",
+        "description": "Create and store a DataFrame under `dataframe_name` via `pandas.<create_using_function>(**function_parameters)`.",
         "parameters": {
           "type": "object",
           "properties": {
             "dataframe_name": {
-              "type": "string",
-              "description": "The name of the dataframe to create."
+              "type": "string"
             },
             "create_using_function": {
-              "type": "string",
-              "description": "The function to use to create the dataframe."
+              "type": "string"
             },
             "function_parameters": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "The parameters to pass to the function."
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4811,8 +4551,7 @@
           },
           "required": [
             "dataframe_name",
-            "create_using_function",
-            "function_parameters"
+            "create_using_function"
           ]
         },
         "strict": false,
@@ -4821,25 +4560,29 @@
       },
       {
         "name": "run_dataframe_operation",
-        "description": "Runs an operation `operation` on a dataframe `dataframe_name` with the parameters `operation_parameters`.\nReturns the result of the operation as a string if successful, otherwise returns an error message.\n\nFor Example:\n- To get the first 5 rows of a dataframe `csv_data`, use: {\"dataframe_name\": \"csv_data\", \"operation\": \"head\", \"operation_parameters\": {\"n\": 5}}\n- To get the last 5 rows of a dataframe `csv_data`, use: {\"dataframe_name\": \"csv_data\", \"operation\": \"tail\", \"operation_parameters\": {\"n\": 5}}",
+        "description": "Run `operation` on stored DataFrame `dataframe_name` with optional `operation_parameters`.",
         "parameters": {
           "type": "object",
           "properties": {
             "dataframe_name": {
-              "type": "string",
-              "description": "The name of the dataframe to run the operation on."
+              "type": "string"
             },
             "operation": {
-              "type": "string",
-              "description": "The operation to run on the dataframe."
+              "type": "string"
             },
             "operation_parameters": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "The parameters to pass to the operation."
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4856,8 +4599,7 @@
           },
           "required": [
             "dataframe_name",
-            "operation",
-            "operation_parameters"
+            "operation"
           ]
         },
         "strict": false,
@@ -5780,12 +5522,19 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_tables",
-        "description": "Use this function to get a list of table names in the database.",
+        "name": "sql_inspect",
+        "description": "Inspect database tables and schemas via SQLAlchemy.\nActions:\n- `list_tables`: list available table names in the configured schema.\n- `describe_table`: return column names, types, nullability, and defaults for `table_name`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_tables",
+                "describe_table"
+              ]
+            },
+            "table_name": {
               "anyOf": [
                 {
                   "type": "string"
@@ -5793,26 +5542,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "describe_table",
-        "description": "Use this function to describe a table.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "table_name": {
-              "type": "string",
-              "description": "(str) The name of the table to get the schema for."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5828,7 +5558,7 @@
             }
           },
           "required": [
-            "table_name"
+            "action"
           ]
         },
         "strict": false,
@@ -5837,17 +5567,22 @@
       },
       {
         "name": "run_sql_query",
-        "description": "Use this function to run a SQL query and return the result.",
+        "description": "Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty).",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) The query to run."
+              "type": "string"
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7723,241 +7458,29 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_current_stock_price",
-        "description": "Use this function to get the current stock price for a given symbol.",
+        "name": "yfinance_get",
+        "description": "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n- `stock_price`: current/regular market stock price.\n- `company_info`: company profile and key metrics.\n- `fundamentals`: valuation and summary fundamentals.\n- `income_statements`: income statement table as JSON.\n- `financial_ratios`: full ticker info/ratios JSON.\n- `analyst_recommendations`: analyst recommendation history.\n- `company_news`: recent news items (capped by `num_stories`).\n- `technical_indicators`: OHLCV history for `period` (default `3mo`).\n- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "symbol": {
+            "action": {
               "type": "string",
-              "description": "(str) The stock symbol."
+              "enum": [
+                "stock_price",
+                "company_info",
+                "fundamentals",
+                "income_statements",
+                "financial_ratios",
+                "analyst_recommendations",
+                "company_news",
+                "technical_indicators",
+                "historical_prices"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_info",
-        "description": "Use this function to get company information and overview for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_stock_fundamentals",
-        "description": "Use this function to get fundamental data for a given stock symbol yfinance API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_income_statements",
-        "description": "Use this function to get income statements for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_key_financial_ratios",
-        "description": "Use this function to get key financial ratios for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_analyst_recommendations",
-        "description": "Use this function to get analyst recommendations for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_company_news",
-        "description": "Use this function to get company news and press releases for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "num_stories": {
-              "type": "integer",
-              "description": "(int) The number of news stories to return. Defaults to 3."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_technical_indicators",
-        "description": "Use this function to get technical indicators for a given stock symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
+              "type": "string"
             },
             "period": {
-              "type": "string",
-              "description": "(str) The time period for which to retrieve technical indicators.\nValid periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max. Defaults to 3mo."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -7965,36 +7488,13 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "symbol"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_historical_stock_prices",
-        "description": "Use this function to get the historical stock price for a given symbol.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "symbol": {
-              "type": "string",
-              "description": "(str) The stock symbol."
-            },
-            "period": {
-              "type": "string",
-              "description": "(str) The period for which to retrieve historical prices. Defaults to \"1mo\".\nValid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max"
+              ]
             },
             "interval": {
-              "type": "string",
-              "description": "(str) The interval between data points. Defaults to \"1d\".\nValid intervals: 1d,5d,1wk,1mo,3mo"
+              "type": "string"
+            },
+            "num_stories": {
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8010,6 +7510,7 @@
             }
           },
           "required": [
+            "action",
             "symbol"
           ]
         },

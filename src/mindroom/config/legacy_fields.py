@@ -351,18 +351,23 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of consolidated toolkits (scheduler, searxng, memory, todo, file_generation, visualization, unsplash).
-# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
-#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
-#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
-#   and todo respectively.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
+# Legacy format: scheduler, searxng, memory, todo, Wave 5 native toolkits (file_generation, visualization, unsplash),
+#   and Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona) previously exposed individual per-operation function names that could appear in
+#   tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Wave 5 & Wave 6: v2026.11.625 / unreleased); replacement: unreleased; consolidated
+#   into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
-#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name.
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
+#   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -395,6 +400,143 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "csv": {
+        "list_csv_files": "csv_inspect",
+        "get_columns": "csv_inspect",
+        "read_csv_file": "csv_inspect",
+    },
+    "duckdb": {
+        "show_tables": "duckdb_inspect",
+        "describe_table": "duckdb_inspect",
+        "summarize_table": "duckdb_inspect",
+        "inspect_query": "duckdb_inspect",
+        "full_text_search": "duckdb_inspect",
+        "create_table_from_path": "duckdb_manage",
+        "load_local_path_to_table": "duckdb_manage",
+        "load_local_csv_to_table": "duckdb_manage",
+        "load_s3_path_to_table": "duckdb_manage",
+        "load_s3_csv_to_table": "duckdb_manage",
+        "export_table_to_path": "duckdb_manage",
+        "create_fts_index": "duckdb_manage",
+        "get_table_name_from_path": "duckdb_manage",
+    },
+    "sql": {
+        "list_tables": "sql_inspect",
+        "describe_table": "sql_inspect",
+    },
+    "postgres": {
+        "show_tables": "postgres_inspect",
+        "describe_table": "postgres_inspect",
+        "summarize_table": "postgres_inspect",
+        "inspect_query": "postgres_inspect",
+    },
+    "redshift": {
+        "show_tables": "redshift_inspect",
+        "describe_table": "redshift_inspect",
+        "summarize_table": "redshift_inspect",
+        "inspect_query": "redshift_inspect",
+    },
+    "neo4j": {
+        "list_labels": "neo4j_inspect",
+        "list_relationship_types": "neo4j_inspect",
+        "get_schema": "neo4j_inspect",
+    },
+    "yfinance": {
+        "get_current_stock_price": "yfinance_get",
+        "get_company_info": "yfinance_get",
+        "get_stock_fundamentals": "yfinance_get",
+        "get_income_statements": "yfinance_get",
+        "get_key_financial_ratios": "yfinance_get",
+        "get_analyst_recommendations": "yfinance_get",
+        "get_company_news": "yfinance_get",
+        "get_technical_indicators": "yfinance_get",
+        "get_historical_stock_prices": "yfinance_get",
+    },
+    "openbb": {
+        "get_stock_price": "openbb_get",
+        "search_company_symbol": "openbb_get",
+        "get_company_news": "openbb_get",
+        "get_company_profile": "openbb_get",
+        "get_price_targets": "openbb_get",
+    },
+    "financial_datasets_api": {
+        "get_income_statements": "financial_datasets_financials",
+        "get_balance_sheets": "financial_datasets_financials",
+        "get_cash_flow_statements": "financial_datasets_financials",
+        "get_segmented_financials": "financial_datasets_financials",
+        "get_financial_metrics": "financial_datasets_financials",
+        "get_company_info": "financial_datasets_financials",
+        "get_earnings": "financial_datasets_financials",
+        "get_insider_trades": "financial_datasets_financials",
+        "get_institutional_ownership": "financial_datasets_financials",
+        "get_sec_filings": "financial_datasets_financials",
+        "get_stock_prices": "financial_datasets_market",
+        "get_crypto_prices": "financial_datasets_market",
+        "get_news": "financial_datasets_market",
+        "search_tickers": "financial_datasets_market",
+    },
+    "openweather": {
+        "get_current_weather": "openweather_get",
+        "get_forecast": "openweather_get",
+        "get_air_pollution": "openweather_get",
+        "geocode_location": "openweather_get",
+    },
+    "docker": {
+        "list_containers": "docker_inspect",
+        "inspect_container": "docker_inspect",
+        "get_container_logs": "docker_inspect",
+        "list_images": "docker_inspect",
+        "inspect_image": "docker_inspect",
+        "list_volumes": "docker_inspect",
+        "inspect_volume": "docker_inspect",
+        "list_networks": "docker_inspect",
+        "inspect_network": "docker_inspect",
+        "run_container": "docker_container",
+        "exec_in_container": "docker_container",
+        "start_container": "docker_container",
+        "stop_container": "docker_container",
+        "remove_container": "docker_container",
+        "pull_image": "docker_resource",
+        "build_image": "docker_resource",
+        "tag_image": "docker_resource",
+        "remove_image": "docker_resource",
+        "create_volume": "docker_resource",
+        "remove_volume": "docker_resource",
+        "create_network": "docker_resource",
+        "remove_network": "docker_resource",
+        "connect_container_to_network": "docker_resource",
+        "disconnect_container_from_network": "docker_resource",
+    },
+    "e2b": {
+        "run_python_code": "e2b_run",
+        "run_command": "e2b_run",
+        "stream_command": "e2b_run",
+        "run_background_command": "e2b_run",
+        "kill_background_command": "e2b_run",
+        "run_server": "e2b_run",
+        "list_files": "e2b_inspect",
+        "read_file_content": "e2b_inspect",
+        "watch_directory": "e2b_inspect",
+        "get_sandbox_status": "e2b_inspect",
+        "list_running_sandboxes": "e2b_inspect",
+        "get_public_url": "e2b_inspect",
+        "write_file_content": "e2b_files",
+        "upload_file": "e2b_files",
+        "download_file_from_sandbox": "e2b_files",
+        "download_png_result": "e2b_files",
+        "download_chart_data": "e2b_files",
+        "set_sandbox_timeout": "e2b_lifecycle",
+        "shutdown_sandbox": "e2b_lifecycle",
+    },
+    "daytona": {
+        "run_code": "daytona_run",
+        "run_shell_command": "daytona_run",
+        "read_file": "daytona_inspect",
+        "list_files": "daytona_inspect",
+        "create_file": "daytona_files",
+        "delete_file": "daytona_files",
+        "change_directory": "daytona_files",
     },
     "file_generation": {
         "generate_json_file": "generate_file",

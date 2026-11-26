@@ -2954,13 +2954,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "change_directory",
-        "create_file",
-        "delete_file",
-        "list_files",
-        "read_file",
-        "run_code",
-        "run_shell_command"
+        "daytona_files",
+        "daytona_inspect",
+        "daytona_run"
       ],
       "helper_text": null,
       "icon": "FaTerminal",
@@ -3002,30 +2998,9 @@
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
-        "build_image",
-        "connect_container_to_network",
-        "create_network",
-        "create_volume",
-        "disconnect_container_from_network",
-        "exec_in_container",
-        "get_container_logs",
-        "inspect_container",
-        "inspect_image",
-        "inspect_network",
-        "inspect_volume",
-        "list_containers",
-        "list_images",
-        "list_networks",
-        "list_volumes",
-        "pull_image",
-        "remove_container",
-        "remove_image",
-        "remove_network",
-        "remove_volume",
-        "run_container",
-        "start_container",
-        "stop_container",
-        "tag_image"
+        "docker_container",
+        "docker_inspect",
+        "docker_resource"
       ],
       "helper_text": "Docker is privileged. Use a dedicated worker sandbox, or explicitly opt in to unsafe local execution before exposing host Docker access.",
       "icon": "SiDocker",
@@ -3107,25 +3082,10 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "download_chart_data",
-        "download_file_from_sandbox",
-        "download_png_result",
-        "get_public_url",
-        "get_sandbox_status",
-        "kill_background_command",
-        "list_files",
-        "list_running_sandboxes",
-        "read_file_content",
-        "run_background_command",
-        "run_command",
-        "run_python_code",
-        "run_server",
-        "set_sandbox_timeout",
-        "shutdown_sandbox",
-        "stream_command",
-        "upload_file",
-        "watch_directory",
-        "write_file_content"
+        "e2b_files",
+        "e2b_inspect",
+        "e2b_lifecycle",
+        "e2b_run"
       ],
       "helper_text": null,
       "icon": "Terminal",
@@ -3640,29 +3600,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
       "display_name": "Financial Datasets API",
       "docs_url": "https://docs.mindroom.chat/tools/data-and-databases/#financial_datasets_api",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_balance_sheets",
-        "get_cash_flow_statements",
-        "get_company_info",
-        "get_crypto_prices",
-        "get_earnings",
-        "get_financial_metrics",
-        "get_income_statements",
-        "get_insider_trades",
-        "get_institutional_ownership",
-        "get_news",
-        "get_sec_filings",
-        "get_segmented_financials",
-        "get_stock_prices",
-        "search_tickers"
+        "financial_datasets_financials",
+        "financial_datasets_market"
       ],
       "helper_text": null,
       "icon": "TrendingUp",
@@ -5110,9 +5056,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_schema",
-        "list_labels",
-        "list_relationship_types",
+        "neo4j_inspect",
         "run_cypher_query"
       ],
       "helper_text": null,
@@ -5460,19 +5404,14 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Weather data services from OpenWeatherMap API",
       "display_name": "OpenWeather",
       "docs_url": "https://docs.mindroom.chat/tools/location-commerce-and-home/#openweather",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "geocode_location",
-        "get_air_pollution",
-        "get_current_weather",
-        "get_forecast"
+        "openweather_get"
       ],
       "helper_text": null,
       "icon": "WiDaySunny",
@@ -5578,12 +5517,9 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "describe_table",
         "export_table_to_path",
-        "inspect_query",
-        "run_query",
-        "show_tables",
-        "summarize_table"
+        "postgres_inspect",
+        "run_query"
       ],
       "helper_text": null,
       "icon": "SiPostgresql",
@@ -5931,12 +5867,9 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "describe_table",
         "export_table_to_path",
-        "inspect_query",
-        "run_query",
-        "show_tables",
-        "summarize_table"
+        "redshift_inspect",
+        "run_query"
       ],
       "helper_text": null,
       "icon": "AwsRedshift",
@@ -8274,10 +8207,8 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "get_columns",
-        "list_csv_files",
-        "query_csv_file",
-        "read_csv_file"
+        "csv_inspect",
+        "query_csv_file"
       ],
       "helper_text": null,
       "icon": "FaFileCsv",
@@ -8410,20 +8341,9 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "create_fts_index",
-        "create_table_from_path",
-        "describe_table",
-        "export_table_to_path",
-        "full_text_search",
-        "get_table_name_from_path",
-        "inspect_query",
-        "load_local_csv_to_table",
-        "load_local_path_to_table",
-        "load_s3_csv_to_table",
-        "load_s3_path_to_table",
-        "run_query",
-        "show_tables",
-        "summarize_table"
+        "duckdb_inspect",
+        "duckdb_manage",
+        "run_query"
       ],
       "helper_text": null,
       "icon": "Database",
@@ -9447,11 +9367,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_company_news",
-        "get_company_profile",
-        "get_price_targets",
-        "get_stock_price",
-        "search_company_symbol"
+        "openbb_get"
       ],
       "helper_text": null,
       "icon": "FaChartArea",
@@ -9848,10 +9764,8 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "describe_table",
-        "list_tables",
-        "run_sql",
-        "run_sql_query"
+        "run_sql_query",
+        "sql_inspect"
       ],
       "helper_text": null,
       "icon": "Database",
@@ -10142,15 +10056,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_analyst_recommendations",
-        "get_company_info",
-        "get_company_news",
-        "get_current_stock_price",
-        "get_historical_stock_prices",
-        "get_income_statements",
-        "get_key_financial_ratios",
-        "get_stock_fundamentals",
-        "get_technical_indicators"
+        "yfinance_get"
       ],
       "helper_text": null,
       "icon": "FaChartLine",

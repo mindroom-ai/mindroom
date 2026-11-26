@@ -74,22 +74,62 @@ def _module_env_reads(module_name: str) -> set[str]:
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
+def _imported_module_names(source: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def _classify_imports(source: str, agno_modules: set[str], pending: list[str]) -> None:
+    for imported in _imported_module_names(source):
+        if imported == "agno" or imported.startswith("agno."):
+            agno_modules.add(imported)
+        elif imported.startswith(("mindroom.custom_tools.", "mindroom.tools.")):
+            pending.append(imported)
+
+
+def _ast_tool_modules(factory: Any) -> tuple[set[str], set[str]]:  # noqa: ANN401
+    """Collect imported ``agno.*`` and owned ``mindroom.(tools|custom_tools).*`` modules via AST only."""
+    agno_modules: set[str] = set()
+    owned_modules: set[str] = set()
+    pending: list[str] = []
+    seen: set[str] = set()
+    if factory.__module__ == "mindroom.tools":
+        _classify_imports(textwrap.dedent(inspect.getsource(factory)), agno_modules, pending)
+    else:
+        pending.append(factory.__module__)
+
+    while pending:
+        current = pending.pop()
+        if current in seen or current == "mindroom.tools":
+            continue
+        seen.add(current)
+        spec = importlib.util.find_spec(current)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+            continue
+        owned_modules.add(current)
+        _classify_imports(Path(spec.origin).read_text(encoding="utf-8"), agno_modules, pending)
+    return agno_modules, owned_modules
+
+
 def _agno_modules(tool_name: str) -> set[str]:
     """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
     factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
         return set()
+    ast_agno, _owned_modules = _ast_tool_modules(factory)
+    if not ast_agno:
+        return set()
     try:
         toolkit_class = factory()
     except ImportError:
-        # The toolkit's SDK is not installed, so read the Agno modules its registration imports.
-        registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
-        return {
-            node.module
-            for node in ast.walk(registration)
-            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
-        }
-    return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+        return ast_agno
+    mro_agno = {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+    return mro_agno or ast_agno
 
 
 def _imported_mindroom_modules(tree: ast.AST) -> set[str]:
@@ -154,7 +194,9 @@ def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_nam
     modules = _agno_modules(tool_name)
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
     if not modules:
-        native_modules = _native_modules(tool_name)
+        factory = builtin_tool_registry().entries[tool_name].factory
+        owned_modules = _ast_tool_modules(factory)[1] if factory is not None else set()
+        native_modules = _native_modules(tool_name) | owned_modules
         if declared:
             assert native_modules, f"{tool_name} declares env fallbacks without a native toolkit module"
         native_reads = set().union(*map(_module_env_reads, native_modules)) if native_modules else set()
