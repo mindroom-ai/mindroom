@@ -101,7 +101,7 @@ if TYPE_CHECKING:
             default=30,
         ),
     ],
-    dependencies=["requests"],
+    dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#serper",
     function_names=("scrape_webpage", "search_news", "search_scholar", "search_web"),
 )

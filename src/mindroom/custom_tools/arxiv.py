@@ -120,6 +120,8 @@ class ArxivTools(Toolkit):
             str: A JSON of the articles with title, id, authors, pdf_url and summary.
 
         """
+        if num_articles <= 0:
+            return "[]"
         articles: list[dict[str, Any]] = []
         logger.debug("Searching arXiv", query=query)
         search = arxiv.Search(
@@ -128,7 +130,8 @@ class ArxivTools(Toolkit):
             sort_by=arxiv.SortCriterion.Relevance,
             sort_order=arxiv.SortOrder.Descending,
         )
-        for result in arxiv.Client(page_size=num_articles).results(search=search):
+        client = arxiv.Client(page_size=min(num_articles, self.client.page_size))
+        for result in client.results(search=search):
             try:
                 articles.append(_article_metadata(result))
             except Exception:

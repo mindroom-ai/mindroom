@@ -6,7 +6,7 @@ icon: lucide/globe-lock
 
 Approved egress blocks direct internet access from dedicated Kubernetes workers and sends their traffic through a policy-enforcing HTTP proxy.
 A worker can reach a hostname only when it is on the static allowlist or a human has approved a temporary grant in Matrix.
-Use it when worker-routed tools such as `shell` and `python` must not reach arbitrary hosts.
+Use it when worker-routed tools such as `shell` must not reach arbitrary hosts.
 
 ## Enable with the Runtime Chart
 

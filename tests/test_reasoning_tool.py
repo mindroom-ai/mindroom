@@ -19,6 +19,7 @@ def test_reasoning_toolkit_is_native_and_respects_enable_switches() -> None:
     tool_class = reasoning_tools()
 
     assert issubclass(tool_class, Toolkit)
+    assert tool_class is ReasoningTools
     assert tool_class().name == "reasoning_tools"
     assert list(tool_class().functions) == ["think", "analyze"]
     assert list(tool_class(enable_think=False).functions) == ["analyze"]

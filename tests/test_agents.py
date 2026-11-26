@@ -1033,14 +1033,14 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "shell",
         "coding",
     ]
-    config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
+    config.defaults.tools = ["openclaw_compat", "calculator", "scheduler"]
 
     assert config.resolve_agent("summary").tools.tool_names == (
         "browser",
         "openclaw_compat",
         "shell",
         "filesystem",
-        "python",
+        "calculator",
         "scheduler",
         "duckduckgo",
         "website",

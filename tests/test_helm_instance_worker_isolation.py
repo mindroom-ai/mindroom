@@ -3543,7 +3543,7 @@ def test_instance_chart_static_runner_proxies_every_default_worker_execution_too
     env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-tenant42"), "mindroom"))
 
     assert env["MINDROOM_SANDBOX_EXECUTION_MODE"]["value"] == "selective"
-    assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "python", "coding"}
+    assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "coding"}
 
 
 _EGRESS_BROKER_NAME = "mindroom-runtime-egress-broker"

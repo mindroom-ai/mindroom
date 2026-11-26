@@ -25,6 +25,23 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
 ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "knowledge/readers.py", "logging_config.py"})
 REEXPORT = "tool_system/agno_toolkits.py"
+# Once a builtin goes native, neither its registration nor its implementation can import Agno again.
+NATIVE_WAVE_2 = {
+    "arxiv": "arxiv",
+    "baidusearch": "baidusearch",
+    "calculator": "calculator",
+    "custom_api": None,
+    "duckduckgo": "ddgs_search",
+    "googlesearch": "ddgs_search",
+    "hackernews": "hackernews",
+    "pubmed": "pubmed",
+    "reasoning": "reasoning",
+    "serpapi": "serpapi",
+    "serper": "serper",
+    "sleep": "sleep",
+    "wikipedia": "wikipedia",
+    "youtube": "youtube",
+}
 TESTS_ROOT = Path(__file__).resolve().parent
 # The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
 # MindRoom's seams (#3120).
@@ -254,6 +271,14 @@ def test_no_module_outside_the_boundary_imports_agno() -> None:
     violations = boundary_violations()
 
     assert not violations, f"Agno imports outside the boundary: {violations}"
+
+
+def test_wave_2_toolkits_do_not_import_agno() -> None:
+    """Both halves of each converted toolkit stay inside MindRoom's native authoring boundary."""
+    paths = {SOURCE_ROOT / "tools" / f"{name}.py" for name in NATIVE_WAVE_2}
+    paths.update(SOURCE_ROOT / "custom_tools" / f"{name}.py" for name in NATIVE_WAVE_2.values() if name is not None)
+    imports = {str(path.relative_to(SOURCE_ROOT)): agno_imports(path.read_text(encoding="utf-8")) for path in paths}
+    assert not {path: modules for path, modules in imports.items() if modules}
 
 
 def test_reexported_agno_names_are_the_names_the_reexport_binds_from_agno() -> None:

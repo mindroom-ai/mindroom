@@ -4098,7 +4098,7 @@ csv = [
     { name = "duckdb" },
 ]
 custom-api = [
-    { name = "requests" },
+    { name = "httpx" },
 ]
 daytona = [
     { name = "daytona" },
@@ -4310,7 +4310,7 @@ serpapi = [
     { name = "google-search-results" },
 ]
 serper = [
-    { name = "requests" },
+    { name = "httpx" },
 ]
 shopify = [
     { name = "httpx" },
@@ -4498,11 +4498,13 @@ requires-dist = [
     { name = "hiredis", marker = "extra == 'knowledge-graph'" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'brandfetch'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'custom-api'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'giphy'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'hackernews'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'homeassistant'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'jina'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'pubmed'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'serper'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'shopify'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'spotify'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'website'", specifier = ">=0.27" },
@@ -4579,13 +4581,11 @@ requires-dist = [
     { name = "requests", marker = "extra == 'brightdata'" },
     { name = "requests", marker = "extra == 'cal-com'" },
     { name = "requests", marker = "extra == 'clickup'" },
-    { name = "requests", marker = "extra == 'custom-api'" },
     { name = "requests", marker = "extra == 'discord'" },
     { name = "requests", marker = "extra == 'financial-datasets-api'" },
     { name = "requests", marker = "extra == 'linear'" },
     { name = "requests", marker = "extra == 'modelslabs'" },
     { name = "requests", marker = "extra == 'openweather'" },
-    { name = "requests", marker = "extra == 'serper'" },
     { name = "requests", marker = "extra == 'zendesk'" },
     { name = "requests", marker = "extra == 'zoom'" },
     { name = "resend", marker = "extra == 'resend'" },

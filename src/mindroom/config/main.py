@@ -378,7 +378,7 @@ class Config(BaseModel):
 
     egress_broker: EgressBrokerConfig = Field(
         default_factory=EgressBrokerConfig,
-        description="Credential-injecting egress broker for worker shell and python traffic",
+        description="Credential-injecting egress broker for shell traffic",
     )
 
     IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {

@@ -20,6 +20,7 @@ def test_sleep_toolkit_is_native_and_respects_enable_switches() -> None:
     tool_class = sleep_tools()
 
     assert issubclass(tool_class, Toolkit)
+    assert tool_class is SleepTools
     assert tool_class().name == "sleep"
     assert list(tool_class().functions) == ["sleep"]
     assert list(tool_class(enable_sleep=False).functions) == []

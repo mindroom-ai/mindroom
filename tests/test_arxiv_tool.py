@@ -114,6 +114,9 @@ def test_search_and_page_bounds(arxiv_http: list[str], tmp_path: Path) -> None:
     """Search serializes article metadata and read_arxiv_papers honors None and 0 page limits."""
     toolkit = arxiv_tools()(download_dir=tmp_path)
 
+    assert json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=0)) == []
+    assert arxiv_http == []
+
     search_articles = json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=3))
     assert len(search_articles) == 1
     assert search_articles[0]["id"] == "math/0211159v1"

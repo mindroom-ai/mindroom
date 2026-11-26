@@ -470,22 +470,6 @@ def test_without_worker_target_explains_a_worker_scoped_agent_is_required(tmp_pa
     assert "worker-scoped" in str(payload["note"])
 
 
-def test_an_agent_whose_only_command_tool_is_a_primary_python_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
-    """A primary python runs in-process, so the tool lists no services and sends the agent to the operator, not a page."""
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        MINDROOM_PUBLIC_URL="https://mindroom.example",
-        MINDROOM_EGRESS_BROKER_PORT="8768",
-    )
-    agent = AgentConfig(display_name="Code", tools=["python", "egress_credentials"], worker_tools=[])
-
-    payload = _list(_tool(runtime_paths), _context(runtime_paths, agents={"code": agent}))
-
-    assert payload["services"] == []
-    assert payload["manage_url"] is None
-    assert "worker_tools" in str(payload["note"])
-
-
 def test_without_runtime_context_returns_empty_services(tmp_path: Path) -> None:
     """Outside a live request there is no committed config, so the tool reports nothing instead of raising."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -512,7 +496,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's shell and worker Python calls into Agent Keys, inspect available keys, and request missing ones"
+        "Opt this agent's shell calls into Agent Keys, inspect available keys, and request missing ones"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
@@ -867,7 +851,7 @@ def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) ->
     assert "an API key wins over a connected account" in note
     assert (
         "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service: allowing it "
-        "there lets this agent's shell and python commands act as that account with its full access, without the "
+        "there lets this agent's shell commands act as that account with its full access, without the "
         "approval prompts its tools ask for. "
         "Only the user can allow it."
     ) in note
@@ -1308,7 +1292,7 @@ async def test_refuses_without_posting(
         "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
     }
     agent_fields = {
-        "no-agent-keys": {"tools": ["python", "egress_credentials"], "worker_tools": []},
+        "no-agent-keys": {"tools": ["calculator", "egress_credentials"], "worker_tools": []},
         "not-a-user": {"access": {"users": [_BOB]}},
     }.get(case)
     tool, context = _asking(

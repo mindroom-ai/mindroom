@@ -11,7 +11,7 @@ Every `agent()`, `tool()` and `shell()` call of the script is saved with its res
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
 A run that a MindRoom restart interrupts is resumed the same way on its own.
 
-Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `workflow` as trusted arbitrary code with authority comparable to `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
 Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
 Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.

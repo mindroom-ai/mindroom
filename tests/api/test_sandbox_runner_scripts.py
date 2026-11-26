@@ -974,7 +974,7 @@ def _live_primary_script_snapshot(tmp_path: Path, *, private: bool) -> dict[str,
             "agents": {
                 "watcher": watcher,
                 **{
-                    f"helper_{index:03d}": {"display_name": f"Helper {index}", "tools": ["shell", "file", "python"]}
+                    f"helper_{index:03d}": {"display_name": f"Helper {index}", "tools": ["shell", "filesystem"]}
                     for index in range(256)
                 },
             },

@@ -21,7 +21,6 @@ Use it to pick a tool, configure it, and understand why a URL was refused.
 | [`agentql`](#agentql) | AgentQL query extraction in a local browser | `AGENTQL_API_KEY` |
 | [`browserbase`](#browserbase) | Hosted remote browser sessions for navigation, screenshots, and page reads | `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` |
 | [`browser`](#browser) | Multi-step automation of MindRoom's browser or the user's own signed-in browser | None |
-| [`web_browser_tools`](#web_browser_tools) | Opening a URL in the host computer's browser for a person | None |
 
 Each credential can be stored as the tool's `api_key` (or `apify_api_token`, `username`, and `password`) through the dashboard or credential store, or supplied as the environment variable shown.
 Keep password fields out of inline YAML.
@@ -417,17 +416,6 @@ browser_control(action="start", target="desktop")
 browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
 browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
-
-### [`web_browser_tools`]
-
-`web_browser_tools` exposes `open_page(url, new_window=False)`, which opens an `http` or `https` URL in a tab or window of the host computer's browser for a person to use.
-It refuses `file:` paths, other schemes, and scheme-less strings, and returns no page content, so it is not a scraper.
-It only works on a host with a desktop browser.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `enable_open_page` | `boolean` | `true` | Enable `open_page()`. |
-| `all` | `boolean` | `false` | Enable every function. |
 
 ## Related Docs
 

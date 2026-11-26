@@ -66,7 +66,7 @@ def _effective(config: Config) -> list[tuple[str, dict[str, object], bool, bool]
 
 def test_plain_entries_naming_one_toolkit_keep_the_first_position() -> None:
     """Two spellings with no settings and the same lazy flags are one entry where the first one stood."""
-    assert _entries(["shell", "file", "python", "coding"]) == ["shell", "filesystem", "python"]
+    assert _entries(["shell", "file", "docker", "coding"]) == ["shell", "filesystem", "docker"]
     both_deferred = [{"file": {"defer": True}}, {"coding": {"defer": True}}]
     assert _entries(both_deferred) == [{"filesystem": {"defer": True}}]
 
@@ -191,8 +191,8 @@ def test_current_filesystem_settings_load_under_every_spelling(tmp_path: Path) -
 
 def test_tool_name_lists_take_every_spelling() -> None:
     """worker_tools, listening, and background-job exclusions in the config read file and coding."""
-    config = _config(["filesystem", "shell"], worker_tools=["shell", "file", "python", "coding"])
-    assert config.agents["a"].worker_tools == ["shell", "filesystem", "python"]
+    config = _config(["filesystem", "shell"], worker_tools=["shell", "file", "docker", "coding"])
+    assert config.agents["a"].worker_tools == ["shell", "filesystem", "docker"]
     assert DefaultsConfig(worker_tools=["file", "coding"]).worker_tools == ["filesystem"]
     assert ListenConfig(rooms=["lobby"], tools=["memory", "coding.read_file"]).tools == [
         "memory",
@@ -229,7 +229,7 @@ def _load_rules(tmp_path: Path, *rules: str | tuple[str, str]) -> Config:
     pairs = [(rule, "require_approval") if isinstance(rule, str) else rule for rule in rules]
     data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "agents": {"a": {"display_name": "A", "tools": ["python"]}},
+        "agents": {"a": {"display_name": "A", "tools": ["filesystem"]}},
         "tool_approval": {"rules": [{"match": match, "action": action} for match, action in pairs]},
     }
     return Config.validate_with_runtime(data, runtime_paths)
@@ -277,5 +277,5 @@ def test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails
     ["write_file", "edit_file", "grep", "list_files", "*", "*_file", "read_*", "read_file*", "*_files"],
 )
 def test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load(tmp_path: Path, match: str) -> None:
-    """Rules for the new names, python's live list_files, and globs matching both names of a rename load."""
+    """Rules for the new names and globs matching both names of a rename load."""
     assert _load_rules(tmp_path, match).tool_approval.rules[0].match == match

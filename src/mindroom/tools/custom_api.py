@@ -261,7 +261,7 @@ class CustomApiTools(Toolkit):
             default=False,
         ),
     ],
-    dependencies=["requests"],
+    dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#custom_api",
     function_names=("make_request",),
 )

@@ -262,7 +262,7 @@ def _client_with_agents(
     config_data["agents"] = agents
     config_data["defaults"].update(defaults)
     egress_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    # A sandbox runner, so the agents' shell and python calls run in a worker, where the broker reaches them.
+    # A sandbox runner, so the agents' shell calls run in a worker, where the broker reaches them.
     return _admin_client(egress_config_file, MINDROOM_SANDBOX_PROXY_URL="http://sandbox-runner.test")
 
 
@@ -286,7 +286,7 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool, without the `egress_credentials` tool, or whose only command tool is a primary python.
+    without a command tool or without the `egress_credentials` tool.
     Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
@@ -296,11 +296,10 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
             "calculator_team": _keys_agent(["calculator"], worker_scope="shared"),
             "shell_team": _agent(["shell"], worker_scope="shared"),
             "per_user": _keys_agent(["shell"], worker_scope="user"),
-            "per_agent": _keys_agent(["python"], worker_scope="user_agent"),
+            "per_agent": _keys_agent(["shell"], worker_scope="user_agent"),
             "mine": _keys_agent(["shell"], private={"per": "user_agent"}),
             "notes": _keys_agent(["calculator"]),
             "coder": _agent(["shell"]),
-            "host_python": _keys_agent(["python"], worker_scope="shared", worker_tools=[]),
             "host_shell": _keys_agent(["shell"], worker_scope="shared", worker_tools=[]),
         },
     )
@@ -318,7 +317,8 @@ def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environm
     Both read one list, so a tool added there makes its agents eligible without a second edit.
     """
     assert env.EXECUTION_ENV_TOOL_NAMES is sandbox_proxy.EXECUTION_ENV_TOOL_NAMES
-    tools = sorted({*EXECUTION_ENV_TOOL_NAMES, "calculator"})
+    assert "shell" in EXECUTION_ENV_TOOL_NAMES
+    tools = ["calculator", "shell"]
     monkeypatch.setattr(env, "EXECUTION_ENV_TOOL_NAMES", frozenset(tools))
     agents = {f"{tool}_team": _keys_agent([tool], worker_scope="shared") for tool in tools}
 
@@ -329,7 +329,7 @@ def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environm
     ("agents", "has_personal_agents"),
     [
         ({"per_user": _keys_agent(["shell"], worker_scope="user")}, True),
-        ({"per_agent": _keys_agent(["python"], worker_scope="user_agent")}, True),
+        ({"per_agent": _keys_agent(["shell"], worker_scope="user_agent")}, True),
         ({"mine": _keys_agent(["shell"], private={"per": "user_agent"})}, True),
         (
             {

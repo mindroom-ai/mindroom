@@ -68,7 +68,7 @@ workers:
   sandbox:
     # Default worker-routed tools for agents that leave worker_tools unset
     # (personal_agents.mind sets worker_tools explicitly). Never add browser under static_runner.
-    proxyTools: shell,file,python,coding,browser
+    proxyTools: shell,file,coding,browser
     proxyToken:
       existingSecret: mindroom-sandbox-proxy
       key: MINDROOM_SANDBOX_PROXY_TOKEN

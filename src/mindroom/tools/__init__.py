@@ -268,9 +268,7 @@ def _homeassistant_tools() -> type[Toolkit]:
     file_access=ToolFileAccess.NONE,
     requires_primary_runtime=True,
     display_name="Egress Credentials",
-    description=(
-        "Opt this agent's shell and worker Python calls into Agent Keys, inspect available keys, and request missing ones"
-    ),
+    description=("Opt this agent's shell calls into Agent Keys, inspect available keys, and request missing ones"),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
     icon="KeyRound",
