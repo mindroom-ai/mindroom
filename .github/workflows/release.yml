@@ -99,6 +99,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+    outputs:
+      superseded: ${{ steps.appcast-metadata.outputs.superseded }}
     steps:
       # Short-lived token from the mindroom-release-bot GitHub App; minted first
       # so a misconfigured app fails the job before the expensive notarized build.
@@ -222,6 +224,7 @@ jobs:
 
           cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
       - name: Update Sparkle appcast metadata
+        id: appcast-metadata
         env:
           GH_TOKEN: ${{ steps.release-bot.outputs.token }}
           TAG_NAME: ${{ inputs.release_ref }}
@@ -229,23 +232,27 @@ jobs:
           set -o pipefail
           python3 .github/scripts/normalize_appcast.py macos/appcast.xml
 
-          if git diff --quiet -- macos/appcast.xml; then
-            echo "macos/appcast.xml is already up to date."
-            exit 0
-          fi
-
           skip_if_newer() {
             local rev="$1" label="$2" newer
             if git cat-file -e "${rev}:macos/appcast.xml" 2>/dev/null; then
               newer=$(git show "${rev}:macos/appcast.xml" | python3 .github/scripts/check_appcast_version.py --newer-than "$TAG_NAME")
               if [[ -n "$newer" ]]; then
                 echo "${label} already contains newer release ${newer}; skipping ${TAG_NAME}."
+                echo "superseded=true" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
             fi
           }
 
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          skip_if_newer "HEAD" "main"
+
+          if git diff --quiet -- macos/appcast.xml; then
+            echo "macos/appcast.xml is already up to date."
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add macos/appcast.xml
@@ -257,7 +264,14 @@ jobs:
           RELEASE_METADATA_BRANCH="release-metadata/mindroom"
           PUSHED=0
           for attempt in 1 2 3 4 5; do
-            if [[ "$attempt" -gt 1 ]] && git fetch "$REPO_URL" main; then
+            if [[ "$attempt" -gt 1 ]]; then
+              if ! git fetch "$REPO_URL" main; then
+                if [[ "$attempt" -lt 5 ]]; then
+                  echo "Failed to fetch main before retry (attempt ${attempt}/5); retrying..."
+                  sleep 1
+                fi
+                continue
+              fi
               skip_if_newer "FETCH_HEAD" "main"
             fi
             git update-ref -d "refs/remotes/origin/${RELEASE_METADATA_BRANCH}" 2>/dev/null || true
@@ -297,6 +311,7 @@ jobs:
           REMOTE_TIP=$(git ls-remote --heads "$REPO_URL" "refs/heads/${RELEASE_METADATA_BRANCH}" | awk '{print $1}')
           if [[ "$REMOTE_TIP" != "$LOCAL_HEAD" ]]; then
             echo "${RELEASE_METADATA_BRANCH} moved to ${REMOTE_TIP:-<deleted>} after push; skipping PR update for ${TAG_NAME}."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -323,9 +338,11 @@ jobs:
               --title "Update MindRoom release metadata to ${TAG_NAME}" \
               --body-file "$PR_BODY"
           fi
+          echo "superseded=false" >> "$GITHUB_OUTPUT"
   update_homebrew_tap:
     name: Trigger Homebrew tap update
     needs: build_macos_app
+    if: needs.build_macos_app.outputs.superseded != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
