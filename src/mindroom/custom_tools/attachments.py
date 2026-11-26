@@ -342,10 +342,10 @@ def resolve_send_attachment(
     return record, newly_registered
 
 
-def _payload_too_large_detail(failure: MatrixDeliveryFailure, fallback: str) -> str:
-    if failure.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
-        return failure.detail
-    return fallback
+def _too_large_detail(outcome: object) -> str | None:
+    if isinstance(outcome, MatrixDeliveryFailure) and outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+        return outcome.detail
+    return None
 
 
 async def send_resolved_attachments(
@@ -388,15 +388,9 @@ async def send_resolved_attachments(
                 latest_thread_event_id=latest_thread_event_id,
                 extra_content=dict(extra_content),
             )
-            if isinstance(outcome, DeliveredMatrixEvent):
-                attachment_event_id = outcome.event_id
-            elif isinstance(outcome, MatrixDeliveryFailure):
-                return (
-                    attachment_event_ids,
-                    _payload_too_large_detail(outcome, f"Failed to send attachment: {attachment.attachment_id}"),
-                )
-            else:
-                attachment_event_id = None
+            if (too_large := _too_large_detail(outcome)) is not None:
+                return attachment_event_ids, too_large
+            attachment_event_id = outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
         else:
             attachment_event_id = await send_runtime_encrypted_media_message(
                 context.client,
@@ -804,7 +798,7 @@ class AttachmentTools(Toolkit):
         if isinstance(upload_outcome, MatrixDeliveryFailure):
             return _attachment_tool_payload(
                 "error",
-                message=_payload_too_large_detail(upload_outcome, "Failed to upload inline image."),
+                message=_too_large_detail(upload_outcome) or "Failed to upload inline image.",
             )
         mxc_uri, upload_payload = upload_outcome
         if "file" in upload_payload:

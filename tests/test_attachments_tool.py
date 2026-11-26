@@ -52,6 +52,7 @@ from tests.conftest import (
     delivered_matrix_event,
     make_latest_thread_event_id_mock,
     make_relation_lookup,
+    patch_send_file_outcome,
 )
 from tests.test_media_delivery import image_bytes
 
@@ -1036,10 +1037,7 @@ async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -
 
     context = _tool_context(tmp_path, attachment_ids=("att_upload",))
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
@@ -1268,10 +1266,7 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(
@@ -1380,10 +1375,7 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
 
     with (
         tool_runtime_context(ctx),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file")),
-        ) as send_file,
+        patch_send_file_outcome("$file") as send_file,
     ):
         attachment_id = json.loads(await tool.register_attachment("notes.txt"))["attachment_id"]
         notes.unlink()
@@ -1581,10 +1573,7 @@ async def test_matrix_message_attachments_reject_paths_outside_workspace(
     with (
         tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
@@ -1607,10 +1596,7 @@ async def test_matrix_message_attachments_require_a_workspace(tmp_path: Path) ->
 
     with (
         tool_runtime_context(ctx),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
 
@@ -1642,10 +1628,7 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
     )
 
     with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
@@ -1670,10 +1653,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 
     with (
         tool_runtime_context(ctx),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         register_payload = json.loads(await tool.register_attachment(str(generated_file)))
         current_context = get_tool_runtime_context()
@@ -1737,10 +1717,7 @@ async def test_attachments_tool_register_attachment_available_after_task_boundar
 
     with (
         tool_runtime_context(ctx),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         register_payload = json.loads(await asyncio.create_task(tool.register_attachment(str(generated_file))))
         current_context = get_tool_runtime_context()
@@ -1773,10 +1750,7 @@ async def test_matrix_message_attachments_cross_room_send_requires_authorization
 
     with (
         patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
         tool_runtime_context(ctx),
     ):
         result = json.loads(
@@ -1797,10 +1771,7 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
 
     with (
         tool_runtime_context(ctx),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file_evt")),
-        ) as mocked,
+        patch_send_file_outcome() as mocked,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -2010,6 +1981,23 @@ async def test_inline_image_requires_context() -> None:
     assert payload["status"] == "error"
 
 
+def _configure_upload_limit(
+    context: ToolRuntimeContext,
+    *,
+    config_limit: int | None,
+    upload_error: nio.UploadError | None,
+) -> None:
+    context.client.rooms[context.room_id].encrypted = False
+    context.client.content_repository_config = AsyncMock(
+        return_value=(
+            nio.ContentRepositoryConfigResponse(upload_size=config_limit)
+            if config_limit is not None
+            else nio.ContentRepositoryConfigError("unsupported")
+        ),
+    )
+    context.client.upload = AsyncMock(return_value=(upload_error, None))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("config_limit", "upload_error", "expected_limit_fragment"),
@@ -2036,15 +2024,7 @@ async def test_matrix_message_attachments_surfaces_payload_too_large(
     assert record is not None
 
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
-    context.client.rooms[context.room_id].encrypted = False
-    context.client.content_repository_config = AsyncMock(
-        return_value=(
-            nio.ContentRepositoryConfigResponse(upload_size=config_limit)
-            if config_limit is not None
-            else nio.ContentRepositoryConfigError("unsupported")
-        ),
-    )
-    context.client.upload = AsyncMock(return_value=(upload_error, None))
+    _configure_upload_limit(context, config_limit=config_limit, upload_error=upload_error)
     context.client.room_send = AsyncMock()
 
     with tool_runtime_context(context):
@@ -2082,15 +2062,7 @@ async def test_inline_image_surfaces_payload_too_large(
     assert record is not None
 
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
-    context.client.rooms[context.room_id].encrypted = False
-    context.client.content_repository_config = AsyncMock(
-        return_value=(
-            nio.ContentRepositoryConfigResponse(upload_size=config_limit)
-            if config_limit is not None
-            else nio.ContentRepositoryConfigError("unsupported")
-        ),
-    )
-    context.client.upload = AsyncMock(return_value=(upload_error, None))
+    _configure_upload_limit(context, config_limit=config_limit, upload_error=upload_error)
 
     with tool_runtime_context(context):
         payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))

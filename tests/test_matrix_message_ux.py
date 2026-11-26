@@ -15,7 +15,12 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.tool_system.runtime_context import register_tool_runtime_media_attachment, tool_runtime_context
-from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect, make_latest_thread_event_id_mock
+from tests.conftest import (
+    delivered_matrix_event,
+    delivered_matrix_side_effect,
+    make_latest_thread_event_id_mock,
+    patch_send_file_outcome,
+)
 from tests.test_matrix_agent_discovery import context as context  # noqa: PLC0414 - expose imported pytest fixture
 from tests.test_matrix_message_tool import _make_context
 
@@ -266,10 +271,7 @@ async def test_explicit_room_timeline_keeps_all_deliveries_outside_threads(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$text")),
         ) as send,
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file")),
-        ) as send_file,
+        patch_send_file_outcome("$file") as send_file,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -340,10 +342,7 @@ async def test_attachment_id_like_filename_can_be_sent_with_dot_slash(
     runtime = replace(context, storage_path=tmp_path)
     with (
         tool_runtime_context(runtime),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file")),
-        ) as send,
+        patch_send_file_outcome("$file") as send,
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
@@ -365,10 +364,7 @@ async def test_room_recipient_receives_trusted_attachment_references(
     runtime = replace(context, storage_path=tmp_path)
     with (
         tool_runtime_context(runtime),
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message_outcome",
-            new=AsyncMock(return_value=delivered_matrix_event("$file")),
-        ),
+        patch_send_file_outcome("$file"),
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$text")),

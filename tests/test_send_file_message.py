@@ -1198,6 +1198,25 @@ class TestEncryptionEnabledDuringMediaUpload:
         client._send.assert_not_awaited()
 
 
+def _assert_too_large(outcome: object, *fragments: str) -> None:
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+    assert outcome.status == 413
+    for fragment in fragments:
+        assert fragment in outcome.detail
+
+
+async def _warm_cached_limit(tmp_path: Path, limit: int) -> AsyncMock:
+    client = _delivering_client(encrypted=False)
+    client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=limit)
+    seed = tmp_path / "seed.bin"
+    seed.write_bytes(b"a" * min(limit, 5))
+    assert isinstance(await send_file_message_outcome(client, "!room:localhost", seed), DeliveredMatrixEvent)
+    assert cached_homeserver_max_upload_size(client) == limit
+    client.upload.reset_mock()
+    return client
+
+
 class TestHomeserverMaxUploadSize:
     """Tests for homeserver_max_upload_size caching and fail-open behavior."""
 
@@ -1237,7 +1256,7 @@ class TestHomeserverMaxUploadSize:
     @pytest.mark.asyncio
     async def test_client_without_config_method_fails_open(self) -> None:
         """Minimal mock clients lacking content_repository_config fail open to None."""
-        minimal_client = SimpleNamespace()
+        minimal_client = MagicMock(spec=[])
         assert await homeserver_max_upload_size(cast("nio.AsyncClient", minimal_client)) is None
 
 
@@ -1260,14 +1279,7 @@ class TestMediaUploadTooLarge:
         with patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be called")):
             outcome = await send_file_message_outcome(client, "!room:localhost", oversized)
 
-        assert isinstance(outcome, MatrixDeliveryFailure)
-        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert outcome.status == 413
-        assert "report.log" in outcome.detail
-        assert "2.0 KiB" in outcome.detail
-        assert "1.0 KiB" in outcome.detail
-        assert "M_TOO_LARGE" in outcome.detail
-        assert "Compress it" in outcome.detail
+        _assert_too_large(outcome, "report.log", "2.0 KiB", "1.0 KiB", "M_TOO_LARGE", "Compress it")
         client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
 
@@ -1299,12 +1311,7 @@ class TestMediaUploadTooLarge:
             mimetype="image/png",
         )
 
-        assert isinstance(outcome, MatrixDeliveryFailure)
-        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert outcome.status == 413
-        assert "clip.png" in outcome.detail
-        assert "150 B" in outcome.detail
-        assert "100 B" in outcome.detail
+        _assert_too_large(outcome, "clip.png", "150 B", "100 B")
         client.upload.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1355,13 +1362,7 @@ class TestMediaUploadTooLarge:
             mimetype="application/octet-stream",
         )
 
-        assert isinstance(outcome, MatrixDeliveryFailure)
-        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert outcome.status == 413
-        assert "big.bin" in outcome.detail
-        assert "250 B" in outcome.detail
-        assert expected_fragment in outcome.detail
-        assert "Compress it" in outcome.detail
+        _assert_too_large(outcome, "big.bin", "250 B", expected_fragment, "Compress it")
 
     @pytest.mark.asyncio
     async def test_non_413_upload_error_keeps_send_file_message_outcome_none(self, tmp_path: Path) -> None:
@@ -1386,35 +1387,27 @@ class TestMediaUploadTooLarge:
         """Raising m.upload.size on the homeserver unblocks retries on the same client without extra hot-path calls."""
         client = _delivering_client(encrypted=False)
         client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=10)
-        fifteen = tmp_path / "fifteen.bin"
+        fifteen, five, eighteen = tmp_path / "fifteen.bin", tmp_path / "five.bin", tmp_path / "eighteen.bin"
         fifteen.write_bytes(b"a" * 15)
-        five = tmp_path / "five.bin"
         five.write_bytes(b"b" * 5)
-        eighteen = tmp_path / "eighteen.bin"
         eighteen.write_bytes(b"c" * 18)
 
-        rejected = await send_file_message_outcome(client, "!room:localhost", fifteen)
-        assert isinstance(rejected, MatrixDeliveryFailure)
-        assert rejected.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert "10 B" in rejected.detail
+        _assert_too_large(await send_file_message_outcome(client, "!room:localhost", fifteen), "10 B")
         assert client.content_repository_config.await_count == 1
         client.upload.assert_not_awaited()
 
         # Hot path: fitting file reuses the cached limit with zero extra config requests.
-        small = await send_file_message_outcome(client, "!room:localhost", five)
-        assert isinstance(small, DeliveredMatrixEvent)
+        assert isinstance(await send_file_message_outcome(client, "!room:localhost", five), DeliveredMatrixEvent)
         assert client.content_repository_config.await_count == 1
 
         # Homeserver raises the limit; retrying the 15-byte file refreshes the cache and succeeds.
         client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=20)
-        retried = await send_file_message_outcome(client, "!room:localhost", fifteen)
-        assert isinstance(retried, DeliveredMatrixEvent)
+        assert isinstance(await send_file_message_outcome(client, "!room:localhost", fifteen), DeliveredMatrixEvent)
         assert client.content_repository_config.await_count == 2
         assert cached_homeserver_max_upload_size(client) == 20
 
         # Subsequent fitting file reuses the refreshed limit without another config request.
-        larger = await send_file_message_outcome(client, "!room:localhost", eighteen)
-        assert isinstance(larger, DeliveredMatrixEvent)
+        assert isinstance(await send_file_message_outcome(client, "!room:localhost", eighteen), DeliveredMatrixEvent)
         assert client.content_repository_config.await_count == 2
 
     @pytest.mark.asyncio
@@ -1432,15 +1425,9 @@ class TestMediaUploadTooLarge:
         refresh_response: object,
     ) -> None:
         """If a refresh finds no advertised limit or errors, the stale cached limit is evicted and upload proceeds."""
-        client = _delivering_client(encrypted=False)
-        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=10)
-        five = tmp_path / "five.bin"
-        five.write_bytes(b"a" * 5)
+        client = await _warm_cached_limit(tmp_path, 10)
         fifteen = tmp_path / "fifteen.bin"
         fifteen.write_bytes(b"b" * 15)
-
-        assert isinstance(await send_file_message_outcome(client, "!room:localhost", five), DeliveredMatrixEvent)
-        assert cached_homeserver_max_upload_size(client) == 10
 
         client.content_repository_config.return_value = refresh_response
         outcome = await send_file_message_outcome(client, "!room:localhost", fifteen)
@@ -1452,32 +1439,21 @@ class TestMediaUploadTooLarge:
     @pytest.mark.asyncio
     async def test_stale_cached_limit_still_rejects_without_reading_when_limit_unchanged(self, tmp_path: Path) -> None:
         """When a cached limit is confirmed unchanged on refresh, the file is still rejected before read_bytes()."""
-        client = _delivering_client(encrypted=False)
-        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=10)
-        five = tmp_path / "five.bin"
-        five.write_bytes(b"a" * 5)
+        client = await _warm_cached_limit(tmp_path, 10)
         fifteen = tmp_path / "fifteen.bin"
         fifteen.write_bytes(b"b" * 15)
-
-        assert isinstance(await send_file_message_outcome(client, "!room:localhost", five), DeliveredMatrixEvent)
-        client.upload.reset_mock()
 
         with patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be called")):
             outcome = await send_file_message_outcome(client, "!room:localhost", fifteen)
 
-        assert isinstance(outcome, MatrixDeliveryFailure)
-        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert "10 B" in outcome.detail
+        _assert_too_large(outcome, "10 B")
         assert client.content_repository_config.await_count == 2
         client.upload.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_server_413_refreshes_stale_higher_cached_limit(self) -> None:
+    async def test_server_413_refreshes_stale_higher_cached_limit(self, tmp_path: Path) -> None:
         """When the homeserver lowers its limit and rejects with 413, the stale higher cache is refreshed."""
-        client = _delivering_client(encrypted=False)
-        client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=20)
-        assert await homeserver_max_upload_size(client) == 20
-
+        client = await _warm_cached_limit(tmp_path, 20)
         client.content_repository_config.return_value = nio.ContentRepositoryConfigResponse(upload_size=10)
         client.upload.return_value = (nio.UploadError("Too large", status_code="M_TOO_LARGE", http_status=413), None)
 
@@ -1489,7 +1465,5 @@ class TestMediaUploadTooLarge:
             mimetype="application/octet-stream",
         )
 
-        assert isinstance(outcome, MatrixDeliveryFailure)
-        assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        assert "exceeds the homeserver upload limit of 10 B (M_TOO_LARGE)" in outcome.detail
+        _assert_too_large(outcome, "exceeds the homeserver upload limit of 10 B (M_TOO_LARGE)")
         assert cached_homeserver_max_upload_size(client) == 10
