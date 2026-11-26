@@ -15,10 +15,7 @@ from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, MAX_TOKEN_BYTE
 
 __all__ = ["GatewayDecodeError", "GatewayHTTPError", "GatewayTransportError", "ScriptGatewayTransport"]
 
-_CAPABILITY_UNAVAILABLE_MESSAGE = "The MindRoom script capability token is unavailable."
 _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
-_TRANSPORT_ERROR_MESSAGE = "The script gateway transport failed."
-_DECODE_ERROR_MESSAGE = "The script gateway returned invalid JSON."
 
 
 class GatewayHTTPError(RuntimeError):
@@ -29,14 +26,14 @@ class GatewayHTTPError(RuntimeError):
         *,
         status: int,
         reason: str,
-        detail: str | None,
         payload: dict[str, object] | None,
         sent_bytes: int,
     ) -> None:
-        super().__init__(detail or f"Script gateway request failed with status {status}.")
+        raw_detail = payload.get("detail") if payload is not None else None
+        self.detail = str(raw_detail) if raw_detail else None
+        super().__init__(self.detail or f"Script gateway request failed with status {status}.")
         self.status = status
         self.reason = reason
-        self.detail = detail
         self.payload = payload
         self.sent_bytes = sent_bytes
 
@@ -59,21 +56,11 @@ class ScriptGatewayTransport:
 
     def __init__(self, *, timeout_seconds: float) -> None:
         self._gateway_url = _validated_gateway_url(_required_env(GATEWAY_URL_ENV))
-        self._run_id = _required_env(RUN_ID_ENV)
+        self.run_id = _required_env(RUN_ID_ENV)
         self._token = _read_token(Path(_required_env(TOKEN_PATH_ENV)))
         self._timeout_seconds = timeout_seconds
         # Scripts may inherit proxy env vars; never route bearer tokens through a proxy or redirect.
         self._opener = build_opener(ProxyHandler({}), _NoRedirects())
-
-    @property
-    def gateway_url(self) -> str:
-        """Return the validated gateway base URL without a trailing slash."""
-        return self._gateway_url
-
-    @property
-    def run_id(self) -> str:
-        """Return the current script run identifier."""
-        return self._run_id
 
     def request_json(
         self,
@@ -92,7 +79,7 @@ class ScriptGatewayTransport:
             **(headers or {}),
         }
         request = Request(  # noqa: S310 - the constructor restricts the gateway to HTTP(S).
-            f"{self.gateway_url}/{path.lstrip('/')}",
+            f"{self._gateway_url}/{path.lstrip('/')}",
             data=data,
             headers=request_headers,
             method=method,
@@ -103,9 +90,11 @@ class ScriptGatewayTransport:
         except HTTPError as exc:
             raise _http_error(exc, sent_bytes=sent_bytes) from exc
         except (URLError, TimeoutError, OSError, HTTPException) as exc:
-            raise GatewayTransportError(_TRANSPORT_ERROR_MESSAGE) from exc
+            msg = "The script gateway transport failed."
+            raise GatewayTransportError(msg) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise GatewayDecodeError(_DECODE_ERROR_MESSAGE) from exc
+            msg = "The script gateway returned invalid JSON."
+            raise GatewayDecodeError(msg) from exc
 
     def _open(self, request: Request) -> HTTPResponse:
         return self._opener.open(request, timeout=self._timeout_seconds)
@@ -131,8 +120,6 @@ def _validated_gateway_url(raw_url: str) -> str:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
         or "?" in raw_url
         or "#" in raw_url
         or any(ch.isspace() for ch in raw_url)
@@ -143,7 +130,8 @@ def _validated_gateway_url(raw_url: str) -> str:
 
 def _read_token(path: Path) -> str:
     if not path.is_file():
-        raise RuntimeError(_CAPABILITY_UNAVAILABLE_MESSAGE)
+        msg = "The MindRoom script capability token is unavailable."
+        raise RuntimeError(msg)
     if path.stat().st_size > MAX_TOKEN_BYTES:
         raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
     try:
@@ -162,11 +150,9 @@ def _http_error(exc: HTTPError, *, sent_bytes: int) -> GatewayHTTPError:
         except (json.JSONDecodeError, UnicodeDecodeError, OSError, HTTPException):
             parsed = None
     payload = cast("dict[str, object]", parsed) if isinstance(parsed, dict) else None
-    raw_detail = payload.get("detail") if payload is not None else None
     return GatewayHTTPError(
         status=exc.code,
         reason=str(exc.reason),
-        detail=str(raw_detail) if raw_detail else None,
         payload=payload,
         sent_bytes=sent_bytes,
     )

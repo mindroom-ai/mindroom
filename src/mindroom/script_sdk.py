@@ -311,6 +311,7 @@ def _http_error(exc: GatewayHTTPError, *, call_id: str) -> MindRoomToolCallError
     elif 400 <= exc.status < 500:
         kind, retryable = "request_rejected", False
     else:
+        # Blocked 3xx redirect; leave state indeterminate rather than rejected.
         kind, retryable = "unexpected_redirect", False
     return MindRoomToolCallError(
         exc.detail or f"Background tool gateway request failed with status {exc.status}.",

@@ -116,7 +116,7 @@ def test_transport_bypasses_env_proxy_and_sends_auth_and_headers(
         monkeypatch.delenv("no_proxy", raising=False)
 
         transport = ScriptGatewayTransport(timeout_seconds=5.0)
-        assert (transport.gateway_url, transport.run_id) == (url, "run-1")
+        assert transport.run_id == "run-1"
         assert transport.request_json("POST", "calls", {"a": 1}) == {"ok": True}
         assert transport.request_json("GET", "/runs/run-1", headers={"X-Workflow-State": "running"}) == {"ok": True}
 
