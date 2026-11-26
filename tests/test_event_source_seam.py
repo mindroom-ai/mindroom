@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -31,9 +32,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_SOURCE_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
+from mindroom.custom_tools.triggers import TriggersTools
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+from mindroom.matrix.state import MatrixState
+from mindroom.message_target import MessageTarget
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.plugin_lifecycle import PluginLifecycle, PluginLifespans
 from mindroom.reactive_triggers import (
     DispatchResult,
@@ -60,20 +65,26 @@ from mindroom.reactive_triggers import (
 )
 from mindroom.slack.integration import SLACK_INTEGRATION
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     _TEST_PROBE_PREFIX,
     bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     publish_test_plugins,
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _OWNER = "@alice:localhost"
 _OWNER_ALIAS = "@bridge_alice:localhost"
@@ -1062,3 +1073,442 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
             plugin_http.event_source_emitter(stale_request, "acme_builds")
     finally:
         await lifespans.stop()
+
+class _PrivateToolEventSource(EventSource):
+    """Test EventSource exercising OAuth binding, private room checks, defaults, history, and dry-run audience."""
+
+    source_id = "slack_private"
+    description = "Private Slack watch"
+    allowed_kinds = ("message", "mention")
+    match_fields = ("channel_id",)
+    example = "subscribe_event(source_id='slack_private', kind='message')"
+    default_once = False
+    default_new_thread = True
+    default_thread_key_from_event = True
+    default_reopen_on_fire = True
+    private_room_only = True
+
+    def __init__(self, *, visible_to: set[str], connected_users: set[str]) -> None:
+        self.visible_to = visible_to
+        self.connected_users = connected_users
+        self.validate_calls: list[tuple[EventSourceContext, str, dict[str, Any], dict[str, Any] | None]] = []
+        self.history_contexts: list[tuple[EventSourceContext, TriggerEvent | None]] = []
+        self.delivery_contexts: list[EventSourceContext] = []
+
+    async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
+        if ctx.owner_user_id not in self.visible_to:
+            return None
+        return await super().describe_for_user(ctx)
+
+    async def validate_subscription(
+        self,
+        ctx: EventSourceContext,
+        *,
+        kind: str,
+        match: Mapping[str, str | bool | int | list[str]],
+        existing_binding: Mapping[str, str | bool | int] | None = None,
+    ) -> ValidatedSubscription:
+        self.validate_calls.append(
+            (ctx, kind, dict(match), dict(existing_binding) if existing_binding is not None else None),
+        )
+        if ctx.owner_user_id not in self.connected_users:
+            msg = "Connect Slack first"
+            raise OAuthConnectionRequired(
+                msg,
+                provider_id="slack",
+                connect_url="https://example.test/connect/slack",
+            )
+        if kind not in self.allowed_kinds:
+            msg = f"Unsupported kind {kind!r}"
+            raise ValueError(msg)
+        if not set(match).issubset({"channel_id"}):
+            msg = "Only channel_id filter is allowed"
+            raise ValueError(msg)
+        # Deliberately return a forged/empty binding on update to verify triggers.py ignores it and preserves existing.
+        binding = (
+            {"team_id": "FORGED", "slack_user_id": "FORGED"}
+            if existing_binding is not None
+            else {"team_id": "T1", "slack_user_id": "U_ALICE"}
+        )
+        return ValidatedSubscription(kind=kind, match=dict(match), binding=binding)
+
+    def dry_run_audience(self, rule: ReactiveTriggerRecord) -> object:
+        if isinstance(rule.source, ExternalEventSourceSpec) and "slack_user_id" in rule.source.binding:
+            return frozenset({rule.source.binding["slack_user_id"]})
+        return None
+
+    def matches_rule(
+        self,
+        rule: ReactiveTriggerRecord,
+        event: TriggerEvent,
+        *,
+        audience: object = None,
+        has_thread_binding: bool = False,
+    ) -> bool:
+        del has_thread_binding
+        if not isinstance(rule.source, ExternalEventSourceSpec):
+            return False
+        uid = rule.source.binding.get("slack_user_id")
+        if not isinstance(audience, (set, frozenset)) or uid not in audience:
+            return False
+        return matches_external_event(rule.source, event)
+
+    @staticmethod
+    def _is_private_room(state: RoomStateSnapshot | None, owner_user_id: str) -> bool:
+        if state is None:
+            return False
+        joined_or_invited = {
+            state_key
+            for (etype, state_key), content in state.events.items()
+            if etype == "m.room.member" and content.get("membership") in {"join", "invite"}
+        }
+        return owner_user_id in joined_or_invited and joined_or_invited <= {
+            owner_user_id,
+            "@mindroom_research:localhost",
+        }
+
+    async def check_delivery_access(
+        self,
+        ctx: EventSourceContext,
+        *,
+        rule: ReactiveTriggerRecord,
+        event: TriggerEvent | None = None,
+    ) -> DispatchResult | None:
+        del event
+        self.delivery_contexts.append(ctx)
+        if not self._is_private_room(ctx.target_room_state, rule.owner_user_id):
+            return DispatchResult(status="skipped", reason="Room is no longer private")
+        return None
+
+    async def check_history_access(
+        self,
+        ctx: EventSourceContext,
+        *,
+        rule: ReactiveTriggerRecord,
+        event: TriggerEvent | None = None,
+    ) -> bool:
+        self.history_contexts.append((ctx, event))
+        return self._is_private_room(ctx.calling_room_state, rule.owner_user_id) and self._is_private_room(
+            ctx.target_room_state,
+            rule.owner_user_id,
+        )
+
+
+def _tool_room_client(room_members: dict[str, list[str]]) -> SimpleNamespace:
+    rooms = {
+        rid: SimpleNamespace(room_id=rid, users={uid: SimpleNamespace(user_id=uid) for uid in members})
+        for rid, members in room_members.items()
+    }
+
+    async def room_get_state(room_id: str) -> object:
+        if room_id not in room_members:
+            return nio.RoomGetStateError(message="not found", status_code="M_NOT_FOUND")
+        events = [
+            {
+                "type": "m.room.member",
+                "state_key": uid,
+                "sender": uid,
+                "event_id": f"$m_{idx}",
+                "origin_server_ts": 1_000,
+                "content": {"membership": "join"},
+            }
+            for idx, uid in enumerate(room_members[room_id])
+        ]
+        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+
+    return SimpleNamespace(
+        user_id="@mindroom_research:localhost",
+        rooms=rooms,
+        room_get_state=AsyncMock(side_effect=room_get_state),
+    )
+
+
+def _setup_registered_tool_env(
+    tmp_path: Path,
+    *,
+    connected_users: set[str] | None = None,
+) -> tuple[
+    TriggersTools,
+    ReactiveTriggerStore,
+    _PrivateToolEventSource,
+    dict[str, list[str]],
+    Callable[..., ToolRuntimeContext],
+]:
+    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=["priv", "shared"],
+                    access={"users": [_OWNER, _OTHER, admin]},
+                ),
+            },
+            rooms={"priv": {"display_name": "Private"}, "shared": {"display_name": "Shared"}},
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(
+                enabled=True,
+                reactive_enabled=True,
+                admin_users=[admin],
+                event_sources={
+                    "github": GitHubEventSourceConfig(
+                        kind="github",
+                        secret_env="GH_SECRET",  # noqa: S106
+                        allowed_repos=["org/app"],
+                        allowed_events=["push"],
+                        subscribers=[_OWNER],
+                    ),
+                },
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    matrix_state = MatrixState.load(runtime_paths)
+    matrix_state.add_room("priv", private_room, "#priv:localhost", "Private")
+    matrix_state.add_room("shared", shared_room, "#shared:localhost", "Shared")
+    save_matrix_state(matrix_state, runtime_paths)
+
+    registry = EventSourceRegistry(lambda: config, AsyncMock(return_value=0))
+    source = _PrivateToolEventSource(visible_to={_OWNER}, connected_users=set(connected_users or ()))
+    registry.register(source)
+    orchestrator = SimpleNamespace(
+        agent_bots={},
+        reactive_triggers=SimpleNamespace(event_sources=registry, notify_work=MagicMock()),
+    )
+    room_members = {
+        private_room: [_OWNER, "@mindroom_research:localhost"],
+        shared_room: [_OWNER, _OTHER, admin, "@mindroom_research:localhost"],
+    }
+    client = _tool_room_client(room_members)
+
+    def _ctx(
+        *,
+        requester_id: str = _OWNER,
+        room_id: str = private_room,
+        hook_source: str | None = None,
+    ) -> ToolRuntimeContext:
+        reader = make_conversation_reader_mock()
+        reader.latest_room_cursor = AsyncMock(return_value=None)
+        return make_test_tool_runtime_context(
+            agent_name="research",
+            target=MessageTarget.resolve(room_id=room_id, thread_id="$root:localhost", reply_to_event_id=None),
+            requester_id=requester_id,
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            relations=make_relation_lookup(),
+            conversation_reader=reader,
+            orchestrator=orchestrator,
+            hook_source=hook_source,
+        )
+
+    return TriggersTools(), ReactiveTriggerStore(runtime_paths), source, room_members, _ctx
+
+
+@pytest.mark.asyncio
+async def test_triggers_tool_registered_event_source_discovery_subscribe_and_binding_safety(
+    tmp_path: Path,
+) -> None:
+    """TriggersTools discovers registered EventSources, handles OAuth/defaults, and protects binding on update."""
+    tool, store, source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path)
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        owner_list = json.loads(await tool.triggers(action="list"))
+    assert [s["source_id"] for s in owner_list["event_sources"]] == ["github", "slack_private"]
+    assert owner_list["event_sources"][1] == {
+        "source_id": "slack_private",
+        "kind": "registered",
+        "description": "Private Slack watch",
+        "allowed_kinds": ["message", "mention"],
+        "match_fields": ["channel_id"],
+        "example": "subscribe_event(source_id='slack_private', kind='message')",
+        "private_room_only": True,
+    }
+
+    with tool_runtime_context(make_ctx(requester_id=_OTHER, room_id="!shared:localhost")):
+        other_list = json.loads(await tool.triggers(action="list"))
+        other_sub = json.loads(
+            await tool.triggers(action="subscribe_event", source_id="slack_private", kind="message", prompt="Watch"),
+        )
+    assert other_list["event_sources"] == []
+    assert other_sub["status"] == "error"
+    assert "unavailable" in other_sub["message"]
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        need_oauth = json.loads(
+            await tool.triggers(action="subscribe_event", source_id="slack_private", kind="message", prompt="Watch"),
+        )
+    assert (need_oauth["status"], need_oauth["oauth_connection_required"], need_oauth["connect_url"]) == (
+        "error",
+        True,
+        "https://example.test/connect/slack",
+    )
+
+    source.connected_users.add(_OWNER)
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        created = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_1",
+                source_id="slack_private",
+                kind="message",
+                prompt="Summarize Slack ping",
+                match={"channel_id": ["C1", "C2"]},
+            ),
+        )
+        override_created = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_room",
+                source_id="slack_private",
+                kind="mention",
+                prompt="Post in room",
+                target_thread_id="room",
+                once=True,
+                reopen_on_fire=False,
+            ),
+        )
+    assert created["status"] == "ok", created
+    assert (
+        created["trigger"]["once"],
+        created["trigger"]["target"]["new_thread"],
+        created["trigger"]["target"]["thread_key_from_event"],
+        created["trigger"]["target"]["reopen_on_fire"],
+    ) == (False, True, True, True)
+    assert created["trigger"]["source"] == {
+        "source_type": "external_event",
+        "source_id": "slack_private",
+        "kind": "message",
+        "match": {"channel_id": ["C1", "C2"]},
+    }
+    assert "binding" not in json.dumps(created)
+    assert "U_ALICE" not in json.dumps(created)
+    assert (
+        override_created["trigger"]["once"],
+        override_created["trigger"]["target"]["new_thread"],
+        override_created["trigger"]["target"]["thread_key_from_event"],
+        override_created["trigger"]["target"]["reopen_on_fire"],
+    ) == (True, False, False, False)
+
+    stored = store.get_trigger("sl_1")
+    assert stored is not None
+    assert isinstance(stored.source, ExternalEventSourceSpec)
+    assert stored.source.binding == {"team_id": "T1", "slack_user_id": "U_ALICE"}
+    assert source.validate_calls[-1][0].target_room_state is not None
+    assert source.validate_calls[-1][0].credentials_manager is not None
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        updated = json.loads(await tool.triggers(action="update", trigger_id="sl_1", match={"channel_id": ["C3"]}))
+        updated_prompt = json.loads(await tool.triggers(action="update", trigger_id="sl_1", prompt="Updated prompt"))
+        bad_update = json.loads(await tool.triggers(action="update", trigger_id="sl_1", match={"bogus": "x"}))
+    assert (updated["status"], updated_prompt["status"], bad_update["status"]) == ("ok", "ok", "error")
+    assert updated["trigger"]["source"]["match"] == {"channel_id": ["C3"]}
+    assert "binding" not in json.dumps(updated)
+    reloaded = store.get_trigger("sl_1")
+    assert reloaded is not None
+    assert isinstance(reloaded.source, ExternalEventSourceSpec)
+    assert reloaded.source.binding == {"team_id": "T1", "slack_user_id": "U_ALICE"}
+    assert reloaded.source.match == {"channel_id": ["C3"]}
+
+
+@pytest.mark.asyncio
+async def test_triggers_tool_registered_event_source_paused_test_history_and_watch_guard(
+    tmp_path: Path,
+) -> None:
+    """Registered EventSource list paused_reason, dry-run test, calling-room history gating, and watch-turn guard."""
+    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
+    tool, store, _source, room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        created = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_1",
+                source_id="slack_private",
+                kind="message",
+                prompt="Summarize Slack ping",
+                match={"channel_id": ["C3"]},
+            ),
+        )
+        active_list = json.loads(await tool.triggers(action="list"))
+    assert created["status"] == "ok"
+    assert active_list["reactive_triggers"][0]["paused_reason"] is None
+    assert "binding" not in json.dumps(active_list)
+
+    room_members[private_room] = [_OWNER, _OTHER, "@mindroom_research:localhost"]
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        paused_list = json.loads(await tool.triggers(action="list"))
+    assert paused_list["reactive_triggers"][0]["paused_reason"] == "Room is no longer private"
+    room_members[private_room] = [_OWNER, "@mindroom_research:localhost"]
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        dry_hit = json.loads(await tool.triggers(action="test", trigger_id="sl_1", sample_data={"channel_id": "C3"}))
+        dry_miss = json.loads(await tool.triggers(action="test", trigger_id="sl_1", sample_data={"channel_id": "C9"}))
+    assert (dry_hit["matched"], dry_hit["would_fire"], dry_miss["matched"], dry_miss["would_fire"]) == (
+        True,
+        True,
+        False,
+        False,
+    )
+
+    rule = store.get_trigger("sl_1")
+    assert rule is not None
+    assert store.enqueue_firing(
+        "sl_1",
+        "sl-ev-1",
+        TriggerEvent(
+            source_type="external_event",
+            source_id="slack_private",
+            kind="message",
+            event_id="sl-ev-1",
+            timestamp=1_000.0,
+            actor="U_COWORKER",
+            text="Private Slack DM about acquisition",
+            data={"channel_id": "C3"},
+        ),
+        expected_rule_uid=rule.rule_uid,
+    )
+    firing_id = store.list_firings(trigger_id="sl_1")[0].id
+    assert store.claim_firing(firing_id, now=1_001.0, triage_reason="Mentions secret acquisition deal") == "claimed"
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room)):
+        priv_hist = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
+    assert priv_hist["firings"][0]["event"]["text"] == "Private Slack DM about acquisition"
+    assert priv_hist["firings"][0]["triage_reason"] == "Mentions secret acquisition deal"
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=shared_room)):
+        shared_scoped = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
+        shared_unscoped = json.loads(await tool.triggers(action="history"))
+    assert (shared_scoped["status"], shared_unscoped["count"]) == ("error", 0)
+
+    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
+        admin_hist = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
+    assert (admin_hist["firings"][0]["event"], admin_hist["firings"][0]["triage_reason"]) == (None, None)
+    assert "acquisition" not in json.dumps(admin_hist)
+
+    mutating_calls: list[dict[str, Any]] = [
+        {"action": "watch_room", "prompt": "x"},
+        {"action": "watch_thread", "prompt": "x"},
+        {"action": "watch_pr", "repo": "org/repo", "number": 1},
+        {"action": "subscribe_event", "source_id": "slack_private", "kind": "message", "prompt": "x"},
+        {"action": "create", "trigger_id": "d1", "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+        {"action": "update", "trigger_id": "sl_1", "prompt": "hijack"},
+        {"action": "set_enabled", "trigger_id": "sl_1", "enabled": False},
+        {"action": "delete", "trigger_id": "sl_1"},
+        {"action": "rotate_key", "trigger_id": "d1", "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+    ]
+    for watch_hook in ("event_source:slack_private", "slack-watch/w1"):
+        with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room, hook_source=watch_hook)):
+            for call_kwargs in mutating_calls:
+                res = json.loads(await tool.triggers(**call_kwargs))
+                assert (res["status"], res["message"]) == (
+                    "error",
+                    "Ask me in a new message to change your triggers.",
+                )
+            assert json.loads(await tool.triggers(action="list"))["status"] == "ok"
+            assert json.loads(await tool.triggers(action="history", trigger_id="sl_1"))["status"] == "ok"
+            assert json.loads(await tool.triggers(action="test", trigger_id="sl_1"))["status"] == "ok"
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room, hook_source=None)):
+        assert json.loads(await tool.triggers(action="delete", trigger_id="sl_1"))["status"] == "ok"

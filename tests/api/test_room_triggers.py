@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 from fastapi.testclient import TestClient
@@ -19,7 +20,10 @@ from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
+from mindroom.reactive_triggers.dispatch import DispatchResult
+from mindroom.reactive_triggers.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.reactive_triggers.models import (
+    ExternalEventSourceSpec,
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
     ReactiveTriggerRecord,
@@ -288,6 +292,8 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "last_fired_at": 1_764_000_000_000,
         "owner_user_id": ALICE,
         "can_manage": True,
+        "source_id": None,
+        "paused_reason": None,
     }
     assert alice_rows["wh_deploy"] == expected_wh_deploy
     for row in triggers:
@@ -513,3 +519,141 @@ def test_reenabling_github_pr_trigger_over_quota_returns_409(tmp_path: Path) -> 
     resp2 = h2.req("PATCH", ROOM_A, ALICE, "tr_pr_closed", {"enabled": True})
     assert resp2.status_code == 409
     assert "reactive trigger limit" in resp2.json()["detail"]
+
+
+class _RoomTestEventSource(EventSource):
+    def __init__(self, source_id: str, *, private_room_only: bool) -> None:
+        self.source_id = source_id
+        self.description = f"Test {source_id}"
+        self.private_room_only = private_room_only
+
+    async def check_delivery_access(
+        self,
+        ctx: EventSourceContext,
+        *,
+        rule: ReactiveTriggerRecord,
+        event: object = None,
+    ) -> DispatchResult | None:
+        del event
+        if not self.private_room_only:
+            return None
+        if ctx.target_room_state is None:
+            return DispatchResult(status="skipped", reason="Cannot verify private room state")
+        members = {
+            state_key
+            for (etype, state_key), content in ctx.target_room_state.events.items()
+            if etype == "m.room.member" and content.get("membership") in {"join", "invite"}
+        }
+        if members - {rule.owner_user_id}:
+            return DispatchResult(status="skipped", reason="Room has another member")
+        return None
+
+
+def test_registered_event_source_hides_private_room_triggers_and_reports_owner_paused_reason(
+    tmp_path: Path,
+) -> None:
+    """GET hides private_room_only triggers from non-owners, computes live owner paused_reason, and omits match/binding."""
+    room_events: dict[str, list[dict[str, object]]] = {
+        ROOM_A: [
+            {
+                "type": "m.room.member",
+                "state_key": ALICE,
+                "sender": ALICE,
+                "event_id": "$m1",
+                "origin_server_ts": 1_000,
+                "content": {"membership": "join"},
+            },
+        ],
+    }
+    h = _Harness(tmp_path, room_state_events=room_events)
+    registry = EventSourceRegistry(lambda: h.config, AsyncMock(return_value=0))
+    registry.register(_RoomTestEventSource("slack_priv", private_room_only=True))
+    registry.register(_RoomTestEventSource("public_src", private_room_only=False))
+    ensure_app_state(h.app).embedded = SimpleNamespace(  # type: ignore[assignment]
+        reactive_triggers=SimpleNamespace(event_sources=registry),
+    )
+
+    h.add_reactive(
+        "tr_slack",
+        ExternalEventSourceSpec(
+            source_id="slack_priv",
+            kind="message",
+            match={"channel_id": ["C_SECRET"]},
+            binding={"team_id": "T_SECRET", "slack_user_id": "U_SECRET"},
+        ),
+        description="My private Slack watch",
+        prompt="Summarize private Slack DM",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_public",
+        ExternalEventSourceSpec(
+            source_id="public_src",
+            kind="deploy",
+            match={"env": "prod"},
+            binding={"token": "BIND_SECRET"},
+        ),
+        description="Deploy alerts",
+        prompt="Announce deploy",
+        created_at=2.0,
+    )
+    h.add_reactive(
+        "tr_yaml",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push", match={"repo": "org/app"}),
+        description="GitHub push",
+        prompt="Review push",
+        created_at=3.0,
+    )
+
+    # Owner sees all 3 triggers with source_id, live paused_reason=None, and zero match/binding leakage.
+    h.client.room_get_state.reset_mock()
+    alice_resp = h.req("GET", ROOM_A, ALICE)
+    assert alice_resp.status_code == 200
+    alice_rows = {row["trigger_id"]: row for row in alice_resp.json()["triggers"]}
+    assert set(alice_rows) == {"tr_slack", "tr_public", "tr_yaml"}
+    assert alice_rows["tr_slack"]["source_id"] == "slack_priv"
+    assert alice_rows["tr_slack"]["paused_reason"] is None
+    assert alice_rows["tr_public"]["source_id"] == "public_src"
+    assert alice_rows["tr_public"]["paused_reason"] is None
+    assert alice_rows["tr_yaml"]["source_id"] == "github_wh"
+    assert alice_rows["tr_yaml"]["paused_reason"] is None
+    assert h.client.room_get_state.call_count == 1
+    for secret in ("binding", "match", "C_SECRET", "T_SECRET", "U_SECRET", "BIND_SECRET"):
+        assert secret not in alice_resp.text
+
+    # When another person joins ROOM_A, owner sees live paused_reason and non-owner cannot see private_room_only trigger.
+    room_events[ROOM_A].append(
+        {
+            "type": "m.room.member",
+            "state_key": BOB,
+            "sender": BOB,
+            "event_id": "$m2",
+            "origin_server_ts": 2_000,
+            "content": {"membership": "join"},
+        },
+    )
+    alice_paused = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
+    assert alice_paused["tr_slack"]["paused_reason"] == "Room has another member"
+    assert alice_paused["tr_public"]["paused_reason"] is None
+
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    bob_rows = {row["trigger_id"]: row for row in bob_resp.json()["triggers"]}
+    assert set(bob_rows) == {"tr_public", "tr_yaml"}
+    assert "tr_slack" not in bob_resp.text
+    assert "My private Slack watch" not in bob_resp.text
+    assert bob_rows["tr_public"]["source_id"] == "public_src"
+    assert bob_rows["tr_public"]["paused_reason"] is None
+
+    # Owner PATCH also projects source_id and live paused_reason.
+    patched = h.req("PATCH", ROOM_A, ALICE, "tr_slack", {"enabled": False})
+    assert patched.status_code == 200
+    assert patched.json()["source_id"] == "slack_priv"
+    assert patched.json()["paused_reason"] == "Room has another member"
+
+    # Unreadable room state fails closed into paused_reason instead of failing GET with 503.
+    h.client.room_get_state.side_effect = nio.LocalProtocolError("connection reset")
+    alice_unreadable = h.req("GET", ROOM_A, ALICE)
+    assert alice_unreadable.status_code == 200
+    rows_unreadable = {row["trigger_id"]: row for row in alice_unreadable.json()["triggers"]}
+    assert rows_unreadable["tr_slack"]["paused_reason"] == "Cannot verify private room state"

@@ -145,6 +145,11 @@ class EventSource:
             binding=dict(existing_binding) if existing_binding is not None else {},
         )
 
+    def dry_run_audience(self, rule: ReactiveTriggerRecord) -> object:
+        """Return a synthetic ephemeral audience for dry-run `test`, or None by default."""
+        del rule
+        return None
+
     def matches_rule(
         self,
         rule: ReactiveTriggerRecord,

@@ -264,6 +264,7 @@ async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp
         "thread_id": "origin",
         "new_thread": False,
         "thread_key": None,
+        "thread_key_from_event": False,
         "reopen_on_fire": False,
         "prompt": "Alert me on urgent deploys.",
     }
@@ -2440,6 +2441,7 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
         ),
     )
     owner_firing = store.list_firings(trigger_id="owner-private")[0]
+    assert store.claim_firing(owner_firing.id, now=1_001.5, triage_reason="Private body summary") == "claimed"
     assert store.mark_skipped(owner_firing.id, "delivery rate limited")
 
     store.enqueue_firing(
@@ -2471,6 +2473,7 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     assert redacted_row["dedupe_key"] == "$ev_secret"
     assert redacted_row["status"] == "skipped"
     assert redacted_row["error_message"] == "delivery rate limited"
+    assert redacted_row["triage_reason"] is None
     assert redacted_row["event"] is None
     serialized_other = json.dumps(redacted_row)
     assert "classified private room body" not in serialized_other
@@ -2482,6 +2485,7 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
 
     by_id = {row["dedupe_key"]: row for row in unscoped["firings"]}
     assert by_id["$ev_secret"]["event"] is None
+    assert by_id["$ev_secret"]["triage_reason"] is None
     assert by_id["$ev_secret"]["error_message"] == "delivery rate limited"
     assert by_id["$ev_admin"]["event"]["text"] == "admin visible body"
 
