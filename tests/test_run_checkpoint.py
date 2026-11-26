@@ -338,15 +338,16 @@ async def test_checkpoints_leave_a_turn_that_finishes_and_the_turn_after_it_unch
     saves: list[RunStatus] = []
     save_checkpoint = loop_hooks.checkpoint_hooks.__globals__["save_run_checkpoint"]
 
-    async def counting(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        await save_checkpoint(*args, **kwargs)
+    async def counting(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        outcome = await save_checkpoint(*args, **kwargs)
         saves.append(args[2].status)
+        return outcome
 
     monkeypatch.setitem(loop_hooks.checkpoint_hooks.__globals__, "save_run_checkpoint", counting)
     requests, runs = await converse(tmp_path / "checkpointed")
     # Each tool batch saved before it ran, and each later request of its run saved what it sends.
     assert saves == [RunStatus.cancelled] * 4
-    monkeypatch.setattr(loop_hooks, "checkpoint_hooks", lambda _storage: None)
+    monkeypatch.setattr(loop_hooks, "checkpoint_hooks", lambda _storage, **_kwargs: None)
     plain_requests, plain_runs = await converse(tmp_path / "plain")
 
     assert [_wire(request) for request in requests] == [_wire(request) for request in plain_requests]

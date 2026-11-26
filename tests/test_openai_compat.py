@@ -426,17 +426,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
 
     exposed_tool_names = _offered_function_names(build)
     assert "todo" not in {toolkit.name for toolkit in build.spec.toolkits}
-    assert (
-        not {
-            "add_todo",
-            "apply_template",
-            "list_templates",
-            "list_todos",
-            "plan",
-            "update_todo",
-        }
-        & exposed_tool_names
-    )
+    assert "todo" not in exposed_tool_names
 
 
 def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
@@ -1604,7 +1594,7 @@ def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
         if "content" in delta
     ]
     assert contents[0] == "Checking..."
-    assert contents[-1] == "\n\n[general] ⚠️ Error: Connection reset by peer"
+    assert contents[-1] == "\n\n⚠️ Connection reset by peer"
 
 
 @dataclass

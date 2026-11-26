@@ -30,8 +30,8 @@ def test_dotted_name_selects_toolkit_and_function() -> None:
 
     describe = parse_arguments(["tools", "describe", "matrix_message.matrix_message"])
     assert (describe.toolkit, describe.function) == ("matrix_message", "matrix_message")
-    call = parse_arguments(["tools", "call", "todo.add_todo", "--json", "{}"])
-    assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", None)
+    call = parse_arguments(["tools", "call", "todo.todo", "--json", "{}"])
+    assert (call.toolkit, call.function, call.timeout) == ("todo", "todo", None)
 
 
 @pytest.mark.parametrize(
@@ -294,7 +294,7 @@ def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch
 
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    assert main(["tools", "call", "memory.add_memory", "{}"]) == 1
+    assert main(["tools", "call", "memory.memory", "{}"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 

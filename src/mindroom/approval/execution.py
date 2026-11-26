@@ -14,7 +14,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import model_payload, prior_usage_by_run
+from mindroom.ai_run_metadata import ai_run_error_from_metadata, model_payload, prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
@@ -24,6 +24,7 @@ from mindroom.approval.tool_owners import (
 )
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
+from mindroom.error_handling import StructuredReplyError
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -397,7 +398,11 @@ async def _stream_continuation_turn(
         )
     # A quiet turn's empty attempt reports nothing, which completes the turn.
     if not completed or (completed[-1].status is not RunStatus.completed and not (quiet and completed[-1].is_empty)):
-        raise RuntimeError(response_text or "Approval continuation did not complete")
+        message = response_text or "Approval continuation did not complete"
+        error_info = ai_run_error_from_metadata(run_metadata)
+        if error_info is not None:
+            raise StructuredReplyError(message, error_info=error_info)
+        raise RuntimeError(message)
     if presentation.show_tool_calls:
         tool_trace_collector.extend(tool_trace)
     return CompletedApprovalRun(response_text=response_text, metadata_content=run_metadata)

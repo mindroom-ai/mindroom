@@ -9,6 +9,8 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
+import stat
 import time
 from collections import OrderedDict
 from contextvars import Context
@@ -32,6 +34,7 @@ from mindroom.matrix.media import (
     FileOrVideoMessageEvent,
     ImageMessageEvent,
     download_media_bytes,
+    format_byte_size,
     is_audio_message_event,
     is_file_or_video_message_event,
     is_image_message_event,
@@ -53,6 +56,7 @@ from .legacy_attachments import legacy_attachment_source, open_legacy_attachment
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
+    from mindroom.llm.media import File
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
@@ -274,6 +278,66 @@ def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | 
     lines = [f"{_CURRENT_ATTACHMENTS_HEADING} (use tool calls to inspect or process them by ID):"]
     lines.extend(_attachment_provenance_line(record) for record in current_records)
     return "\n".join(lines)
+
+
+_ATTACHMENT_ID_PREFIX = "att_"
+OMITTED_INLINE_FILES_HEADING = "[Inline file attachment omitted]"
+_OMITTED_INLINE_FILES_BASE_GUIDANCE = (
+    "Not included inline because it exceeds the inline attachment budget. "
+    "Do not claim to have read the omitted file content."
+)
+_OMITTED_INLINE_FILES_TOOL_GUIDANCE = (
+    " Use get_attachment(attachment_id, mindroom_output_path=...) to save and inspect it selectively with tools, "
+    "or get_attachment(attachment_id, view=True) if full viewing is needed. "
+    "If attachment tools are unavailable, ask the user for a smaller excerpt."
+)
+_OMITTED_INLINE_FILES_NO_ID_GUIDANCE = " Ask the user for a smaller excerpt."
+OMITTED_INLINE_FILES_PATTERN = re.compile(
+    rf"(\n{{1,2}})?^{re.escape(OMITTED_INLINE_FILES_HEADING)}\n"
+    r"Omitted files: [^\n]+\.\n"
+    rf"{re.escape(_OMITTED_INLINE_FILES_BASE_GUIDANCE)}"
+    rf"(?:{re.escape(_OMITTED_INLINE_FILES_TOOL_GUIDANCE)}|{re.escape(_OMITTED_INLINE_FILES_NO_ID_GUIDANCE)})"
+    r"(?=\n|$)",
+    re.MULTILINE,
+)
+
+
+def _file_byte_size(file: File) -> int | None:
+    """Return ``file``'s size in bytes without reading its full contents from disk, or None when unavailable."""
+    if isinstance(file.content, bytes):
+        return len(file.content)
+    if isinstance(file.content, str):
+        if file.content.isascii():
+            return len(file.content)
+        return file.size if file.size is not None else len(file.content.encode("utf-8"))
+    if file.filepath is not None:
+        try:
+            file_stat = Path(file.filepath).stat()
+        except OSError:
+            return file.size
+        if stat.S_ISREG(file_stat.st_mode):
+            return file_stat.st_size
+    return file.size
+
+
+def format_omitted_inline_files_note(omitted_files: Sequence[File]) -> str:
+    """Return a concise, byte-stable sanitized note naming files omitted from inline prompt media."""
+    labels: list[str] = []
+    has_attachment_id = False
+    for file in omitted_files:
+        raw_name = file.filename or file.name
+        label = (raw_name and rendered_label(raw_name)) or "file"
+        is_attachment = file.id.startswith(_ATTACHMENT_ID_PREFIX)
+        has_attachment_id = has_attachment_id or is_attachment
+        details = [
+            *([rendered_label(file.id)] if is_attachment else []),
+            *([format_byte_size(size)] if (size := _file_byte_size(file)) is not None else []),
+        ]
+        labels.append(f"{label} ({', '.join(details)})" if details else label)
+    guidance = _OMITTED_INLINE_FILES_BASE_GUIDANCE + (
+        _OMITTED_INLINE_FILES_TOOL_GUIDANCE if has_attachment_id else _OMITTED_INLINE_FILES_NO_ID_GUIDANCE
+    )
+    return f"{OMITTED_INLINE_FILES_HEADING}\nOmitted files: {', '.join(labels)}.\n{guidance}"
 
 
 def format_voice_transcript_attachment_guidance(current_records: list[AttachmentRecord]) -> str | None:

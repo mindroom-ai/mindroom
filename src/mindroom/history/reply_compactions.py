@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 # out its answer: the strings an entry takes from outside are cut to these lengths.
 _MAX_CHARS = {"failure_reason": 300, "summary_model": 120}
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
-MAX_REPLY_COMPACTIONS = 8
+_MAX_REPLY_COMPACTIONS = 8
 # ...and within this many bytes as Matrix sends them (ASCII escapes), since an edit carries the list twice.
 # The newest entry is always kept; with its strings cut, it fits on its own.
-MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
+_MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
 
 
 def _capped(key: str, value: object) -> object:
@@ -58,6 +58,7 @@ class ReplyCompactions:
     def __init__(self) -> None:
         self._entries: list[dict[str, object]] = []
         self._progress: _ReplyProgress | None = None
+        self.version: int = 0
 
     def bind(self, progress: _ReplyProgress) -> None:
         """Attach the delivery showing the reply, whose progress places each new compaction."""
@@ -90,6 +91,7 @@ class ReplyCompactions:
         if event.history_budget_tokens is not None:
             entry["history_budget_tokens"] = event.history_budget_tokens
         self._entries.append(entry)
+        self.version += 1
         return entry_id
 
     def update(self, entry_id: str, **fields: object) -> None:
@@ -103,13 +105,14 @@ class ReplyCompactions:
         entry.update({key: _capped(key, value) for key, value in fields.items() if value is not None})
         if entry["status"] != "running":
             entry.pop("runs_remaining", None)
+        self.version += 1
 
     def content(self) -> list[dict[str, object]] | None:
         """Return a copy of the newest entries for the reply's content and frames, or ``None`` when there are none."""
         if not self._entries:
             return None
-        entries = self._entries[-MAX_REPLY_COMPACTIONS:]
-        while len(entries) > 1 and len(json.dumps(entries)) > MAX_REPLY_COMPACTIONS_BYTES:
+        entries = self._entries[-_MAX_REPLY_COMPACTIONS:]
+        while len(entries) > 1 and len(json.dumps(entries)) > _MAX_REPLY_COMPACTIONS_BYTES:
             entries = entries[1:]
         return copy.deepcopy(entries)
 

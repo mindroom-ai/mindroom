@@ -7,7 +7,12 @@ import pytest
 
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
+from mindroom.model_usage import (
+    ContextTokens,
+    message_context_tokens,
+    provider_reports_cache_tokens_outside_input,
+    uncached_input_tokens_from_counts,
+)
 from mindroom.providers.names import ROUTE_PROVIDERS
 
 
@@ -129,4 +134,28 @@ def test_uncached_input_is_unknown_without_input() -> None:
             model_id="gpt-6-luna",
         )
         is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_provider", "model_id"),
+    [
+        ("VertexAI", "vertexai-claude", "custom-endpoint"),
+        ("VertexAI", "vertexai_claude", "custom-endpoint"),
+        ("claude-code", None, "claude-opus-4-6"),
+        (None, "claude-code", "claude-opus-4-6"),
+    ],
+)
+def test_hyphenated_and_underscored_provider_spellings_match_cache_accounting(
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str,
+) -> None:
+    assert (
+        provider_reports_cache_tokens_outside_input(
+            provider=provider,
+            configured_provider=configured_provider,
+            model_id=model_id,
+        )
+        is True
     )

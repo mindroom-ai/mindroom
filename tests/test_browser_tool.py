@@ -31,6 +31,7 @@ from mindroom.agents import build_agent_toolkit
 from mindroom.browser import fetch_guard as browser_fetch_guard
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager, scoped_credentials_path
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
     _PROFILE_SESSIONS,
@@ -42,17 +43,20 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
+from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.declarations import ToolManagedInitArg
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
 from mindroom.worker_computer.protocol import BrowserSession
@@ -4017,3 +4021,180 @@ async def test_worker_shown_page_is_the_active_tab_of_the_profile_the_agent_last
     assert shown_url() == "about:blank"
     await browser.browser("stop")
     assert shown_url() is None
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_resolves_paired_credentials_with_precedence_and_worker_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paired Desktop credentials take precedence over static config, fail closed when invalid, and honor worker scope."""
+    metadata = builtin_tool_registry().entries["browser"]
+    assert ToolManagedInitArg.CREDENTIALS_MANAGER in metadata.managed_init_args
+    assert ToolManagedInitArg.WORKER_TARGET in metadata.managed_init_args
+
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    credentials_manager = get_runtime_credentials_manager(paths)
+
+    # Partial static triples are still rejected even when credentials_manager is supplied.
+    with pytest.raises(ValueError, match="together"):
+        BrowserTools(paths, device_user_id="@static:example.org", credentials_manager=credentials_manager)
+
+    # default_target=desktop without static device_* is allowed when credentials_manager is supplied.
+    worker_target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="routed_agent",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="routed_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+    runtime_context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="context_agent",
+        client=object(),
+    )
+    request = AsyncMock(
+        return_value=DesktopResponse(
+            request_id="req",
+            session_id="session",
+            ok=True,
+            result={"action": "tabs", "provider": "playwright_mcp_extension", "result": "ok"},
+        ),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: runtime_context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+
+    paired_only = BrowserTools(
+        paths,
+        default_target="desktop",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    # 1. No paired credentials and no static pin -> clear setup error.
+    with pytest.raises(ValueError, match="/desktop setup"):
+        await paired_only.browser(action="tabs")
+
+    # 2. Paired READY beats stale static YAML pin and preserves BrowserTools's own 90s timeout + routing_agent_name.
+    save_desktop_credentials(
+        credentials_manager,
+        {
+            "device_user_id": "@paired:example.org",
+            "device_id": "PAIREDDEV",
+            "device_ed25519": "paired-key",
+            "timeout_seconds": 30,
+        },
+        requester_id="@alice:example.org",
+        agent_name="routed_agent",
+    )
+    with_static = BrowserTools(
+        paths,
+        default_target="desktop",
+        device_user_id="@static:example.org",
+        device_id="STATICDEV",
+        device_ed25519="static-key",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    await with_static.browser(action="tabs")
+    sent_target, sent_command = request.await_args.args
+    assert sent_target == PinnedMatrixDevice("@paired:example.org", "PAIREDDEV", "paired-key")
+    assert (sent_command.requester_id, sent_command.agent_name) == ("@alice:example.org", "routed_agent")
+    assert request.await_args.kwargs["timeout_seconds"] == 90.0
+
+    # 3. Paired INVALID fails closed and does NOT fall back to static config.
+    save_desktop_credentials(
+        credentials_manager,
+        {
+            "device_user_id": "@paired:example.org",
+            "device_id": "PAIREDDEV",
+            "device_ed25519": "paired-key",
+            "timeout_seconds": "invalid",
+        },
+        requester_id="@alice:example.org",
+        agent_name="routed_agent",
+    )
+    with pytest.raises(ValueError, match="timeout_seconds must be a number"):
+        await with_static.browser(action="tabs")
+
+    # 4. Paired SETUP_REQUIRED falls back to static config when configured.
+    delete_desktop_credentials(
+        credentials_manager,
+        requester_id="@alice:example.org",
+        agent_name="routed_agent",
+    )
+    request.reset_mock()
+    await with_static.browser(action="tabs")
+    fallback_target, _ = request.await_args.args
+    assert fallback_target == PinnedMatrixDevice("@static:example.org", "STATICDEV", "static-key")
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_corrupt_paired_credentials_fails_closed_without_static_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt/unreadable scoped Desktop pairing file fails closed and never falls back to a static pin."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    credentials_manager = get_runtime_credentials_manager(paths)
+    worker_target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="routed_agent",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="routed_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+    scoped_path = scoped_credentials_path(
+        "desktop",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    scoped_path.parent.mkdir(parents=True, exist_ok=True)
+    scoped_path.write_text("{corrupt-json", encoding="utf-8")
+
+    runtime_context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="routed_agent",
+        client=object(),
+    )
+    request = AsyncMock()
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: runtime_context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+
+    browser = BrowserTools(
+        paths,
+        default_target="desktop",
+        device_user_id="@static:example.org",
+        device_id="STATICDEV",
+        device_ed25519="static-key",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(ValueError, match="could not be read"):
+        await browser.browser(action="tabs")
+
+    request.assert_not_awaited()

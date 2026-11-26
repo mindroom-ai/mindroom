@@ -9,6 +9,7 @@ The oracle keeps the facts a caller observed and the outcome precedence the runt
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -21,6 +22,8 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobClaim,
+    _ended_room_key,
+    _follow_up_candidate_key,
     _parse_saved_job,
 )
 from tests.tool_job_helpers import (
@@ -504,6 +507,20 @@ class JobFuzzRunner:
                 assert self._faults > faults, task.exception()
         pending = {job.job_id for job in pending_outcomes(self.runtime)}
         assert pending == {job_id for job_id in self.jobs if self._pending(job_id)}
+        self._check_indexes()
+
+    def _check_indexes(self) -> None:
+        entries = self.runtime._entries
+        assert set(self.runtime._live) == {jid for jid, e in entries.items() if e.job.status not in TERMINAL_STATUSES}
+        assert self.runtime._claimed == {jid for jid, e in entries.items() if e.claim is not None}
+        expected_rooms = Counter(k for e in entries.values() if (k := _ended_room_key(e.job)) is not None)
+        assert self.runtime._ended_room_counts == dict(expected_rooms)
+        expected_cands: dict[object, set[str]] = {}
+        for jid, entry in entries.items():
+            if (cand_key := _follow_up_candidate_key(entry.job)) is not None:
+                expected_cands.setdefault(cand_key, set()).add(jid)
+        assert {k: set(v) for k, v in self.runtime._follow_up_candidates.items()} == expected_cands
+        assert set(self.runtime._follow_up_revisions) == set(expected_cands)
 
     def _pending(self, job_id: str) -> bool:
         job, model, held = self._current(job_id), self.jobs[job_id], self.claims.get(job_id)

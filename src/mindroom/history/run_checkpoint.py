@@ -27,7 +27,7 @@ from mindroom.session_storage.summary_rows import folded_tool_call_ids
 from mindroom.usage.storage import carry_request_usage
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
     from mindroom.agent_loop.model_loop import BeforeDispatchHook, BeforeRequestHook, LoopState, RequestDecision
     from mindroom.agent_loop.tools import PlannedCall
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.run_storage import RunStorage
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.store import ConversationStore, SaveOutcome
     from mindroom.session_storage.types import ConversationSession
 
 logger = get_logger(__name__)
@@ -60,26 +60,31 @@ class CheckpointHooks(NamedTuple):
     before_dispatch: BeforeDispatchHook
 
 
-async def save_run_checkpoint(store: ConversationStore, session: ConversationSession, run: AnyRunRecord) -> None:
+async def save_run_checkpoint(store: ConversationStore, session: ConversationSession, run: AnyRunRecord) -> SaveOutcome:
     """Save ``run``, a copy of a running run nothing else changes, as a cancelled row; storage failures propagate.
 
     The row is cancelled so that, if the process dies before the run's terminal record replaces it, history skips it
     until recovery finishes it. The run and the session state its tools ran with commit together, without its usage.
     """
     run.status = RunStatus.cancelled
-    await write_with_session_state(
+    return await write_with_session_state(
         store,
         session,
         lambda opened, state: opened.save_run(session, run, record_usage=False, state=state),
     )
 
 
-def checkpoint_hooks(storage: RunStorage | None) -> CheckpointHooks | None:
+def checkpoint_hooks(
+    storage: RunStorage | None,
+    *,
+    on_saved: Callable[[AnyRunRecord], Awaitable[None]] | None = None,
+) -> CheckpointHooks | None:
     """Return the hooks that checkpoint a run stored in ``storage``, or None for a run that stores no turn.
 
     The hooks save the run before a tool batch runs, so its row ends in the calls about to take effect, and before
     each request of a run that has called a tool, so it holds the batch's results, a subagent's answer the run paused
-    for included. A checkpoint a reply can do without: a failed save is logged.
+    for included. A checkpoint a reply can do without: a failed save is logged. ``on_saved``, when given, runs after
+    each checkpoint whose row is written.
     """
     if storage is None or storage.store is None or storage.usage_kind is not None:
         return None
@@ -89,9 +94,12 @@ def checkpoint_hooks(storage: RunStorage | None) -> CheckpointHooks | None:
         # The run's task waits here, so nothing changes the live record and messages the copy shares.
         run = replace(state.record, messages=list(state.messages))
         try:
-            await save_run_checkpoint(store, session, run)
+            outcome = await save_run_checkpoint(store, session, run)
         except Exception:
             logger.warning("run_checkpoint_failed", run_id=run.run_id, exc_info=True)
+            return
+        if outcome == "written" and on_saved is not None:
+            await on_saved(run)
 
     async def before_request(state: LoopState) -> RequestDecision:
         # A run that has called no tool holds only its prompt, which a replayed turn sends again.
@@ -290,6 +298,7 @@ __all__ = [
     "INTERRUPTED_CALL_RESULT",
     "STOPPED_BY_USER_NOTE",
     "CheckpointHooks",
+    "InterruptedTurn",
     "checkpoint_hooks",
     "is_recovered_run",
     "link_response_event",

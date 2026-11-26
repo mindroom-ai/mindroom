@@ -1336,8 +1336,65 @@ def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tag", "include_tag", "exclude_tag"),
+    [
+        ("resolved", None, None),
+        (None, "blocked", None),
+        (None, None, "resolved"),
+    ],
+)
+async def test_list_thread_tags_tag_filters_query_room_wide_inside_thread(
+    tag: str | None,
+    include_tag: str | None,
+    exclude_tag: str | None,
+) -> None:
+    """Passing any tag filter without thread_id queries room-wide even inside an active thread."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
+            new=AsyncMock(),
+        ) as mock_normalize,
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value=_listing(
+                    {
+                        "$other-thread:localhost": _state(
+                            "$other-thread:localhost",
+                            resolved=_record(),
+                            blocked=_record(),
+                        ),
+                    },
+                ),
+            ),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(
+            await tool.list_thread_tags(tag=tag, include_tag=include_tag, exclude_tag=exclude_tag),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert list(payload["threads"]) == ["$other-thread:localhost"]
+    mock_normalize.assert_not_awaited()
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=tag,
+        include_tag=include_tag,
+        exclude_tag=exclude_tag,
+        include_untagged=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_thread_tags_filters_thread_specific_payload() -> None:
-    """Thread-specific listing should support a tag filter through the shared helper."""
+    """Explicit thread_id with a tag filter still returns single-thread output."""
     tool = ThreadTagsTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
 
@@ -1362,9 +1419,11 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(tag="blocked"))
+        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", tag="blocked"))
 
     assert payload["status"] == "ok"
+    assert "room_wide" not in payload
+    assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["tags"]["blocked"]["data"] == {"blocked_by": ["$other:localhost"]}
     assert payload["tags"]["blocked"]["set_by"] == "@user:localhost"
     assert datetime.fromisoformat(payload["tags"]["blocked"]["set_at"]).tzinfo is not None
@@ -1410,25 +1469,29 @@ async def test_list_thread_tags_thread_specific_include_exclude_filters() -> Non
         tool_runtime_context(context),
     ):
         # include_tag matches → thread returned with all tags
-        payload = json.loads(await tool.list_thread_tags(include_tag="blocked"))
+        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", include_tag="blocked"))
         assert payload["status"] == "ok"
         assert "blocked" in payload["tags"]
         assert "resolved" in payload["tags"]
 
         # exclude_tag matches → thread excluded (empty tags)
-        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved"))
+        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", exclude_tag="resolved"))
         assert payload["status"] == "ok"
         assert payload["tags"] == {}
 
         # include_tag matches but exclude_tag also matches → excluded
         payload = json.loads(
-            await tool.list_thread_tags(include_tag="blocked", exclude_tag="resolved"),
+            await tool.list_thread_tags(
+                thread_id="$ctx-thread:localhost",
+                include_tag="blocked",
+                exclude_tag="resolved",
+            ),
         )
         assert payload["status"] == "ok"
         assert payload["tags"] == {}
 
         # include_tag doesn't match → excluded
-        payload = json.loads(await tool.list_thread_tags(include_tag="nonexistent"))
+        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", include_tag="nonexistent"))
         assert payload["status"] == "ok"
         assert payload["tags"] == {}
 

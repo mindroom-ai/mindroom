@@ -2840,7 +2840,7 @@ async def test_editing_a_pre_approved_task_through_tool_is_refused_before_parsin
         tool_runtime_context(context),
         pytest.raises(SchedulingError, match="cannot be edited; cancel it and schedule the call again"),
     ):
-        await SchedulerTools().edit_schedule(task_id="task1234", message="move it to 10am")
+        await SchedulerTools().scheduler(action="edit", task_id="task1234", message="move it to 10am")
 
     context.client.room_put_state.assert_not_awaited()
 

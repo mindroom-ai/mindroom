@@ -158,6 +158,15 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
+def ai_run_error_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return the structured ``io.mindroom.ai_run["error"]`` payload from collected run metadata, if present."""
+    if run_metadata is None:
+        return None
+    ai_run_metadata = run_metadata.get(AI_RUN_METADATA_KEY)
+    error = ai_run_metadata.get("error") if isinstance(ai_run_metadata, dict) else None
+    return dict(error) if isinstance(error, dict) else None
+
+
 def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> float | None:
     """Return the USD cost a reply's AI run metadata reports, or None when the cost is unknown.
 
@@ -354,6 +363,7 @@ def build_terminal_note_ai_run_metadata_content(
     status: Literal["completed", "cancelled", "error"],
     *,
     model: Mapping[str, str] | None = None,
+    error_info: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build terminal ``io.mindroom.ai_run`` metadata for a note or finalized reply without full run metrics."""
     payload: dict[str, Any] = {
@@ -362,6 +372,8 @@ def build_terminal_note_ai_run_metadata_content(
     }
     if model is not None:
         payload["model"] = dict(model)
+    if error_info is not None:
+        payload["error"] = dict(error_info)
     return {AI_RUN_METADATA_KEY: payload}
 
 
@@ -381,6 +393,7 @@ def build_ai_run_metadata_content(
     prior_usage: Sequence[RunMetrics] = (),
     context_run: AnyRunRecord | None = None,
     prepared_history: PreparedHistoryState | None = None,
+    error_info: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the Matrix event content fragment for a reply whose turn ended with one AI run.
 
@@ -449,5 +462,7 @@ def build_ai_run_metadata_content(
     if prepared_history is not None:
         payload.update(_prepared_history_payload(prepared_history))
     payload["tools"] = {"count": tool_count}
+    if error_info is not None:
+        payload["error"] = dict(error_info)
 
     return {AI_RUN_METADATA_KEY: payload}

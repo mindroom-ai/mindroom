@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.types import MessageMetrics
+    from mindroom.llm.usage import MessageMetrics
 
 _LIMIT = {"max_cost_usd": 1.0, "max_concurrent": 2}
 

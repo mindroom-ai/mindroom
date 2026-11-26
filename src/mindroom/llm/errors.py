@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 # media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
 # The marker of a transport failure that timed out, such as an HTTP connect or read timeout, so callers that report
-# timeouts need not read the error's text; other transport failures carry ``connection_error``.
+# timeouts need not read the error's text.
 TRANSPORT_TIMEOUT = "timeout"
+# The marker of a non-timeout transport failure, such as DNS failure, a refused connect, or a dropped connection.
+CONNECTION_ERROR = "connection_error"
 # The marker of a response the model's safeguards refused: neither a retry nor a resend without the request's media can
 # change the answer.
 SAFEGUARD_REFUSAL = "refusal"
@@ -29,6 +31,8 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 # The marker of a request rejected because it replayed provider-encrypted state another upstream created: the request
 # pipeline resends it once without that state, and the request's media did not cause it.
 ENCRYPTED_REPLAY_REJECTED = "encrypted_replay_rejected"
+# The marker of a stream that went silent past the idle timeout and was retried once.
+STREAM_STALLED = "stream_stalled"
 # The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "The model's safeguards refused the response"
 
@@ -191,12 +195,14 @@ def fails_over(error: ProviderError) -> bool:
 
 
 __all__ = [
+    "CONNECTION_ERROR",
     "ENCRYPTED_REPLAY_REJECTED",
     "MALFORMED_TOOL_CALL",
     "MISSING_API_KEY",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
     "QUOTA_EXHAUSTED",
     "SAFEGUARD_REFUSAL",
+    "STREAM_STALLED",
     "TOKENS_PER_MINUTE",
     "TRANSPORT_TIMEOUT",
     "AuthenticationFailed",

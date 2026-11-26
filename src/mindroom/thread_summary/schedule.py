@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 _PREQUEUE_CONCURRENCY_MARGIN = 2
 # A new thread's first reply brings it to two messages: the prompt and the answer.
 _NEW_THREAD_SIZE_AFTER_FIRST_REPLY = 2
+_UNTITLED_FAILURE_COOLDOWN_SECONDS = 60.0
 
 
 @dataclass
@@ -37,6 +39,7 @@ class _ThreadSummaryBaselines:
     )
     _provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
     _superseded_provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
+    _retry_after: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
 
     def claim_provisional_title(self, room_id: str, thread_id: str) -> bool:
         """Claim one thread's single prompt-only title attempt, so only the first responder in the process makes it."""
@@ -62,9 +65,32 @@ class _ThreadSummaryBaselines:
         return self._counts.get((room_id, thread_id), 0)
 
     def record(self, room_id: str, thread_id: str, message_count: int) -> None:
-        """Raise one thread's summarized message count to ``message_count``."""
+        """Raise one thread's summarized message count to ``message_count`` and clear any failure cooldown when positive."""
         if message_count > self.count(room_id, thread_id):
             self._counts[room_id, thread_id] = message_count
+        if message_count > 0:
+            self._retry_after.pop((room_id, thread_id), None)
+
+    def record_failure_cooldown(
+        self,
+        room_id: str,
+        thread_id: str,
+        cooldown_seconds: float = _UNTITLED_FAILURE_COOLDOWN_SECONDS,
+    ) -> None:
+        """Delay retrying an untitled thread's failed summary pass until the cooldown elapses."""
+        key = (room_id, thread_id)
+        self._retry_after[key] = max(self._retry_after.get(key, 0.0), time.monotonic() + cooldown_seconds)
+
+    def in_failure_cooldown(self, room_id: str, thread_id: str) -> bool:
+        """Return whether an untitled thread's failed summary pass is still cooling down."""
+        key = (room_id, thread_id)
+        deadline = self._retry_after.get(key)
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            return True
+        self._retry_after.pop(key, None)
+        return False
 
     def next_threshold(self, room_id: str, thread_id: str, config: Config) -> int:
         """Return the message count at which one thread's next automatic summary is due."""
@@ -112,10 +138,12 @@ def should_queue_thread_summary(
     message_count_hint: int | None,
 ) -> bool:
     """Return whether summary generation or room-vocabulary upkeep is due."""
-    if message_count_hint is None:
-        return True
-    threshold = THREAD_SUMMARY_BASELINES.next_threshold(room_id, thread_id, config)
-    return message_count_hint >= threshold - _PREQUEUE_CONCURRENCY_MARGIN or claim_vocabulary_check(
+    summary_due = not THREAD_SUMMARY_BASELINES.in_failure_cooldown(room_id, thread_id) and (
+        message_count_hint is None
+        or message_count_hint
+        >= THREAD_SUMMARY_BASELINES.next_threshold(room_id, thread_id, config) - _PREQUEUE_CONCURRENCY_MARGIN
+    )
+    return summary_due or claim_vocabulary_check(
         room_id,
         config,
         runtime_paths,

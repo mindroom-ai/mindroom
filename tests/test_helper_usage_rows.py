@@ -37,7 +37,8 @@ from mindroom.config.resolution import entity_model_name
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.helper_usage import HelperUsageOwner
-from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.policy import resolve_history_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.history.types import HistoryScope
@@ -354,12 +355,10 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     )
     seed_session(storage, session)
     _scripted(monkeypatch, "A summary of the conversation.")
-    inputs = resolve_entity_preparation_inputs(
+    inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=paths,
         history_settings=config.resolve_scope("test_agent").history_settings,
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     )
     result = await _compact_stored_scope(
         ScopeSessionContext(

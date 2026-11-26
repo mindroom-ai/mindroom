@@ -55,11 +55,13 @@ from mindroom.config.legacy_access import (
     validate_access_migration_source,
 )
 from mindroom.config.legacy_fields import (
+    RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_PROMPT_NAMES,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_consolidated_approval_error,
     retired_dynamic_workflow_approval_error,
     retired_trigger_approval_error,
 )
@@ -1617,6 +1619,20 @@ class Config(BaseModel):
         tools, skipped = candidate_tool_registry(self, runtime_paths)
         if skipped and not tolerate_plugin_load_errors:
             raise skipped[0].error
+        self._validate_tool_registry(tools)
+
+    def validate_tool_registry(self, tools: ToolRegistry) -> None:
+        """Validate authored tool references, overrides, and approval rules against one tool registry."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
+
+        try:
+            self._validate_tool_registry(tools)
+        except (ToolConfigOverrideError, ToolMetadataValidationError) as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+
+    def _validate_tool_registry(self, tools: ToolRegistry) -> None:
+        """Validate authored tool references, overrides, and approval rules against ``tools``."""
         entries = [(f"defaults.tools[{index}]", entry) for index, entry in enumerate(self.defaults.tools)] + [
             (f"agents.{agent_name}.tools[{index}]", entry)
             for agent_name, agent_config in self.agents.items()
@@ -1667,6 +1683,38 @@ class Config(BaseModel):
             is not None
         ):
             raise ToolConfigOverrideError(workflow_error)
+        if self.tool_approval.rules:
+            self._validate_retired_consolidated_approval_rules({entry.name for _, entry in entries}, tools)
+
+    def _validate_retired_consolidated_approval_rules(
+        self,
+        authored_tool_names: set[str],
+        tools: ToolRegistry,
+    ) -> None:
+        """Fail closed when approval rules target retired function names of enabled consolidated toolkits."""
+        from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        enabled_toolkits = set(authored_tool_names)
+        for agent_name in self.agents:
+            enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
+        for toolkit_name in sorted(enabled_toolkits):
+            builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+            metadata = tools.entries.get(toolkit_name)
+            declared_renames = metadata.retired_functions if metadata is not None else None
+            if not builtin_renames and not declared_renames:
+                continue
+            renames = {**(builtin_renames or {}), **(declared_renames or {})}
+            if (
+                consolidated_error := retired_consolidated_approval_error(
+                    toolkit_name,
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                    renames=renames,
+                )
+            ) is not None:
+                raise ToolConfigOverrideError(consolidated_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

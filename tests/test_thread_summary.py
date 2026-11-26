@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     FORK_CONTENT_KEY,
+    SUPPRESS_PUSH_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     resolve_runtime_paths,
@@ -36,6 +37,7 @@ from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -43,16 +45,16 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS, THREAD_SUMMARY_KEEP_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.schema import strict_response_schema
-from mindroom.thread_summary import automatic
+from mindroom.thread_summary import automatic, schedule
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _CLIP_SEPARATOR,
     _CLIP_TAIL_CHARS,
+    _GENERATED_TITLE_MAX_LENGTH,
     _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_EDGE_COUNT,
     _TRUNCATION_MIDDLE_COUNT,
-    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _conversation_text,
     _ThreadEnrichment,
@@ -482,7 +484,7 @@ def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) 
 
 def test_thread_summary_model_accepts_a_long_answer_to_reject() -> None:
     """An overlong answer parses, so the title check can send it back instead of a parse error losing it."""
-    assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
+    assert _GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
     assert _ThreadSummary(title="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
 
 
@@ -514,7 +516,7 @@ def test_title_error_checks_six_words_and_80_characters(title: str, error: str |
         ("🧪 ISSUE-148 cache refetch live test now", True),
         ("🧪 ISSUE-148 cache refetch live test (forked)", True),
         ("🧵 Review of PR #548 session persistence hooks", False),
-        ("x" * (GENERATED_TITLE_MAX_LENGTH + 1), False),
+        ("x" * (_GENERATED_TITLE_MAX_LENGTH + 1), False),
     ],
 )
 def test_only_a_title_within_the_short_rule_may_be_kept(title: str, keepable: bool) -> None:
@@ -856,6 +858,36 @@ class TestShouldQueueThreadSummary:
 
         assert should_queue_thread_summary(_ROOM, _THREAD, _mock_config(), due, message_count_hint=1)
 
+    def test_failure_cooldown_suppresses_summary_queue_until_expiry_without_blocking_vocabulary(
+        self,
+        tmp_path: Path,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Failure cooldown suppresses summary queueing (including hint=None) while still letting due vocabulary run."""
+        now = [100.0]
+        monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        config = _mock_config()
+
+        thread_summary_baselines.record_failure_cooldown(_ROOM, _THREAD)
+        # Recording count 0 (as automatic.py does for untitled threads) must not clear the cooldown.
+        thread_summary_baselines.record(_ROOM, _THREAD, 0)
+        assert thread_summary_baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=5)
+        assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=None)
+
+        # Daily vocabulary upkeep still queues during failure cooldown for both numeric and None hints.
+        due_num, due_none = _runtime_paths(tmp_path / "due-num"), _runtime_paths(tmp_path / "due-none")
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, due_num, message_count_hint=5)
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, due_none, message_count_hint=None)
+
+        # After cooldown expires, summary queueing resumes and short-circuits vocabulary claiming.
+        now[0] += schedule._UNTITLED_FAILURE_COOLDOWN_SECONDS
+        fresh_vocab = _runtime_paths(tmp_path / "fresh-vocab")
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, fresh_vocab, message_count_hint=None)
+        assert claim_vocabulary_check(_ROOM, config, fresh_vocab, now=datetime.now(UTC))
+
 
 @pytest.mark.asyncio
 class TestMaybeGenerateThreadSummary:
@@ -1001,7 +1033,7 @@ class TestMaybeGenerateThreadSummary:
         assert sent["summary"] == fork_title
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
-        assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
+        assert len(model.requests) == (parent_title is None or len(parent_title) > _GENERATED_TITLE_MAX_LENGTH)
         # Only a title a model writes reads the room's title settings, both at once.
         state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
         assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
@@ -2148,8 +2180,8 @@ class TestMaybeGenerateThreadSummary:
         (request,) = model.requests
         assert "- bug (2)" in _prompt(request)
 
-    async def test_model_resolution_failure_records_count(self) -> None:
-        """Room override lookup failures should not retry until the next threshold."""
+    async def test_model_resolution_failure_cools_down_untitled_thread(self) -> None:
+        """Room override lookup failures on untitled threads enter cooldown without advancing the baseline."""
         config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
         model = self._summarizer(model_name="haiku")
         self._history(_make_thread_history(5))
@@ -2162,7 +2194,8 @@ class TestMaybeGenerateThreadSummary:
 
         assert not model.requests
         self.client.room_send.assert_not_awaited()
-        assert self._count() == 5
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_room_specific_model_generates_and_records_metadata(self) -> None:
         """Room-specific summary model overrides should drive generation and event metadata."""
@@ -2337,18 +2370,20 @@ class TestMaybeGenerateThreadSummary:
         self.client.room_send.assert_not_awaited()
 
     async def test_generation_failure_no_event(self) -> None:
-        """No Matrix event sent when the model answers nothing; count is recorded to prevent retries."""
+        """No Matrix event sent when the model answers nothing; an untitled thread enters failure cooldown."""
         self._summarizer("")
         self._history(_make_thread_history(5))
 
         await self._maybe_generate(_mock_config())
 
         self.client.room_send.assert_not_awaited()
-        # Count is recorded to prevent retry storms
-        assert self._count() == 5
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_failed_first_summary_does_not_skip_to_initial_enrichment(self) -> None:
-        """A failed first summary must keep the next attempt summary-only."""
+        """A failed first summary must keep the next attempt summary-only after cooldown."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
         client = make_matrix_client_mock()
         client.user_id = None
         model = self._summarizer("", _title("🧵 Login failure investigation"))
@@ -2356,6 +2391,10 @@ class TestMaybeGenerateThreadSummary:
 
         self._history(_make_thread_history(5))
         await self._maybe_generate(config, client=client)
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        now[0] = 160.0
         self._history(_make_thread_history(15))
         await self._maybe_generate(config, client=client)
 
@@ -2374,21 +2413,166 @@ class TestMaybeGenerateThreadSummary:
         assert self.room_state.tags(_THREAD) == ["bug"]
         assert self._count() == 2
 
-    async def test_generation_exception_records_count(self) -> None:
-        """A failing model call records the count to prevent retry storms."""
+    @staticmethod
+    async def _unavailable() -> None:
+        msg = "LLM unavailable"
+        raise RuntimeError(msg)
 
-        async def unavailable() -> None:
-            msg = "LLM unavailable"
-            raise RuntimeError(msg)
+    @pytest.mark.parametrize("failure", ["exception", "over-80-chars", "unparsed", "empty-normalized"])
+    async def test_untitled_generation_failure_cools_down_and_retries_after_expiry(self, failure: str) -> None:
+        """An untitled thread cools down on any generation failure without advancing baseline, then retries."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        config = _mock_config()
+        self._history(_make_thread_history(5))
 
-        self._summarizer(Await(unavailable))
+        model = None
+        if failure == "empty-normalized":
+            fake_generate = AsyncMock(
+                side_effect=[GeneratedSummary(summary="** **"), GeneratedSummary(summary="🧵 Recovered title")],
+            )
+            self.monkeypatch.setattr(automatic, "generate_summary", fake_generate)
+        else:
+            over_80 = "🧵 " + " ".join(["longwordlong"] * 7)
+            initial_by_failure: dict[str, list[object]] = {
+                "exception": [Await(self._unavailable)],
+                "over-80-chars": [_title(over_80)] * 3,
+                "unparsed": [""],
+            }
+            initial = initial_by_failure[failure]
+            model = self._summarizer(*initial, _title("🧵 Recovered title"))
+
+        await self._maybe_generate(config)
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        # During cooldown, automatic passes return before reading history or calling the model.
+        assert self.conversation_reader.read_strict.await_count == 1
+        requests_before_cooldown = len(model.requests) if model is not None else 0
+        now[0] = 130.0
+        await self._maybe_generate(config)
+        assert self.conversation_reader.read_strict.await_count == 1
+        if model is not None:
+            assert len(model.requests) == requests_before_cooldown
+
+        # Once cooldown expires, the next pass retries, titles the thread, and clears cooldown.
+        now[0] = 160.0
+        await self._maybe_generate(config)
+        if model is not None:
+            assert len(model.requests) == requests_before_cooldown + 1
+        assert _sent_summaries(self.client)[0]["summary"] == "🧵 Recovered title"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+        assert (_ROOM, _THREAD) not in self.baselines._retry_after
+
+    async def test_retitle_bypasses_failure_cooldown_and_clears_it_on_success(self) -> None:
+        """An explicit retitle bypasses an active untitled failure cooldown and clears it when it succeeds."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        model = self._summarizer(Await(self._unavailable), _title("Retitled promptly"))
+        self._history(_make_thread_history(5))
+        config = _mock_config()
+
+        await self._maybe_generate(config)
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        now[0] = 110.0
+        await self._maybe_generate(config, retitle=True)
+        assert len(model.requests) == 2
+        assert _sent_summaries(self.client)[0]["summary"] == "Retitled promptly"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize(
+        ("existing_count", "thread_size"),
+        [(5, 15), (0, 5)],
+        ids=["durable-title", "provisional-title"],
+    )
+    async def test_titled_generation_exception_records_count_without_cooldown(
+        self,
+        existing_count: int,
+        thread_size: int,
+    ) -> None:
+        """An already-titled thread hitting a generation exception advances its baseline without failure cooldown."""
+        self._summarizer(Await(self._unavailable))
+        self._history(
+            [
+                *_make_thread_history(thread_size),
+                _make_summary_notice_message(_THREAD, message_count=existing_count, summary="Existing title"),
+            ],
+        )
+
+        await self._maybe_generate(_mock_config())
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == thread_size
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    async def test_untitled_thread_posts_shortest_fallback_when_all_attempts_exceed_word_limit(self) -> None:
+        """An untitled post-reply pass falls back to the shortest <=80-char title when all attempts exceed 6 words."""
+        model = self._summarizer(
+            _title("🧵 Review of the login failure investigation notes"),
+            _title("🧵 Fix auth token refresh retry race condition"),
+            _title("🧵 Investigate auth token refresh retry race condition"),
+        )
         self._history(_make_thread_history(5))
 
         await self._maybe_generate(_mock_config())
 
-        self.client.room_send.assert_not_awaited()
-        # Count is recorded to prevent retry storms
+        assert len(model.requests) == 3
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Fix auth token refresh retry race condition"
         assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize(
+        ("existing_count", "thread_size", "existing_summary", "retitle"),
+        [
+            (5, 15, "🧵 Existing title", False),
+            (0, 5, "🧵 Existing title", False),
+            (5, 7, "🧵 Existing title", True),
+            (5, 15, "🧵 Review of PR #548 session persistence hooks", False),
+        ],
+        ids=["durable-title", "provisional-title", "retitle", "long-legacy-title"],
+    )
+    async def test_titled_thread_skips_fallback_and_records_count_without_cooldown(
+        self,
+        existing_count: int,
+        thread_size: int,
+        existing_summary: str,
+        retitle: bool,
+    ) -> None:
+        """Already-titled threads never use overlong fallback and record message_count without failure cooldown."""
+        model = self._summarizer(*[_title("🧵 Plan migration for all backend service instances")] * 3)
+        self._history(
+            [
+                *_make_thread_history(thread_size),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=existing_count,
+                    summary=existing_summary,
+                    initial_enrichment_complete=True if existing_count > 0 else None,
+                ),
+            ],
+        )
+
+        await self._maybe_generate(_mock_config(), retitle=retitle)
+
+        assert len(model.requests) == 3
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == thread_size
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    async def test_provisional_title_all_rejected_skips_fallback_and_cooldown(self) -> None:
+        """Provisional titles stay strict (no fallback) and do not set failure cooldown."""
+        model = self._summarizer(*[_title("🧵 Plan migration for all backend service instances")] * 3)
+        self._history(_make_thread_history(1))
+
+        await self._provisional(config=_mock_config(first_threshold=2))
+
+        assert len(model.requests) == 3
+        self.client.room_send.assert_not_awaited()
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_send_failure_still_records_count(self) -> None:
         """When the summary send fails, count is still recorded to prevent cost amplification."""
@@ -2525,6 +2709,7 @@ class TestSendSummaryEvent:
         content = call_kwargs["content"]
         assert content["msgtype"] == "m.notice"
         assert content["body"] == "Discussed deployment plan"
+        assert content[SUPPRESS_PUSH_KEY] is True
 
         relates_to = content["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
@@ -2609,6 +2794,28 @@ class TestSendSummaryEvent:
         relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
         assert relates_to["event_id"] == "$root1"
         assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+
+    async def test_event_content_suppresses_push_and_hoists_for_encryption(self) -> None:
+        """Thread summary notices suppress push and expose that marker outside encryption."""
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
+
+        result = await send_thread_summary_notice(
+            client,
+            room_id=_ROOM,
+            thread_id="$root1",
+            summary="Provisional title",
+            message_count=0,
+            model_name="haiku",
+            conversation_reader=conversation_reader,
+        )
+
+        assert result == "$s1"
+        content = client.room_send.call_args.kwargs["content"]
+        assert content[SUPPRESS_PUSH_KEY] is True
+        assert encryption_visible_metadata(content) == {SUPPRESS_PUSH_KEY: True}
 
 
 @pytest.mark.asyncio
@@ -2886,6 +3093,7 @@ class TestGenerateSummary:
         *,
         model_name: str = "default",
         tag_vocabulary: str | None = None,
+        allow_fallback: bool = False,
     ) -> GeneratedSummary | None:
         return await generate_summary(
             thread_history,
@@ -2893,6 +3101,7 @@ class TestGenerateSummary:
             runtime_paths,
             model_name=model_name,
             tag_vocabulary=tag_vocabulary,
+            allow_fallback=allow_fallback,
         )
 
     async def test_prompt_instructions_and_delimiters(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2959,6 +3168,137 @@ class TestGenerateSummary:
 
         assert result is None
         assert len(model.requests) == 3
+
+    @pytest.mark.parametrize(
+        ("prompts", "first_rejected", "second_rejected", "expected_snippet"),
+        [
+            (
+                None,
+                "🧵 Review of the login failure investigation notes",
+                "🧵 Review of the login failure investigation notes",
+                "Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words. Drop secondary detail rather than cutting the phrase short.",
+            ),
+            (
+                {"THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE": "BAD: {rejected_title} | {error}"},
+                "🧵 Review of the login failure investigation notes",
+                "🧵 Detailed review of login failure investigation logs",
+                "BAD: 🧵 Detailed review of login failure investigation logs",
+            ),
+        ],
+        ids=["default-template-repeated-rejection", "custom-template-distinct-rejections"],
+    )
+    async def test_rejected_titles_accumulate_across_retries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        prompts: dict[str, str] | None,
+        first_rejected: str,
+        second_rejected: str,
+        expected_snippet: str,
+    ) -> None:
+        """Attempt 3 keeps attempt 1's and attempt 2's rejections so retries never resend an identical prompt."""
+        model = _summary_model(
+            _title(first_rejected),
+            _title(second_rejected),
+            _title("🧵 Login failure investigation"),
+        )
+        install_model_providers(monkeypatch, {"default": model})
+        config = Config(prompts=prompts) if prompts is not None else _mock_config()
+
+        result = await self._summarize(_make_thread_history(3), config, _mock_runtime_paths())
+
+        assert result == GeneratedSummary(summary="🧵 Login failure investigation")
+        first, second, third = (_prompt(request) for request in model.requests)
+        assert second.startswith(f"{first}\n\n")
+        assert third.startswith(f"{second}\n\n")
+        assert third != second
+        assert expected_snippet in third
+        if prompts is None:
+            block = f"<rejected_title>\n{first_rejected}\n</rejected_title>\n{title_error(first_rejected)}"
+            assert second.count(block) == 1
+            assert third.count(block) == 2
+        else:
+            first_idx = third.index(f"BAD: {first_rejected} | {title_error(first_rejected)}")
+            second_idx = third.index(f"BAD: {second_rejected} | {title_error(second_rejected)}")
+            assert first_idx < second_idx
+
+    @pytest.mark.parametrize(
+        ("answers", "expected", "expected_calls"),
+        [
+            (
+                [
+                    _title("🧵 a b c d e f g h"),
+                    _title("🧵 Plan migration for all backend service instances"),
+                    _title("🧵 Planning migration for all backend service instances"),
+                ],
+                "🧵 Plan migration for all backend service instances",
+                3,
+            ),
+            (
+                [
+                    _title("🧵 Fix alpha beta gamma delta zeta eta"),
+                    _title("🧵 Fix a1 b2 c3 d4 e5 f6"),
+                    _title("🧵 Fix g1 h2 i3 j4 k5 l6"),
+                ],
+                "🧵 Fix a1 b2 c3 d4 e5 f6",
+                3,
+            ),
+            (
+                [
+                    _title("🧵 " + " ".join(["longwordlong"] * 7)),
+                    _title("🧵 Review of the login failure investigation notes now"),
+                    _title("🧵 " + " ".join(["anotherlongw"] * 7)),
+                ],
+                "🧵 Review of the login failure investigation notes now",
+                3,
+            ),
+            (
+                [_title("🧵 " + " ".join(["longwordlong"] * 7))] * 3,
+                None,
+                3,
+            ),
+            (
+                [_title(""), _title("   "), _title("** **")],
+                None,
+                3,
+            ),
+            (
+                [
+                    _title("🧵 Plan migration for all backend service instances"),
+                    "",
+                ],
+                "🧵 Plan migration for all backend service instances",
+                2,
+            ),
+        ],
+        ids=[
+            "fewer-words-beats-fewer-chars",
+            "fewer-chars-and-earlier-wins-ties",
+            "skips-over-80-char-candidate",
+            "all-over-80-chars-returns-none",
+            "all-empty-returns-none",
+            "later-non-schema-preserves-earlier-fallback",
+        ],
+    )
+    async def test_allow_fallback_selects_shortest_intact_candidate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        answers: list[BaseModel | str],
+        expected: str | None,
+        expected_calls: int,
+    ) -> None:
+        """With allow_fallback=True, pick the best <=80-char candidate by (word_count, len), preserving earlier ties."""
+        model = _summary_model(*answers)
+        install_model_providers(monkeypatch, {"default": model})
+
+        result = await self._summarize(
+            _make_thread_history(3),
+            _mock_config(),
+            _mock_runtime_paths(),
+            allow_fallback=True,
+        )
+
+        assert result == (None if expected is None else GeneratedSummary(summary=expected))
+        assert len(model.requests) == expected_calls
 
     async def test_current_title_follows_an_overridden_user_prompt_escaped(
         self,

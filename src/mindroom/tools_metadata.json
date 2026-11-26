@@ -8535,7 +8535,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Request context compaction before the next reply in this conversation scope",
+      "description": "Compact conversation context mid-turn in this conversation scope",
       "display_name": "Context Compaction",
       "docs_url": "https://docs.mindroom.chat/configuration/history/#manual-compaction",
       "executes_code": false,
@@ -9372,12 +9372,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_memory",
-        "delete_memory",
-        "get_memory",
-        "list_memories",
-        "search_memories",
-        "update_memory"
+        "memory"
       ],
       "helper_text": null,
       "icon": "Brain",
@@ -10009,12 +10004,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "cancel_schedule",
-        "edit_schedule",
-        "list_schedules",
         "run_scheduled_call",
-        "schedule",
-        "schedule_tool_call"
+        "schedule_tool_call",
+        "scheduler"
       ],
       "helper_text": null,
       "icon": "Calendar",
@@ -10299,12 +10291,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_todo",
-        "apply_template",
-        "list_templates",
-        "list_todos",
-        "plan",
-        "update_todo"
+        "todo"
       ],
       "helper_text": null,
       "icon": "ListTodo",
@@ -13555,14 +13542,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "image_search",
-        "it_search",
-        "map_search",
-        "music_search",
-        "news_search",
-        "science_search",
-        "search_web",
-        "video_search"
+        "searxng_search"
       ],
       "helper_text": null,
       "icon": "FaSearch",

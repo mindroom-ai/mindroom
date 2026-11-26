@@ -1,5 +1,6 @@
 """Tests for large message handling."""
 
+import copy
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -63,8 +64,9 @@ class _UploadClient:
     user_id = "@sender:server"
     device_id = "DEVICE"
 
-    def __init__(self, upload_result: object | BaseException) -> None:
+    def __init__(self, upload_result: object | BaseException, *, user_id: str = "@sender:server") -> None:
         self.upload_result = upload_result
+        self.user_id = user_id
         self.uploaded_data: bytes | None = None
 
     async def upload(self, **kwargs) -> tuple[object, None]:  # noqa: ANN003
@@ -1818,3 +1820,205 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload["m.new_content"]["io.mindroom.visible_body"] == visible_body
+
+
+_AGENT_USER_ID = "@mindroom_worker:localhost"
+_PRE_TOOL_WORK = "Investigating workspace state.\n\n" * 1200
+
+
+def _agent_tool_reply(
+    *,
+    work: str = _PRE_TOOL_WORK,
+    answer: str = "Final answer text.",
+    is_edit: bool = True,
+    ai_run_status: str | None = "completed",
+    stream_status: object = "completed",
+    pill: str | None = None,
+    formatted_body: str | None = None,
+) -> dict[str, object]:
+    """Build a v2 marked agent reply for answer-first preview tests."""
+    tail = f"\n\n{answer}" if answer else ""
+    body = f"{work}\n\n🔧 `read_file` [1]\n\nSecond step notes.\n\n🔧 `run_check` [2]{tail}"
+    rendered_html = formatted_body if formatted_body is not None else markdown_to_html(body)
+    if pill is not None:
+        rendered_html = rendered_html.replace("@mindroom_helper:localhost", pill)
+    meta: dict[str, object] = {}
+    if ai_run_status is not None:
+        meta[AI_RUN_METADATA_KEY] = {"version": 1, "status": ai_run_status}
+    if stream_status is not None:
+        meta[STREAM_STATUS_KEY] = stream_status
+    trace = {
+        "version": 2,
+        "events": [
+            {"type": "tool_call_completed", "tool_name": "read_file", "result_preview": "ok"},
+            {"type": "tool_call_completed", "tool_name": "run_check", "result_preview": "ok"},
+        ],
+    }
+    layer: dict[str, object] = {
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": rendered_html,
+        "msgtype": "m.text",
+        _TOOL_TRACE_KEY: trace,
+        **meta,
+    }
+    if not is_edit:
+        return layer
+    return {
+        "body": f"* {body}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": rendered_html,
+        "m.new_content": layer,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        **meta,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_edit", [True, False], ids=["edit", "message"])
+async def test_prepare_finished_agent_sidecar_preview_starts_at_post_tool_answer(is_edit: bool) -> None:
+    """Finished agent sidecars upload full v2 content while previews start at the post-tool answer."""
+    work = _PRE_TOOL_WORK if is_edit else _PRE_TOOL_WORK * 2
+    answer = "Asked @mindroom_helper:localhost. All **checks** passed."
+    pill = '<a href="https://matrix.to/#/@mindroom_helper:localhost">@mindroom_helper:localhost</a>'
+    content = _agent_tool_reply(work=work, answer=answer, is_edit=is_edit, pill=pill)
+    original = copy.deepcopy(content)
+    client = _UploadClient(nio.UploadResponse("mxc://server/finished-sidecar"), user_id=_AGENT_USER_ID)
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert content == original
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == original
+    preview = result["m.new_content"] if is_edit else result
+    assert preview["body"] == answer
+    assert preview["format"] == "org.matrix.custom.html"
+    assert pill in preview["formatted_body"]
+    assert "Investigating workspace state" not in preview["formatted_body"]
+    assert preview["io.mindroom.long_text"]["preview_size"] == len(answer)
+    assert _TOOL_TRACE_KEY not in preview
+    if is_edit:
+        assert result["body"] == f"* {answer}"
+    assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_finished_agent_oversized_answer_truncates_from_answer_start() -> None:
+    """When the post-tool answer itself exceeds the event budget, truncation starts at the answer."""
+    answer = "Final answer detail line.\n\n" * 1600
+    content = _agent_tool_reply(answer=answer, ai_run_status="cached", stream_status={"state": "done"})
+    client = _UploadClient(nio.UploadResponse("mxc://server/big-answer-sidecar"), user_id=_AGENT_USER_ID)
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    preview = result["m.new_content"]
+    assert preview["body"].startswith("Final answer detail line.")
+    assert preview["body"].endswith("[Message continues in attached file]")
+    assert preview["formatted_body"] == markdown_to_html(preview["body"])
+    assert preview["io.mindroom.long_text"]["preview_size"] == len(preview["body"])
+    assert result["body"].startswith("* Final answer detail line.")
+    assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["upload_error", "envelope_overflow"])
+async def test_prepare_finished_agent_sidecar_fallbacks_preserve_pre_tool_work(failure_mode: str) -> None:
+    """Without a usable sidecar, fallbacks must start from byte 0 so pre-tool work is never lost."""
+    content = _agent_tool_reply(answer="Short final answer.")
+    if failure_mode == "upload_error":
+        client = _UploadClient(nio.UploadError("upload failed"), user_id=_AGENT_USER_ID)
+        result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+    else:
+        huge_uri = f"mxc://server/{'x' * 70_000}"
+
+        async def upload_overflow(*_args: object, **_kwargs: object) -> tuple[str, dict[str, object]]:
+            return huge_uri, {"url": huge_uri, "mimetype": "application/json", "size": 70_000}
+
+        client = _UploadClient(nio.UploadResponse("mxc://server/unused"), user_id=_AGENT_USER_ID)
+        with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=upload_overflow):
+            result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert "io.mindroom.long_text" not in result["m.new_content"]
+    assert result["m.new_content"]["body"].startswith("Investigating workspace state.")
+    assert result["body"].startswith("* Investigating workspace state.")
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in result["m.new_content"]["body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_id", "ai_run_status", "stream_status"),
+    [
+        (_AGENT_USER_ID, "completed", STREAM_STATUS_STREAMING),
+        (_AGENT_USER_ID, "completed", "pending"),
+        (_AGENT_USER_ID, "error", "completed"),
+        (_AGENT_USER_ID, "failed", None),
+        (_AGENT_USER_ID, "stopped", None),
+        (_AGENT_USER_ID, "cancelled", "cancelled"),
+        (_AGENT_USER_ID, "interrupted", "interrupted"),
+        ("@human:localhost", "completed", "completed"),
+    ],
+)
+async def test_prepare_nonterminal_failed_and_non_agent_previews_keep_full_work(
+    user_id: str,
+    ai_run_status: str,
+    stream_status: str | None,
+) -> None:
+    """Streaming, non-completed, and non-agent replies keep their preview starting at line 0."""
+    content = _agent_tool_reply(ai_run_status=ai_run_status, stream_status=stream_status)
+    client = _UploadClient(nio.UploadResponse("mxc://server/keep-full"), user_id=user_id)
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert result["m.new_content"]["body"].startswith("Investigating workspace state.")
+    assert result["body"].startswith("* Investigating workspace state.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", ["", "---", "⏳", "---\n\n⏳\u200b"])
+async def test_prepare_finished_agent_skips_cut_when_post_tool_answer_has_no_visible_content(tail: str) -> None:
+    """Finished replies with empty, thematic-break, or invisible post-tool tails keep the full preview."""
+    content = _agent_tool_reply(answer=tail)
+    client = _UploadClient(nio.UploadResponse("mxc://server/no-visible-tail"), user_id=_AGENT_USER_ID)
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert result["m.new_content"]["body"].startswith("Investigating workspace state.")
+    assert result["body"].startswith("* Investigating workspace state.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expect_cut"),
+    [("work_to_answer", False), ("answer_to_work", False), ("answer_only", True)],
+)
+async def test_prepare_finished_agent_cross_half_footnote_guard(mode: str, expect_cut: bool) -> None:
+    """Cross-half footnotes keep the full preview while self-contained answer footnotes still cut."""
+    if mode == "work_to_answer":
+        content = _agent_tool_reply(
+            work=f"{_PRE_TOOL_WORK}See detail[^1].",
+            answer="Final answer summary.\n\n[^1]: Supporting detail from work.",
+        )
+    elif mode == "answer_to_work":
+        work_html = "<p>Investigating workspace state.</p>\n" * 1200
+        custom_html = (
+            f'{work_html}<p id="fn1">Definition in work.</p>\n'
+            "<p>🔧 <code>read_file</code> [1]</p>\n<p>Second step notes.</p>\n"
+            '<p>🔧 <code>run_check</code> [2]</p>\n<p>Final answer <a href="#fn1">[1]</a>.</p>\n'
+        )
+        content = _agent_tool_reply(
+            work=f"{_PRE_TOOL_WORK}Definition in work.",
+            answer="Final answer [1].",
+            formatted_body=custom_html,
+        )
+    else:
+        content = _agent_tool_reply(
+            work=_PRE_TOOL_WORK.rstrip(),
+            answer="Final answer[^1].\n\n[^1]: Answer-only footnote.",
+        )
+    client = _UploadClient(nio.UploadResponse("mxc://server/footnotes"), user_id=_AGENT_USER_ID)
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    expected_prefix = "Final answer" if expect_cut else "Investigating workspace state."
+    assert result["m.new_content"]["body"].startswith(expected_prefix)

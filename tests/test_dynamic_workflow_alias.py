@@ -31,7 +31,7 @@ from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_n
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import _extract_run
-from mindroom.usage.storage import LEGACY_USAGE_KINDS, USAGE_KINDS, IndependentUsageKind
+from mindroom.usage.storage import _LEGACY_USAGE_KINDS, USAGE_KINDS, IndependentUsageKind
 from tests.conftest import persist_entity_accounts, persist_runs, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -389,7 +389,7 @@ def test_contacts_tools_rejects_workflow_and_dynamic_workflow(tool_name: str) ->
 def test_legacy_dynamic_workflow_usage_row_is_preserved(tmp_path: Path) -> None:
     """Historical SQLite usage rows with kind='dynamic_workflow' keep counting in usage reports and monthly budgets."""
     assert "dynamic_workflow" not in get_args(IndependentUsageKind.__value__)
-    assert "dynamic_workflow" in LEGACY_USAGE_KINDS
+    assert "dynamic_workflow" in _LEGACY_USAGE_KINDS
     assert "dynamic_workflow" in USAGE_KINDS
 
     now = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)

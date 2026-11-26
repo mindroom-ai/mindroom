@@ -257,7 +257,7 @@ agents:
 ## [`searxng`]
 
 `searxng` searches through your own SearXNG instance.
-It provides `search_web`, `image_search`, `it_search`, `map_search`, `music_search`, `news_search`, `science_search`, and `video_search`, each taking `(query, max_results=5)`.
+It provides `searxng_search(query, category=None, max_results=5)`, supporting general web search (when `category` is omitted) or the `images`, `it`, `map`, `music`, `news`, `science`, and `videos` categories.
 The instance must allow JSON output (`json` in SearXNG's `search.formats`).
 
 | Option | Type | Default | Notes |

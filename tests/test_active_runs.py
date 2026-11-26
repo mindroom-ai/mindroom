@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
+from mindroom import interactive
 from mindroom.active_runs import _CURRENT_LEASE, ActiveRunPublisher, pause_current_active_run
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits, CliWaiters
 from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventJournalStore
+from mindroom.final_delivery import Completed, TurnProgress
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import _MANAGED_ROOM_EVENT_POWER_LEVELS
 from mindroom.matrix.event_types import ACTIVE_RUNS_EVENT_TYPE
@@ -25,8 +29,10 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
-from mindroom.reply_turn.request import response_typing_indicator
+from mindroom.reply_turn.request import ResponseRequest, response_typing_indicator
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+from mindroom.response_runner import ResponseRunner, _LockedTurn, _TeamResponseRequest
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from mindroom.secret_request_cards import _job_awaits_requester
@@ -34,10 +40,12 @@ from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turns.facts import IngressFacts
+from mindroom.turns.interactive_selection import InteractiveSelections, InteractiveSelectionsDeps
 from mindroom.voice import ingress as voice_ingress_module
 from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
+from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import TEST_PASSWORD, test_runtime_paths
+from tests.conftest import TEST_PASSWORD, test_runtime_paths, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _config, _envelope, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -884,3 +892,457 @@ async def test_voice_ingress_active_run_skip_conditions_and_bot_wiring(
         rooms=["!room:localhost"],
     )
     assert router._voice_ingress.deps.active_runs is None
+
+
+async def _assert_pause_toggles(client: _FakeClient, expected_thread: str | None) -> None:
+    before = len(client.puts)
+    with pause_current_active_run():
+        await _wait_for_puts(client, before + 1)
+        assert _threads_of(client.puts[-1]) == []
+    await _wait_for_puts(client, before + 2)
+    assert _threads_of(client.puts[-1]) == [expected_thread]
+
+
+def _runner_with_publisher(tmp_path: Path) -> tuple[ResponseRunner, _FakeClient, ActiveRunPublisher]:
+    bot = _bot(tmp_path)
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@mindroom_general:localhost")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.active_runs = publisher
+    runner.approvals.active_runs = publisher
+    return runner, client, publisher
+
+
+def _patch_turn_prep(runner: ResponseRunner, req: ResponseRequest, **overrides: object) -> ExitStack:
+    stack = ExitStack()
+    defaults: dict[str, object] = {
+        "_admit_locked_turn": AsyncMock(return_value=req),
+        "_send_placeholder": AsyncMock(return_value=None),
+        "_prepare_claimed_request": AsyncMock(return_value=req),
+        "_prepare_agent_turn": AsyncMock(return_value=_LockedTurn.__new__(_LockedTurn)),
+        "_generate_and_settle": AsyncMock(),
+    }
+    defaults.update(overrides)
+    for name, value in defaults.items():
+        stack.enter_context(patch.object(runner, name, new=value))
+    stack.enter_context(
+        patch.object(runner.deps.request_preparer, "with_system_enrichment", new=AsyncMock(return_value=req)),
+    )
+    return stack
+
+
+@pytest.mark.asyncio
+async def test_reentrant_track_refcounts_single_lease_pause_and_deferred_activation() -> None:
+    """Nested scopes share one lease so pauses clear immediately and refcount releases once."""
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@bot:localhost")
+
+    async with publisher.track("!r:localhost", "$t1") as outer:
+        await _wait_for_puts(client, 1)
+        assert outer.activations == 1
+        assert publisher._leases["!r:localhost"] == [outer]
+        async with (
+            publisher.track("!r:localhost", "$t1", active=False) as mid,
+            publisher.deferred_activation(mid) as act,
+        ):
+            assert mid is outer
+            act()
+            act()  # Idempotent.
+            assert outer.activations == 2
+            async with publisher.track("!r:localhost", "$t1", active=False) as inner, publisher.activate(inner):
+                assert inner is outer
+                assert outer.activations == 3
+                assert publisher._leases["!r:localhost"] == [outer]
+                await _assert_pause_toggles(client, "$t1")
+            assert outer.activations == 2
+        assert outer.activations == 1
+        async with (
+            publisher.track("!r:localhost", "$t1", active=False) as unused,
+            publisher.deferred_activation(unused),
+        ):
+            assert unused is outer
+        assert outer.activations == 1
+    await _wait_workers_done(publisher)
+    assert outer.activations == 0
+    assert _threads_of(client.puts[-1]) == []
+
+    # Rescuing a pending delayed release re-activates without appending a duplicate lease.
+    async with publisher.track("!r:localhost", "$t2", active=False) as lease:
+        async with publisher.activate(lease):
+            await _wait_for_puts(client, 5)
+            lease.release_delay_seconds = 5.0
+        assert lease in publisher._pending_releases
+        async with publisher.activate(lease):
+            assert lease not in publisher._pending_releases
+            assert publisher._leases["!r:localhost"] == [lease]
+            lease.release_delay_seconds = 0.0
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+
+@pytest.mark.asyncio
+async def test_response_runner_active_run_from_placeholder_through_finalization(tmp_path: Path) -> None:
+    """_run_locked_turn publishes before placeholder, shares lease with typing, and clears cleanly."""
+    runner, client, publisher = _runner_with_publisher(tmp_path)
+    req = _plain_request(_target(thread_id="$root"))
+    assert not req.quiet
+    seen: list[object] = []
+
+    async def send_placeholder(*_a: object, **_kw: object) -> str:
+        await _wait_for_puts(client, 1)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+        seen.append(_CURRENT_LEASE.get())
+        return "$placeholder"
+
+    async def prepare_claimed(request: ResponseRequest, **_kw: object) -> ResponseRequest:
+        assert _CURRENT_LEASE.get() is seen[0]
+        return request
+
+    async def generate(_turn: object) -> None:
+        async with response_typing_indicator(
+            cast("nio.AsyncClient", client),
+            req,
+            response_run_id="r1",
+            active_runs=publisher,
+        ):
+            assert _CURRENT_LEASE.get() is seen[0]
+            await _assert_pause_toggles(client, "$root")
+        await asyncio.sleep(0.01)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+
+    with _patch_turn_prep(
+        runner,
+        req,
+        _send_placeholder=send_placeholder,
+        _prepare_claimed_request=prepare_claimed,
+        _generate_and_settle=generate,
+    ):
+        assert await runner._run_locked_turn(req, team=None, participation=None) == Owned()
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    # Approved continued reply + ResponsePausedForApproval, and team turns, publish early and clear cleanly.
+    before = len(client.puts)
+    continued_req = replace(req, existing_event_id="$existing", participation=ParticipationConfig())
+    continued_gate = ParticipationGate()
+    continued_gate.approve_existing_response()
+
+    async def pause_generate(_turn: object) -> None:
+        await _wait_for_puts(client, before + 1)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+        raise ResponsePausedForApproval(cast("Any", SimpleNamespace(run_id="r-pause")))
+
+    with (
+        _patch_turn_prep(runner, continued_req, _generate_and_settle=pause_generate),
+        pytest.raises(ResponsePausedForApproval),
+    ):
+        await runner._run_locked_turn(continued_req, team=None, participation=continued_gate)
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    before_team = len(client.puts)
+    team_req = _TeamResponseRequest(member_names=("general",), team_mode="coordinate", rejection_message="rejected")
+
+    async def check_team(*_a: object, **_kw: object) -> None:
+        await _wait_for_puts(client, before_team + 1)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+
+    with _patch_turn_prep(runner, req, _settle_team_rejection=check_team):
+        assert await runner._run_locked_turn(req, team=team_req, participation=None) == Owned()
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+
+@pytest.mark.asyncio
+async def test_response_runner_active_run_gates_non_visible_and_unapproved_participation(tmp_path: Path) -> None:
+    """Empty, refused, silent, contact, and unapproved participation turns skip early active-run publication."""
+    runner, client, publisher = _runner_with_publisher(tmp_path)
+    req = _plain_request(_target(thread_id="$root"))
+    silent_req = replace(
+        req,
+        response_envelope=replace(
+            req.response_envelope,
+            origin=replace(req.response_envelope.origin, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+        ),
+    )
+    contact_req = replace(req, contact=cast("Any", (SimpleNamespace(status="active"), "a")))
+    assert silent_req.quiet
+    assert contact_req.quiet
+
+    with (
+        patch.object(
+            runner,
+            "_finalize_without_running_locked",
+            new=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
+        ),
+        patch.object(runner, "_admit_locked_turn", new=AsyncMock(return_value=Unclaimed(UnclaimedReason.REVOKED))),
+    ):
+        await runner._run_locked_turn(replace(req, prompt="   "), team=None, participation=None)
+        await runner._run_locked_turn(req, team=None, participation=None)
+    for gated in (silent_req, contact_req):
+        with patch.object(runner, "_runs_nothing", return_value=None), _patch_turn_prep(runner, gated):
+            await runner._run_locked_turn(gated, team=None, participation=None)
+    assert client.puts == []
+
+    part_req = replace(req, participation=ParticipationConfig())
+    declined_gate = ParticipationGate()
+
+    async def generate_declined(_turn: object) -> None:
+        async with response_typing_indicator(
+            cast("nio.AsyncClient", client),
+            part_req,
+            response_run_id="rp-decline",
+            participation=declined_gate,
+            active_runs=publisher,
+        ):
+            declined_gate.decline("stay_silent")
+            await asyncio.sleep(0.01)
+
+    with _patch_turn_prep(runner, part_req, _generate_and_settle=generate_declined):
+        await runner._run_locked_turn(part_req, team=None, participation=declined_gate)
+    await _wait_workers_done(publisher)
+    assert client.puts == []
+
+    gate = ParticipationGate()
+
+    async def generate_participation(_turn: object) -> None:
+        await asyncio.sleep(0.01)
+        assert client.puts == []
+        outer = _CURRENT_LEASE.get()
+        async with response_typing_indicator(
+            cast("nio.AsyncClient", client),
+            part_req,
+            response_run_id="rp",
+            participation=gate,
+            active_runs=publisher,
+        ):
+            assert _CURRENT_LEASE.get() is outer
+            gate.approve_existing_response()
+            await _wait_for_puts(client, 1)
+            assert _threads_of(client.puts[-1]) == ["$root"]
+            await _assert_pause_toggles(client, "$root")
+        puts_after_typing = len(client.puts)
+        await asyncio.sleep(0.01)
+        assert len(client.puts) == puts_after_typing
+        assert _threads_of(client.puts[-1]) == ["$root"]
+
+    with _patch_turn_prep(runner, part_req, _generate_and_settle=generate_participation):
+        await runner._run_locked_turn(part_req, team=None, participation=gate)
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_active_run_coverage_skip_and_bot_wiring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """InteractiveSelections tracks ack + payload + nested response with one lease and matches bot wiring."""
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@bot:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@bot:localhost")
+    target = _target(thread_id="$root", reply_to_event_id="$q1")
+    selection = interactive.InteractiveSelection("$q1", "Choose", "1", "A", "a", "$root")
+    facts = IngressFacts(physical_sender="@user:localhost", source_kind="message", lane_requester_id="@user:localhost")
+    ack_lease: list[object] = []
+
+    async def deliver_ack(*_a: object, **_kw: object) -> tuple[str, str]:
+        await _wait_for_puts(client, 1)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+        ack_lease.append(_CURRENT_LEASE.get())
+        return "$ack-1", "span-1"
+
+    async def build_payload(_req: object) -> object:
+        assert _CURRENT_LEASE.get() is ack_lease[0]
+        return SimpleNamespace(prompt="selected a", model_prompt=None, attachment_ids=())
+
+    async def generate_response(req: ResponseRequest) -> Owned:
+        async with (
+            publisher.track(req.room_id, req.thread_id, active=False) as lease,
+            publisher.deferred_activation(lease) as act,
+        ):
+            assert lease is ack_lease[0]
+            act()
+            await _assert_pause_toggles(client, "$root")
+        return Owned()
+
+    def build_selections(**kw: object) -> InteractiveSelections:
+        record = SimpleNamespace(source_event_ids=("$sel-1",), discovery_event_ids=("$q1",))
+        terminal = bool(kw.get("terminal", False))
+        return InteractiveSelections(
+            InteractiveSelectionsDeps(
+                logger=get_logger("test.interactive_active_runs"),
+                runtime_paths=test_runtime_paths(tmp_path),
+                agent_name="general",
+                resolver=cast("Any", SimpleNamespace(fetch_thread_history=AsyncMock(return_value=[]))),
+                normalizer=cast(
+                    "Any",
+                    SimpleNamespace(
+                        build_dispatch_payload_with_attachments=AsyncMock(side_effect=kw.get("payload", build_payload)),
+                    ),
+                ),
+                ingress=cast("Any", SimpleNamespace()),
+                response_runner=cast(
+                    "Any",
+                    SimpleNamespace(
+                        placeholder_ai_run_content=lambda *_a, **_kw: None,
+                        generate_response=AsyncMock(side_effect=kw.get("generate", generate_response)),
+                    ),
+                ),
+                delivery_gateway=cast("Any", SimpleNamespace(settle_unclaimed_reply=AsyncMock())),
+                turn_store=cast(
+                    "Any",
+                    SimpleNamespace(
+                        is_handled=AsyncMock(return_value=terminal),
+                        attach_response_context=lambda r, **_kw: r,
+                        response_history_scope=lambda _a: SimpleNamespace(),
+                        record_pending_turn=AsyncMock(return_value=SimpleNamespace(record=record, deleted_sources=())),
+                        build_run_metadata=lambda _r: None,
+                    ),
+                ),
+                visible_responses=cast(
+                    "Any",
+                    SimpleNamespace(
+                        deliver_selection_acknowledgement=AsyncMock(side_effect=kw.get("ack", deliver_ack)),
+                    ),
+                ),
+                retry_dispatch_sources=lambda *_a: None,
+                settle_dispatch_sources=AsyncMock(),
+                dispatch_source_is_terminal=AsyncMock(return_value=terminal),
+                active_runs=cast("ActiveRunPublisher | None", kw.get("active_runs", publisher)),
+                can_publish_active_run=cast("Callable[[str], bool]", kw.get("can_publish", lambda _r: True)),
+            ),
+        )
+
+    assert await build_selections()._execute_admitted_interactive_selection(
+        room,
+        selection=selection,
+        facts=facts,
+        source_event_id="$sel-1",
+        response_target=target,
+    )
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    before_fail = len(client.puts)
+
+    async def fail_ack(*_a: object, **_kw: object) -> tuple[None, None]:
+        await _wait_for_puts(client, before_fail + 1)
+        return None, None
+
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await build_selections(ack=fail_ack)._execute_admitted_interactive_selection(
+            room,
+            selection=selection,
+            facts=facts,
+            source_event_id="$sel-fail",
+            response_target=target,
+        )
+    await _wait_workers_done(publisher)
+    assert len(client.puts) == before_fail + 2
+    assert _threads_of(client.puts[-1]) == []
+
+    before_skip = len(client.puts)
+    skip_payload = AsyncMock(return_value=SimpleNamespace(prompt="a", model_prompt=None, attachment_ids=()))
+    skip_gen = AsyncMock(return_value=Owned())
+    for sel in (
+        build_selections(
+            can_publish=lambda _r: False,
+            ack=AsyncMock(return_value=("$ack", "sp")),
+            payload=skip_payload,
+            generate=skip_gen,
+        ),
+        build_selections(
+            active_runs=None,
+            ack=AsyncMock(return_value=("$ack", "sp")),
+            payload=skip_payload,
+            generate=skip_gen,
+        ),
+        build_selections(terminal=True),
+    ):
+        await sel._execute_admitted_interactive_selection(
+            room,
+            selection=selection,
+            facts=facts,
+            source_event_id="$sel-skip",
+            response_target=target,
+        )
+    await _wait_workers_done(publisher)
+    assert len(client.puts) == before_skip
+
+    bot = _bot(tmp_path / "agent-bot")
+    assert bot._interactive_selections.deps.active_runs is bot._active_runs
+    assert bot._interactive_selections.deps.can_publish_active_run("!room:localhost") is True
+    monkeypatch.setattr("mindroom.bot.contact_room", lambda *_a: (object(), "a"))
+    assert bot._interactive_selections.deps.can_publish_active_run("!contact:localhost") is False
+    router = make_test_agent_bot(
+        AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        ),
+        _config(tmp_path / "router-bot"),
+        rooms=["!room:localhost"],
+    )
+    assert router._interactive_selections.deps.active_runs is None
+
+
+@pytest.mark.asyncio
+async def test_approval_continuation_tracks_active_run_from_refresh_through_settlement(tmp_path: Path) -> None:
+    """Approval continuation publishes from refresh through settlement, shares pause lease, and skips silent schedules."""
+    runner, client, publisher = _runner_with_publisher(tmp_path)
+    approvals = runner.approvals
+    target = _target(thread_id="$root", reply_to_event_id="$source")
+    claimed = approval_continuation(approval_id="approval-1", response_event_id="$orig")
+    refresh_lease: list[object] = []
+
+    async def fake_refresh(_req: ResponseRequest) -> None:
+        await _wait_for_puts(client, 1)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+        refresh_lease.append(_CURRENT_LEASE.get())
+
+    async def fake_settle(request: ResponseRequest, *, progress: TurnProgress, **_kw: object) -> None:
+        async with response_typing_indicator(
+            cast("nio.AsyncClient", client),
+            request,
+            response_run_id="r1",
+            active_runs=publisher,
+        ):
+            assert _CURRENT_LEASE.get() is refresh_lease[0]
+            await _assert_pause_toggles(client, "$root")
+        await asyncio.sleep(0.01)
+        assert _threads_of(client.puts[-1]) == ["$root"]
+        progress.ending = Completed()
+
+    with (
+        patch.object(approvals.locked, "refresh_mid_turn_context_for_approval", new=fake_refresh),
+        patch.object(approvals.locked, "run_and_settle_locked_response", new=fake_settle),
+        patch.object(approvals, "_facts", new=AsyncMock()),
+        patch.object(
+            approvals,
+            "_run_step",
+            new=AsyncMock(side_effect=lambda *_a, **_kw: _threads_of(client.puts[-1]) == ["$root"]),
+        ),
+        patch("mindroom.approval.continuation_runner.next_step", return_value=object()),
+    ):
+        assert await approvals._run_claimed_approval_lifecycle(claimed, target=target) == Completed()
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    before_silent = len(client.puts)
+    silent_claimed = replace(claimed, origin=replace(claimed.origin, source_kind=SILENT_SCHEDULE_SOURCE_KIND))
+
+    async def silent_settle(_req: ResponseRequest, *, progress: TurnProgress, **_kw: object) -> None:
+        progress.ending = Completed()
+
+    with (
+        patch.object(approvals.locked, "refresh_mid_turn_context_for_approval", new=AsyncMock()),
+        patch.object(approvals.locked, "run_and_settle_locked_response", new=silent_settle),
+        patch.object(approvals, "_facts", new=AsyncMock()),
+        patch.object(approvals, "_run_step", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval.continuation_runner.next_step", return_value=object()),
+    ):
+        await approvals._run_claimed_approval_lifecycle(silent_claimed, target=target)
+    await _wait_workers_done(publisher)
+    assert len(client.puts) == before_silent

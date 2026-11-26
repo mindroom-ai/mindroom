@@ -43,6 +43,8 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "approval_policy_names",
+    "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "human_gate",
@@ -156,6 +158,12 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return rule
 
 
+def effective_tool_approval_policy(config: Config, tool_name: str) -> ApprovalRuleConfig | str:
+    """Return the winning approval rule for ``tool_name``, or the default action when no rule matches."""
+    rule = _matching_tool_approval_rule(config, tool_name)
+    return rule if rule is not None else config.tool_approval.default
+
+
 def _rule_outcome(config: Config, rule: ApprovalRuleConfig | None) -> tuple[bool, float]:
     """Return whether ``rule``, or the default when no rule matches, may ask about a call, and how long its card stays open."""
     may_ask = config.tool_approval.default == "require_approval" if rule is None else rule.action != "auto_approve"
@@ -194,6 +202,20 @@ def toolkit_approval_alias(
         if metadata is not None and function_name in metadata.approval_aliases:
             return metadata.approval_aliases[function_name]
     return None
+
+
+def approval_policy_names(
+    config: Config,
+    tools: ToolRegistry,
+    registered_toolkit: str | None,
+    function_name: str,
+) -> tuple[str, ...]:
+    """Return the tool names whose approval rules judge ``(registered_toolkit, function_name)``."""
+    # A scheduled call runs only with the approval its requester gave when it was scheduled.
+    if registered_toolkit == "scheduler" and function_name == "run_scheduled_call":
+        return ()
+    alias = toolkit_approval_alias(config, tools, registered_toolkit, function_name)
+    return (function_name, alias.judged_as) if alias is not None else (function_name,)
 
 
 def resolve_tool_approval_approver(
@@ -396,6 +418,8 @@ def scheduled_call_offers_any_arguments(
     requester_id: str,
     approver_id: str,
     authored_confirmation: bool,
+    tools: ToolRegistry | None = None,
+    toolkit_name: str | None = None,
 ) -> bool:
     """Return whether a scheduled call's card may offer approving any arguments.
 
@@ -406,7 +430,7 @@ def scheduled_call_offers_any_arguments(
     """
     if not config.tool_approval.scheduled_any_arguments or approver_id != requester_id or authored_confirmation:
         return False
-    operation = grant_operation(config, tool_name, arguments)
+    operation = grant_operation(config, tool_name, arguments, tools=tools, toolkit_name=toolkit_name)
     return operation is not None and operation.mcp_server_id is None
 
 

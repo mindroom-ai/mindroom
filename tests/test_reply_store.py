@@ -1590,6 +1590,23 @@ async def test_retention_rechecks_a_chosen_reply_by_its_key() -> None:
     assert "SEARCH reply USING INDEX sqlite_autoindex_reply_messages_1 (principal_id=? AND reply_id=?)" in plan, plan
 
 
+async def test_open_replies_uses_partial_index_without_temp_btree() -> None:
+    """open_replies() scans only open rows in order via reply_messages_open without an outer temporary sort."""
+    with closing(sqlite3.connect(":memory:")) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        outer_steps = [
+            detail
+            for _id, parent, _notused, detail in database.execute(
+                "EXPLAIN QUERY PLAN " + reply_messages._OPEN_REPLIES_SQL,
+            )
+            if parent == 0
+        ]
+
+    assert "SCAN reply_messages USING INDEX reply_messages_open" in outer_steps, outer_steps
+    assert all("USE TEMP B-TREE FOR ORDER BY" not in step for step in outer_steps), outer_steps
+
+
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_room: str = ROOM) -> PrincipalStore:
     """Record a Stop on ``$reply`` while the reply's create, which Matrix gives that event, is still unacknowledged.
 

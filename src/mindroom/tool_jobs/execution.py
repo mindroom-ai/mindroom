@@ -135,6 +135,8 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool
         # A toolkit that prepares its calls' jobs is asked only once the call has its approval, as any call is.
         isinstance(toolkit, JobTools | WorkflowPeerTools | ManagedJobToolkit)
         or function.controls_run
+        # Mid-turn compaction acts on the enclosing model loop, never from a detached job.
+        or function.registered_toolkit == "compact_context"
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(toolkit)
     )
@@ -157,6 +159,7 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     """
     if (
         isinstance(tool.toolkit, JobTools | WorkflowPeerTools)
+        or tool.function.registered_toolkit == "compact_context"
         or _is_background_job_excluded(tool, context)
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(tool.toolkit)
@@ -357,6 +360,7 @@ def _detached(call: JobCall) -> JobCall:
         call.context,
         session_state=session_state_snapshot(call.context.session_state),
         metadata=deepcopy(call.context.metadata),
+        compaction_requests=None,
     )
     return replace(call, arguments=application_arguments(deepcopy(dict(call.arguments))), context=context)
 

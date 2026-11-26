@@ -415,7 +415,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
         plugins=config_plugins(config, runtime_paths),
     )
     with tool_runtime_context(context):
-        result = await run_offered(agent, "list_schedules")
+        result = await run_offered(agent, "scheduler", {"action": "list"})
 
     assert not result.is_error
     assert result.content == "No scheduled tasks found."

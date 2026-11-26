@@ -18,12 +18,9 @@ from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
 )
 from mindroom.history.compaction import (
-    SummaryModel,
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
-    _summarize_chunk,
     compact_scope_history,
-    summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_text_tokens
 from mindroom.history.storage import (
@@ -32,12 +29,12 @@ from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import SummaryModel, summarize_chunk, summarize_runs
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryScope,
-    HistoryScopeState,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -101,7 +98,7 @@ from tests.history_helpers import (
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
-    from mindroom.history.compaction import _SummaryChunk
+    from mindroom.history.summarizer import SummaryChunk
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -123,14 +120,13 @@ async def _rewrite_single_run(
     seed_session(storage, working_session)
     report = AsyncMock()
 
-    async def after_persist(chunk: _SummaryChunk, _compacted_run_count: int, _runs_remaining: int) -> None:
+    async def after_persist(chunk: SummaryChunk, _compacted_run_count: int, _remaining: object) -> None:
         if served_models is not None:
-            served_models.append(chunk.summarizer.model.name)
+            served_models.append(chunk.model.name)
 
     await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
-        working_session=working_session,
         summarizer=_summarizer(
             summary_model,
             summary_input_budget,
@@ -193,11 +189,11 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
 
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(side_effect=fake_summary),
         ),
         patch(
-            "mindroom.history.compaction.build_summary_input",
+            "mindroom.history.summarizer.build_summary_input",
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
@@ -313,7 +309,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error
         return "merged summary"
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
         report = await _rewrite_single_run(storage=storage, working_session=working_session)
@@ -345,8 +341,8 @@ async def test_rewrite_starts_later_chunks_at_a_shrunk_budget(tmp_path: Path) ->
     summary_mock = AsyncMock(side_effect=[timeout, *(f"summary {index}" for index in range(4))])
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.build_summary_input", wraps=build_summary_input) as build_spy,
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.build_summary_input", wraps=build_summary_input) as build_spy,
     ):
         report = await _rewrite_single_run(
             storage=storage,
@@ -381,8 +377,8 @@ async def test_rewrite_keeps_a_later_run_whole_when_the_full_budget_holds_it(tmp
     summary_mock = AsyncMock(side_effect=[timeout, "first", "second"])
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.build_summary_input", wraps=build_summary_input) as build_spy,
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.build_summary_input", wraps=build_summary_input) as build_spy,
     ):
         report = await _rewrite_single_run(
             storage=storage,
@@ -445,7 +441,7 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     )
     summary_mock = AsyncMock(return_value="merged summary")
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         summary, _ = await summarize_runs(_summarizer(), "PREVIOUS SUMMARY", [run_1, run_2, run_3, run_4])
 
     assert summary == "merged summary"
@@ -481,8 +477,8 @@ async def test_a_checkpoint_in_the_first_run_stands_in_for_the_work_before_it() 
     run_2 = _completed_run("run-2")
     summary_mock = AsyncMock(return_value="merged summary")
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        chunk = await _summarize_chunk(_summarizer(), None, [run_1, run_2])
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
+        chunk = await summarize_chunk(_summarizer(), None, [run_1, run_2])
 
     assert chunk is not None
     # Compaction hooks read the transcript of the folded runs, so the fold keeps each run whole.
@@ -510,7 +506,7 @@ async def test_a_checkpoint_too_large_for_the_summary_input_gives_way_to_the_his
     )
     summary_mock = AsyncMock(return_value="merged summary")
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         summary, _ = await summarize_runs(_summarizer(input_budget_tokens=4_000), "PREVIOUS SUMMARY", [run_1, run_2])
 
     assert summary == "merged summary"
@@ -547,7 +543,7 @@ async def test_a_fallback_too_small_for_the_checkpoint_summarizes_the_history_it
         ],
     )
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         summary, _ = await summarize_runs(
             _summarizer(input_budget_tokens=30_000, fallback=fallback),
             None,
@@ -592,7 +588,7 @@ async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_w
     assert [run.run_id for run in loaded.runs] == ["earlier", "intervening", "approval"]
     summary_mock = AsyncMock(return_value="portable summary")
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         report = await _rewrite_single_run(
             storage=storage,
             working_session=loaded,
@@ -627,7 +623,7 @@ async def test_summary_built_on_a_checkpoint_folds_its_run(tmp_path: Path) -> No
     )
     summary_mock = AsyncMock(side_effect=["first", "second"])
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         report = await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
@@ -699,10 +695,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     served_models: list[str] = []
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.build_summary_input",
+            "mindroom.history.summarizer.build_summary_input",
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
@@ -735,8 +731,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     ]
     _assert_fold_reported(report, storage, 2)
     chunk, _ = report.await_args.args
-    assert chunk.summarizer.model.model is fallback
-    assert chunk.summarizer.model.name == "fallback-model"
+    assert chunk.model.model is fallback
+    assert chunk.model.name == "fallback-model"
     assert served_models == ["fallback-model", "fallback-model"]
     persisted = storage.load_session("session-1")
     assert persisted is not None
@@ -757,8 +753,8 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
     retry_sleep = AsyncMock()
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -817,8 +813,8 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     retry_sleep = AsyncMock()
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -866,8 +862,8 @@ async def test_rewrite_bounds_retry_attempts(
     retry_sleep = AsyncMock()
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -894,7 +890,7 @@ async def test_rewrite_propagates_non_retryable_provider_error_without_persistin
     summary_mock = AsyncMock(side_effect=classify_provider_error("invalid request", provider="fake", status_code=400))
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -915,7 +911,7 @@ async def test_rewrite_propagates_cancellation_without_retrying_or_persisting(tm
     summary_mock = AsyncMock(side_effect=asyncio.CancelledError)
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -947,8 +943,8 @@ async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_
 
     retry_sleep = AsyncMock(side_effect=wait_for_cancellation)
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
@@ -1058,7 +1054,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
     ):
@@ -1165,7 +1161,7 @@ async def test_compaction_hooks_see_who_said_each_line_without_what_mindroom_add
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
     ):
@@ -1286,7 +1282,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
         patch("mindroom.history.compaction.append_compaction_chunk", new=append_chunk),
@@ -1294,7 +1290,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             available_history_budget=1,
             max_summary_tokens=None,
@@ -1337,7 +1333,7 @@ async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_th
         await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(summary_model(summary), 50_000),
             available_history_budget=1,
             max_summary_tokens=2_000,
@@ -1376,7 +1372,7 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
     outcome = await compact_scope_history(
         storage=storage,
         session=session,
-        state=HistoryScopeState(),
+        mode="auto",
         summarizer=_summarizer(model, summary_input_budget),
         available_history_budget=1,
         max_summary_tokens=estimate_summary_text_tokens(short_summary, ScriptedModel([])),
@@ -1469,7 +1465,7 @@ async def test_prepare_history_for_run_does_not_build_the_compaction_transcript_
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
         patch(
@@ -1601,7 +1597,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
     ):
@@ -1715,7 +1711,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path, monkeypat
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
     ):
@@ -1767,7 +1763,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path, mon
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="merged summary"),
         ),
     ):
@@ -1854,13 +1850,12 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
     seed_session(storage, working_session)
     report = AsyncMock()
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(return_value=summary_text),
     ):
         await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=working_session,
-            working_session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             runs=list(working_session.runs),
             max_summary_tokens=None,
@@ -1956,13 +1951,13 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
     )
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(return_value=summary_text),
     ):
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             available_history_budget=1,
             max_summary_tokens=None,
@@ -2050,14 +2045,14 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
         progress_events.append(event)
 
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(return_value="merged summary"),
     ):
         outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
-            state=HistoryScopeState(),
+            mode="auto",
             available_history_budget=1,
             max_summary_tokens=None,
             before_tokens=estimate_prompt_visible_history_tokens(
@@ -2116,7 +2111,7 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
         ],
     )
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         summary, served_by = await summarize_runs(
             _summarizer(
                 primary,
@@ -2129,7 +2124,7 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
         )
 
     assert summary == "merged summary"
-    assert served_by.model.name == "fallback-model"
+    assert served_by.name == "fallback-model"
     assert [call.kwargs["model"] for call in summary_mock.await_args_list] == [primary, fallback, fallback]
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert "RUN1-MARKER" in summary_inputs[1]
@@ -2173,13 +2168,13 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         return stored
 
     with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.append_compaction_chunk", new=append_chunk),
     ):
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(force_compact_before_next_run=True),
+            mode="manual",
             summarizer=_summarizer(input_budget_tokens=6_000, fallback=fallback),
             available_history_budget=None,
             max_summary_tokens=None,
@@ -2254,7 +2249,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(
             return_value="merged summary",
         ),
@@ -2284,3 +2279,15 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
         "response-3",
         "response-4",
     }
+
+
+@pytest.mark.asyncio
+async def test_xml_only_history_skips_replay_basis_computation() -> None:
+    """When no run contains a readable native checkpoint, _after_native_checkpoint never calls replay_basis."""
+    runs = [_completed_run(f"run-{index}") for index in range(5)]
+    with (
+        patch("mindroom.history.summarizer.replay_basis", side_effect=AssertionError("replay_basis should not run")),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(return_value="xml summary")),
+    ):
+        summary, _ = await summarize_runs(_summarizer(), "PREVIOUS SUMMARY", runs)
+    assert summary == "xml summary"

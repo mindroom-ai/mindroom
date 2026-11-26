@@ -738,6 +738,11 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
             ),
         )
+
+        def can_publish_active_run(room_id: str) -> bool:
+            return contact_room(self.config, self.runtime_paths, room_id, self.agent_name) is None
+
+        active_runs = None if self.agent_name == ROUTER_AGENT_NAME else self._active_runs
         self._interactive_selections = InteractiveSelections(
             InteractiveSelectionsDeps(
                 logger=self.logger,
@@ -753,6 +758,8 @@ class AgentBot:
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
+                active_runs=active_runs,
+                can_publish_active_run=can_publish_active_run,
             ),
         )
         self._voice_ingress = VoiceIngress(
@@ -770,10 +777,8 @@ class AgentBot:
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
-                active_runs=None if self.agent_name == ROUTER_AGENT_NAME else self._active_runs,
-                can_publish_active_run=lambda room_id: (
-                    contact_room(self.config, self.runtime_paths, room_id, self.agent_name) is None
-                ),
+                active_runs=active_runs,
+                can_publish_active_run=can_publish_active_run,
             ),
         )
         self._turn_dispatcher = TurnDispatcher(
@@ -1802,7 +1807,7 @@ class AgentBot:
             # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
             self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
-            await self.steward_duties.started(client)
+            self.steward_duties.started()
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)

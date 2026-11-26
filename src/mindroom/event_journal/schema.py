@@ -837,6 +837,12 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS reply_messages_state ON reply_messages (principal_id, state, created_at_ns)
     """,
     """
+    -- Startup and recovery scan only open replies, not the full history of terminal replies.
+    CREATE INDEX IF NOT EXISTS reply_messages_open
+    ON reply_messages (principal_id, created_at_ns, reply_id)
+    WHERE state IN ('active', 'paused')
+    """,
+    """
     -- Live spans map to their replies' events by span, not by every reply the room holds.
     CREATE INDEX IF NOT EXISTS reply_messages_current_span
     ON reply_messages (principal_id, current_span_id)

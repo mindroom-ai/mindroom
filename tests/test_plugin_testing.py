@@ -5,6 +5,7 @@ These tests import only the kit, the plugin API, pytest and the example plugin, 
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -370,3 +371,100 @@ def test_a_plugin_that_fails_to_load_raises_its_error(tmp_path: Path) -> None:
 
         with pytest.raises(Exception, match=f"broken {module}"), load_plugin(broken, tmp_path / f"{module}-runtime"):
             pass
+
+
+@pytest.mark.asyncio
+async def test_call_tool_scopes_client_rooms_to_the_invoking_agent(tmp_path: Path) -> None:
+    """`call_tool` exposes only the invoking agent's joined rooms to `shared_room_ids`."""
+    plugin_dir = tmp_path / "rooms-plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "rooms_probe", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "tools.py").write_text(
+        """
+import json
+
+from mindroom.plugin_api import (
+    ToolCategory,
+    ToolFileAccess,
+    Toolkit,
+    get_tool_runtime_context,
+    register_tool_with_metadata,
+    resolve_accessible_room_id,
+    shared_room_ids,
+    tool,
+)
+
+
+class RoomsProbeTools(Toolkit):
+    name = "rooms_probe"
+
+    @tool
+    async def inspect_rooms(self, target_room: str) -> str:
+        context = get_tool_runtime_context()
+        assert context is not None
+        shared = await shared_room_ids(context)
+        resolved, error = await resolve_accessible_room_id(context, target_room)
+        return json.dumps({"shared": shared, "resolved": resolved, "error": error})
+
+
+@register_tool_with_metadata(
+    name="rooms_probe",
+    display_name="Rooms Probe",
+    description="Inspect shared rooms",
+    file_access=ToolFileAccess.NONE,
+    category=ToolCategory.DEVELOPMENT,
+)
+def rooms_probe_tools() -> type[RoomsProbeTools]:
+    return RoomsProbeTools
+""".lstrip(),
+        encoding="utf-8",
+    )
+    room_a = "!room-a:example.org"
+    room_b = "!room-b:example.org"
+    config = {
+        "agents": {
+            "helper": {
+                "display_name": "Helper",
+                "tools": ["rooms_probe"],
+                "access": {"users": [ALICE]},
+            },
+        },
+    }
+    with load_plugin(plugin_dir, tmp_path / "runtime", config=config) as plugin:
+        directory = entity_directory(plugin.config, plugin.runtime_paths)
+        (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
+        plugin.add_room(room_a, members={ALICE: "Alice", helper: "Helper"})
+        plugin.add_room(room_b, members={ALICE: "Alice"})
+
+        result = await plugin.call_tool(
+            "rooms_probe",
+            "inspect_rooms",
+            {"target_room": room_b},
+            agent="helper",
+            sender=ALICE,
+            room=room_a,
+        )
+        unknown_alias = await plugin.call_tool(
+            "rooms_probe",
+            "inspect_rooms",
+            {"target_room": "#unknown:localhost"},
+            agent="helper",
+            sender=ALICE,
+            room=room_a,
+        )
+
+    assert result.status == "ok"
+    assert json.loads(result.value) == {
+        "shared": [room_a],
+        "resolved": None,
+        "error": "Not authorized to access the target room.",
+    }
+    assert unknown_alias.status == "ok"
+    assert json.loads(unknown_alias.value) == {
+        "shared": [room_a],
+        "resolved": None,
+        "error": "Unknown room '#unknown:localhost'; pass a room ID, alias, or configured room name.",
+    }

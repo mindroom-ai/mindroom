@@ -42,6 +42,7 @@ Matrix sync callback
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `delivery_replay.py` | Durable per-scope claims for inbound deliveries: event ids, Matrix thread roots, and nonces, each scope in its own file under its own lock; external triggers also split their old shared file through it |
 | `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
+| `startup_maintenance.py` | Detached post-sync startup maintenance lifecycle: room/membership setup, runtime support sync, approval-recovery readiness, and best-effort owner orphaned-account cleanup |
 | `room_steward.py` | The steward rule: which running, joined bot does a room's shared invisible work (highest power, ties to the lowest Matrix ID), which one posts where no agent answers, which one has a given Matrix ID, and which bot, while its receive loop has caught up, observes a room's members for reply access |
 | `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
@@ -69,7 +70,7 @@ Matrix sync callback
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation: transcription and its durable per-bot checkpoint |
-| `steward_duties.py` | What a room's steward does for the room: publish its thread mode and MindRoom accounts, on its own triggers, on a handover and in the startup and reload sweep, and emit room-membership hooks under a per-event claim taken for the steward elected then; `runs_room_hooks` says which bot runs an emission's room-scoped hooks; also the owner account's orphaned-account cleanup and welcome in configured rooms |
+| `steward_duties.py` | What a room's steward does for the room: publish its thread mode and MindRoom accounts, on its own triggers, on a handover and in the startup and reload sweep, and emit room-membership hooks under a per-event claim taken for the steward elected then; `runs_room_hooks` says which bot runs an emission's room-scoped hooks; also the owner account's welcome in configured rooms (orphaned-account cleanup runs in startup maintenance / orchestrator) |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -334,7 +335,7 @@ Matrix sync callback
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `knowledge/search.py` | What an agent searches: its published sources, the `search_knowledge_base` tool and its results, and the `<knowledge_base>` prompt block |
-| `knowledge/readers.py` | The Agno document readers and chunkers knowledge indexing reads files with; the only knowledge module that imports Agno |
+| `knowledge/readers.py` | MindRoom-owned file readers and factory knowledge indexing reads files with |
 | `knowledge/collections.py` | Collection naming and ownership for one knowledge base: opening, writing a file's chunk rows, reclaiming superseded collections and legacy Chroma storage |
 | `knowledge/vector_store.py` | One collection as one SQLite file: chunk rows, float32 vectors, an FTS5 keyword index, and the collection's own claims, failures, and lifecycle, changed in one transaction with its rows; in-process search |
 | `knowledge/index_metadata.py` | A base's two state documents: the publication, written only by the publisher under the source-root lock, and the refresh status, written only by the runtime |
@@ -460,7 +461,8 @@ Matrix sync callback
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
 | `history/request_size.py` | The one sizing rule of every model request: the latest answer's reported size when the request extends that answer's request, else the route's estimate; and the frame a reply's requests hold around its history |
 | `history/runtime.py` | Prepares a scope's history before a reply (replay plan and compaction check), runs live manual compaction, and coordinates compaction lifecycle reporting |
-| `history/compaction.py` | Scoped compaction: summarizing a scope's runs, or a running turn, into its summary rows |
+| `history/compaction.py` | Scoped compaction persistence, hook emission, and lifecycle orchestration for stored scopes and running turns |
+| `history/summarizer.py` | Pure compaction summarization engine: summary model loading, cache-warm fork attempt, lazy native-checkpoint scan, and XML chunking |
 | `token_counting/families.py` | The local token counter of each model: its own tiktoken encoding on routes serving OpenAI's models, else o200k_base scaled by a per-family margin; loads o200k_base in the background |
 | `token_counting/counts.py` | Every token count, from the route's local estimate, with a stand-in while the vocabulary loads, and verified text fitting |
 | `token_counting/requests.py` | How a route sizes and identifies a request from the parts its body builder renders: text, JSON values, and priced costs such as media allowances |

@@ -255,7 +255,7 @@ _REJECTED_TOOL_OVERRIDES_BY_TOOL = {
 # Coverage:
 #   tests/test_filesystem_tool_config.py::test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement,
 #   tests/api/test_plugin_room_agents.py::test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant.
-RETIRED_FILE_FUNCTIONS = {
+_RETIRED_FILE_FUNCTIONS = {
     "save_file": "write_file",
     "replace_file_chunk": "edit_file",
     "read_file_chunk": "read_file",
@@ -266,7 +266,7 @@ RETIRED_FILE_FUNCTIONS = {
 _RETIRED_FILE_SETTINGS = {
     **{
         f"enable_{old}": f"use `filesystem: {{exclude_tools: [{new}]}}` to switch {new} off"
-        for old, new in {"read_file": "read_file", **RETIRED_FILE_FUNCTIONS}.items()
+        for old, new in {"read_file": "read_file", **_RETIRED_FILE_FUNCTIONS}.items()
     },
     "all": "remove it; set `filesystem: {enable_delete_file: true}` only if it enabled deletion and you still want that",
     **dict.fromkeys(
@@ -290,7 +290,7 @@ _RETIRED_FILE_SETTINGS = {
 #   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
 def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
     """Return the rule that decided a retired file function but not its replacement, as text, or None."""
-    for old, new in RETIRED_FILE_FUNCTIONS.items():
+    for old, new in _RETIRED_FILE_FUNCTIONS.items():
         first_old, first_new = (
             next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
         )
@@ -317,7 +317,7 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_changing_timeout_days_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
-RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
+_RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
     "watch_thread": "triggers",
     "subscribe_event": "triggers",
@@ -326,6 +326,53 @@ RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "disable_trigger": "triggers",
     "delete_trigger": "triggers",
     "rotate_trigger_key": "triggers",
+}
+
+# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
+# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
+#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
+#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
+#   and todo respectively.
+# Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
+#   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
+#   differs from the replacement's effective decision (regardless of other toolkits).
+# Coverage:
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name.
+RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
+    "scheduler": {
+        "schedule": "scheduler",
+        "edit_schedule": "scheduler",
+        "list_schedules": "scheduler",
+        "cancel_schedule": "scheduler",
+    },
+    "searxng": {
+        "search_web": "searxng_search",
+        "image_search": "searxng_search",
+        "it_search": "searxng_search",
+        "map_search": "searxng_search",
+        "music_search": "searxng_search",
+        "news_search": "searxng_search",
+        "science_search": "searxng_search",
+        "video_search": "searxng_search",
+    },
+    "memory": {
+        "add_memory": "memory",
+        "search_memories": "memory",
+        "list_memories": "memory",
+        "get_memory": "memory",
+        "update_memory": "memory",
+        "delete_memory": "memory",
+    },
+    "todo": {
+        "plan": "todo",
+        "add_todo": "todo",
+        "list_todos": "todo",
+        "update_todo": "todo",
+        "apply_template": "todo",
+        "list_templates": "todo",
+    },
 }
 
 
@@ -390,7 +437,32 @@ def retired_trigger_approval_error(
     default_timeout_days: float = 7.0,
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
-    for old, new in RETIRED_TRIGGER_FUNCTIONS.items():
+    for old, new in _RETIRED_TRIGGER_FUNCTIONS.items():
+        if (
+            error := _retired_approval_pair_error(
+                rules,
+                old=old,
+                new=new,
+                default=default,
+                default_timeout_days=default_timeout_days,
+            )
+        ) is not None:
+            return error
+    return None
+
+
+def retired_consolidated_approval_error(
+    toolkit_name: str,
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+    renames: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
+    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
+    if not effective_renames:
+        return None
+    for old, new in effective_renames.items():
         if (
             error := _retired_approval_pair_error(
                 rules,
@@ -424,7 +496,7 @@ def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | No
     if (
         retired := _retired_function_filter(
             settings,
-            RETIRED_FILE_FUNCTIONS,
+            _RETIRED_FILE_FUNCTIONS,
             guidance_for=lambda key, new: f"use `filesystem: {{{key}: [{new}]}}`",
         )
     ) is not None:
@@ -432,11 +504,11 @@ def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | No
     return next(((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings), None)
 
 
-def retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first retired trigger function filter in ``settings``, and its migration guidance."""
     return _retired_function_filter(
         settings,
-        RETIRED_TRIGGER_FUNCTIONS,
+        _RETIRED_TRIGGER_FUNCTIONS,
         guidance_for=lambda _key, new: (
             f"`{new}` is now a single unified function with an `action` parameter; "
             "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
@@ -448,7 +520,7 @@ def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tu
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
         return retired
-    if tool_name == "triggers" and (retired := retired_trigger_setting(overrides)) is not None:
+    if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
@@ -526,7 +598,7 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
-RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
+_RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "run_workflow": ("start_workflow", "resume_workflow"),
     "create_workflow": ("save_workflow",),
     "update_workflow": ("save_workflow",),
@@ -541,7 +613,7 @@ def retired_dynamic_workflow_approval_error(
     default_timeout_days: float = 7.0,
 ) -> str | None:
     """Return a migration error when approval rules decide a `workflow` function differently from its retired name."""
-    for old, replacements in RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS.items():
+    for old, replacements in _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS.items():
         for new in replacements:
             if (
                 error := _retired_approval_pair_error(
