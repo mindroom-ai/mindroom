@@ -1950,7 +1950,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     continue
             elif isinstance(chunk, FailedReply):
                 streaming._failed_reply_error = chunk.error
-                streaming._failed_reply_text = chunk.text.strip() or None
+                streaming._failed_reply_text = chunk.text.strip()
                 text_chunk = chunk.text
             elif isinstance(chunk, RunFinished):
                 if chunk.record.content is not None:

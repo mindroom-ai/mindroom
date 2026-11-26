@@ -1952,6 +1952,62 @@ async def test_streaming_response_failed_reply_without_extra_content_populates_a
 
 
 @pytest.mark.asyncio
+async def test_streaming_response_empty_failed_reply_omits_error_fallback(tmp_path: Path) -> None:
+    """An empty FailedReply omits io.mindroom.ai_run.error.fallback instead of synthesizing plain_text."""
+    config = _config(tmp_path)
+    config.defaults.streaming.update_interval = 0.0
+    config.defaults.streaming.min_update_interval = 0.0
+    config.defaults.streaming.max_idle = 0.0
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    homeserver = _Homeserver()
+    client.room_send = AsyncMock(side_effect=homeserver.room_send)
+    records = FakeReplyRecords()
+    model = model_payload(config, "default")
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+
+    async def chunks() -> AsyncIterator[str | FailedReply]:
+        yield "Partial answer."
+        await asyncio.sleep(0.02)
+        yield FailedReply("", stall)
+
+    await send_streaming_response(
+        client,
+        MessageTarget.resolve(_ROOM, None, None, room_mode=True),
+        config,
+        runtime_paths_for(config),
+        chunks(),
+        extra_content=None,
+        active_model=lambda: model,
+        **records.hooks(),
+    )
+
+    writes = homeserver.writes
+    assert _visible_content(writes[-1]).get("body") == "Partial answer."
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model,
+        "error": {
+            "kind": "stream_stalled",
+            "title": "Primary stopped responding",
+            "summary": "OpenRouter sent no data for 5 min.",
+            "detail": "Model stream stalled: no provider event for 300s",
+            "code": STREAM_STALLED,
+            "status_code": 504,
+            "provider": "OpenRouter",
+            "retryable": True,
+            "action": "continue",
+        },
+    }
+    _assert_only_final_write_reports_error(writes, model)
+
+
+@pytest.mark.asyncio
 async def test_team_run_failure_emits_structured_ai_run_error_with_model_label(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

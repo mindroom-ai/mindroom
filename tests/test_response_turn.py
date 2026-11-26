@@ -1981,3 +1981,31 @@ async def test_settle_failure_uses_runtime_paths_for_missing_api_key_dashboard_u
     assert collector["io.mindroom.ai_run"]["error"]["kind"] == "missing_api_key"
     assert "https://42.mindroom.chat" in collector["io.mindroom.ai_run"]["error"]["summary"]
     assert "**" not in collector["io.mindroom.ai_run"]["error"]["summary"]
+
+
+def test_settle_failure_omits_fallback_for_empty_failed_reply() -> None:
+    """An empty FailedReply omits io.mindroom.ai_run.error.fallback instead of synthesizing plain_text."""
+    collector: dict[str, Any] = {}
+    empty_failure = FailedReply("", RuntimeError("boom"))
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: TurnContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved]:
+        yield AttemptResolved(HandledAttempt(empty_failure))
+
+    chunks = _run_turn(_attempt, sinks=TurnSinks(run_metadata_collector=collector))
+
+    assert chunks == [empty_failure]
+    assert collector == {
+        "io.mindroom.ai_run": {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "boom",
+                "retryable": False,
+            },
+        },
+    }
