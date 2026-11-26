@@ -213,6 +213,27 @@ def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
     return value
 
 
+# LEGACY_COMPAT: Retired overlapping built-in toolkits.
+# Legacy format: Authored tool lists accepted web_browser_tools, jira, confluence, and python.
+# Last legacy release: v2026.11.615; replacement: unreleased; use browser, atlassian, or shell and filesystem.
+# Handling: Reject the old names with explicit migration guidance; never grant replacement capabilities implicitly.
+# Coverage: tests/test_retired_tools.py.
+_RETIRED_TOOL_REPLACEMENTS = {
+    "web_browser_tools": "choose and configure `browser` explicitly if you want Chromium or desktop browser access",
+    "jira": "configure the `atlassian` tool and connect an Atlassian account",
+    "confluence": "configure the `atlassian` tool and connect an Atlassian account",
+    "python": "use `shell` to run Python and `filesystem` to read and write files",
+}
+
+
+def retired_tool_message(name: str) -> str | None:
+    """Return migration guidance for a retired toolkit or one of its functions."""
+    toolkit = name.partition(".")[0]
+    if toolkit in _RETIRED_TOOL_REPLACEMENTS:
+        return f"Tool {toolkit!r} was removed; {_RETIRED_TOOL_REPLACEMENTS[toolkit]}."
+    return None
+
+
 # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
 # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
 # Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and
@@ -301,10 +322,11 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 
 # LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
 # Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
-#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
-#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
-#   function taking an `action` parameter.
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key) and
+#   later a separate watch_pr function, which could appear in tool_approval.rules[].match globs or
+#   include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480 (original 8) and v2026.11.633 (watch_pr); replacement: unreleased; all 9 were
+#   collapsed into a single `triggers` function taking an `action` parameter.
 # Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
 #   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
 #   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
@@ -320,6 +342,7 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
     "watch_thread": "triggers",
+    "watch_pr": "triggers",
     "subscribe_event": "triggers",
     "create_trigger": "triggers",
     "list_triggers": "triggers",
@@ -328,20 +351,29 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of consolidated built-in toolkits.
-# Legacy format: scheduler (4), searxng (8), memory (6), todo (6), gmail (26), google_calendar (14), github (39),
-#   google_drive (9), google_sheets (5 including create_duplicate_sheet), and homeassistant (11) exposed separate
-#   per-operation functions that could appear in tool_approval.rules[].match globs (including prefixed secondary
-#   Google Workspace plugin copies).
-# Last legacy release: v2026.11.610 (scheduler/searxng/memory/todo) and v2026.11.611 (gmail/google_calendar/github/
-#   google_drive/google_sheets/homeassistant); replacement: unreleased; consolidated into risk-scoped action tools.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
+# Legacy format: scheduler, searxng, memory, todo, Wave 3b native toolkits (gmail, google_calendar, github,
+#   google_drive, google_sheets, homeassistant, including prefixed secondary Google Workspace plugin copies),
+#   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
+#   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
+#   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
+#   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
+#   mem0, zep) previously exposed individual per-operation function names that could appear in
+#   tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625 / unreleased); replacement: unreleased;
+#   consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone), allow configs with
 #   an explicit exact rule deciding the replacement function, and otherwise reject tool_approval.rules when any
-#   retired function's effective decision differs from the replacement's effective decision.
+#   retired function's effective decision differs from the replacement's effective decision (regardless of other
+#   toolkits).
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
-#   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed.
+#   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
+#   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -490,6 +522,348 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "activate_scene": "homeassistant_control",
         "trigger_automation": "homeassistant_control",
         "call_service": "homeassistant_control",
+    },
+    "csv": {
+        "list_csv_files": "csv_inspect",
+        "get_columns": "csv_inspect",
+        "read_csv_file": "csv_inspect",
+    },
+    "duckdb": {
+        "show_tables": "duckdb_inspect",
+        "describe_table": "duckdb_inspect",
+        "summarize_table": "duckdb_inspect",
+        "inspect_query": "duckdb_inspect",
+        "full_text_search": "duckdb_inspect",
+        "create_table_from_path": "duckdb_manage",
+        "load_local_path_to_table": "duckdb_manage",
+        "load_local_csv_to_table": "duckdb_manage",
+        "load_s3_path_to_table": "duckdb_manage",
+        "load_s3_csv_to_table": "duckdb_manage",
+        "export_table_to_path": "duckdb_manage",
+        "create_fts_index": "duckdb_manage",
+        "get_table_name_from_path": "duckdb_manage",
+    },
+    "sql": {
+        "list_tables": "sql_inspect",
+        "describe_table": "sql_inspect",
+    },
+    "postgres": {
+        "show_tables": "postgres_inspect",
+        "describe_table": "postgres_inspect",
+        "summarize_table": "postgres_inspect",
+        "inspect_query": "postgres_inspect",
+    },
+    "redshift": {
+        "show_tables": "redshift_inspect",
+        "describe_table": "redshift_inspect",
+        "summarize_table": "redshift_inspect",
+        "inspect_query": "redshift_inspect",
+    },
+    "neo4j": {
+        "list_labels": "neo4j_inspect",
+        "list_relationship_types": "neo4j_inspect",
+        "get_schema": "neo4j_inspect",
+    },
+    "yfinance": {
+        "get_current_stock_price": "yfinance_get",
+        "get_company_info": "yfinance_get",
+        "get_stock_fundamentals": "yfinance_get",
+        "get_income_statements": "yfinance_get",
+        "get_key_financial_ratios": "yfinance_get",
+        "get_analyst_recommendations": "yfinance_get",
+        "get_company_news": "yfinance_get",
+        "get_technical_indicators": "yfinance_get",
+        "get_historical_stock_prices": "yfinance_get",
+    },
+    "openbb": {
+        "get_stock_price": "openbb_get",
+        "search_company_symbol": "openbb_get",
+        "get_company_news": "openbb_get",
+        "get_company_profile": "openbb_get",
+        "get_price_targets": "openbb_get",
+    },
+    "financial_datasets_api": {
+        "get_income_statements": "financial_datasets_financials",
+        "get_balance_sheets": "financial_datasets_financials",
+        "get_cash_flow_statements": "financial_datasets_financials",
+        "get_segmented_financials": "financial_datasets_financials",
+        "get_financial_metrics": "financial_datasets_financials",
+        "get_company_info": "financial_datasets_financials",
+        "get_earnings": "financial_datasets_financials",
+        "get_insider_trades": "financial_datasets_financials",
+        "get_institutional_ownership": "financial_datasets_financials",
+        "get_sec_filings": "financial_datasets_financials",
+        "get_stock_prices": "financial_datasets_market",
+        "get_crypto_prices": "financial_datasets_market",
+        "get_news": "financial_datasets_market",
+        "search_tickers": "financial_datasets_market",
+    },
+    "openweather": {
+        "get_current_weather": "openweather_get",
+        "get_forecast": "openweather_get",
+        "get_air_pollution": "openweather_get",
+        "geocode_location": "openweather_get",
+    },
+    "docker": {
+        "list_containers": "docker_inspect",
+        "inspect_container": "docker_inspect",
+        "get_container_logs": "docker_inspect",
+        "list_images": "docker_inspect",
+        "inspect_image": "docker_inspect",
+        "list_volumes": "docker_inspect",
+        "inspect_volume": "docker_inspect",
+        "list_networks": "docker_inspect",
+        "inspect_network": "docker_inspect",
+        "run_container": "docker_container",
+        "exec_in_container": "docker_container",
+        "start_container": "docker_container",
+        "stop_container": "docker_container",
+        "remove_container": "docker_container",
+        "pull_image": "docker_resource",
+        "build_image": "docker_resource",
+        "tag_image": "docker_resource",
+        "remove_image": "docker_resource",
+        "create_volume": "docker_resource",
+        "remove_volume": "docker_resource",
+        "create_network": "docker_resource",
+        "remove_network": "docker_resource",
+        "connect_container_to_network": "docker_resource",
+        "disconnect_container_from_network": "docker_resource",
+    },
+    "e2b": {
+        "run_python_code": "e2b_run",
+        "run_command": "e2b_run",
+        "stream_command": "e2b_run",
+        "run_background_command": "e2b_run",
+        "kill_background_command": "e2b_run",
+        "run_server": "e2b_run",
+        "list_files": "e2b_inspect",
+        "read_file_content": "e2b_inspect",
+        "watch_directory": "e2b_inspect",
+        "get_sandbox_status": "e2b_inspect",
+        "list_running_sandboxes": "e2b_inspect",
+        "get_public_url": "e2b_inspect",
+        "write_file_content": "e2b_files",
+        "upload_file": "e2b_files",
+        "download_file_from_sandbox": "e2b_files",
+        "download_png_result": "e2b_files",
+        "download_chart_data": "e2b_files",
+        "set_sandbox_timeout": "e2b_lifecycle",
+        "shutdown_sandbox": "e2b_lifecycle",
+    },
+    "daytona": {
+        "run_code": "daytona_run",
+        "run_shell_command": "daytona_run",
+        "read_file": "daytona_inspect",
+        "list_files": "daytona_inspect",
+        "create_file": "daytona_files",
+        "delete_file": "daytona_files",
+        "change_directory": "daytona_files",
+    },
+    "file_generation": {
+        "generate_json_file": "generate_file",
+        "generate_csv_file": "generate_file",
+        "generate_pdf_file": "generate_file",
+        "generate_docx_file": "generate_file",
+        "generate_text_file": "generate_file",
+        "generate_html_file": "generate_file",
+        "generate_code_file": "generate_file",
+    },
+    "visualization": {
+        "create_bar_chart": "create_chart",
+        "create_line_chart": "create_chart",
+        "create_pie_chart": "create_chart",
+        "create_scatter_plot": "create_chart",
+        "create_histogram": "create_chart",
+    },
+    "unsplash": {
+        "search_photos": "unsplash",
+        "get_photo": "unsplash",
+        "get_random_photo": "unsplash",
+        "download_photo": "unsplash",
+    },
+    "email": {"email_user": "smtp_send_email"},
+    "twilio": {"get_call_details": "twilio_read", "list_messages": "twilio_read"},
+    "discord": {
+        "get_channel_messages": "discord_read",
+        "get_channel_info": "discord_read",
+        "list_channels": "discord_read",
+        "send_message": "discord_send",
+        "delete_message": "discord_manage",
+    },
+    "telegram": {
+        "get_chat": "telegram_read",
+        "get_file": "telegram_read",
+        "send_message": "telegram_send",
+        "send_photo": "telegram_send",
+        "send_document": "telegram_send",
+        "send_video": "telegram_send",
+        "send_audio": "telegram_send",
+        "send_animation": "telegram_send",
+        "send_sticker": "telegram_send",
+        "edit_message": "telegram_manage",
+        "delete_message": "telegram_manage",
+        "react_with_emoji": "telegram_manage",
+        "pin_message": "telegram_manage",
+    },
+    "whatsapp": {
+        "send_text_message": "whatsapp_send",
+        "send_template_message": "whatsapp_send",
+        "send_reply_buttons": "whatsapp_send",
+        "send_list_message": "whatsapp_send",
+        "send_image": "whatsapp_send",
+        "send_document": "whatsapp_send",
+        "send_location": "whatsapp_send",
+        "send_reaction": "whatsapp_send",
+    },
+    "webex": {"list_rooms": "webex_read", "send_message": "webex_send"},
+    "zoom": {
+        "get_meeting": "zoom_read",
+        "get_upcoming_meetings": "zoom_read",
+        "list_meetings": "zoom_read",
+        "get_meeting_recordings": "zoom_read",
+        "schedule_meeting": "zoom_manage",
+        "delete_meeting": "zoom_manage",
+    },
+    "x": {
+        "get_user_info": "x_read",
+        "get_home_timeline": "x_read",
+        "search_posts": "x_read",
+        "create_post": "x_write",
+        "reply_to_post": "x_write",
+        "send_dm": "x_write",
+    },
+    "linear": {
+        "get_user_details": "linear_read",
+        "get_teams_details": "linear_read",
+        "get_issue_details": "linear_read",
+        "get_user_assigned_issues": "linear_read",
+        "get_workflow_issues": "linear_read",
+        "get_high_priority_issues": "linear_read",
+        "create_issue": "linear_write",
+        "update_issue": "linear_write",
+    },
+    "notion": {
+        "search_pages": "notion_search",
+        "create_page": "notion_write",
+        "update_page": "notion_write",
+    },
+    "todoist": {
+        "get_task": "todoist_read",
+        "get_active_tasks": "todoist_read",
+        "get_projects": "todoist_read",
+        "create_task": "todoist_write",
+        "update_task": "todoist_write",
+        "close_task": "todoist_write",
+        "delete_task": "todoist_write",
+    },
+    "clickup": {
+        "list_spaces": "clickup_read",
+        "list_lists": "clickup_read",
+        "list_tasks": "clickup_read",
+        "get_task": "clickup_read",
+        "create_task": "clickup_write",
+        "update_task": "clickup_write",
+        "delete_task": "clickup_write",
+    },
+    "trello": {
+        "list_boards": "trello_read",
+        "get_board_lists": "trello_read",
+        "get_cards": "trello_read",
+        "create_board": "trello_write",
+        "create_list": "trello_write",
+        "create_card": "trello_write",
+        "move_card": "trello_write",
+    },
+    "bitbucket": {
+        "list_repositories": "bitbucket_read",
+        "get_repository_details": "bitbucket_read",
+        "list_repository_commits": "bitbucket_read",
+        "list_all_pull_requests": "bitbucket_read",
+        "get_pull_request_details": "bitbucket_read",
+        "get_pull_request_changes": "bitbucket_read",
+        "list_issues": "bitbucket_read",
+        "create_repository": "bitbucket_create_repository",
+    },
+    "cal_com": {
+        "get_available_slots": "cal_com_read",
+        "get_upcoming_bookings": "cal_com_read",
+        "create_booking": "cal_com_write",
+        "reschedule_booking": "cal_com_write",
+        "cancel_booking": "cal_com_write",
+    },
+    "shopify": {
+        "get_shop_info": "shopify_store",
+        "get_products": "shopify_store",
+        "get_orders": "shopify_store",
+        "get_inventory_levels": "shopify_store",
+        "get_low_stock_products": "shopify_store",
+        "get_top_selling_products": "shopify_analytics",
+        "get_products_bought_together": "shopify_analytics",
+        "get_sales_by_date_range": "shopify_analytics",
+        "get_order_analytics": "shopify_analytics",
+        "get_product_sales_breakdown": "shopify_analytics",
+        "get_customer_order_history": "shopify_analytics",
+        "get_sales_trends": "shopify_analytics",
+        "get_average_order_value": "shopify_analytics",
+        "get_repeat_customers": "shopify_analytics",
+    },
+    "spotify": {
+        "search_tracks": "spotify_search",
+        "search_playlists": "spotify_search",
+        "search_artists": "spotify_search",
+        "search_albums": "spotify_search",
+        "get_track_recommendations": "spotify_search",
+        "get_artist_top_tracks": "spotify_search",
+        "get_album_tracks": "spotify_search",
+        "get_current_user": "spotify_library",
+        "get_currently_playing": "spotify_library",
+        "get_user_playlists": "spotify_library",
+        "get_playlist": "spotify_library",
+        "get_my_top_tracks": "spotify_library",
+        "get_my_top_artists": "spotify_library",
+        "create_playlist": "spotify_playlist_write",
+        "add_tracks_to_playlist": "spotify_playlist_write",
+        "update_playlist_details": "spotify_playlist_write",
+        "remove_tracks_from_playlist": "spotify_playlist_write",
+        "play_track": "spotify_play",
+    },
+    "reddit": {
+        "get_user_info": "reddit_read",
+        "get_top_posts": "reddit_read",
+        "get_subreddit_info": "reddit_read",
+        "get_trending_subreddits": "reddit_read",
+        "get_subreddit_stats": "reddit_read",
+        "create_post": "reddit_write",
+        "reply_to_post": "reddit_write",
+        "reply_to_comment": "reddit_write",
+    },
+    "google_maps": {
+        "search_places": "google_maps_places",
+        "geocode_address": "google_maps_places",
+        "reverse_geocode": "google_maps_places",
+        "validate_address": "google_maps_places",
+        "get_elevation": "google_maps_places",
+        "get_timezone": "google_maps_places",
+        "get_directions": "google_maps_routes",
+        "get_distance_matrix": "google_maps_routes",
+    },
+    "brandfetch": {
+        "search_by_identifier": "brandfetch_lookup",
+        "asearch_by_identifier": "brandfetch_lookup",
+        "search_by_brand": "brandfetch_lookup",
+        "asearch_by_brand": "brandfetch_lookup",
+    },
+    "mem0": {
+        "search_memory": "mem0_read",
+        "get_all_memories": "mem0_read",
+        "add_memory": "mem0_add",
+        "delete_all_memories": "mem0_delete_all",
+    },
+    "zep": {
+        "get_zep_memory": "zep_read",
+        "search_zep_memory": "zep_read",
+        "add_zep_message": "zep_add_message",
     },
 }
 

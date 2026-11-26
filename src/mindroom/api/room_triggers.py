@@ -31,7 +31,11 @@ from mindroom.reactive_triggers.models import (
     SourceType,
     ThreadTagSourceSpec,
 )
-from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
+from mindroom.reactive_triggers.store import (
+    ReactiveTriggerLimitError,
+    ReactiveTriggerStore,
+    ReactiveTriggerStoreError,
+)
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -70,6 +74,7 @@ class TriggerRow:
     target_room_id: str | None
     target_thread_id: str | None
     thread_mode: _TriggerThreadMode
+    reopen_on_fire: bool
     enabled: bool
     disabled_reason: str | None
     once: bool
@@ -208,6 +213,8 @@ def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, re
 async def _run_store[T](call: Callable[[], T]) -> T:
     try:
         return await asyncio.to_thread(call)
+    except ReactiveTriggerLimitError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (ExternalTriggerStoreError, ReactiveTriggerStoreError, sqlite3.Error, OSError) as exc:
         raise HTTPException(503, "Trigger store is not available.") from exc
 
@@ -282,6 +289,7 @@ def _build_trigger_row(matched: _MatchedTrigger, *, can_manage: bool, joined_tar
         target_room_id=None if redacted else matched.target_room_id,
         target_thread_id=None if redacted else target_thread_id,
         thread_mode=thread_mode,
+        reopen_on_fire=False if redacted else target.reopen_on_fire,
         enabled=record.enabled,
         disabled_reason=disabled_reason,
         once=once,

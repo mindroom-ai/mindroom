@@ -1377,14 +1377,7 @@ def test_instructions_name_the_mirrored_reply_only_for_a_project_agent_offered_s
     project = _tools(paths, channels=[CHANNEL], room="lobby")
 
     assert "do not call slack_post" in project.instructions_for(offered)
-    assert (
-        "do not call slack_post"
-        in with_offered_instructions(
-            project,
-            adapt_toolkit(project),
-            authored_instructions=False,
-        ).instructions
-    )
+    assert "do not call slack_post" in with_offered_instructions(project, adapt_toolkit(project)).instructions
     assert project.instructions_for([name for name in offered if name != "slack_post"]) == ""
     assert _tools(paths, channels=[CHANNEL]).instructions_for(offered) == ""
     assert _tools(paths, room="lobby").instructions_for(offered) == ""

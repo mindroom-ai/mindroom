@@ -945,6 +945,7 @@ async def test_mid_turn_switch_to_a_model_that_fails_to_build_reports_the_error_
             "title": "Reply failed",
             "summary": "no provider installed for model 'large'",
             "retryable": False,
+            "fallback": "⚠️ no provider installed for model 'large'",
         },
     }
 
@@ -989,6 +990,7 @@ async def test_team_attempt_that_fails_to_build_reports_the_error_on_its_resolve
             "title": "Reply failed",
             "summary": "team build boom",
             "retryable": False,
+            "fallback": "[Team (Writer, Checker)] ⚠️ team build boom",
         },
     }
 
@@ -1161,6 +1163,7 @@ async def test_terminal_notes_always_carry_terminal_ai_run_status(
 
     error_final = turn_error.homeserver.writes[-1]
     assert _stream_status(error_final) == STREAM_STATUS_ERROR
+    assert _visible_content(error_final).get("body") == "**[Response interrupted by an error: boom]**"
     assert _ai_run(error_final) == {
         "version": 1,
         "status": "error",
@@ -1170,6 +1173,7 @@ async def test_terminal_notes_always_carry_terminal_ai_run_status(
             "title": "Reply failed",
             "summary": "boom",
             "retryable": False,
+            "fallback": "**[Response interrupted by an error: boom]**",
         },
     }
 
@@ -1521,6 +1525,7 @@ async def test_provider_failure_after_tool_approval_emits_structured_ai_run_erro
                 "provider": "OpenRouter",
                 "retryable": True,
                 "action": "continue",
+                "fallback": "⚠️ OpenRouter unavailable (503) — Primary could not complete the reply. Try again shortly.",
             },
         }
         visible_body = str(_visible_content(final_write).get("body", ""))
@@ -1684,6 +1689,7 @@ async def test_handled_failed_reply_without_metadata_builder_reports_error_ai_ru
             "title": "Reply failed",
             "summary": "prep boom",
             "retryable": False,
+            "fallback": "⚠️ prep boom",
         },
     }
     _assert_only_final_write_reports_error(writes, model)
@@ -1777,6 +1783,7 @@ async def test_collected_failure_after_preparation_keeps_prepared_context_and_co
             "title": "Reply failed",
             "summary": "post-prep boom",
             "retryable": False,
+            "fallback": "⚠️ post-prep boom",
         },
     }
 
@@ -1827,6 +1834,7 @@ async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
             "title": "Reply failed",
             "summary": "prep failed",
             "retryable": False,
+            "fallback": "[general] ⚠️ Error: prep failed",
         },
     }
     if model is not None:
@@ -1879,6 +1887,7 @@ async def test_full_run_stream_stalled_emits_structured_ai_run_error_and_omits_a
         "provider": "OpenRouter",
         "retryable": True,
         "action": "continue",
+        "fallback": "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
     }
     _assert_only_final_write_reports_error(writes, model_payload(turn.bot.config, "default"))
 
@@ -1922,6 +1931,63 @@ async def test_streaming_response_failed_reply_without_extra_content_populates_a
     )
 
     writes = homeserver.writes
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model,
+        "error": {
+            "kind": "stream_stalled",
+            "title": "Primary stopped responding",
+            "summary": "OpenRouter sent no data for 5 min.",
+            "detail": "Model stream stalled: no provider event for 300s",
+            "code": STREAM_STALLED,
+            "status_code": 504,
+            "provider": "OpenRouter",
+            "retryable": True,
+            "action": "continue",
+            "fallback": "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
+        },
+    }
+    _assert_only_final_write_reports_error(writes, model)
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_empty_failed_reply_omits_error_fallback(tmp_path: Path) -> None:
+    """An empty FailedReply omits io.mindroom.ai_run.error.fallback instead of synthesizing plain_text."""
+    config = _config(tmp_path)
+    config.defaults.streaming.update_interval = 0.0
+    config.defaults.streaming.min_update_interval = 0.0
+    config.defaults.streaming.max_idle = 0.0
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    homeserver = _Homeserver()
+    client.room_send = AsyncMock(side_effect=homeserver.room_send)
+    records = FakeReplyRecords()
+    model = model_payload(config, "default")
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+
+    async def chunks() -> AsyncIterator[str | FailedReply]:
+        yield "Partial answer."
+        await asyncio.sleep(0.02)
+        yield FailedReply("", stall)
+
+    await send_streaming_response(
+        client,
+        MessageTarget.resolve(_ROOM, None, None, room_mode=True),
+        config,
+        runtime_paths_for(config),
+        chunks(),
+        extra_content=None,
+        active_model=lambda: model,
+        **records.hooks(),
+    )
+
+    writes = homeserver.writes
+    assert _visible_content(writes[-1]).get("body") == "Partial answer."
     assert _ai_run(writes[-1]) == {
         "version": 1,
         "status": "error",
@@ -1985,5 +2051,94 @@ async def test_team_run_failure_emits_structured_ai_run_error_with_model_label(
         "provider": "OpenRouter",
         "retryable": True,
         "action": "continue",
+        "fallback": "[Team (Writer, Checker)] ⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
     }
     _assert_only_final_write_reports_error(writes, model_payload(turn.bot.config, "default"))
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_error_notes_override_fallback_with_rendered_note_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """Owed and approval NoteKind.ERROR rows override stale error.fallback with the rendered note text."""
+    del echo_tool
+    stale_error = {
+        "kind": "runtime_error",
+        "title": "Reply failed",
+        "summary": "boom",
+        "retryable": False,
+        "fallback": "stale fallback",
+    }
+
+    # (a) Approval NoteKind.ERROR overrides stale fallback with the rendered approval note text.
+    turn = await _setup_turn(
+        tmp_path / "approval",
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        assert await gateway.write_approval_failure_note(
+            continuation.response_event_id,
+            approval_id=continuation.approval_id,
+            note=NoteKind.ERROR,
+            text="Rendered approval error note.",
+            target=continuation_target(continuation),
+            model_name=continuation.runtime_model_name,
+            error_info=stale_error,
+        )
+        approval_write = turn.homeserver.writes[-1]
+        assert "Rendered approval error note." in str(_visible_content(approval_write).get("body", ""))
+        assert (_ai_run(approval_write) or {})["error"] == {**stale_error, "fallback": "Rendered approval error note."}
+    finally:
+        await shutdown_approval_runtime()
+
+    # (b) Owed NoteKind.ERROR overrides stale fallback with the rendered owed note text.
+    turn_owed = await _setup_turn(tmp_path / "owed", monkeypatch, scripts={"default": [answer("unused")]})
+    gateway_owed = unwrap_extracted_collaborator(turn_owed.bot._delivery_gateway)
+    request = _plain_request(_target())
+    async with turn_owed.bot._reply_runtime.span_scope() as slot:
+        handle = await turn_owed.bot._reply_runtime.claim(
+            sources=request.sources,
+            room_id=_ROOM,
+            thread_id=None,
+            placeholder=AGENT_PLACEHOLDER,
+            show_tool_calls=True,
+        )
+        assert isinstance(handle, SpanHandle)
+        slot.handle = handle
+        await turn_owed.runner._send_placeholder(
+            request,
+            history_scope=turn_owed.bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
+            execution_identity=turn_owed.runner.deps.tool_runtime.build_execution_identity(
+                target=_target(),
+                user_id=request.user_id,
+            ),
+            placeholder_message=AGENT_PLACEHOLDER,
+        )
+        reply_id, span = handle.reply_id, handle.span
+    await turn_owed.bot.journal_principal().replies.update(
+        reply_id,
+        lambda current: rl.dispatch_failed(
+            current,
+            span,
+            error_text="Rendered owed error note.",
+            error_info=stale_error,
+            now_ns=time.time_ns(),
+        ),
+    )
+    await gateway_owed._flush_owed_write(reply_id)
+    owed_write = turn_owed.homeserver.writes[-1]
+    assert _visible_content(owed_write).get("body") == "Rendered owed error note."
+    assert (_ai_run(owed_write) or {})["error"] == {**stale_error, "fallback": "Rendered owed error note."}

@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 import mindroom.judgment.rerank as judgment_rerank
 import mindroom.knowledge.rerank as rerank_module
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.judgment.answers import JudgmentError
+from mindroom.judgment.answers import JudgmentError, JudgmentResult
 from mindroom.judgment.client import JudgmentClient
-from mindroom.judgment.evaluator import BatchEvaluator
+from mindroom.judgment.evaluator import BatchEvaluator, _logged_evaluator
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
 from mindroom.judgment.rerank import _JudgmentReranker, create_judgment_reranker
 from mindroom.judgment.state import JudgmentQuestion, JudgmentRequest, build_batch_request
+from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import REDACTION_FAILED
 from tests.conftest import test_runtime_paths
@@ -283,3 +286,58 @@ def test_judgment_provider_is_a_reranker_config(tmp_path: Path) -> None:
     paths = test_runtime_paths(tmp_path)
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
     assert isinstance(rerank_module._create_reranker(config.reranker, paths), _JudgmentReranker)
+
+
+@pytest.mark.asyncio
+async def test_outer_deadline_cancellation_logs_both_judgment_and_retrieval() -> None:
+    """An outer retrieval deadline cancels the judgment evaluator and logs both the cancelled evaluation and fallback."""
+    settings = OpenAIDecisionsJudgmentConfig(provider="openai_decisions", threshold=0.3)
+
+    async def stall(_request: JudgmentRequest) -> JudgmentResult[tuple[float | None, ...]]:
+        await asyncio.Event().wait()
+        msg = "unreachable"
+        raise AssertionError(msg)
+
+    batch = BatchEvaluator(
+        evaluate=_logged_evaluator(stall, settings, question_id="batch"),
+        fits=lambda _request: True,
+    )
+    reranker = _JudgmentReranker(batch)
+    candidates = [
+        Candidate("a", "First passage.", 0.9),
+        Candidate("b", "Second passage.", 0.8),
+        Candidate("c", "Third passage.", 0.5),
+    ]
+
+    with capture_logs() as logs:
+        kept = await retrieve(
+            "Where do I park?",
+            candidates,
+            Selection(limit=2),
+            reranker=reranker,
+            deadline_seconds=0.02,
+        )
+
+    assert kept == candidates[:2]
+    [evaluated] = [entry for entry in logs if entry["event"] == "Judgment evaluated"]
+    assert evaluated["question"] == "batch"
+    assert evaluated["backend"] == "openai_decisions"
+    assert evaluated["failure"] == "cancelled"
+    assert evaluated["model"] is None
+    assert evaluated["model_alias"] is None
+    assert evaluated["decision"] is None
+    assert evaluated["probability"] is None
+    assert evaluated["threshold"] == 0.3
+    assert evaluated["input_tokens"] is None
+    assert evaluated["output_tokens"] is None
+    assert evaluated["state_bytes"] > 0
+    assert evaluated["incomplete_reason"] is None
+    assert isinstance(evaluated["latency_ms"], int)
+    assert evaluated["latency_ms"] >= 0
+
+    [warning] = [entry for entry in logs if entry["event"] == "Reranking failed; keeping search order"]
+    assert warning["error"] == "TimeoutError"
+    assert isinstance(warning["latency_ms"], int)
+    assert warning["latency_ms"] >= 0
+    assert warning["candidate_count"] == len(candidates)
+    assert warning["deadline_seconds"] == 0.02

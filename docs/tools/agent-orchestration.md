@@ -19,7 +19,7 @@ These built-in tools let an agent hand tasks to other agents, publish reports th
 Related tools documented elsewhere:
 
 - [`contacts`](../agent-contacts.md#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's `shell` calls and worker-routed `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](../deployment/egress-broker.md#asking-in-chat).
+- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's `shell` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](../deployment/egress-broker.md#asking-in-chat).
 - [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](../usage.md#usage_stats) - Read-only summaries of retained usage.
@@ -148,7 +148,7 @@ Common errors:
 
 ### Dedicated Workers
 
-With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
+With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell` and `filesystem`, in a worker of its own instead of the worker it shares with its agent's other subagents.
 Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
 Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
 The runtime must also run idle-worker cleanup, because every such subagent gets a new worker: the API server runs it when `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is above 0, which both Helm charts set, so `mindroom run --no-api` offers no dedicated workers.
@@ -159,7 +159,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem]
 ```
 
 ```python
@@ -274,7 +274,7 @@ If a custom or plugin tool already declares that application parameter, exclude 
 The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and vendor toolkits whose connection lasts only for one run always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 

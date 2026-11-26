@@ -37,6 +37,7 @@ from mindroom.thread_tags import (
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
+    reopen_thread_if_resolved,
     set_thread_tag,
     set_thread_tags_if_empty,
     snooze_until,
@@ -2546,3 +2547,72 @@ async def test_remove_thread_tag_with_an_expected_record_returns_when_the_tag_is
     )
     assert state.tags == {}
     client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reopen_thread_if_resolved_fast_path_removal_and_concurrency() -> None:
+    """Open/malformed threads short-circuit with zero writes; resolved threads remove with owner and expected_record."""
+    thread_root = "$thread-root:localhost"
+    resolved_key = _thread_tag_state_key(thread_root, "resolved")
+    resolved_content = _tag_record_content(set_by="@alice:localhost")
+
+    for state_event in (
+        nio.RoomGetStateEventError("Not found", status_code="M_NOT_FOUND"),
+        nio.RoomGetStateEventResponse(
+            content={"malformed": True},
+            event_type=THREAD_TAGS_EVENT_TYPE,
+            state_key=resolved_key,
+            room_id="!room:localhost",
+        ),
+    ):
+        noop_client = _tag_writer_client("@mindroom_general:localhost", {})
+        noop_client.room_get_state_event.return_value = state_event
+        assert (
+            await reopen_thread_if_resolved(
+                noop_client,
+                "!room:localhost",
+                thread_root,
+                requester_user_id="@alice:localhost",
+            )
+            is False
+        )
+        noop_client.room_get_state.assert_not_awaited()
+        noop_client.room_put_state.assert_not_awaited()
+
+    current_events = {
+        resolved_key: resolved_content,
+        _thread_tag_state_key(thread_root, "blocked"): _tag_record_content(set_by="@alice:localhost"),
+    }
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    client.joined_members.return_value = _joined_members_response("@mindroom_general:localhost", "@alice:localhost")
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == THREAD_TAGS_EVENT_TYPE and state_key == resolved_key:
+            return nio.RoomGetStateEventResponse(
+                content=resolved_content,
+                event_type=event_type,
+                state_key=state_key,
+                room_id=room_id,
+            )
+        if event_type == "m.room.power_levels":
+            return _power_levels_response(users={"@mindroom_general:localhost": 50, "@alice:localhost": 50})
+        return nio.RoomGetStateEventError("Not found", status_code="M_NOT_FOUND")
+
+    client.room_get_state_event.side_effect = get_state_event
+    assert (
+        await reopen_thread_if_resolved(client, "!room:localhost", thread_root, requester_user_id="@alice:localhost")
+        is True
+    )
+    client.room_put_state.assert_awaited_once()
+    assert current_events[resolved_key] == {}
+    assert _thread_tag_state_key(thread_root, "blocked") in current_events
+
+    newer_content = {**resolved_content, "note": "re-resolved"}
+    current_events[resolved_key] = newer_content
+    client.room_put_state.reset_mock()
+    assert (
+        await reopen_thread_if_resolved(client, "!room:localhost", thread_root, requester_user_id="@alice:localhost")
+        is False
+    )
+    client.room_put_state.assert_not_awaited()
+    assert current_events[resolved_key] == newer_content

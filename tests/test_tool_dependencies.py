@@ -457,7 +457,7 @@ def test_file_generation_uses_installed_dependencies(
         tools=builtin_tool_registry(),
     )
 
-    assert "generate_docx_file" in toolkit.functions
+    assert "generate_file" in toolkit.functions
 
 
 @pytest.mark.parametrize(("pip_name", "expected_import"), list(_PIP_TO_IMPORT.items()))

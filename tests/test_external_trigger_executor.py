@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -25,6 +27,7 @@ from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliv
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.thread_tags import ThreadTagsPermissionError
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -70,6 +73,7 @@ def _snapshot(
     resolved_room_id: str | None = None,
     new_thread: bool = False,
     thread_id: str | None = "$thread-root",
+    reopen_on_fire: bool = False,
 ) -> TriggerDeliverySnapshot:
     return TriggerDeliverySnapshot(
         trigger_id="campground",
@@ -87,6 +91,7 @@ def _snapshot(
             thread_id=thread_id,
             agent="research",
             new_thread=new_thread,
+            reopen_on_fire=reopen_on_fire,
         ),
         resolved_room_id=resolved_room_id or room_id,
         auth="ed25519",
@@ -399,3 +404,76 @@ async def test_execute_external_trigger_continues_recorded_thread_instead_of_new
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest-in-thread"
     assert PER_FIRE_THREAD_ROOT_KEY not in content
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_execute_external_trigger_reopen_on_fire_ordering_skips_and_resilience(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reopen_on_fire reopens targeted threads before send, skips room/new roots, and survives errors."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock()
+    events_order: list[str] = []
+
+    async def fake_reopen(
+        reopen_client: object,
+        room_id: str,
+        thread_root_id: str,
+        *,
+        requester_user_id: str | None = None,
+    ) -> bool:
+        assert (reopen_client, room_id, requester_user_id) == (client, "!fixed:localhost", "@owner:localhost")
+        events_order.append(f"reopen:{thread_root_id}")
+        return True
+
+    async def fake_send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        events_order.append("send")
+        return DeliveredMatrixEvent(event_id="$delivered", content_sent={})
+
+    async def run(snapshot: TriggerDeliverySnapshot, *, continue_thread: str | None = None) -> str | None:
+        events_order.clear()
+        return await execute_external_trigger(
+            client=client,
+            snapshot=snapshot,
+            payload=_payload(),
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_reader=_conversation_reader(),
+            continue_thread_event_id=continue_thread,
+        )
+
+    monkeypatch.setattr("mindroom.external_triggers.executor.reopen_thread_if_resolved", fake_reopen)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", fake_send)
+
+    assert await run(_snapshot(thread_id="$thread-root", reopen_on_fire=True)) == "$delivered"
+    assert events_order == ["reopen:$thread-root", "send"]
+
+    await run(_snapshot(new_thread=True, thread_id=None, reopen_on_fire=True), continue_thread="$first-root")
+    assert events_order == ["reopen:$first-root", "send"]
+
+    for snap in (
+        _snapshot(thread_id=None, new_thread=False, reopen_on_fire=True),
+        _snapshot(thread_id=None, new_thread=True, reopen_on_fire=True),
+        _snapshot(thread_id="$thread-root", new_thread=False, reopen_on_fire=False),
+    ):
+        await run(snap)
+        assert events_order == ["send"]
+
+    monkeypatch.setattr(
+        "mindroom.external_triggers.executor.reopen_thread_if_resolved",
+        AsyncMock(side_effect=ThreadTagsPermissionError("insufficient power level")),
+    )
+    with capture_logs() as logs:
+        assert await run(_snapshot(thread_id="$thread-root", reopen_on_fire=True)) == "$delivered"
+    assert events_order == ["send"]
+    assert any(entry.get("log_level") == "warning" and entry.get("thread_id") == "$thread-root" for entry in logs)
+
+    monkeypatch.setattr(
+        "mindroom.external_triggers.executor.reopen_thread_if_resolved",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await run(_snapshot(thread_id="$thread-root", reopen_on_fire=True))
+    assert events_order == []

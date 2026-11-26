@@ -273,7 +273,6 @@ agents:
     - duckduckgo
     - website
     - openclaw_compat
-    - python
     - calculator
   research:
     display_name: ResearchAgent

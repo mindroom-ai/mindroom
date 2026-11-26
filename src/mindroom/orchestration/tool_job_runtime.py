@@ -7,7 +7,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
@@ -56,8 +57,9 @@ from mindroom.tool_jobs.runtime import (
     is_workflow_node_job,
     register_background_runtime,
 )
+from mindroom.tool_system.catalog import ToolConfigOverrideError
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -71,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
     from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_jobs.instances import ToolJobInstance
+    from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workflow_runs.engine import WorkflowEngine
@@ -80,6 +83,81 @@ logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
 # How long a stopped subagent job waits for its requester's access to resolve once its bot has synced.
 _ACCESS_WAIT_SECONDS = 600.0
+_REFUSED_NOT_AUTHORIZED = "Tool execution is no longer authorized for this caller."
+_REFUSED_RUNTIME_UNAVAILABLE = "This tool is currently unavailable in the current runtime."
+_REFUSED_PLUGIN_NOT_LOADED = "The plugin that supplied this tool for this turn did not load in the current runtime."
+
+
+def _caller_refusal_reason(
+    *,
+    valid_transport: bool,
+    allowed_edges: bool,
+    requester_id: str | None,
+    requester_access: JobGrant | None,
+) -> str | None:
+    """Return the caller-side refusal reason, or None when transport, delegation, and requester access pass."""
+    if not valid_transport:
+        return "invalid_transport"
+    if not allowed_edges:
+        return "delegation_revoked"
+    if requester_id is None:
+        return "missing_requester"
+    return "requester_denied" if requester_access == "denied" else None
+
+
+def _refuse_execution(
+    owner: ToolExecutionIdentity,
+    tool: JobTool,
+    *,
+    constructed_toolkit: str | None,
+    reason: str,
+    message: str = _REFUSED_NOT_AUTHORIZED,
+) -> NoReturn:
+    """Log one structured execution refusal without arguments, paths, or raw plugin errors, then raise."""
+    logger.warning(
+        "Refused tool execution",
+        agent_name=owner.agent_name,
+        tool_name=tool.function.name,
+        toolkit_name=tool.toolkit_name,
+        constructed_toolkit=constructed_toolkit,
+        reason=reason,
+    )
+    raise JobAccessError(message)
+
+
+def _unavailability_reason(
+    live_plugins: ConfigPlugins,
+    construction: object,
+    check_local: Callable[..., bool],
+) -> tuple[str, str] | None:
+    """Diagnose whether ``locally_allowed`` refused solely due to tool/plugin unavailability; never permits."""
+    if not isinstance(construction, dict) or not isinstance(constructed_name := construction.get("name"), str):
+        return None
+    live_tools = live_plugins.tools
+    if constructed_name in live_tools.runtime_unavailable:
+        diagnostic_tools = replace(live_tools, runtime_unavailable=live_tools.runtime_unavailable - {constructed_name})
+        result = ("runtime_unavailable", _REFUSED_RUNTIME_UNAVAILABLE)
+    elif constructed_name not in live_tools.entries:
+        context = get_tool_runtime_context()
+        raw_origin = construction.get("factory_origin")
+        factory_origin = (
+            raw_origin if isinstance(raw_origin, list) and all(isinstance(part, str) for part in raw_origin) else None
+        )
+        source = context.plugins.plugin_tool_source(constructed_name, factory_origin) if context is not None else None
+        if source is None or not live_plugins.has_unloaded_plugin_root(source[0]):
+            return None
+        diagnostic_tools = replace(
+            live_tools,
+            entries=MappingProxyType({**live_tools.entries, constructed_name: source[1]}),
+            unavailable=MappingProxyType({k: v for k, v in live_tools.unavailable.items() if k != constructed_name}),
+        )
+        result = ("plugin_not_loaded", _REFUSED_PLUGIN_NOT_LOADED)
+    else:
+        return None
+    try:
+        return result if check_local(tools=diagnostic_tools) else None
+    except ToolConfigOverrideError:
+        return None
 
 
 def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
@@ -344,44 +422,72 @@ class ToolJobRuntimeCoordinator:
 
         config = self.config_provider()
         edges = active_delegation_edges(owner)
-        if isinstance(tool.toolkit, WorkflowPeerTools):
-            # Runtime-attached to a workflow child; authorize by its bound run and node instead of config tools.
-            allowed = owner.agent_name in config.agents and tool.toolkit.matches_caller(owner)
-        else:
-            allowed = locally_allowed(
-                config,
-                owner,
-                tools=config_plugins(config, self.runtime_paths).tools,
-                tool_name=tool.function.name,
-                toolkit_name=tool.toolkit_name,
-                origin=function_provenance(tool, arguments),
-                depth=len(edges),
-                authority=dict(tool.authority),
-                runtime_paths=self.runtime_paths,
-            )
-        if not allowed:
-            msg = "Tool execution is no longer authorized for this caller."
-            raise JobAccessError(msg)
+        construction = tool.authority.get("construction")
+        constructed_name = (
+            construction.get("name")
+            if isinstance(construction, dict) and isinstance(construction.get("name"), str)
+            else None
+        )
+
+        # Evaluate caller, transport, delegation, and requester access before inspecting tool availability.
         root = edges[0][0] if edges else owner.agent_name
         recipient = owner.transport_agent_name or root
         valid_transport = _transport_allows_actor(config, recipient, root)
-        # Delegated children and their callers need their own grants; the root actor may hold its team's.
-        callers = ({owner.agent_name, *(caller for caller, _, _ in edges)} - {root}) | accessed_entities(
-            config,
-            recipient,
-            root,
-        )
         # A workflow participant is granted by its caller's workflow tool, any other child by its delegate list.
         allowed_edges = all(caller_grants_child(caller, child, config, grant) for caller, child, grant in edges)
+        agent_configured = owner.agent_name in config.agents
+        requester_access: JobGrant | None = None
+        if agent_configured and valid_transport and allowed_edges and owner.requester_id is not None:
+            # Delegated children and their callers need their own grants; the root actor may hold its team's.
+            callers = ({owner.agent_name, *(caller for caller, _, _ in edges)} - {root}) | accessed_entities(
+                config,
+                recipient,
+                root,
+            )
+            requester_access = self._requester_access(config, owner.requester_id, owner.room_id, callers)
+
+        caller_failure = _caller_refusal_reason(
+            valid_transport=valid_transport,
+            allowed_edges=allowed_edges,
+            requester_id=owner.requester_id,
+            requester_access=requester_access,
+        )
+        if isinstance(tool.toolkit, WorkflowPeerTools):
+            # Runtime-attached to a workflow child; authorize by its bound run and node instead of config tools.
+            if not (agent_configured and tool.toolkit.matches_caller(owner)):
+                _refuse_execution(owner, tool, constructed_toolkit=constructed_name, reason="workflow_peer_mismatch")
+            if caller_failure is not None:
+                _refuse_execution(owner, tool, constructed_toolkit=constructed_name, reason=caller_failure)
+            return
+
         # Accepted work keeps executing while membership resolves; only a proven denial stops it, as revocation does.
-        if (
-            not valid_transport
-            or not allowed_edges
-            or owner.requester_id is None
-            or self._requester_access(config, owner.requester_id, owner.room_id, callers) == "denied"
-        ):
-            msg = "Tool execution is no longer authorized for this caller."
-            raise JobAccessError(msg)
+        if caller_failure is not None:
+            _refuse_execution(owner, tool, constructed_toolkit=constructed_name, reason=caller_failure)
+
+        live_plugins = config_plugins(config, self.runtime_paths)
+        check_local = partial(
+            locally_allowed,
+            config,
+            owner,
+            tool_name=tool.function.name,
+            toolkit_name=tool.toolkit_name,
+            origin=function_provenance(tool, arguments),
+            depth=len(edges),
+            authority=dict(tool.authority),
+            runtime_paths=self.runtime_paths,
+        )
+        if not check_local(tools=live_plugins.tools):
+            diagnostic = (
+                _unavailability_reason(live_plugins, construction, check_local)
+                if agent_configured
+                and valid_transport
+                and allowed_edges
+                and owner.requester_id is not None
+                and requester_access == "allowed"
+                else None
+            )
+            reason, message = diagnostic or ("not_locally_allowed", _REFUSED_NOT_AUTHORIZED)
+            _refuse_execution(owner, tool, constructed_toolkit=constructed_name, reason=reason, message=message)
 
     async def sync(self) -> None:
         """Recover once, publish the service, and wake it after config changes."""

@@ -169,7 +169,7 @@ if __name__ == "__main__":
 
 @pytest.mark.parametrize("listed", ["file", "coding", "filesystem"])
 def test_a_selective_env_list_naming_filesystem_by_an_alias_still_routes_it(tmp_path: Path, listed: str) -> None:
-    """A deployment's ``shell,file,python,coding`` list keeps the filesystem toolkit in the worker."""
+    """A deployment's ``shell,file,coding`` list keeps the filesystem toolkit in the worker."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -183,4 +183,4 @@ def test_a_selective_env_list_naming_filesystem_by_an_alias_still_routes_it(tmp_
         ),
     )
     assert _placement(runtime_paths, "filesystem", None) == "1"
-    assert _placement(runtime_paths, "python", None) == "0"
+    assert _placement(runtime_paths, "docker", None) == "0"

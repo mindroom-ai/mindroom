@@ -21,7 +21,7 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool), and each of its `python` calls that runs in a worker, gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool) gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
@@ -377,7 +377,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`, or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -546,7 +546,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
 Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
-The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
+The provider's tools ask for approval before they write, but an allowed account lets the agent's shell commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or requester-scoped Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
@@ -676,10 +676,9 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: such an agent's `shell` calls, wherever they run, and its `python` calls that run in a worker go through the broker and get keys, and only such agents appear on the Agent Keys pages.
+Adding the `egress_credentials` tool to an agent with `shell` opts it into Agent Keys: its `shell` calls go through the broker and get keys, and only such agents appear on the Agent Keys pages.
 A `shell` in the primary process, for example under `worker_tools: []`, works the same as one in a worker, but there the broker keeps nothing from the agent (see [Code in the primary process](#what-the-broker-cannot-protect-against)).
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
-So does an agent whose only command tool is `python` running in the primary process, which runs inside MindRoom itself where the broker cannot reach it: the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 
 ```yaml
@@ -917,7 +916,7 @@ A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
 
-**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), or its `shell` and `python` run in the primary process, so its calls get no broker environment; add the tool, or route `shell` or `python` to a worker with `worker_tools`.
+**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool) or does not have `shell`; add both tools, and make sure the broker listener is reachable from where `shell` runs.
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.

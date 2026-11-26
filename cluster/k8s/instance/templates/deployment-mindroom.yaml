@@ -223,7 +223,7 @@ spec:
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
-          value: "shell,file,python,coding"
+          value: "shell,file,coding"
         - name: MATRIX_HOMESERVER
           value: "http://tuwunel-{{ .Values.customer }}:8008"
         - name: MINDROOM_DESKTOP_MATRIX_HOMESERVER

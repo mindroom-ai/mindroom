@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.youtube import YouTubeTools
+    from mindroom.custom_tools.youtube import YouTubeTools
 
 
 @register_tool_with_metadata(
@@ -75,6 +75,6 @@ if TYPE_CHECKING:
 )
 def youtube_tools() -> type[YouTubeTools]:
     """Return YouTube tools for video data extraction."""
-    from agno.tools.youtube import YouTubeTools
+    from mindroom.custom_tools.youtube import YouTubeTools
 
     return YouTubeTools

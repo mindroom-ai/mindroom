@@ -1,7 +1,7 @@
 """Which OAuth connections Agent Keys may use: an explicit, revocable opt-in per service.
 
 A connection serves the tools of its provider, whose writes ask for approval. Agent Keys hands the same token to the
-agent's shell and python, which run without approval prompts, so the broker uses a connection for a service only once
+agent's shell, which run without approval prompts, so the broker uses a connection for a service only once
 someone allowed it. The opt-in lives in the store of the connection it unlocks (`oauth_source.broker_credential_context`):
 the requester's own store for a requester-scoped provider such as GitHub, else the store of the service's keys. One
 reserved document there, `egress__oauth_reuse`, holds

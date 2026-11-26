@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.websearch import WebSearchTools
+    from mindroom.custom_tools.ddgs_search import GoogleSearchTools
 
 
 @register_tool_with_metadata(
@@ -90,38 +90,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/web-search/#googlesearch",
     function_names=("web_search", "search_news"),
 )
-def googlesearch_tools() -> type[WebSearchTools]:
+def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""
-    from agno.tools.websearch import WebSearchTools
-
-    class GoogleSearchTools(WebSearchTools):
-        """Convenience wrapper for WebSearchTools with Google as the backend."""
-
-        def __init__(
-            self,
-            enable_search: bool = True,
-            enable_news: bool = True,
-            modifier: str | None = None,
-            fixed_max_results: int | None = None,
-            proxy: str | None = None,
-            timeout: int | None = 10,
-            verify_ssl: bool = True,
-            timelimit: Literal["d", "w", "m", "y"] | None = None,
-            region: str | None = None,
-            **kwargs: object,
-        ) -> None:
-            super().__init__(
-                enable_search=enable_search,
-                enable_news=enable_news,
-                backend="google",
-                modifier=modifier,
-                fixed_max_results=fixed_max_results,
-                proxy=proxy,
-                timeout=timeout,
-                verify_ssl=verify_ssl,
-                timelimit=timelimit,
-                region=region,
-                **kwargs,
-            )
+    from mindroom.custom_tools.ddgs_search import GoogleSearchTools
 
     return GoogleSearchTools

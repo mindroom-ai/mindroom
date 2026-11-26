@@ -25,7 +25,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -104,19 +104,20 @@ agents:
 ## [`e2b`]
 
 `e2b` runs code in a hosted E2B sandbox.
-The tool creates one sandbox when it loads and reuses it for its calls.
-It fails to load when sandbox creation fails or no key is available, which reports `E2B_API_KEY not set. Please set the E2B_API_KEY environment variable.`
+The tool creates one sandbox lazily on its first call and reuses it across calls in the reply.
+It fails to load when no API key is available, reporting `E2B API key is required.`
+Requests pin the `e2b.app` domain (ignoring ambient `E2B_DOMAIN`) and fail closed when ambient `E2B_DEBUG=true` is set.
 It provides:
 
-- Code and commands: `run_python_code()`, `run_command()`, `stream_command()`, `run_background_command()`, and `kill_background_command()`.
-- Results of the most recent `run_python_code()` call: `download_png_result()` and `download_chart_data()`.
-- Sandbox files: `upload_file()`, `download_file_from_sandbox()`, `list_files()`, `read_file_content()`, `write_file_content()`, and `watch_directory()`.
-- Servers and lifecycle: `run_server()`, `get_public_url()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
+- `e2b_run(action, ...)`: `python`, `command`, `stream_command`, `background_command`, `kill_background`, and `server`.
+- `e2b_inspect(action, ...)`: `list_files`, `read_file`, `watch_directory`, `status`, `list_sandboxes`, and `public_url`.
+- `e2b_files(action, ...)`: `write`, `upload`, `download`, `download_png`, and `download_chart`.
+- `e2b_lifecycle(action, ...)`: `set_timeout` and `shutdown`.
 
-`upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
-`download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
-`run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
+`e2b_files(action="upload", ...)` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
+`e2b_files(action="download", ...)` and `e2b_inspect(action="read_file", ...)` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
+`e2b_run()` refuses Python and command output larger than 64 MiB with a tool error, so write larger output to a sandbox file instead.
+Downloads and execution artifacts always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -134,14 +135,14 @@ agents:
 ## [`daytona`]
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
-It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
+It provides `daytona_run(action, ...)` (`code`, `shell`), `daytona_inspect(action, ...)` (`read_file`, `list_files`), and `daytona_files(action, ...)` (`create_file`, `delete_file`, `change_directory`).
 With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
-Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
+Change it with `daytona_files(action="change_directory", ...)` or a standalone `daytona_run(action="shell", command="cd <directory>")` call.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
-The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
+Set `instructions` to override the default sandbox instructions in the agent prompt.
 
-`verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
+`verify_ssl: false` disables TLS certificate checks for that Daytona toolkit instance, exposing its API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
 
 | Option | Type | Default | Notes |

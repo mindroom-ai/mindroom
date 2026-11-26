@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.wikipedia import WikipediaTools
+    from mindroom.custom_tools.wikipedia import WikipediaTools
 
 
 @register_tool_with_metadata(
@@ -39,10 +39,10 @@ if TYPE_CHECKING:
     ],
     dependencies=["wikipedia"],
     docs_url="https://docs.mindroom.chat/tools/research-sources/#wikipedia",
-    function_names=("search_wikipedia", "search_wikipedia_and_update_knowledge_base"),
+    function_names=("search_wikipedia",),
 )
 def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for searching and retrieving information."""
-    from agno.tools.wikipedia import WikipediaTools
+    from mindroom.custom_tools.wikipedia import WikipediaTools
 
     return WikipediaTools

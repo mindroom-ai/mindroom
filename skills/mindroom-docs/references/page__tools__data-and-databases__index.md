@@ -32,11 +32,12 @@ Missing Python dependencies install automatically on first use; see [Automatic D
 
 ## [`sql`]
 
-`sql` provides `list_tables()`, `describe_table(table_name)`, and `run_sql_query(query, limit=10)`.
+`sql` provides `sql_inspect(action, table_name=None)` (actions `list_tables`, `describe_table`) and `run_sql_query(query, limit=10)`.
 `run_sql_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
 Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
 The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
 For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
+PostgreSQL URLs require an explicit host (including Unix-socket `?host=...`), username, password, and database, and reject ambient libpq `passfile`, `PGSERVICE`, and `PGHOSTADDR` fallbacks.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -47,16 +48,16 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
+| `enable_list_tables` | `boolean` | `true` | Enable the `list_tables` action on `sql_inspect()`. |
+| `enable_describe_table` | `boolean` | `true` | Enable the `describe_table` action on `sql_inspect()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`postgres`]
 
-`postgres` provides `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`postgres` provides `postgres_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 The connection is read-only, so queries cannot modify the database.
-`inspect_query()` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
+`postgres_inspect(action="inspect_query", ...)` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
 `export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
 
 | Option | Type | Required | Default | Notes |
@@ -81,11 +82,12 @@ agents:
 
 ## [`redshift`]
 
-`redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+`redshift` provides `redshift_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
 Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
 With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
+IAM mode requires an explicit `profile` or both `access_key_id` and `secret_access_key` rather than falling back to ambient AWS default credential chains.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -119,7 +121,7 @@ agents:
 
 ## [`neo4j`]
 
-`neo4j` provides `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
+`neo4j` provides `neo4j_inspect(action)` (actions `list_labels`, `list_relationship_types`, `get_schema`) and `run_cypher_query()`.
 Set `enable_run_cypher: false` to give an agent schema visibility without free-form graph queries.
 
 | Option | Type | Required | Default | Notes |
@@ -128,9 +130,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 | `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
 | `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
-| `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
-| `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
-| `enable_get_schema` | `boolean` | no | `true` | Enable `get_schema()`. |
+| `enable_list_labels` | `boolean` | no | `true` | Enable the `list_labels` action on `neo4j_inspect()`. |
+| `enable_list_relationships` | `boolean` | no | `true` | Enable the `list_relationship_types` action on `neo4j_inspect()`. |
+| `enable_get_schema` | `boolean` | no | `true` | Enable the `get_schema` action on `neo4j_inspect()`. |
 | `enable_run_cypher` | `boolean` | no | `true` | Enable `run_cypher_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
@@ -148,9 +150,9 @@ agents:
 ## [`duckdb`]
 
 `duckdb` is the best choice for repeatable local analytics over files.
-It provides `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
+It provides `duckdb_inspect(action, ...)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`, `full_text_search`), `run_query()`, and `duckdb_manage(action, ...)` (actions `load_path`, `export_table`, `create_fts_index`).
 Without `db_path`, the database lives in memory and is not saved.
-`export_table_to_path()` writes Parquet unless the call passes another format such as `CSV`.
+`duckdb_manage(action="export_table", ...)` writes Parquet unless the call passes `CSV` or `JSON`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -167,23 +169,23 @@ agents:
 ```
 
 ```python
-create_table_from_path("/workspace/data/orders.parquet", table="orders", replace=True)
+duckdb_manage("load_path", path="/workspace/data/orders.parquet", table="orders", replace=True)
 run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
-export_table_to_path("orders", format="CSV", path="/tmp")
+duckdb_manage("export_table", table="orders", file_format="CSV", path="/tmp")
 ```
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
+`csv` provides `csv_inspect(action, csv_name=None, row_limit=None)` (actions `list`, `columns`, `read`) and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
-| `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
-| `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
-| `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
+| `row_limit` | `number` | `null` | Default row cap for `csv_inspect(action="read", ...)`. |
+| `enable_read_csv_file` | `boolean` | `true` | Enable the `read` action on `csv_inspect()`. |
+| `enable_list_csv_files` | `boolean` | `true` | Enable the `list` action on `csv_inspect()`. |
+| `enable_get_columns` | `boolean` | `true` | Enable the `columns` action on `csv_inspect()`. |
 | `enable_query_csv_file` | `boolean` | `true` | Enable `query_csv_file()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
@@ -338,21 +340,21 @@ agents:
 
 ## [`openbb`]
 
-`openbb` provides `get_stock_price(symbol)`, `search_company_symbol()`, `get_company_news(symbol, num_stories=10)`, `get_company_profile()`, and `get_price_targets()`.
+`openbb` provides `openbb_get(action, symbol=None, company_name=None, num_stories=10)` with actions `stock_price`, `search_symbol`, `company_news`, `company_profile`, and `price_targets`.
 Symbols can be comma-separated, such as `AAPL,MSFT`.
-The default `yfinance` provider works without an OpenBB account; set `openbb_pat` or the `OPENBB_PAT` environment variable for premium providers.
+The default `yfinance` provider works out of the box without credentials; credentialed providers are not supported via `openbb_pat` (or `OPENBB_PAT`) in OpenBB 4.7.2 (which removed `obb.account.login`) and fail closed rather than reading host environment variables or `~/.openbb_platform/user_settings.json`.
 Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data providers.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
-| `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
-| `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |
-| `enable_get_company_profile` | `boolean` | `false` | Enable `get_company_profile()`. |
-| `enable_get_price_targets` | `boolean` | `false` | Enable `get_price_targets()`. |
-| `all` | `boolean` | `false` | Enable every function. |
+| `enable_get_stock_price` | `boolean` | `true` | Enable the `stock_price` action. |
+| `enable_search_company_symbol` | `boolean` | `false` | Enable the `search_symbol` action. |
+| `enable_get_company_news` | `boolean` | `false` | Enable the `company_news` action. |
+| `enable_get_company_profile` | `boolean` | `false` | Enable the `company_profile` action. |
+| `enable_get_price_targets` | `boolean` | `false` | Enable the `price_targets` action. |
+| `all` | `boolean` | `false` | Enable every action. |
 
 ```yaml
 agents:
@@ -365,21 +367,21 @@ agents:
 
 ## [`yfinance`]
 
-`yfinance` reads Yahoo Finance data with no credentials.
-Only the current stock price is enabled by default, so enable each additional function the agent needs.
+`yfinance` reads Yahoo Finance data with no credentials through `yfinance_get(action, symbol, period=None, interval="1d", num_stories=3)`.
+Only `stock_price` is enabled by default, so enable each additional action the agent needs.
 
-| Option | Type | Default | Enables |
+| Option | Type | Default | Enables action |
 | --- | --- | --- | --- |
-| `enable_stock_price` | `boolean` | `true` | `get_current_stock_price()` |
-| `enable_company_info` | `boolean` | `false` | `get_company_info()` |
-| `enable_stock_fundamentals` | `boolean` | `false` | `get_stock_fundamentals()` |
-| `enable_income_statements` | `boolean` | `false` | `get_income_statements()` |
-| `enable_key_financial_ratios` | `boolean` | `false` | `get_key_financial_ratios()` |
-| `enable_analyst_recommendations` | `boolean` | `false` | `get_analyst_recommendations()` |
-| `enable_company_news` | `boolean` | `false` | `get_company_news()` |
-| `enable_technical_indicators` | `boolean` | `false` | `get_technical_indicators()` |
-| `enable_historical_prices` | `boolean` | `false` | `get_historical_stock_prices()` |
-| `all` | `boolean` | `false` | Every function |
+| `enable_stock_price` | `boolean` | `true` | `stock_price` |
+| `enable_company_info` | `boolean` | `false` | `company_info` |
+| `enable_stock_fundamentals` | `boolean` | `false` | `fundamentals` |
+| `enable_income_statements` | `boolean` | `false` | `income_statements` |
+| `enable_key_financial_ratios` | `boolean` | `false` | `financial_ratios` |
+| `enable_analyst_recommendations` | `boolean` | `false` | `analyst_recommendations` |
+| `enable_company_news` | `boolean` | `false` | `company_news` |
+| `enable_technical_indicators` | `boolean` | `false` | `technical_indicators` |
+| `enable_historical_prices` | `boolean` | `false` | `historical_prices` |
+| `all` | `boolean` | `false` | Every action |
 
 ```yaml
 agents:
@@ -393,7 +395,7 @@ agents:
 
 ## [`financial_datasets_api`]
 
-`financial_datasets_api` reads structured data from Financial Datasets through `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
+`financial_datasets_api` reads structured data from Financial Datasets through `financial_datasets_financials(action, ticker, ...)` (actions `income_statements`, `balance_sheets`, `cash_flow_statements`, `segmented_financials`, `financial_metrics`, `company_info`, `earnings`, `insider_trades`, `institutional_ownership`, `sec_filings`) and `financial_datasets_market(action, ...)` (actions `stock_prices`, `crypto_prices`, `news`, `search_tickers`).
 Set `api_key` or the `FINANCIAL_DATASETS_API_KEY` environment variable; without a key, every call returns `API key not set`.
 
 | Option | Type | Default | Notes |

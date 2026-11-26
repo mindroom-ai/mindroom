@@ -123,41 +123,41 @@ agents:
 
 ## [`unsplash`]
 
-`unsplash` returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
+`unsplash` provides a unified `unsplash(action, ...)` tool that returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
 
-- `search_photos(query, per_page=10, page=1, orientation=None, color=None)` returns the total match count and a list of photos with author and image URLs.
-- `get_photo(photo_id)` adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
-- `get_random_photo(query=None, orientation=None, count=1)` returns one or more random photos, optionally matching a query.
-- `download_photo(photo_id)` reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
+- `action="search"` (`query`, optional `count`, `page`, `orientation`, `color`) returns the total match count and a list of photos with author and image URLs.
+- `action="get"` (`photo_id`) adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
+- `action="random"` (optional `query`, `orientation`, `count`) returns one or more random photos, optionally matching a query.
+- `action="download"` (`photo_id`) reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `access_key` | `password` | `null` | Required Unsplash access key; falls back to `UNSPLASH_ACCESS_KEY`. Get one from [Unsplash Developers](https://unsplash.com/developers). |
-| `enable_search_photos` | `boolean` | `true` | Enable `search_photos()`. |
-| `enable_get_photo` | `boolean` | `true` | Enable `get_photo()`. |
-| `enable_get_random_photo` | `boolean` | `true` | Enable `get_random_photo()`. |
-| `enable_download_photo` | `boolean` | `false` | Enable `download_photo()`. |
-| `all` | `boolean` | `false` | Enable all functions. |
+| `enable_search_photos` | `boolean` | `true` | Enable `action="search"` in `unsplash()`. |
+| `enable_get_photo` | `boolean` | `true` | Enable `action="get"` in `unsplash()`. |
+| `enable_get_random_photo` | `boolean` | `true` | Enable `action="random"` in `unsplash()`. |
+| `enable_download_photo` | `boolean` | `false` | Enable `action="download"` in `unsplash()`. |
+| `all` | `boolean` | `false` | Enable all actions in `unsplash()`. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 
 ```python
-search_photos("conference stage lighting", per_page=5, orientation="landscape")
-get_random_photo(query="workspace desk", count=3)
+unsplash("search", query="conference stage lighting", count=5, orientation="landscape")
+unsplash("random", query="workspace desk", count=3)
 ```
 
 ## [`brandfetch`]
 
 `brandfetch` returns brand identity data such as logos, colors, and fonts.
 
-- `search_by_identifier(identifier)` looks up a domain, Brandfetch brand ID, ISIN, or stock ticker and needs `api_key`.
-- `search_by_brand(name)` finds brands by name when you do not know the domain, needs `client_id`, and is off by default.
+- `brandfetch_lookup(query, action="by_identifier")` looks up a domain, Brandfetch brand ID, ISIN, or stock ticker and needs `api_key`.
+- `brandfetch_lookup(query, action="by_brand")` finds brands by name when you do not know the domain, needs `client_id`, and is off by default.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Brand API key for `search_by_identifier()`; falls back to `BRANDFETCH_API_KEY`. |
-| `client_id` | `text` | `null` | Brand Search client ID for `search_by_brand()`; falls back to `BRANDFETCH_CLIENT_ID`. |
-| `enable_search_by_identifier` | `boolean` | `true` | Enable `search_by_identifier()`. |
-| `enable_search_by_brand` | `boolean` | `false` | Enable `search_by_brand()`. |
+| `api_key` | `password` | `null` | Brand API key for `brandfetch_lookup(action="by_identifier")`; falls back to `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `null` | Brand Search client ID for `brandfetch_lookup(action="by_brand")`; falls back to `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `true` | Enable `brandfetch_lookup(action="by_identifier")`. |
+| `enable_search_by_brand` | `boolean` | `false` | Enable `brandfetch_lookup(action="by_brand")`. |
 | `base_url` | `url` | `https://api.brandfetch.io/v2` | Brandfetch API base URL. |
 | `timeout` | `number` | `20.0` | Request timeout in seconds. |
 | `all` | `boolean` | `false` | Enable all functions. |
@@ -173,14 +173,14 @@ agents:
 ```
 
 ```python
-search_by_identifier("openai.com")
-search_by_brand("OpenAI")
+brandfetch_lookup("openai.com", action="by_identifier")
+brandfetch_lookup("OpenAI", action="by_brand")
 ```
 
 ## [`spotify`]
 
 `spotify` acts on the connected Spotify account.
-It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
+It provides `spotify_search()` (`search`, `recommendations`, `album_tracks`, `artist_top_tracks`), `spotify_library()` (`current_user`, `currently_playing`, `user_playlists`, `playlist`, `my_top_tracks`, `my_top_artists`), `spotify_playlist_write()` (`create`, `update`, `add_tracks`, `remove_tracks`), and `spotify_play()`.
 
 ### Connect Spotify
 
@@ -219,15 +219,15 @@ agents:
 ```
 
 ```python
-search_tracks("ambient coding music", max_results=5)
-create_playlist("MindRoom Picks", description="Tracks from this week's chat")
+spotify_search(action="search", query="ambient coding music", limit=5)
+spotify_playlist_write(action="create", name="MindRoom Picks", description="Tracks from this week's chat")
 ```
 
 ### Troubleshooting
 
 - If playlist changes or playback control fail with a permissions error, disconnect and reconnect Spotify to grant the current scopes.
-- `play_track()` needs an active Spotify device and returns a `NO_ACTIVE_DEVICE` error when no device can play.
-- `get_track_recommendations()` also needs a Spotify app with access to the Recommendations endpoint, which OAuth scopes cannot grant; Spotify [restricts this endpoint](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) for new and affected Development Mode apps.
+- `spotify_play()` needs an active Spotify device and returns a `NO_ACTIVE_DEVICE` error when no device can play.
+- `spotify_search(action="recommendations")` also needs a Spotify app with access to the Recommendations endpoint, which OAuth scopes cannot grant; Spotify [restricts this endpoint](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) for new and affected Development Mode apps.
 
 ## Related Docs
 

@@ -25,6 +25,23 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
 ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "logging_config.py"})
 REEXPORT = "tool_system/agno_toolkits.py"
+# Once a builtin goes native, neither its registration nor its implementation can import Agno again.
+NATIVE_WAVE_2 = {
+    "arxiv": "arxiv",
+    "baidusearch": "baidusearch",
+    "calculator": "calculator",
+    "custom_api": None,
+    "duckduckgo": "ddgs_search",
+    "googlesearch": "ddgs_search",
+    "hackernews": "hackernews",
+    "pubmed": "pubmed",
+    "reasoning": "reasoning",
+    "serpapi": "serpapi",
+    "serper": "serper",
+    "sleep": "sleep",
+    "wikipedia": "wikipedia",
+    "youtube": "youtube",
+}
 TESTS_ROOT = Path(__file__).resolve().parent
 # The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
 # MindRoom's seams (#3120).
@@ -53,8 +70,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_agent_personas.py",
         "test_agent_tool_calls.py",
         "test_agent_turn_runtime.py",
-        "test_agent_worker_routing.py",
-        "test_agentql_tools.py",
         "test_agents.py",
         "test_agno_tool_wrapping.py",
         "test_ai_provider_retry.py",
@@ -63,15 +78,11 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_bot_media_dispatch.py",
         "test_browser_mcp_outputs.py",
         "test_cli_approval_recovery.py",
-        "test_composio_tools.py",
         "test_computer_announcement.py",
         "test_delegation_execution.py",
         "test_dynamic_toolkits.py",
-        "test_gemini_tools.py",
-        "test_init.py",
         "test_issue_154_logging_integration.py",
         "test_logging_config.py",
-        "test_lumalabs_tool.py",
         "test_matrix_rtc_call_tools.py",
         "test_mcp_gateway_execution.py",
         "test_mcp_gateway_tools.py",
@@ -82,16 +93,13 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_mid_turn_compaction_resume_and_team.py",
         "test_minimal_agent_parity.py",
         "test_openai_compat.py",
-        "test_openai_toolkit_speech.py",
         "test_queued_message_notify.py",
-        "test_replicate_tools.py",
         "test_response_runner_focused.py",
         "test_sandbox_proxy.py",
         "test_scheduled_tool_approval.py",
         "test_script_run_policy.py",
         "test_script_tool_broker.py",
         "test_skill_learning.py",
-        "test_structured_tool_config.py",
         "test_subagent_runtime.py",
         "test_team_turn_runtime.py",
         "test_tool_access.py",
@@ -102,7 +110,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_tool_output_files.py",
         "test_toolkit_aliases.py",
         "test_tools_metadata.py",
-        "test_trafilatura_tool.py",
         "test_worker_media.py",
         "test_worker_tool_transport.py",
         "tool_system/agno_parity_support.py",
@@ -244,11 +251,97 @@ def build() -> None:
     assert agno_imports(source) == {"agno", "agno.tools", "agno.run", "agno.media"}
 
 
+# Native tool modules that must stay free of Agno imports and AGNO_COMPAT markers.
+AGNO_FREE_TOOL_MODULES = frozenset(
+    {
+        "tools/native_helpers.py",
+        "tools/csv.py",
+        "tools/pandas.py",
+        "tools/duckdb.py",
+        "tools/sql.py",
+        "tools/postgres.py",
+        "tools/redshift.py",
+        "tools/neo4j.py",
+        "tools/yfinance.py",
+        "tools/openbb.py",
+        "tools/financial_datasets_api.py",
+        "tools/openweather.py",
+        "tools/docker.py",
+        "tools/e2b.py",
+        "custom_tools/e2b.py",
+        "tools/daytona.py",
+        "tools/linear.py",
+        "tools/notion.py",
+        "tools/todoist.py",
+        "tools/clickup.py",
+        "tools/trello.py",
+        "tools/bitbucket.py",
+        "tools/cal_com.py",
+        "tools/shopify.py",
+        "tools/zendesk.py",
+        "tools/spotify.py",
+        "custom_tools/spotify.py",
+        "tools/reddit.py",
+        "tools/google_maps.py",
+        "tools/brandfetch.py",
+        "tools/aws_lambda.py",
+        "tools/airflow.py",
+        "tools/composio.py",
+        "tools/mem0.py",
+        "tools/zep.py",
+    },
+)
+
+
+def test_native_comms_tools_have_no_agno_dependency() -> None:
+    """Messaging tools own their exposed functions, including Zoom's OAuth boundary."""
+    for name in (
+        "_comms",
+        "aws_ses",
+        "discord",
+        "email",
+        "resend",
+        "telegram",
+        "twilio",
+        "webex",
+        "whatsapp",
+        "x",
+        "zoom",
+    ):
+        path = SOURCE_ROOT / "tools" / f"{name}.py"
+        source = path.read_text(encoding="utf-8")
+        assert not agno_imports(source), path
+        assert "AGNO_COMPAT:" not in source, path
+
+
 def test_no_module_outside_the_boundary_imports_agno() -> None:
     """Every ``agno`` import under ``src/mindroom`` sits in an allowed package or module."""
     violations = boundary_violations()
 
     assert not violations, f"Agno imports outside the boundary: {violations}"
+
+
+def test_native_tool_modules_have_no_agno_imports_or_compat_markers() -> None:
+    """Rewritten native toolkits neither import Agno nor carry AGNO_COMPAT markers."""
+    agno_hits: dict[str, list[str]] = {}
+    marker_hits: list[str] = []
+    for rel_path in sorted(AGNO_FREE_TOOL_MODULES):
+        source = (SOURCE_ROOT / rel_path).read_text(encoding="utf-8")
+        if imported := agno_imports(source):
+            agno_hits[rel_path] = sorted(imported)
+        if "AGNO_COMPAT:" in source:
+            marker_hits.append(rel_path)
+
+    assert not agno_hits, f"Native tool modules importing Agno: {agno_hits}"
+    assert not marker_hits, f"Native tool modules with AGNO_COMPAT markers: {marker_hits}"
+
+
+def test_wave_2_toolkits_do_not_import_agno() -> None:
+    """Both halves of each converted toolkit stay inside MindRoom's native authoring boundary."""
+    paths = {SOURCE_ROOT / "tools" / f"{name}.py" for name in NATIVE_WAVE_2}
+    paths.update(SOURCE_ROOT / "custom_tools" / f"{name}.py" for name in NATIVE_WAVE_2.values() if name is not None)
+    imports = {str(path.relative_to(SOURCE_ROOT)): agno_imports(path.read_text(encoding="utf-8")) for path in paths}
+    assert not {path: modules for path, modules in imports.items() if modules}
 
 
 def test_reexported_agno_names_are_the_names_the_reexport_binds_from_agno() -> None:
