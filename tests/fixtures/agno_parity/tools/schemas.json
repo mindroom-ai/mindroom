@@ -1575,7 +1575,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to scrape"
+              "description": "URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1600,13 +1600,13 @@
       },
       {
         "name": "get_screenshot",
-        "description": "Capture a screenshot of a webpage",
+        "description": "Capture a screenshot of a webpage.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to screenshot"
+              "description": "URL to screenshot."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1637,23 +1637,37 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Search query"
+              "description": "Search query."
             },
             "engine": {
               "type": "string",
-              "description": "(str) Search engine - 'google', 'bing', or 'yandex'"
+              "description": "Search engine - 'google', 'bing', or 'yandex'."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return"
+              "description": "Number of results to return."
             },
             "language": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter language code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter language code."
             },
             "country_code": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter country code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter country code."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1684,15 +1698,22 @@
           "properties": {
             "source_type": {
               "type": "string",
-              "description": "(str) Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')"
+              "description": "Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')."
             },
             "url": {
               "type": "string",
-              "description": "(str) URL of the web resource to retrieve data from"
+              "description": "URL of the web resource to retrieve data from."
             },
             "num_of_reviews": {
-              "type": "integer",
-              "description": "(Optional[int]) Number of reviews to retrieve"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Number of reviews to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3395,11 +3416,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to navigate to"
+              "description": "The URL to navigate to."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3430,15 +3458,22 @@
           "properties": {
             "path": {
               "type": "string",
-              "description": "(str) Where to save the screenshot"
+              "description": "Where to save the screenshot."
             },
             "full_page": {
               "type": "boolean",
-              "description": "(bool) Whether to capture the full page"
+              "description": "Whether to capture the full page."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3468,8 +3503,15 @@
           "type": "object",
           "properties": {
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9006,15 +9048,22 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "description": "The query to search for."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return. Defaults to 5."
+              "description": "Number of results to return. Defaults to 5."
             },
             "category": {
-              "type": "string",
-              "description": "(Optional[str]) The category to filter search results.\nOptions are \"company\", \"research paper\", \"news\", \"pdf\", \"github\",\n\"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9048,7 +9097,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(list(str)) A list of URLs from which to fetch content."
+              "description": "A list of URLs from which to fetch content."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9079,11 +9128,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL for which to find similar links."
+              "description": "The URL for which to find similar links."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) The number of similar links to return. Defaults to 5."
+              "description": "The number of similar links to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9114,11 +9163,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The question or query to answer."
+              "description": "The question or query to answer."
             },
             "text": {
               "type": "boolean",
-              "description": "(bool) Include full text from citation. Default is False."
+              "description": "Include full text from citation. Default is False."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10324,7 +10373,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -16550,15 +16599,29 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "depth": {
-              "type": "string",
-              "description": "(str) (deep|standard) Depth of the search. Defaults to 'standard'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(deep|standard) Depth of the search. Defaults to 'standard'."
             },
             "output_type": {
-              "type": "string",
-              "description": "(str) (sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20128,7 +20191,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the article."
+              "description": "The URL of the article."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21730,11 +21793,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "Search query"
+              "description": "Search query."
             },
             "domain_code": {
               "type": "string",
-              "description": "Google domain to search (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Google domain to search (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21765,11 +21828,11 @@
           "properties": {
             "asin": {
               "type": "string",
-              "description": "Amazon Standard Identification Number (10 alphanumeric characters, e.g., \"B07FZ8S74R\")"
+              "description": "Amazon Standard Identification Number (10 alphanumeric characters, e.g., \"B07FZ8S74R\")."
             },
             "domain_code": {
               "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21800,11 +21863,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "Product search query"
+              "description": "Product search query."
             },
             "domain_code": {
               "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21835,15 +21898,22 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "Website URL to scrape (must start with http:// or https://)"
+              "description": "Website URL to scrape (must start with http:// or https://)."
             },
             "render_javascript": {
               "type": "boolean",
-              "description": "Whether to enable JavaScript rendering for dynamic content (default: False)"
+              "description": "Whether to enable JavaScript rendering for dynamic content (default: False)."
             },
             "markdown": {
-              "type": "boolean",
-              "description": "Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting)"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23490,11 +23560,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "prompt": {
               "type": "string",
-              "description": "(str) Natural language prompt describing what to extract."
+              "description": "Natural language prompt describing what to extract."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25546,11 +25616,18 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search the web with."
+              "description": "The query to search the web with."
             },
             "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25581,7 +25658,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to scrape."
+              "description": "The URL of the webpage to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25612,11 +25689,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to crawl."
+              "description": "The URL of the webpage to crawl."
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The maximum number of pages to crawl. Defaults to 10."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of pages to crawl. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -26469,11 +26553,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Maximum number of results to return. Defaults to 5."
+              "description": "Maximum number of results to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27670,11 +27754,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract content from."
+              "description": "The URL to extract content from."
             },
             "output_format": {
-              "type": "string",
-              "description": "(Optional[str]) Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27705,11 +27796,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract metadata from."
+              "description": "The URL to extract metadata from."
             },
             "as_json": {
               "type": "boolean",
-              "description": "(bool) Whether to return metadata as JSON string."
+              "description": "Whether to return metadata as JSON string."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27740,11 +27831,11 @@
           "properties": {
             "html_content": {
               "type": "string",
-              "description": "(str) The HTML content to convert."
+              "description": "The HTML content to convert."
             },
             "clean": {
               "type": "boolean",
-              "description": "(bool) Whether to remove potentially undesirable elements."
+              "description": "Whether to remove potentially undesirable elements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27778,7 +27869,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) List of URLs to extract content from."
+              "description": "List of URLs to extract content from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27809,11 +27900,11 @@
           "properties": {
             "homepage_url": {
               "type": "string",
-              "description": "(str) The starting URL (preferably homepage) to crawl from."
+              "description": "The starting URL (preferably homepage) to crawl from."
             },
             "extract_content": {
               "type": "boolean",
-              "description": "(bool) Whether to extract content from discovered URLs."
+              "description": "Whether to extract content from discovered URLs."
             },
             "mindroom_output_path": {
               "anyOf": [
