@@ -7,8 +7,9 @@ A failure that is not transient is final at once. After a transient failure the 
 each request once, reissues the request at most four times and only until the attempt commits, by producing
 output the caller could have shown or by starting a hosted tool that acts or costs; a stall it reissues only once.
 A comment explains each other case.
-Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary
-unavailability, and a request that no longer fits the context window says so.
+Error replies follow the typed error: a rate limit reads as one, a transport failure says the provider could not
+be reached, any other transient failure reads as temporary unavailability, and a request that no longer fits the
+context window says so.
 """
 
 from __future__ import annotations
@@ -31,9 +32,11 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MALFORMED_TOOL_CALL,
     QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -80,6 +83,7 @@ _PARTIAL = "partial"
 
 RATE_LIMITED = "⏱️ Rate limited."
 UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries."
+UNREACHABLE = "⚠️ The model request failed with a network error or timeout."
 ERROR = "⚠️ Error: "
 AUTHENTICATION = "❌ Authentication failed"
 CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."
@@ -589,11 +593,11 @@ _CLAUDE_CASES = [
         "connect_error",
         _connect_error,
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
-        code="connection_error",
+        code=CONNECTION_ERROR,
     ),
-    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="timeout"),
+    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNREACHABLE, _PIPELINE, code=TRANSPORT_TIMEOUT),
     _Case(
         "event_overloaded_error",
         _claude_stream(_claude_error("overloaded_error")),
@@ -639,7 +643,7 @@ _CLAUDE_CASES = [
         1,
         code=QUOTA_EXHAUSTED,
     ),
-    _Case("reset_before_output", _claude_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+    _Case("reset_before_output", _claude_stream(drop=True), ProviderUnavailable, UNREACHABLE, _PIPELINE),
     _Case(
         "stall",
         _claude_stream(*_claude_text(0, "ok"), pause=_STALL_SECONDS),
@@ -659,7 +663,7 @@ _CLAUDE_CASES = [
         "reset_after_visible_output",
         _claude_stream(*_claude_text(0, _PARTIAL), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         1,
     ),
     # The stream ends before message_stop.
@@ -915,11 +919,11 @@ _OPENAI_HTTP_CASES = [
         "connect_error",
         _connect_error,
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
-        code="connection_error",
+        code=CONNECTION_ERROR,
     ),
-    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="timeout"),
+    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNREACHABLE, _PIPELINE, code=TRANSPORT_TIMEOUT),
 ]
 # Until visible text or a complete tool call arrives, a Chat stream keeps its retry budget, so an opening empty-text
 # chunk does not make a failure final.
@@ -1014,12 +1018,12 @@ _CHAT_CASES = [
         ERROR,
         1,
     ),
-    _Case("reset_before_output", _chat_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+    _Case("reset_before_output", _chat_stream(drop=True), ProviderUnavailable, UNREACHABLE, _PIPELINE),
     _Case(
         "reset_during_tool_arguments",
         _chat_stream(_TOOL_ARGUMENTS, drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
     ),
     _Case(
@@ -1044,7 +1048,7 @@ _CHAT_CASES = [
         "reset_after_visible_output",
         _chat_stream(_chat_chunk({"content": _PARTIAL}), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         1,
     ),
     *_early_ends(_chat_cut_off(), _chat_cut_off(_chat_chunk({"content": _PARTIAL}))),
@@ -1133,7 +1137,7 @@ _RESPONSES_CASES = [
     ),
     _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), ProviderError, ERROR, 1),
     _Case("response_failed", _responses_stream(_RESPONSE_FAILED), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
-    _Case("reset_before_output", _responses_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+    _Case("reset_before_output", _responses_stream(drop=True), ProviderUnavailable, UNREACHABLE, _PIPELINE),
     _Case(
         "stall",
         _responses_stream(_response_text("ok"), _RESPONSE_COMPLETED, pause=_STALL_SECONDS),
@@ -1153,9 +1157,9 @@ _RESPONSES_CASES = [
         "reset_after_visible_output",
         _responses_stream(_response_text(_PARTIAL), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         1,
-        code="connection_error",
+        code=CONNECTION_ERROR,
     ),
     # The stream ends before response.completed.
     *_early_ends(_responses_stream(), _responses_stream(_response_text(_PARTIAL))),
@@ -1317,8 +1321,8 @@ _GEMINI_CASES = [
         ERROR,
         1,
     ),
-    _Case("connect_error", _connect_error, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="connection_error"),
-    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="timeout"),
+    _Case("connect_error", _connect_error, ProviderUnavailable, UNREACHABLE, _PIPELINE, code=CONNECTION_ERROR),
+    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNREACHABLE, _PIPELINE, code=TRANSPORT_TIMEOUT),
     _Case(
         "event_status_503",
         _gemini_stream({"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}}),
@@ -1330,7 +1334,7 @@ _GEMINI_CASES = [
         "reset_before_output",
         _gemini_stream(_gemini_chunk({"text": ""}), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
     ),
     _Case(
@@ -1345,7 +1349,7 @@ _GEMINI_CASES = [
         "reset_after_visible_output",
         _gemini_stream(_gemini_chunk({"text": _PARTIAL}), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         1,
     ),
     # The stream ends before a candidate carries its finish reason.
@@ -1353,14 +1357,14 @@ _GEMINI_CASES = [
     # A retry would run Google Search grounding or code execution again, so a failure after either is final, a
     # stall included.
     *(
-        _Case(f"{failure}_after_{tool}", reply, ProviderUnavailable, UNAVAILABLE, 1, code=code)
+        _Case(f"{failure}_after_{tool}", reply, ProviderUnavailable, message, 1, code=code)
         for tool, chunk in (
             ("grounding", _gemini_chunk(grounding=True)),
             ("code_execution", _gemini_chunk({"executableCode": {"language": "PYTHON", "code": "print(1)"}})),
         )
-        for failure, reply, code in (
-            ("reset", _gemini_stream(chunk, drop=True), "connection_error"),
-            ("stall", _then_silent(_gemini_stream(chunk)), STREAM_STALLED),
+        for failure, reply, message, code in (
+            ("reset", _gemini_stream(chunk, drop=True), UNREACHABLE, CONNECTION_ERROR),
+            ("stall", _then_silent(_gemini_stream(chunk)), UNAVAILABLE, STREAM_STALLED),
         )
     ),
     # One guidance retry follows a malformed tool call.
@@ -1404,17 +1408,17 @@ _OLLAMA_CASES = [
         "connect_error",
         _connect_error,
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
-        code="connection_error",
+        code=CONNECTION_ERROR,
     ),
     _Case(
         "read_timeout",
         _read_timeout,
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
-        code="timeout",
+        code=TRANSPORT_TIMEOUT,
     ),
     _Case(
         "event_error",
@@ -1427,7 +1431,7 @@ _OLLAMA_CASES = [
         "reset_before_output",
         _ollama_stream(_ollama_chunk(), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         _PIPELINE,
     ),
     _Case(
@@ -1442,7 +1446,7 @@ _OLLAMA_CASES = [
         "reset_after_visible_output",
         _ollama_stream(_ollama_chunk(_PARTIAL), drop=True),
         ProviderUnavailable,
-        UNAVAILABLE,
+        UNREACHABLE,
         1,
     ),
     # The stream ends before its done chunk.
@@ -1840,8 +1844,8 @@ def _expire_cli_login(route: str, root: Path) -> None:
     ("route", "refresh_reply", "error", "message", "refreshes"),
     [
         # A refresh that fails on the network is the provider's transient failure and is retried.
-        ("codex", _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
-        ("kimi", _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("codex", _connect_error(), ProviderUnavailable, UNREACHABLE, _PIPELINE),
+        ("kimi", _connect_error(), ProviderUnavailable, UNREACHABLE, _PIPELINE),
         # A login server that is down or throttling answers with its status, which the shared classifier reads as for
         # any provider response.
         ("codex", httpx.Response(503, text="upstream down"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
