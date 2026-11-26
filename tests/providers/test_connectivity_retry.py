@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import connectivity
 from mindroom.agents import create_agent
@@ -23,6 +24,7 @@ from mindroom.llm.errors import (
     CONNECTION_ERROR,
     QUOTA_EXHAUSTED,
     STREAM_STALLED,
+    TLS_CERTIFICATE_ERROR,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -61,6 +63,7 @@ from mindroom.providers.pipeline.connectivity import connectivity_retry_stream
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.tool_system.runtime_context import current_plugins
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
 from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -198,8 +201,8 @@ async def test_remote_homeserver_probe_coalesces_and_classifies_http_or_cert_as_
     real_http_probe = connectivity._http_probe_homeserver
     monkeypatch.setattr(connectivity, "_http_probe_homeserver", _fake_probe)
     # Early outage (matrix_offline() is still False): two concurrent waiters share ONE probe.
-    t1 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD, is_stream_stalled=True))
-    t2 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD, is_stream_stalled=False))
+    t1 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD))
+    t2 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD))
     await asyncio.sleep(0)
     gate.set()
     assert await asyncio.gather(t1, t2) == [True, True]
@@ -221,7 +224,7 @@ async def test_remote_homeserver_probe_coalesces_and_classifies_http_or_cert_as_
                 raise self._outcome
             return self._outcome
 
-    cfg = connectivity._HomeserverConfig(url=_REMOTE_HS, ssl_verify=True)
+    cfg = (_REMOTE_HS, True)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: _FakeClient(httpx.Response(503)))
     assert await real_http_probe(cfg, 1.0) is True
     cert_connect = httpx.ConnectError("cert failed")
@@ -281,9 +284,21 @@ async def test_local_homeserver_wan_outage_known_reachable_vs_typo_and_online_st
 ) -> None:
     assert all(
         connectivity.is_local_host(h)
-        for h in ("localhost", "127.0.0.1", "::1", "192.168.1.5", "fd00::1", "fe80::1%eth0", "box.local")
+        for h in (
+            "localhost",
+            "tuwunel",
+            "synapse",
+            "host.docker.internal",
+            "127.0.0.1",
+            "::1",
+            "192.168.1.5",
+            "fd00::1",
+            "fe80::1%eth0",
+            "box.local",
+        )
     )
     assert not connectivity.is_local_host("matrix.mindroom.chat")
+    assert not connectivity.is_local_host("2606:4700:4700::1111")
 
     connectivity.register_matrix_homeserver(_LOCAL_HS)
     _fast_wait(monkeypatch)
@@ -314,6 +329,20 @@ async def test_local_homeserver_wan_outage_known_reachable_vs_typo_and_online_st
     assert isinstance(events[-1], TurnCompleted)
     assert events[-1].message.content == "back"
     assert len(wan.requests) == 2
+
+    # Docker single-label homeservers (tuwunel, synapse) count as local and corroborate via known cloud endpoint.
+    for docker_hs in ("http://tuwunel:8008", "http://synapse:8008"):
+        connectivity.register_matrix_homeserver(docker_hs)
+        monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=False))
+        assert await connectivity.corroborate_offline(_CLOUD) is True
+
+    # Stopped local model server (previously reachable) NEVER waits, even when TCP refuses.
+    for local_model in (_LOCAL, "http://ollama-m5.local:11434"):
+        connectivity.note_endpoint_reachable(local_model)
+        local_srv = _Scripted(ModelIdentity(id="llama", provider="ollama", endpoint=local_model), [[_net_err()]])
+        with pytest.raises(ProviderUnavailable):
+            await drain(WrappedProvider(local_srv, connectivity_retry_stream), _req())
+        assert len(local_srv.requests) == 1
 
     # Proxy config routes TCP probe to proxy host:port when not bypassed.
     monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://proxy.internal:8443"})
@@ -380,7 +409,8 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
     assert events[-1].message.content == "local"
     assert wait_calls == 0
 
-    # Cloud primary -> Cloud fallback: both offline -> rollback cooldowns, wait once, retry primary first.
+    # Cloud primary -> Cloud fallback: both offline -> rollback cooldowns, wait once, retry primary first
+    # WITHOUT stripping primary's encrypted replay state even though fallback's error had replay_stripped=True.
     fallback_stage._COOLDOWN_UNTIL.clear()
     primary = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
@@ -388,7 +418,7 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
     )
     secondary = _Scripted(
         ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK),
-        [[_net_err(TRANSPORT_TIMEOUT)]],
+        [[_net_err(TRANSPORT_TIMEOUT, replay_stripped=True)]],
     )
     chained_cloud = WrappedProvider(
         WrappedProvider(
@@ -406,6 +436,7 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
     assert isinstance(events[-1], TurnCompleted)
     assert events[-1].message.content == "primary"
     assert (wait_calls, len(primary.requests), len(secondary.requests)) == (1, 2, 1)
+    assert primary.requests[1].strip_encrypted_replay is False
     assert "pk" not in fallback_stage._COOLDOWN_UNTIL
     assert "sk" not in fallback_stage._COOLDOWN_UNTIL
 
@@ -428,6 +459,103 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
     with pytest.raises(ProviderUnavailable):
         await drain(mixed, _req())
     assert "rl-p" in fallback_stage._COOLDOWN_UNTIL
+
+
+@pytest.mark.asyncio
+async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connectivity.register_matrix_homeserver(_REMOTE_HS)
+
+    # 1. Without corroborated outage (wait=False or online probe), cooldown is NOT rolled back.
+    fallback_stage._COOLDOWN_UNTIL.clear()
+    monkeypatch.setattr(connectivity, "_probe_homeserver_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    for wait_flag, key in ((False, "no-wait-pk"), (True, "online-pk")):
+        p = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[_net_err()]])
+        s = _Scripted(ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK), [[_net_err()]])
+        chained = WrappedProvider(
+            WrappedProvider(
+                p,
+                partial(
+                    fallback_stream,
+                    model_name="p",
+                    chain=(ChainModel("s", None, lambda s=s: s, f"{key}-s"),),
+                    cooldown_key=key,
+                ),
+            ),
+            connectivity_retry_stream,
+        )
+        with pytest.raises(ProviderUnavailable):
+            await drain(chained, _req(wait=wait_flag))
+        assert key in fallback_stage._COOLDOWN_UNTIL
+
+    # 2. Concurrent newer cooldown on same key is preserved during corroborated rollback.
+    fallback_stage._COOLDOWN_UNTIL.clear()
+    mark_matrix_sync_failure("agent")
+    newer_until = 9e12
+
+    async def _corroborate_with_concurrent_write(_endpoint: str | None) -> bool:
+        fallback_stage._COOLDOWN_UNTIL["conc-pk"] = newer_until
+        return True
+
+    monkeypatch.setattr(connectivity_stage, "corroborate_offline", _corroborate_with_concurrent_write)
+    monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", lambda *_a, **_kw: asyncio.sleep(0, result=False))
+    p_conc = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[_net_err()]])
+    s_conc = _Scripted(ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK), [[_net_err()]])
+    chained_conc = WrappedProvider(
+        WrappedProvider(
+            p_conc,
+            partial(
+                fallback_stream,
+                model_name="p",
+                chain=(ChainModel("s", None, lambda: s_conc, "conc-sk"),),
+                cooldown_key="conc-pk",
+            ),
+        ),
+        connectivity_retry_stream,
+    )
+    with pytest.raises(ProviderUnavailable):
+        await drain(chained_conc, _req())
+    assert fallback_stage._COOLDOWN_UNTIL["conc-pk"] == newer_until
+    assert "conc-sk" not in fallback_stage._COOLDOWN_UNTIL
+
+    # 3. Expired TLS cert primary fails over immediately to healthy fallback without retrying or waiting.
+    tls_err = provider_failure(ssl.SSLCertVerificationError(1, "certificate expired"), provider="openai")
+    assert tls_err is not None
+    assert (tls_err.retryable, tls_err.code) == (False, TLS_CERTIFICATE_ERROR)
+    bad_tls = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[tls_err]])
+    healthy = _Scripted(ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK), [[_turn("backup ok")]])
+    tls_chain = WrappedProvider(
+        WrappedProvider(
+            bad_tls,
+            partial(
+                fallback_stream,
+                model_name="p",
+                chain=(ChainModel("s", None, lambda: healthy, "tls-s"),),
+                cooldown_key="tls-p",
+            ),
+        ),
+        connectivity_retry_stream,
+    )
+    tls_events = await drain(tls_chain, _req())
+    assert isinstance(tls_events[-1], TurnCompleted)
+    assert tls_events[-1].message.content == "backup ok"
+    assert (len(bad_tls.requests), len(healthy.requests)) == (1, 1)
+
+    # 4. Reconnect logs record only host:port, never credential-bearing path tokens.
+    monkeypatch.setattr(connectivity_stage, "corroborate_offline", connectivity.corroborate_offline)
+    monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    gateway_endpoint = "https://gateway.example.com/opaque-path-xyz/v1"
+    gw = _Scripted(
+        ModelIdentity(id="gpt-5", provider="openai", endpoint=gateway_endpoint),
+        [[_net_err()], [_turn("ok")]],
+    )
+    with capture_logs() as cap_logs:
+        await drain(WrappedProvider(gw, connectivity_retry_stream), _req())
+    conn_logs = [entry for entry in cap_logs if str(entry.get("event", "")).startswith("provider_connectivity_")]
+    assert conn_logs
+    assert all(entry.get("endpoint") == "gateway.example.com:443" for entry in conn_logs)
+    assert all("opaque-path-xyz" not in str(entry) for entry in conn_logs)
 
 
 @pytest.mark.asyncio
@@ -536,8 +664,28 @@ async def test_opt_out_builders_and_usage_attribution(
         plugins=plugins,
         outside_matrix=True,
     )
+    mcp_identity = ToolExecutionIdentity(
+        channel="mcp",
+        agent_name="helper",
+        requester_id="@user:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="mcp-1",
+    )
+    mcp_build = create_agent(
+        "helper",
+        config,
+        runtime_paths,
+        mcp_identity,
+        knowledge=None,
+        model=model,
+        plugins=plugins,
+        outside_matrix=False,
+    )
     assert matrix_build.request_template.overrides.wait_for_connectivity is True
     assert headless_build.request_template.overrides.wait_for_connectivity is False
+    assert mcp_build.request_template.overrides.wait_for_connectivity is False
     assert _spoken(matrix_build).request_template.overrides.wait_for_connectivity is False
 
     # Usage attribution: single provider (sums attempts) AND fallback chain (no double-counting).
@@ -622,4 +770,4 @@ async def test_matrix_health_sync_transitions_and_ssl_cert_non_retryable(
     for raw in (cert_err, wrapped):
         mapped = provider_failure(raw, provider="openai")
         assert type(mapped) is ProviderError
-        assert mapped.retryable is False
+        assert (mapped.retryable, mapped.code) == (False, TLS_CERTIFICATE_ERROR)

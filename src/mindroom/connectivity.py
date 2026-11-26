@@ -10,7 +10,6 @@ import threading
 import urllib.request
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
@@ -22,7 +21,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "corroborate_offline",
+    "endpoint_host_port",
     "is_endpoint_known_reachable",
+    "is_local_endpoint",
     "is_local_host",
     "matrix_offline",
     "note_endpoint_reachable",
@@ -38,21 +39,13 @@ __all__ = [
 ]
 
 type StreamActivityCallback = Callable[[str, str | None], None]
+type _HomeserverConfig = tuple[str, bool | ssl.SSLContext]
 
 _MAX_KNOWN_ENDPOINTS = 256
 _PROBE_TIMEOUT_SECONDS = 3.0
 
-
-@dataclass(frozen=True, slots=True)
-class _HomeserverConfig:
-    url: str
-    ssl_verify: bool | ssl.SSLContext
-
-
 _lock = threading.Lock()
-_entity_failed_seq: dict[str, int | None] = {}
-_event_seq = 0
-_last_success_seq: int | None = None
+_failed_entities: set[str] = set()
 _recovery_generation = 0
 _waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
 _homeserver: _HomeserverConfig | None = None
@@ -65,24 +58,19 @@ _STREAM_ACTIVITY_CALLBACK: ContextVar[StreamActivityCallback | None] = ContextVa
 
 
 def is_local_host(host: str) -> bool:
-    """Return whether ``host`` is loopback, private/ULA/link-local IP, or an mDNS ``.local`` name."""
+    """Return whether ``host`` is local/private/Docker (single-label, .local/.internal, loopback, private IP)."""
     normalized = host.strip().lower().rstrip(".").removeprefix("[").removesuffix("]")
     if not normalized:
         return False
-    if normalized == "localhost" or normalized.endswith((".localhost", ".local")):
-        return True
     try:
         address = ipaddress.ip_address(normalized.split("%", 1)[0])
     except ValueError:
-        return False
+        return "." not in normalized or normalized.endswith((".localhost", ".local", ".internal"))
     return address.is_loopback or address.is_private or address.is_link_local or address.is_unspecified
 
 
 def _parse_endpoint(endpoint: str | None) -> tuple[str, str, int] | None:
-    if not endpoint:
-        return None
-    raw = endpoint.split("|", 1)[0].strip()
-    if not raw:
+    if not endpoint or not (raw := endpoint.split("|", 1)[0].strip()):
         return None
     parsed = urlparse(raw if "://" in raw else f"https://{raw}")
     if not parsed.hostname:
@@ -95,36 +83,45 @@ def _parse_endpoint(endpoint: str | None) -> tuple[str, str, int] | None:
     return scheme, parsed.hostname.lower(), port if port is not None else (80 if scheme == "http" else 443)
 
 
+def is_local_endpoint(endpoint: str | None) -> bool:
+    """Return whether ``endpoint`` parses to a local host."""
+    return (parsed := _parse_endpoint(endpoint)) is not None and is_local_host(parsed[1])
+
+
+def endpoint_host_port(endpoint: str | None) -> str | None:
+    """Return a log-safe ``host:port`` for ``endpoint`` without paths, query strings, or credentials."""
+    if (parsed := _parse_endpoint(endpoint)) is None:
+        return None
+    _, host, port = parsed
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
 def register_matrix_homeserver(url: str, *, ssl_verify: bool | ssl.SSLContext = True) -> None:
     """Record the active Matrix homeserver URL and TLS verification setting for connectivity probes."""
     global _homeserver
     cleaned = url.strip().rstrip("/")
     with _lock:
-        _homeserver = _HomeserverConfig(url=cleaned, ssl_verify=ssl_verify) if cleaned else None
+        _homeserver = (cleaned, ssl_verify) if cleaned else None
 
 
 def note_matrix_sync_started(entity_name: str) -> None:
-    """Track ``entity_name`` without clearing an existing failure state."""
-    with _lock:
-        _entity_failed_seq.setdefault(entity_name, None)
+    """Retain existing sync failure state when ``entity_name`` starts or restarts its sync loop."""
+    del entity_name
 
 
 def note_matrix_sync_failed(entity_name: str) -> None:
     """Mark ``entity_name`` offline immediately after a Matrix sync transport failure or stall."""
-    global _event_seq
     with _lock:
-        _event_seq += 1
-        _entity_failed_seq[entity_name] = _event_seq
+        _failed_entities.add(entity_name)
 
 
 def note_matrix_sync_succeeded(entity_name: str) -> None:
-    """Mark ``entity_name`` online, advance the recovery generation, and wake all waiting coroutines."""
-    global _event_seq, _last_success_seq, _recovery_generation
+    """Clear offline state, advance the recovery generation, and wake all waiting coroutines."""
+    global _recovery_generation
+    del entity_name
     with _lock:
-        _event_seq += 1
-        _last_success_seq = _event_seq
+        _failed_entities.clear()
         _recovery_generation += 1
-        _entity_failed_seq[entity_name] = None
         waiters = tuple(_waiters)
     for loop, event in waiters:
         with suppress(RuntimeError):
@@ -132,18 +129,15 @@ def note_matrix_sync_succeeded(entity_name: str) -> None:
 
 
 def note_matrix_sync_cleared(entity_name: str) -> None:
-    """Remove ``entity_name`` from tracked Matrix sync entities."""
+    """Remove ``entity_name`` from failed Matrix sync entities."""
     with _lock:
-        _entity_failed_seq.pop(entity_name, None)
+        _failed_entities.discard(entity_name)
 
 
 def matrix_offline() -> bool:
-    """Return True iff at least one active entity failed and no entity succeeded since that failure."""
+    """Return True iff at least one active entity failed and no entity succeeded since."""
     with _lock:
-        latest_failure = max((seq for seq in _entity_failed_seq.values() if seq is not None), default=None)
-        if latest_failure is None:
-            return False
-        return _last_success_seq is None or _last_success_seq < latest_failure
+        return bool(_failed_entities)
 
 
 def note_endpoint_reachable(endpoint: str | None) -> None:
@@ -168,11 +162,9 @@ def is_endpoint_known_reachable(endpoint: str | None) -> bool:
 
 def reset_connectivity_state() -> None:
     """Clear all process-global connectivity state."""
-    global _event_seq, _last_success_seq, _recovery_generation, _homeserver
+    global _recovery_generation, _homeserver
     with _lock:
-        _entity_failed_seq.clear()
-        _event_seq = 0
-        _last_success_seq = None
+        _failed_entities.clear()
         _recovery_generation = 0
         _waiters.clear()
         _homeserver = None
@@ -183,10 +175,9 @@ def reset_connectivity_state() -> None:
 def _remote_homeserver_config() -> _HomeserverConfig | None:
     with _lock:
         config = _homeserver
-    if config is None:
+    if config is None or (parsed := _parse_endpoint(config[0])) is None or is_local_host(parsed[1]):
         return None
-    parsed = _parse_endpoint(config.url)
-    return None if parsed is None or is_local_host(parsed[1]) else config
+    return config
 
 
 def _has_ssl_cert_verification_error(error: BaseException) -> bool:
@@ -201,7 +192,6 @@ def _has_ssl_cert_verification_error(error: BaseException) -> bool:
 
 
 async def _coalesced_probe(key: object, factory: Callable[[], Coroutine[object, object, bool]]) -> bool:
-    """Run ``factory`` once per ``(running_loop, key)``; caller cancellation never cancels peers' probe."""
     loop = asyncio.get_running_loop()
     probes = _loop_probes.setdefault(loop, {})
     task = probes.get(key)
@@ -221,13 +211,10 @@ async def _coalesced_probe(key: object, factory: Callable[[], Coroutine[object, 
 
 
 async def _http_probe_homeserver(config: _HomeserverConfig, timeout_seconds: float) -> bool:
+    url, ssl_verify = config
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds,
-            verify=config.ssl_verify,
-            follow_redirects=False,
-        ) as client:
-            await client.get(f"{config.url}/_matrix/client/versions")
+        async with httpx.AsyncClient(timeout=timeout_seconds, verify=ssl_verify, follow_redirects=False) as client:
+            await client.get(f"{url}/_matrix/client/versions")
     except (httpx.TransportError, OSError, TimeoutError) as exc:
         return _has_ssl_cert_verification_error(exc)
     return True
@@ -236,7 +223,6 @@ async def _http_probe_homeserver(config: _HomeserverConfig, timeout_seconds: flo
 async def _probe_homeserver_reachable(
     timeout: float = _PROBE_TIMEOUT_SECONDS,  # noqa: ASYNC109
 ) -> bool | None:
-    """Coalesced per-loop reachability probe against the registered remote Matrix homeserver."""
     if (config := _remote_homeserver_config()) is None:
         return None
     return await _coalesced_probe("homeserver", lambda: _http_probe_homeserver(config, timeout))
@@ -272,26 +258,20 @@ async def _probe_tcp_reachable(
     endpoint: str,
     timeout: float = _PROBE_TIMEOUT_SECONDS,  # noqa: ASYNC109
 ) -> bool:
-    """Coalesced per-``(loop, host, port)`` TCP reachability probe for ``endpoint``."""
     if (target := _tcp_probe_target(endpoint)) is None:
         return False
     return await _coalesced_probe(target, lambda: _tcp_connect(target[0], target[1], timeout))
 
 
-async def corroborate_offline(endpoint: str | None, *, is_stream_stalled: bool) -> bool:
+async def corroborate_offline(endpoint: str | None) -> bool:
     """Return whether a provider transport/stall failure is corroborated as a host/network outage."""
-    del is_stream_stalled
+    if is_local_endpoint(endpoint):
+        return False
     if _remote_homeserver_config() is not None:
         return matrix_offline() or await _probe_homeserver_reachable(timeout=_PROBE_TIMEOUT_SECONDS) is False
     if not endpoint or not is_endpoint_known_reachable(endpoint):
         return False
     return not await _probe_tcp_reachable(endpoint, timeout=_PROBE_TIMEOUT_SECONDS)
-
-
-async def _sleep_jitter(jitter_range: tuple[float, float], deadline: float, loop: asyncio.AbstractEventLoop) -> None:
-    jitter = min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))  # noqa: S311
-    if jitter > 0:
-        await asyncio.sleep(jitter)
 
 
 async def _wait_for_sync_or_sleep(
@@ -301,7 +281,6 @@ async def _wait_for_sync_or_sleep(
     *,
     remote_hs: bool,
 ) -> tuple[bool, int]:
-    """Wait up to ``sleep_for`` seconds, waking early on Matrix sync recovery when ``remote_hs`` is True."""
     if not remote_hs:
         await asyncio.sleep(sleep_for)
         return False, seen_generation
@@ -324,18 +303,21 @@ async def _wait_for_sync_or_sleep(
     return woken, current_generation
 
 
-async def _backoff_probe_recovered(
+async def _connectivity_restored(
     endpoint: str | None,
     *,
     remote_hs: bool,
+    woken_by_sync: bool,
     deadline: float,
     loop: asyncio.AbstractEventLoop,
 ) -> bool:
-    """Run one backoff reachability check, returning True only when connectivity is back before ``deadline``."""
-    if (remaining := deadline - loop.time()) <= 0:
-        return False
     if remote_hs:
-        if await _probe_homeserver_reachable(timeout=min(_PROBE_TIMEOUT_SECONDS, remaining)) is not True:
+        if woken_by_sync:
+            if matrix_offline():
+                return False
+        elif (remaining := deadline - loop.time()) <= 0 or (
+            await _probe_homeserver_reachable(timeout=min(_PROBE_TIMEOUT_SECONDS, remaining)) is not True
+        ):
             return False
         if endpoint is None:
             return True
@@ -358,30 +340,23 @@ async def wait_for_connectivity(
     with _lock:
         seen_generation = _recovery_generation
     attempt = 0
-
     while (remaining := deadline - loop.time()) > 0:
         sleep_for = min(probe_backoff[min(attempt, len(probe_backoff) - 1)], remaining)
         remote_hs = _remote_homeserver_config() is not None
-        woken_by_sync, seen_generation = await _wait_for_sync_or_sleep(
-            loop,
-            sleep_for,
-            seen_generation,
+        woken, seen_generation = await _wait_for_sync_or_sleep(loop, sleep_for, seen_generation, remote_hs=remote_hs)
+        if woken and (jitter := min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
+            await asyncio.sleep(jitter)
+        elif not woken:
+            attempt += 1
+        if await _connectivity_restored(
+            endpoint,
             remote_hs=remote_hs,
-        )
-        if woken_by_sync:
-            await _sleep_jitter(jitter_range, deadline, loop)
-            if matrix_offline():
-                continue
-            if endpoint is None:
-                return True
-            if (tcp_remaining := deadline - loop.time()) <= 0:
-                return False
-            if await _probe_tcp_reachable(endpoint, timeout=min(_PROBE_TIMEOUT_SECONDS, tcp_remaining)):
-                return True
-            continue
-        attempt += 1
-        if await _backoff_probe_recovered(endpoint, remote_hs=remote_hs, deadline=deadline, loop=loop):
-            await _sleep_jitter(jitter_range, deadline, loop)
+            woken_by_sync=woken,
+            deadline=deadline,
+            loop=loop,
+        ):
+            if not woken and (jitter := min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
+                await asyncio.sleep(jitter)
             return True
     return False
 

@@ -21,6 +21,7 @@ from mindroom.llm.errors import (
     CONNECTION_ERROR,
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
+    TLS_CERTIFICATE_ERROR,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
@@ -351,7 +352,7 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
 
     if _has_ssl_cert_verification_error(error, aiohttp.ClientConnectorCertificateError):
-        return ProviderError(failure_text(error), provider=provider)
+        return ProviderError(failure_text(error), provider=provider, code=TLS_CERTIFICATE_ERROR)
     chain = list(_visible_chain(error))
     transport = (
         httpx.TransportError,

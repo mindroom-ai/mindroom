@@ -445,7 +445,7 @@ async def continue_paused_team_run(
                 ModelRequest(
                     messages=(),
                     overrides=RequestOverrides(
-                        wait_for_connectivity=execution_identity.channel not in ("openai_compat", "headless"),
+                        wait_for_connectivity=execution_identity.channel == "matrix",
                     ),
                 ),
                 native,

@@ -2426,7 +2426,7 @@ async def _run_live_frames(
             and (
                 streaming.has_uncommitted_presentation()
                 or streaming._warmup_state.active_warmups
-                or streaming._connectivity_activities
+                or (streaming._connectivity_activities and not matrix_offline())
                 or streaming._warmup_state.needs_warmup_clear_edit
             )
         ):

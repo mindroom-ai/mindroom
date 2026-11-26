@@ -13,8 +13,16 @@ import asyncio
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
-from mindroom.llm.errors import ProviderError, ProviderUnavailable, fails_over
+from mindroom.llm.errors import (
+    CONNECTION_ERROR,
+    STREAM_STALLED,
+    TRANSPORT_TIMEOUT,
+    ProviderError,
+    ProviderUnavailable,
+    fails_over,
+)
 from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import (
     DeferredTools,
@@ -25,7 +33,6 @@ from mindroom.llm.provider import (
     json_output_prompt,
 )
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.connectivity import CONNECTIVITY_ERROR_CODES
 from mindroom.providers.pipeline.wrapped import commits_attempt
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -35,12 +42,16 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
-__all__ = ["ChainModel", "fallback_stream"]
+__all__ = ["CONNECTIVITY_ERROR_CODES", "ChainModel", "fallback_stream", "rollback_offline_cooldowns"]
 
 logger = get_logger(__name__)
 
 # When each route/account fingerprint may be tried again, on the ``time.monotonic`` clock.
+CONNECTIVITY_ERROR_CODES = frozenset({TRANSPORT_TIMEOUT, CONNECTION_ERROR, STREAM_STALLED})
 _COOLDOWN_UNTIL: dict[str, float] = {}
+_OFFLINE_COOLDOWN_ROLLBACKS: WeakKeyDictionary[ProviderError, dict[str, tuple[float, float | None]]] = (
+    WeakKeyDictionary()
+)
 _UNAVAILABLE_COOLDOWN_SECONDS = 120.0
 
 
@@ -111,15 +122,32 @@ def _with_structured_output_prompt(
     return replace(request, messages=tuple(messages))
 
 
-def _remember_reset(key: str, error: ProviderError, *, committed: bool = False) -> None:
+def _remember_reset(key: str, error: ProviderError, *, committed: bool = False) -> float | None:
     if (hint := error.retry_after_seconds) is not None and hint > 0:
         cooldown_seconds = hint
     elif not committed and isinstance(error, ProviderUnavailable):
         cooldown_seconds = _UNAVAILABLE_COOLDOWN_SECONDS
     else:
-        return
+        return None
     until = time.monotonic() + cooldown_seconds
-    _COOLDOWN_UNTIL[key] = max(_COOLDOWN_UNTIL.get(key, 0.0), until)
+    if until <= _COOLDOWN_UNTIL.get(key, 0.0):
+        return None
+    _COOLDOWN_UNTIL[key] = until
+    return until
+
+
+def _record_cooldown_write(
+    written: dict[str, tuple[float, float | None]],
+    key: str,
+    error: ProviderError,
+    *,
+    committed: bool,
+) -> None:
+    previous = _COOLDOWN_UNTIL.get(key)
+    if (written_until := _remember_reset(key, error, committed=committed)) is None:
+        return
+    first_previous = written[key][1] if key in written else previous
+    written[key] = (written_until, first_previous)
 
 
 def _clear_cooldown(key: str, seen_until: float | None) -> None:
@@ -131,14 +159,27 @@ def _is_connectivity_error(error: ProviderError) -> bool:
     return isinstance(error, ProviderUnavailable) and error.code in CONNECTIVITY_ERROR_CODES
 
 
-def _restore_cooldowns(touched: dict[str, float | None], *, all_connectivity_errors: bool) -> None:
-    if not all_connectivity_errors:
+def _register_offline_rollback(
+    error: ProviderError,
+    written: dict[str, tuple[float, float | None]],
+    *,
+    all_connectivity_errors: bool,
+) -> None:
+    if all_connectivity_errors and written:
+        _OFFLINE_COOLDOWN_ROLLBACKS[error] = written
+
+
+def rollback_offline_cooldowns(error: ProviderError) -> None:
+    """Restore cooldowns written by a connectivity-failed fallback chain if still unchanged."""
+    if (written := _OFFLINE_COOLDOWN_ROLLBACKS.pop(error, None)) is None:
         return
-    for key, prior_until in touched.items():
-        if prior_until is None:
+    for key, (written_until, previous_until) in written.items():
+        if _COOLDOWN_UNTIL.get(key) != written_until:
+            continue
+        if previous_until is None:
             _COOLDOWN_UNTIL.pop(key, None)
         else:
-            _COOLDOWN_UNTIL[key] = prior_until
+            _COOLDOWN_UNTIL[key] = previous_until
 
 
 def _log_fallback(failure: tuple[str, ProviderError] | None, *, to_model: str) -> None:
@@ -237,7 +278,7 @@ async def fallback_stream(
     members = _in_turn(primary, chain, allow_fallback=allow_fallback)
     # A success clears only the cooldown this request saw, not one a concurrent request set since.
     seen = {member.cooldown_key: _COOLDOWN_UNTIL.get(member.cooldown_key) for member in members}
-    touched: dict[str, float | None] = {}
+    written: dict[str, tuple[float, float | None]] = {}
     all_connectivity_errors = True
     failure: tuple[str, ProviderError] | None = None
     for member in members:
@@ -272,8 +313,7 @@ async def fallback_stream(
             defer_transient = request.overrides.transient_retries == "caller" and error.retryable
             can_fail_over = fails_over(error) and not defer_transient
             if can_fail_over:
-                touched.setdefault(member.cooldown_key, seen[member.cooldown_key])
-                _remember_reset(member.cooldown_key, error, committed=committed)
+                _record_cooldown_write(written, member.cooldown_key, error, committed=committed)
             if committed or not can_fail_over:
                 raise
             all_connectivity_errors = all_connectivity_errors and _is_connectivity_error(error)
@@ -285,5 +325,5 @@ async def fallback_stream(
             yield report
     # The request's own model is never skipped, so a failure ends the chain.
     assert failure is not None
-    _restore_cooldowns(touched, all_connectivity_errors=all_connectivity_errors)
+    _register_offline_rollback(failure[1], written, all_connectivity_errors=all_connectivity_errors)
     raise failure[1]

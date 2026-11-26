@@ -2188,7 +2188,10 @@ def create_agent(
         request_template=ModelRequest(
             messages=(),
             deferred_tools=deferred_tools,
-            overrides=RequestOverrides(wait_for_connectivity=not outside_matrix),
+            overrides=RequestOverrides(
+                wait_for_connectivity=not outside_matrix
+                and (execution_identity is None or execution_identity.channel == "matrix"),
+            ),
         ),
         history_settings=agent.history_settings,
         tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),

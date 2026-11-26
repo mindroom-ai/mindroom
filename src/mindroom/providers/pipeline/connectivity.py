@@ -9,15 +9,18 @@ from uuid import uuid4
 
 from mindroom.connectivity import (
     corroborate_offline,
+    endpoint_host_port,
     is_endpoint_known_reachable,
+    is_local_endpoint,
     note_endpoint_reachable,
     set_stream_activity,
     wait_for_connectivity,
 )
-from mindroom.llm.errors import CONNECTION_ERROR, STREAM_STALLED, TRANSPORT_TIMEOUT, ProviderUnavailable
+from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import ModelSelected, ReportedUsage, TurnCompleted
 from mindroom.llm.usage import add_usage
 from mindroom.logging_config import get_logger
+from mindroom.providers.pipeline.fallback import CONNECTIVITY_ERROR_CODES, rollback_offline_cooldowns
 from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -31,7 +34,6 @@ __all__ = ["CONNECTIVITY_ERROR_CODES", "connectivity_retry_stream"]
 
 logger = get_logger(__name__)
 
-CONNECTIVITY_ERROR_CODES = frozenset({TRANSPORT_TIMEOUT, CONNECTION_ERROR, STREAM_STALLED})
 _CONNECTIVITY_WAIT_LIMIT_SECONDS = 1800.0
 _MAX_RECONNECT_ATTEMPTS = 3
 _WAITING_STATUS_TEXT = "⏳ Waiting for connection — will retry automatically."
@@ -43,13 +45,13 @@ class _AttemptState:
     model_id: str
     provider: str
     committed: bool = False
-    saw_model_selected: bool = False
+    selected_count: int = 0
     attempted_endpoints: list[str] = field(default_factory=list)
     usage: ReportedUsage = field(default_factory=ReportedUsage)
 
     def observe(self, event: StreamEvent) -> None:
         if isinstance(event, ModelSelected):
-            self.saw_model_selected = True
+            self.selected_count += 1
             self.endpoint = event.identity.endpoint
             self.model_id = event.identity.id
             self.provider = event.identity.provider
@@ -62,9 +64,12 @@ class _AttemptState:
             note_endpoint_reachable(self.endpoint)
 
     def probe_endpoint(self) -> str | None:
-        for ep in self.attempted_endpoints:
+        remote = [ep for ep in self.attempted_endpoints if not is_local_endpoint(ep)]
+        for ep in remote:
             if is_endpoint_known_reachable(ep):
                 return ep
+        if remote:
+            return remote[0]
         return self.attempted_endpoints[0] if self.attempted_endpoints else self.endpoint
 
 
@@ -77,24 +82,21 @@ async def _wait_for_reconnect(
     deadline: float,
     reconnect_attempts: int,
 ) -> bool:
-    """Publish waiting activity, wait until connectivity returns or ``deadline`` expires, and log transitions."""
+    """Roll back outage cooldowns, publish waiting activity, and wait until recovery or deadline."""
+    log_fields = {
+        "provider": attempt.provider,
+        "model_id": attempt.model_id,
+        "endpoint": endpoint_host_port(probe_endpoint),
+        "error_code": error.code,
+    }
     remaining = deadline - asyncio.get_running_loop().time()
     if remaining <= 0:
-        logger.warning(
-            "provider_connectivity_wait_expired",
-            provider=attempt.provider,
-            model_id=attempt.model_id,
-            endpoint=probe_endpoint,
-            error_code=error.code,
-            reconnect_attempts=reconnect_attempts,
-        )
+        logger.warning("provider_connectivity_wait_expired", **log_fields, reconnect_attempts=reconnect_attempts)
         return False
+    rollback_offline_cooldowns(error)
     logger.warning(
         "provider_connectivity_wait",
-        provider=attempt.provider,
-        model_id=attempt.model_id,
-        endpoint=probe_endpoint,
-        error_code=error.code,
+        **log_fields,
         reconnect_attempt=reconnect_attempts + 1,
         max_reconnect_attempts=_MAX_RECONNECT_ATTEMPTS,
         remaining_seconds=round(remaining, 1),
@@ -105,22 +107,9 @@ async def _wait_for_reconnect(
     finally:
         set_stream_activity(wait_id, None)
     if not recovered:
-        logger.warning(
-            "provider_connectivity_wait_expired",
-            provider=attempt.provider,
-            model_id=attempt.model_id,
-            endpoint=probe_endpoint,
-            error_code=error.code,
-            reconnect_attempts=reconnect_attempts,
-        )
+        logger.warning("provider_connectivity_wait_expired", **log_fields, reconnect_attempts=reconnect_attempts)
         return False
-    logger.info(
-        "provider_connectivity_resumed",
-        provider=attempt.provider,
-        model_id=attempt.model_id,
-        endpoint=probe_endpoint,
-        reconnect_attempt=reconnect_attempts + 1,
-    )
+    logger.info("provider_connectivity_resumed", **log_fields, reconnect_attempt=reconnect_attempts + 1)
     return True
 
 
@@ -149,19 +138,19 @@ async def _connectivity_retry_stream(inner: ModelProvider, request: ModelRequest
             async with closing_async_stream(events):
                 async for event in events:
                     attempt.observe(event)
-                    yield event if attempt.saw_model_selected else with_carried_usage(event, carried)
+                    yield event if attempt.selected_count else with_carried_usage(event, carried)
         except ProviderUnavailable as error:
             probe_endpoint = attempt.probe_endpoint()
             if (
                 attempt.committed
                 or error.code not in CONNECTIVITY_ERROR_CODES
                 or reconnect_attempts >= _MAX_RECONNECT_ATTEMPTS
-                or not await corroborate_offline(probe_endpoint, is_stream_stalled=(error.code == STREAM_STALLED))
+                or not await corroborate_offline(probe_endpoint)
             ):
                 raise
             if (report := attempt.usage.settle()) is not None:
-                yield report if attempt.saw_model_selected else with_carried_usage(report, carried)
-            if not attempt.saw_model_selected:
+                yield report if attempt.selected_count else with_carried_usage(report, carried)
+            if not attempt.selected_count:
                 carried = add_usage(carried, attempt.usage.settled)
             if deadline is None:
                 deadline = loop.time() + _CONNECTIVITY_WAIT_LIMIT_SECONDS
@@ -175,10 +164,7 @@ async def _connectivity_retry_stream(inner: ModelProvider, request: ModelRequest
             ):
                 raise
             reconnect_attempts += 1
-            request = replace(
-                request,
-                retry_budget=None,
-                strip_encrypted_replay=request.strip_encrypted_replay or error.replay_stripped,
-            )
+            strip_replay = request.strip_encrypted_replay or (error.replay_stripped and attempt.selected_count <= 1)
+            request = replace(request, retry_budget=None, strip_encrypted_replay=strip_replay)
         else:
             return
