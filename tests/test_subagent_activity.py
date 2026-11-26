@@ -6,7 +6,6 @@ import asyncio
 import json
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -37,8 +36,16 @@ from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
-from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.events import (
+    ReportedCall,
+    RunFinished,
+    TextDelta,
+    ToolCallOrigin,
+    ToolCompleted,
+    ToolProgress,
+    ToolStarted,
+)
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.providers.identity import model_identity
 from mindroom.redaction import redact_sensitive_text
@@ -74,7 +81,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.activity import _SubagentStatus
     from mindroom.llm.usage import MessageMetrics
-    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from tests.fakes.scripted_model import ScriptStep
@@ -155,6 +162,7 @@ def test_start_reads_the_child_identity() -> None:
     """The snapshot carries the resolved thread, callers, parent link, and the sub-agent the run is a turn of."""
     snapshot = _activity().snapshot()
     assert snapshot.subagent_id == "s1"
+    assert snapshot.caller_tool_call_id == "call"
     assert (snapshot.caller_agent_name, snapshot.root_caller_agent_name) == ("parent", "lead")
     assert (snapshot.thread_id, snapshot.parent_delegation_id, snapshot.source) == ("$thread", "p0", "delegate")
     assert (snapshot.status, snapshot.started_at, snapshot.ended_at) == ("running", 1.0, None)
@@ -764,12 +772,12 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
 
 
 @pytest.mark.asyncio
-async def test_a_childs_progress_names_when_its_tool_call_started(
+async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_feed_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """The caller's progress names the UTC time the child's call started, the start its feed row carries."""
+    """The caller's plain-text progress emits a compact single line while the feed row tracks started_at and ended_at."""
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
@@ -779,11 +787,14 @@ async def test_a_childs_progress_names_when_its_tool_call_started(
         await ai_response(turn, paths, config)
 
     last = await seen.wait_for_status("completed")
-    started_at = last.items[0].started_at
+    assert last.caller_tool_call_id == "delegate"
+    started_at, ended_at = last.items[0].started_at, last.items[0].ended_at
     assert started_at is not None
+    assert ended_at is not None
     assert abs(time.time() - started_at) < 60
-    started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
-    assert f"\nCalling add (started {started} UTC)\n" in reports
+    assert ended_at >= started_at
+    assert reports[0] == "add\n"
+    assert all("Calling " not in report and "UTC" not in report for report in reports)
 
 
 @pytest.mark.asyncio
@@ -792,9 +803,24 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """A provider may reuse a call id within a run; the later call names its own start, not the finished one's."""
-    clock = iter([100.0, 200.0])
+    """A provider may reuse a call id within a run; the later call records a fresh start timestamp."""
+    clock = iter([100.0, 150.0, 200.0, 250.0])
     monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
+    observed_starts: list[float] = []
+    observed_ends: list[float | None] = []
+    orig_start = ActivityFeed.tool_started
+    orig_done = ActivityFeed.tool_completed
+
+    def spy_start(self: ActivityFeed, event: ToolStarted, *, now: float) -> None:
+        observed_starts.append(now)
+        orig_start(self, event, now=now)
+
+    def spy_done(self: ActivityFeed, event: ToolCompleted, *, now: float | None = None) -> None:
+        observed_ends.append(now)
+        orig_done(self, event, now=now)
+
+    monkeypatch.setattr(ActivityFeed, "tool_started", spy_start)
+    monkeypatch.setattr(ActivityFeed, "tool_completed", spy_done)
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
@@ -804,9 +830,10 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
         await ai_response(turn, paths, config)
 
     last = await seen.wait_for_status("completed")
-    assert [item.started_at for item in last.items if item.kind == "tool"] == [100.0]
-    calling = [line for line in reports[-1].splitlines() if line.startswith("Calling")]
-    assert calling == ["Calling add (started 00:01:40 UTC)", "Calling add (started 00:03:20 UTC)"]
+    assert observed_starts == [100.0, 200.0]
+    assert observed_ends == [150.0, 250.0]
+    assert [(item.started_at, item.ended_at) for item in last.items if item.kind == "tool"] == [(100.0, 250.0)]
+    assert reports[-1] == "add\nadd\nDone"
 
 
 @pytest.mark.asyncio
@@ -1554,3 +1581,124 @@ async def test_a_child_resumed_where_nothing_publishes_it_ends_on_its_open_feed(
     assert last is seen.snapshots[-1]
     assert last.result_preview == "Child done"
     assert not _OPEN
+
+
+def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
+    """Running tools store redacted bounded progress, clear it on completion/settlement, and record `ended_at`."""
+    activity = _activity()
+    activity.tool_started(ToolStarted(call=_call("c1")), now=10.0)
+    activity.tool_started(ToolStarted(call=_call("c2")), now=11.0)
+    activity.tool_progress("c1", "Authorization: Bearer super-secret-token\n" + "z" * 1_200)
+    activity.tool_progress("c2", "working on c2")
+    activity.tool_progress("missing", "ignored")
+
+    snap = activity.snapshot()
+    c1, c2 = snap.items
+    assert c1.ended_at is None
+    assert c2.ended_at is None
+    assert c1.progress is not None
+    assert "super-secret-token" not in c1.progress
+    assert len(c1.progress) == 1_000
+    assert c2.progress == "working on c2"
+
+    activity.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=15.5)
+    activity.tool_progress("c1", "late progress ignored")
+    c1_done, c2_running = activity.snapshot().items
+    assert (c1_done.started_at, c1_done.ended_at, c1_done.progress) == (10.0, 15.5, None)
+    assert (c2_running.started_at, c2_running.ended_at, c2_running.progress) == (11.0, None, "working on c2")
+
+    activity.set_status("failed", 20.0, result="stopped")
+    c1_final, c2_settled = activity.snapshot().items
+    assert (c1_final.ended_at, c1_final.progress) == (15.5, None)
+    assert (c2_settled.state, c2_settled.started_at, c2_settled.ended_at, c2_settled.progress) == (
+        "error",
+        11.0,
+        20.0,
+        None,
+    )
+
+
+def test_empty_parent_tool_call_id_becomes_none_on_snapshot() -> None:
+    """An empty `parent_tool_call_id` normalizes to `None` on `SubagentSnapshot.caller_tool_call_id`."""
+    child = replace(_child(), parent_tool_call_id="")
+    activity = _SubagentActivity.start(child, parent_delegation_id=None, root_caller_agent_name="lead", now=1.0)
+    assert activity.snapshot().caller_tool_call_id is None
+
+
+@pytest.mark.asyncio
+async def test_observe_child_event_forwards_tool_progress_without_auditing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """`ToolProgress` updates the child's activity feed without writing transient events to the child audit."""
+    audit_events: list[object] = []
+    orig_record = lifecycle.record_child_event
+
+    async def spy_record(audit: Any, event: Any) -> None:  # noqa: ANN401
+        audit_events.append(event)
+        await orig_record(audit, event)
+
+    monkeypatch.setattr(lifecycle, "record_child_event", spy_record)
+
+    async def child_with_progress(
+        ctx: ResponseTurnContext,
+        *_args: object,
+        sinks: TurnSinks,
+        **_kwargs: object,
+    ) -> TurnResult:
+        assert sinks.on_attempt_start is not None
+        sinks.on_attempt_start("child-run", ctx.active_model_name)
+        call = ReportedCall("call-bash", "bash", {"command": "echo hi"})
+        await lifecycle.observe_child_event(ToolStarted(call=call))
+        await lifecycle.observe_child_event(ToolProgress("call-bash", "line 1\nline 2"))
+        await asyncio.sleep(_FLUSH_INTERVAL_SECONDS + 0.05)
+        await lifecycle.observe_child_event(ToolCompleted(call=replace(call, result="hi")))
+        done_record = RunRecord(
+            run_id="child-run",
+            session_id=ctx.session_id,
+            status=RunStatus.completed,
+            content="done",
+        )
+        await lifecycle.observe_child_event(RunFinished(done_record))
+        return TurnResult("done")
+
+    tools, config, runtime_paths = _direct_tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.ai.ai_response", side_effect=child_with_progress),
+    ):
+        await tools.run_subagent(agent_name="child", task="Run bash")
+
+    last = await seen.wait_for_status("completed")
+    progress_seen = [
+        item.progress
+        for snap in seen.snapshots
+        for item in snap.items
+        if item.kind == "tool" and item.progress is not None
+    ]
+    assert "line 1\nline 2" in progress_seen
+    assert last.items[0].progress is None
+    assert last.items[0].ended_at is not None
+    assert not any(isinstance(ev, ToolProgress) for ev in audit_events)
+
+
+def test_format_child_tool_activity_extracts_redacts_single_lines_and_clips() -> None:
+    """Plain-text child tool progress extracts the primary string arg, redacts secrets, single-lines, and clips."""
+    cmd = lifecycle._format_child_tool_activity(
+        ReportedCall("c1", "bash", {"command": "  curl -H 'Authorization: Bearer secret123'\n  https://example.com  "}),
+    )
+    assert cmd.startswith("bash: curl -H 'Authorization: Bearer ***redacted***' https://example.com\n")
+    assert "secret123" not in cmd
+
+    priority = lifecycle._format_child_tool_activity(
+        ReportedCall("c2", "search", {"command": "   ", "args": ["ignored"], "path": "src/a.py", "url": "https://x"}),
+    )
+    assert priority == "search: src/a.py\n"
+
+    long_cmd = lifecycle._format_child_tool_activity(ReportedCall("c3", "bash", {"command": "x" * 200}))
+    assert long_cmd == f"bash: {'x' * 119}…\n"
+
+    bare = lifecycle._format_child_tool_activity(ReportedCall("c4", "ping", {"count": 3}))
+    assert bare == "ping\n"

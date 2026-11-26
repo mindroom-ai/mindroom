@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -368,7 +367,7 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
         await tools.run_subagent(agent_name="child", task="Inspect the logs")
 
     assert reports[:2] == ["Reading ", "Reading the logs."]
-    assert re.fullmatch(r"Reading the logs\.\nCalling lookup \(started \d\d:\d\d:\d\d UTC\)\n", reports[2])
+    assert reports[2] == "Reading the logs.\nlookup\n"
     assert len(reports) == 3
 
 

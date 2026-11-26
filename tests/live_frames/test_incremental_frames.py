@@ -199,10 +199,18 @@ def _oracle_docs(streaming: StreamingResponse) -> tuple[str, LiveDocs]:
         else visible_markdown(streaming.config, streaming.runtime_paths, display)
     )
     tools = events_module.serialize_tool_trace(streaming.tool_trace) if streaming.show_tool_calls else ()
-    if tools and streaming.tool_progress:
+    if tools:
         progress = streaming.tool_progress
         tools = tuple(
-            {**entry, "progress": progress[trace.tool_call_id]} if trace.tool_call_id in progress else entry
+            {
+                **entry,
+                **({"progress": progress[trace.tool_call_id]} if trace.tool_call_id in progress else {}),
+                **(
+                    {"started_at": trace.started_at}
+                    if trace.type == "tool_call_started" and trace.started_at is not None
+                    else {}
+                ),
+            }
             for trace, entry in zip(streaming.tool_trace, tools, strict=True)
         )
     activity = "\n".join(

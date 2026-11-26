@@ -6675,6 +6675,7 @@ path = "mindroom.tool_system.progress"
 depends_on = []
 visibility = [
     "mindroom.agent_loop",
+    "mindroom.delegation.activity",
     "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.runtime",
     "mindroom.api.sandbox_execute_stream",
@@ -8964,6 +8965,7 @@ path = "mindroom.delegation.activity"
 depends_on = [
     "mindroom.delegation.state",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.progress",
 ]
 visibility = ["mindroom.delegation.lifecycle"]
 

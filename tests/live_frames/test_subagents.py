@@ -299,15 +299,16 @@ def test_terminal_settled_tools_render_without_spinner(
 
     assert "⏳" not in docs.md
     (tool,) = docs.tools
-    assert (tool["type"], tool["tool_name"], tool["started_at"], tool.get("is_error")) == (
+    assert (tool["type"], tool["tool_name"], tool["started_at"], tool.get("ended_at"), tool.get("is_error")) == (
         "tool_call_completed",
         "read_file",
         1001.5,
+        1002.0,
         expected_error,
     )
     assert ("args_preview" in tool) is previews
     if not previews:
-        assert set(tool) == {"type", "tool_name", "started_at", *({"is_error"} if expected_error else ())}
+        assert set(tool) == {"type", "tool_name", "started_at", "ended_at", *({"is_error"} if expected_error else ())}
 
 
 @pytest.mark.parametrize("previews", [True, False], ids=["previews", "hidden"])
@@ -795,3 +796,94 @@ async def test_an_error_in_the_loop_ends_the_publisher_and_a_later_run_starts_an
     await _until(lambda: len(room.sent) == 1)
 
     assert (room.sent[0]["run"], room.sent[0]["seq"]) == ("d2", 0)
+
+
+@pytest.mark.asyncio
+async def test_caller_tool_call_id_rides_in_every_frame_meta_when_present() -> None:
+    """`caller_tool_call_id` rides on snapshots and deltas whenever non-empty and is omitted when absent."""
+    room = FrameRoom()
+    base = make_snapshot(caller_tool_call_id="call-parent-1", items=(_text("Working"),))
+    room.publish(base)
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(replace(base, items=(_text("Working more"),)))
+    await _until(lambda: len(room.sent) == 2)
+    room.publish(make_snapshot(delegation_id="d2", subagent_id="d2", caller_tool_call_id=None, items=(_text("No id"),)))
+    await _until(lambda: len(room.sent) == 3)
+
+    assert ["snapshot" in frame for frame in room.sent] == [True, False, True]
+    assert room.sent[0]["meta"]["caller_tool_call_id"] == "call-parent-1"
+    assert room.sent[1]["meta"]["caller_tool_call_id"] == "call-parent-1"
+    assert "caller_tool_call_id" not in room.sent[2]["meta"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previews", [True, False], ids=["previews", "hidden"])
+async def test_subagent_tool_ended_at_and_running_progress_wire_contract(previews: bool) -> None:
+    """Running tools carry `progress` only with previews and omit `ended_at`; completion clears `progress` and sets `ended_at`."""
+    room = FrameRoom()
+    activity = _activity()
+    call = ReportedCall("call-1", "bash", {"command": "pytest -q"}, result="1 passed")
+    activity.tool_started(ToolStarted(call=call), now=1000.5)
+    room.publish(activity.snapshot(), previews=previews)
+    await _until(lambda: len(room.sent) == 1)
+
+    activity.tool_progress("call-1", "running test_a")
+    room.publish(activity.snapshot(), previews=previews)
+    if previews:
+        await _until(lambda: len(room.sent) == 2)
+    else:
+        await asyncio.sleep(0.05)
+        assert len(room.sent) == 1
+
+    activity.tool_completed(ToolCompleted(call=call), now=1003.25)
+    room.publish(activity.snapshot(), previews=previews)
+    expected_after_complete = 3 if previews else 2
+    await _until(lambda: len(room.sent) == expected_after_complete)
+
+    first_tool = _frame_tools(room.sent[0])[0]
+    assert first_tool["started_at"] == 1000.5
+    assert "ended_at" not in first_tool
+    assert "progress" not in first_tool
+
+    if previews:
+        progress_tool = _frame_tools(room.sent[1])[0]
+        assert "delta" in room.sent[1]
+        assert progress_tool["progress"] == "running test_a"
+        assert "ended_at" not in progress_tool
+
+    done_tool = _frame_tools(room.sent[-1])[0]
+    assert done_tool["type"] == "tool_call_completed"
+    assert done_tool["started_at"] == 1000.5
+    assert done_tool["ended_at"] == 1003.25
+    assert "progress" not in done_tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plaintext", "encrypted"])
+async def test_oversized_running_progress_fits_without_stop(encrypted: bool) -> None:
+    """Oversized running progress drops cleanly during frame fitting and never triggers STOP."""
+    room = FrameRoom(encrypted=encrypted)
+    activity = _activity()
+    for index in range(20):
+        call = ReportedCall(f"call-{index}", "bash", {"command": f"run-{index}"})
+        activity.tool_started(ToolStarted(call=call), now=1000.0 + index)
+        activity.tool_progress(f"call-{index}", "😀" * 1_000)
+    room.publish(activity.snapshot(), previews=True)
+    await _until(lambda: len(room.sent) == 1)
+    # Subsequent progress update while progress is fitted out stays silent rather than overflowing.
+    activity.tool_progress("call-0", "😁" * 1_000)
+    room.publish(activity.snapshot(), previews=True)
+    await asyncio.sleep(0.05)
+    activity.set_status("completed", 1050.0, result="done")
+    room.publish(activity.snapshot(), previews=True)
+    await _until(_forgotten)
+
+    assert len(room.sent) == 2
+    assert max(room.sent_bytes) <= _MAX_FRAME_BYTES
+    assert room.encrypted == []
+    first_tools = room.sent[0]["snapshot"]["tools"]
+    assert all("progress" not in entry for entry in first_tools)
+    # Progress was dropped first while args_preview stayed intact because the frame fits without progress.
+    assert all(entry["args_preview"] == f"command=run-{index}" for index, entry in enumerate(first_tools))
+    final_tools = room.sent[-1]["snapshot"]["tools"]
+    assert all(entry["ended_at"] == 1050.0 for entry in final_tools)

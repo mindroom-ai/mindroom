@@ -14,6 +14,7 @@ from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_i
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.progress import shown_progress
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -52,6 +53,10 @@ class _SubagentItem:
     # kind "tool": Unix seconds when the call was first announced, kept when it resumes and completes; None for a row
     # that only a completion made.
     started_at: float | None = None
+    # kind "tool": Unix seconds when the call finished or settled; None while running.
+    ended_at: float | None = None
+    # kind "tool": latest redacted live progress text while running; cleared on completion or settlement.
+    progress: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +97,8 @@ class SubagentSnapshot:
     interrupted_by_restart: bool = False
     # What the call that started the sub-agent named it, on one line of at most 80 characters, redacted; empty for none.
     title: str = ""
+    # The parent's tool_call_id that launched this child turn, if any.
+    caller_tool_call_id: str | None = None
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]
@@ -164,6 +171,7 @@ class _SubagentActivity:
     thread_id: str | None
     started_at: float
     title: str = ""
+    caller_tool_call_id: str | None = None
     status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
@@ -207,6 +215,7 @@ class _SubagentActivity:
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
             # The child may come from stored metadata a worker could write, so its title is sanitized here.
             title=display_title(child.title),
+            caller_tool_call_id=child.parent_tool_call_id or None,
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )
@@ -238,11 +247,33 @@ class _SubagentActivity:
             self.tool_calls += 1
         self._set_tool(call_id, _public_entry(entry), "running", started_at=now)
 
-    def tool_completed(self, event: ToolCompleted) -> None:
+    def tool_completed(self, event: ToolCompleted, *, now: float | None = None) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
+        ended_at = time.time() if now is None else now
         entry = _public_entry(format_tool_completed_event(event.call))
         self._running_calls.discard(event.call.tool_call_id)
-        self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done", started_at=None)
+        self._set_tool(
+            event.call.tool_call_id,
+            entry,
+            "error" if event.call.is_error else "done",
+            started_at=None,
+            ended_at=ended_at,
+        )
+
+    def _update_tool_progress(self, tool_call_id: str, text: str) -> bool:
+        shown = shown_progress(text) or None
+        for index in range(len(self._items) - 1, -1, -1):
+            item = self._items[index]
+            if item.kind == "tool" and item.tool_call_id == tool_call_id and item.state == "running":
+                if item.progress == shown:
+                    return False
+                self._items[index] = replace(item, progress=shown)
+                return True
+        return False
+
+    def tool_progress(self, tool_call_id: str, text: str) -> None:
+        """Store the latest redacted progress on the newest matching running tool row."""
+        self._update_tool_progress(tool_call_id, text)
 
     def _set_tool(
         self,
@@ -251,15 +282,29 @@ class _SubagentActivity:
         state: Literal["running", "done", "error"],
         *,
         started_at: float | None,
+        ended_at: float | None = None,
     ) -> None:
         """Update the call's newest row, keeping its start, else append one; past the cap, drop the oldest tool row."""
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
             if item.kind == "tool" and item.tool_call_id == tool_call_id:
-                self._items[index] = replace(item, tool=entry, state=state)
+                self._items[index] = replace(
+                    item,
+                    tool=entry,
+                    state=state,
+                    ended_at=ended_at,
+                    progress=item.progress if state == "running" else None,
+                )
                 return
         self._items.append(
-            _SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state, started_at=started_at),
+            _SubagentItem(
+                kind="tool",
+                tool=entry,
+                tool_call_id=tool_call_id,
+                state=state,
+                started_at=started_at,
+                ended_at=ended_at,
+            ),
         )
         tools = [index for index, item in enumerate(self._items) if item.kind == "tool"]
         if len(tools) > _MAX_TOOL_ITEMS:
@@ -278,18 +323,24 @@ class _SubagentActivity:
         self.status, self.interrupted_by_restart = status, interrupted_by_restart
         if status in TERMINAL_CHILD_STATUSES:
             self.ended_at = now
-            self._settle_running_tools(failed=status != "completed")
+            self._settle_running_tools(failed=status != "completed", now=now)
         else:
             self.ended_at = None
         if result is not None:
             self.result = result
 
-    def _settle_running_tools(self, *, failed: bool) -> None:
+    def _settle_running_tools(self, *, failed: bool, now: float) -> None:
         """Close every still-running tool row so ended runs never leave pending spinners behind."""
         self._running_calls.clear()
         state: Literal["done", "error"] = "error" if failed else "done"
         self._items = [
-            replace(item, state=state, tool=replace(item.tool, type="tool_call_completed", is_error=failed))
+            replace(
+                item,
+                state=state,
+                tool=replace(item.tool, type="tool_call_completed", is_error=failed),
+                ended_at=now if item.ended_at is None else item.ended_at,
+                progress=None,
+            )
             if item.kind == "tool" and item.state == "running" and item.tool is not None
             else item
             for item in self._items
@@ -319,6 +370,7 @@ class _SubagentActivity:
             source=self.source,
             task=self.task,
             title=self.title,
+            caller_tool_call_id=self.caller_tool_call_id,
             thread_id=self.thread_id,
             status=self.status,
             started_at=self.started_at,
@@ -379,6 +431,7 @@ class ActivityFeed:
             # The resumed attempt's sink publishes from now on, with the model it runs on.
             feed._sink = sink
             feed._activity.model_name = child.model_name
+            feed._activity.caller_tool_call_id = child.parent_tool_call_id or feed._activity.caller_tool_call_id
         _OPEN[child.delegation_id] = feed
         feed.status("running")
         return feed
@@ -398,10 +451,15 @@ class ActivityFeed:
         self._activity.tool_started(event, now=now)
         self._mark()
 
-    def tool_completed(self, event: ToolCompleted) -> None:
+    def tool_completed(self, event: ToolCompleted, *, now: float | None = None) -> None:
         """Finish a tool row; it goes out with the next window's snapshot."""
-        self._activity.tool_completed(event)
+        self._activity.tool_completed(event, now=now)
         self._mark()
+
+    def tool_progress(self, tool_call_id: str, text: str) -> None:
+        """Update a running tool row's latest progress; it goes out with the next window's snapshot."""
+        if self._activity._update_tool_progress(tool_call_id, text):
+            self._mark()
 
     def model(self, model_name: str) -> None:
         """Switch to the model the child runs on now; it goes out with the next window's snapshot."""

@@ -833,12 +833,15 @@ class StreamingResponse:
         del cache[len(trace) :]
         for index, entry in enumerate(trace):
             progress = progress_map.get(entry.tool_call_id) if entry.tool_call_id is not None else None
-            key = (_tool_trace_identity(entry), progress)
+            started_at = entry.started_at if entry.type == "tool_call_started" else None
+            key = (_tool_trace_identity(entry), progress, started_at)
             if index < len(cache) and cache[index][0] == key:
                 continue
             event = serialize_tool_trace_entry(entry)
             if progress is not None:
                 event["progress"] = progress
+            if started_at is not None:
+                event["started_at"] = started_at
             if index < len(cache):
                 cache[index] = (key, event)
             else:

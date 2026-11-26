@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import threading
 from collections import defaultdict
 from copy import deepcopy
@@ -479,7 +478,7 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
-    assert re.fullmatch(r"\nCalling write_report \(started \d\d:\d\d:\d\d UTC\)\nchild result", reports[-1])
+    assert reports[-1] == "write_report\nchild result"
 
 
 @pytest.mark.asyncio
@@ -527,9 +526,12 @@ async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_ca
     assert isinstance(result, CompletedApprovalRun)
     starts = [item.started_at for snapshot in snapshots for item in snapshot.items if item.kind == "tool"]
     assert set(starts) == ({100.0} if feed else set())
-    calling = [line for report in reports for line in report.splitlines() if line.startswith("Calling")]
-    assert calling
-    assert set(calling) == {"Calling write_report (started 00:01:40 UTC)"}
+    if feed:
+        ended_tools = [item for item in snapshots[-1].items if item.kind == "tool"]
+        assert [(item.started_at, item.ended_at) for item in ended_tools] == [(100.0, 10_900.0)]
+    tool_lines = [line for report in reports for line in report.splitlines() if line == "write_report"]
+    assert tool_lines
+    assert all("Calling " not in report and "UTC" not in report for report in reports)
 
 
 @pytest.mark.asyncio

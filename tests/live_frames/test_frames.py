@@ -155,3 +155,28 @@ def test_a_bare_entry_compares_by_compact_size() -> None:
     entry = {"type": "tool_call_completed", "tool_name": "read_status", "result_preview": result}
     (bare,) = fitted_tools((entry,), bare=1)
     assert json.loads(bare["result_preview"]) == {"job_id": "j1", "tool": "sync", "status": "running"}
+
+
+def test_fitted_tools_preserve_started_at_when_clipped_and_bare() -> None:
+    """Frame fitting keeps `started_at` on running entries in both clipped and bare forms."""
+    running = {
+        "type": "tool_call_started",
+        "tool_name": "bash",
+        "args_preview": "command=" + "x" * 300,
+        "started_at": 1762790001.25,
+    }
+    (clipped,) = fitted_tools((running,), bare=0)
+    (bare,) = fitted_tools((running,), bare=1)
+    assert clipped == {
+        "type": "tool_call_started",
+        "tool_name": "bash",
+        "args_preview": ("command=" + "x" * 300)[:199] + "…",
+        "started_at": 1762790001.25,
+        "clipped": True,
+    }
+    assert bare == {
+        "type": "tool_call_started",
+        "tool_name": "bash",
+        "started_at": 1762790001.25,
+        "clipped": True,
+    }
