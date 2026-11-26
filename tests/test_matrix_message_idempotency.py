@@ -759,12 +759,12 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
     assert len(transport.attempts) == attempts_after_recovery
 
 
-async def test_keyed_send_with_nested_markdown_title_normalizes_idempotently(
+async def test_keyed_send_with_nested_markdown_title_normalizes_once(
     context: ToolRuntimeContext,
     transport: MatrixTransport,
     thread_summary_baselines: _ThreadSummaryBaselines,
 ) -> None:
-    """Nested markdown titles normalize identically on initial send, notice, and replay."""
+    """Nested markdown titles normalize once and agree across initial send, notice, stored intent, and replay."""
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
@@ -781,10 +781,15 @@ async def test_keyed_send_with_nested_markdown_title_normalizes_idempotently(
             ),
         )
     assert first["status"] == "ok"
-    assert first["title"] == "Deploy"
+    assert first["title"] == "1. Deploy"
     assert second == first
-    assert transport.attempts[1]["content"]["body"] == "Deploy"
-    assert transport.attempts[1]["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == "Deploy"
+    assert transport.attempts[1]["content"]["body"] == "1. Deploy"
+    assert transport.attempts[1]["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == "1. Deploy"
+    root = context.runtime_paths.control_state_root
+    assert root is not None
+    state_path = next((root / "matrix_message_sends").glob("*.json"))
+    stored_row = next(iter(json.loads(state_path.read_text(encoding="utf-8"))["sends"].values()))
+    assert stored_row["title"] == "1. Deploy"
     assert thread_summary_baselines.count(context.room_id, first["thread_id"]) == 1
 
 

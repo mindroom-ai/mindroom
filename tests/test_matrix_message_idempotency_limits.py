@@ -334,7 +334,7 @@ async def test_stalled_title_send_preserves_confirmed_root_and_recovers_deduplic
         assert first["status"] == "ok"
         assert first["event_id"] == first["thread_id"]
         assert "title_event_id" not in first
-        assert "Message sent, but failed to set thread title:" in first["warning"]
+        assert first["warning"] == "Message sent, but failed to set thread title: timed out"
         root = context.runtime_paths.control_state_root
         assert root is not None
         assert not file_lock_is_held(next((root / "matrix_message_sends").glob("*.lock")))

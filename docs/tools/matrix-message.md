@@ -86,6 +86,7 @@ Without `room_id`, the call targets the current room; without `thread_id`, `send
 Selecting another room never carries over the current thread.
 Pass `thread_id="room"` to target the room timeline, or `new_thread=True` on `send` to start a separate thread, even from inside a thread.
 Pass `title` alongside `new_thread=True` to pin a plain-text thread title immediately in the same call (returning `title` and `title_event_id`).
+If setting the title fails after delivery, the call still returns `status="ok"` with `event_id`, `thread_id`, and a `warning` (without `title_event_id`); do not resend an unkeyed message, and call `set_thread_summary` on `thread_id` instead.
 `new_thread` and `thread_id` cannot be combined.
 Calls to other rooms follow the [room access rules](matrix-and-attachments.md#tool-runtime-context).
 

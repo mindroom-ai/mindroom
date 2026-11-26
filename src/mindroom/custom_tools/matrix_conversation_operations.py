@@ -323,9 +323,12 @@ class MatrixMessageOperations:
                     conversation_reader=context.conversation_reader,
                     known_latest_thread_event_id=known_latest_thread_event_id,
                     transaction_id=title_transaction_id,
+                    already_normalized=True,
                 )
         except Exception as exc:
-            error_detail = str(exc) or type(exc).__name__
+            error_detail = (
+                "timed out" if isinstance(exc, TimeoutError) and not str(exc) else (str(exc) or type(exc).__name__)
+            )
             logger.warning(
                 "Failed to set initial thread title",
                 room_id=room_id,

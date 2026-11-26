@@ -59,25 +59,27 @@ def normalize_thread_summary_text(raw_text: str) -> str:
     if not normalized:
         return ""
 
-    while True:
-        updated = _MARKDOWN_CODE_BLOCK_RE.sub(r"\1", normalized)
-        updated = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1) or match.group(2) or "", updated)
-        updated = _MARKDOWN_HEADING_RE.sub("", updated)
-        updated = _MARKDOWN_BLOCKQUOTE_RE.sub("", updated)
-        updated = _MARKDOWN_LIST_ITEM_RE.sub("", updated)
-        updated = _MARKDOWN_DOUBLE_EMPHASIS_RE.sub(r"\2", updated)
-        updated = _MARKDOWN_SINGLE_ASTERISK_RE.sub(r"\1", updated)
-        updated = _MARKDOWN_STRIKETHROUGH_RE.sub(r"\1", updated)
-        updated = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", updated)
-        updated = " ".join(updated.split())
-        if updated == normalized:
-            return normalized
-        normalized = updated
+    normalized = _MARKDOWN_CODE_BLOCK_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1) or match.group(2) or "", normalized)
+    normalized = _MARKDOWN_HEADING_RE.sub("", normalized)
+    normalized = _MARKDOWN_BLOCKQUOTE_RE.sub("", normalized)
+    normalized = _MARKDOWN_LIST_ITEM_RE.sub("", normalized)
+    normalized = _MARKDOWN_DOUBLE_EMPHASIS_RE.sub(r"\2", normalized)
+    normalized = _MARKDOWN_SINGLE_ASTERISK_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_STRIKETHROUGH_RE.sub(r"\1", normalized)
+    normalized = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", normalized)
+    return " ".join(normalized.split())
 
 
-def validate_thread_summary_text(summary: str, *, field_name: str = "summary") -> str:
+def validate_thread_summary_text(
+    summary: str,
+    *,
+    field_name: str = "summary",
+    already_normalized: bool = False,
+) -> str:
     """Normalize and validate manual thread summary or title text."""
-    if not (normalized_summary := normalize_thread_summary_text(summary)):
+    normalized_summary = summary if already_normalized else normalize_thread_summary_text(summary)
+    if not normalized_summary.strip():
         msg = f"{field_name} must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
     if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
@@ -113,6 +115,7 @@ async def send_thread_summary_notice(
     generated_at: datetime | None = None,
     known_latest_thread_event_id: str | None = None,
     transaction_id: str | None = None,
+    already_normalized: bool = False,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
 
@@ -122,7 +125,7 @@ async def send_thread_summary_notice(
     acting on a user's intent should pass a boolean: writers that summarize as a
     side effect must not disturb pin state on a thread the user already pinned.
     """
-    normalized_summary = normalize_thread_summary_text(summary)
+    normalized_summary = summary if already_normalized else normalize_thread_summary_text(summary)
     if not normalized_summary:
         logger.warning(
             "Refusing to send empty normalized thread summary",
@@ -242,6 +245,7 @@ async def _send_and_record_manual_summary(
             generated_at=generated_at,
             known_latest_thread_event_id=known_latest_thread_event_id,
             transaction_id=transaction_id,
+            already_normalized=True,
         )
     except Exception as exc:
         msg = "Failed to send thread summary event."
@@ -268,9 +272,10 @@ async def set_initial_thread_summary(
     conversation_reader: ConversationReader,
     known_latest_thread_event_id: str | None = None,
     transaction_id: str | None = None,
+    already_normalized: bool = False,
 ) -> _ThreadSummaryWriteResult:
     """Write one validated pinned initial summary for a newly started thread without waiting for sync echo."""
-    normalized_summary = validate_thread_summary_text(summary)
+    normalized_summary = validate_thread_summary_text(summary, already_normalized=already_normalized)
     effective_count = max(1, message_count)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +69,7 @@ from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
     normalize_thread_summary_text,
     send_thread_summary_notice,
+    set_initial_thread_summary,
     set_manual_thread_summary,
 )
 from mindroom.thread_summary.schedule import (
@@ -532,19 +534,15 @@ def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
     assert normalize_thread_summary_text(raw_summary) == "Fix ISSUE-116 deploy done"
 
 
-@pytest.mark.parametrize(
-    ("raw_text", "expected"),
-    [
-        ("**1. Deploy**", "Deploy"),
-        ("`# Heading`", "Heading"),
-        ("**> **", ""),
-    ],
-)
-def test_normalize_thread_summary_text_is_idempotent(raw_text: str, expected: str) -> None:
-    """Nested markdown normalizes to a fixed point so repeated calls agree."""
-    once = normalize_thread_summary_text(raw_text)
-    assert once == expected
-    assert normalize_thread_summary_text(once) == once
+def test_normalize_thread_summary_text_is_single_pass_and_linear() -> None:
+    """Normalization runs a single pass so repeated leading markers stay linear-time."""
+    assert normalize_thread_summary_text("**1. Deploy**") == "1. Deploy"
+    repeated_quotes = "> " * 5_000
+    started = time.monotonic()
+    normalized = normalize_thread_summary_text(repeated_quotes)
+    elapsed = time.monotonic() - started
+    assert normalized == "> " * 4_998 + ">"
+    assert elapsed < 0.5
 
 
 # -- threshold arithmetic --
@@ -2909,6 +2907,34 @@ class TestSetManualThreadSummary:
 
         self.conversation_reader.read_strict.assert_not_awaited()
         self.client.room_send.assert_not_awaited()
+
+    async def test_manual_and_initial_summary_writers_normalize_once_without_double_stripping(
+        self,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+    ) -> None:
+        """Both manual summary writers preserve single-pass output without re-normalizing inside notice delivery."""
+        serve_conversation_reader(self.conversation_reader, _make_thread_history(2))
+
+        manual = await self._set("**1. Deploy**")
+        manual_content = self.client.room_send.call_args.kwargs["content"]
+        assert manual.summary == "1. Deploy"
+        assert manual_content["body"] == "1. Deploy"
+        assert manual_content[THREAD_SUMMARY_CONTENT_KEY]["summary"] == "1. Deploy"
+
+        initial = await set_initial_thread_summary(
+            self.client,
+            _ROOM,
+            "$root2",
+            "**1. Deploy**",
+            message_count=1,
+            conversation_reader=self.conversation_reader,
+            known_latest_thread_event_id="$root2",
+        )
+        initial_content = self.client.room_send.call_args.kwargs["content"]
+        assert initial.summary == "1. Deploy"
+        assert initial_content["body"] == "1. Deploy"
+        assert initial_content[THREAD_SUMMARY_CONTENT_KEY]["summary"] == "1. Deploy"
+        assert thread_summary_baselines.count(_ROOM, "$root2") == 1
 
 
 @pytest.mark.asyncio
