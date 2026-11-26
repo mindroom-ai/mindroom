@@ -407,3 +407,27 @@ def test_google_calendar_explicit_none_toggles_disable_operations(tmp_path: Path
     assert "create_event" not in offered.parameters["properties"]["action"]["enum"]
     assert "update_event" in offered.parameters["properties"]["action"]["enum"]
     assert "disabled" in json.loads(partial_write_tool.google_calendar_write(action="create_event"))["error"]
+
+
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected_match"),
+    [
+        ({"exclude_tools": ["delete_event"]}, "google_calendar_write"),
+        ({"include_tools": ["list_events"]}, "google_calendar_read"),
+        ({"exclude_tools": ["nonexistent_calendar_fn"]}, "unknown function"),
+        ({"include_tools": ["nonexistent_calendar_fn"]}, "unknown function"),
+    ],
+)
+def test_google_calendar_constructor_rejects_retired_and_unknown_tool_filters(
+    tmp_path: Path,
+    filter_kwargs: dict[str, list[str]],
+    expected_match: str,
+) -> None:
+    """Direct GoogleCalendarTools constructors fail closed on retired or unknown include/exclude tool names."""
+    with pytest.raises(ValueError, match=expected_match):
+        GoogleCalendarTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=_write_capable_calendar_creds(),
+            **filter_kwargs,
+        )

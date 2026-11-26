@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
@@ -139,7 +140,13 @@ class GoogleSheetsTools(GoogleApiToolkit):
             tools.append(self.google_sheets_read)
         if self._write_actions:
             tools.append(self.google_sheets_write)
-        tools = filter_google_tools(tools, include_tools, exclude_tools)
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_sheets"],
+            known_tools=("google_sheets_read", "google_sheets_write"),
+        )
 
         registered_names = {getattr(tool, "__name__", "") for tool in tools}
         self.scopes = _resolve_sheets_scopes(

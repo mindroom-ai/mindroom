@@ -1203,3 +1203,90 @@ def test_gmail_explicit_none_toggles_disable_operations(
     assert "gmail_send" not in gmail_tools.functions
     assert "gmail_read" in gmail_tools.functions
     assert toolkit_offers(gmail_tools, "gmail_draft").parameters["properties"]["action"]["enum"] == ["update"]
+
+
+def test_gmail_from_user_searches_sender_only(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """from_user matches sender-only Gmail queries matching main (not sent mail to the user)."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {"messages": []}
+    gmail_tools.service = service
+
+    gmail_tools.gmail_read(action="from_user", user="alice@example.com")
+    gmail_tools.gmail_read(action="from_user", user="Alice")
+
+    queries = [call.kwargs["q"] for call in service.users.return_value.messages.return_value.list.call_args_list]
+    assert queries == ["from:alice@example.com", "from:Alice*"]
+
+
+def test_gmail_get_message_no_default_body_truncation_and_explicit_limit(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Full-message reads do not truncate bodies by default, but honor explicit max_body_length."""
+    long_body = "A" * 60_000
+    encoded = base64.urlsafe_b64encode(long_body.encode("utf-8")).decode("ascii")
+    raw_message = {
+        "id": "msg-long",
+        "threadId": "thread-long",
+        "labelIds": ["INBOX"],
+        "snippet": "AAA",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "Subject", "value": "Long body"},
+                {"name": "From", "value": "alice@example.com"},
+            ],
+            "body": {"data": encoded},
+        },
+    }
+
+    default_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    default_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.messages.return_value.get.return_value.execute.return_value = raw_message
+    default_tools.service = service
+
+    default_payload = json.loads(default_tools.gmail_read(action="get_message", message_id="msg-long"))
+    assert default_payload["body"] == long_body
+
+    bounded_tools = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=mock_credentials_manager,
+        max_body_length=100,
+    )
+    bounded_tools._authenticate()
+    bounded_tools.service = service
+
+    bounded_payload = json.loads(bounded_tools.gmail_read(action="get_message", message_id="msg-long"))
+    assert bounded_payload["body"] == ("A" * 100) + "... [truncated]"
+
+
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected_match"),
+    [
+        ({"exclude_tools": ["send_email"]}, "gmail_send"),
+        ({"include_tools": ["get_latest_emails"]}, "gmail_read"),
+        ({"exclude_tools": ["delete_custom_label"]}, "gmail_manage"),
+        ({"include_tools": ["send_email_to_self"]}, "gmail_send_to_self"),
+        ({"exclude_tools": ["not_a_real_gmail_tool"]}, "unknown function"),
+        ({"include_tools": ["not_a_real_gmail_tool"]}, "unknown function"),
+    ],
+)
+def test_gmail_constructor_rejects_retired_and_unknown_tool_filters(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    filter_kwargs: dict[str, list[str]],
+    expected_match: str,
+) -> None:
+    """Direct GmailTools constructors fail closed on retired or unknown include/exclude tool names."""
+    with pytest.raises(ValueError, match=expected_match):
+        GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            **filter_kwargs,
+        )

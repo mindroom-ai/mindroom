@@ -322,7 +322,17 @@ When `spreadsheet_id` or `spreadsheet_range` is configured, `google_sheets_read(
 `google_sheets_write(action="update", ...)` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
 `google_sheets_write(action="update", ...)` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
 `google_sheets_write(action="batch_update", ...)` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
-`google_sheets_write(action="batch_update", ...)` can also delete sheets, rows, and ranges, and a [Tool Approval](../tool-approval.md) rule matching `*google_sheets_write` gates every Sheets write action, including prefixed names of additional Google workspace accounts.
+`google_sheets_write(action="batch_update", ...)` can also delete sheets, rows, and ranges; add exact [Tool Approval](../tool-approval.md) rules for `google_sheets_write` and for each prefixed workspace function (such as `work_google_sheets_write`) to gate every Sheets write action:
+
+```yaml
+tool_approval:
+  rules:
+    - match: google_sheets_write
+      action: require_approval
+    - match: work_google_sheets_write
+      action: require_approval
+```
+
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from googleapiclient.errors import HttpError
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
@@ -365,7 +366,13 @@ class GoogleCalendarTools(GoogleApiToolkit):
             tools.append(self.google_calendar_read)
         if self._write_actions:
             tools.append(self.google_calendar_write)
-        tools = filter_google_tools(tools, include_tools, exclude_tools)
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_calendar"],
+            known_tools=("google_calendar_read", "google_calendar_write"),
+        )
 
         super().__init__(
             name="google_calendar",

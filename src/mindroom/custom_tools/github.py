@@ -635,7 +635,7 @@ class GithubTools(Toolkit):
         path: str | None,
         filename: str | None,
     ) -> str:
-        parts = [query]
+        parts = [cleaned] if (cleaned := query.strip()) else []
         for key, value in (
             ("language", language),
             ("repo", repo),
@@ -646,6 +646,8 @@ class GithubTools(Toolkit):
             if value:
                 parts.append(f"{key}:{value}")
         search_query = " ".join(parts)
+        if not search_query:
+            return _missing_arg_error("query", "search_code")
 
         code_results = self.g.search_code(search_query)
         results: list[dict[str, Any]] = []
@@ -745,10 +747,13 @@ class GithubTools(Toolkit):
                 else _missing_arg_error("query", action)
             )
         if action == "search_code":
-            return (
-                self._search_code(query, language=language, repo=repo_name, user=user, path=path, filename=filename)
-                if query
-                else _missing_arg_error("query", action)
+            return self._search_code(
+                query or "",
+                language=language,
+                repo=repo_name,
+                user=user,
+                path=path,
+                filename=filename,
             )
         if not repo_name:
             return _missing_arg_error("repo_name", action)
@@ -1019,7 +1024,7 @@ class GithubTools(Toolkit):
         page: int,
         per_page: int,
     ) -> str:
-        parts = [unescape(query)]
+        parts = [cleaned] if (cleaned := unescape(query).strip()) else []
         # GitHub search has no state:all qualifier and returns nothing for it.
         if state and state != "all":
             parts.append(f"state:{state}")
@@ -1031,6 +1036,8 @@ class GithubTools(Toolkit):
             if value:
                 parts.append(f"{key}:{value}")
         search_query = " ".join(parts)
+        if not search_query:
+            return _missing_arg_error("query", "search_issues_and_prs")
 
         issue_results = self.g.search_issues(search_query, sort=sort, order=order)
         effective_per_page = min(per_page, 100)
@@ -1123,10 +1130,8 @@ class GithubTools(Toolkit):
         if action not in _ISSUE_PR_READ_ACTIONS:
             return _unsupported_action_error("issue/PR read", action)
         if action == "search_issues_and_prs":
-            if not query:
-                return _missing_arg_error("query", action)
             return self._search_issues_and_prs(
-                query,
+                query or "",
                 state=state,
                 type_filter=type_filter,
                 repo=repo_name,

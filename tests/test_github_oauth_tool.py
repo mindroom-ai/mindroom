@@ -129,11 +129,16 @@ class _FakeIssueSearchResults:
 class _SearchGithub:
     def __init__(self) -> None:
         self.queries: list[str] = []
+        self.code_queries: list[str] = []
 
     def search_issues(self, query: str, *, sort: str, order: str) -> _FakeIssueSearchResults:
         assert sort == "created"
         assert order == "desc"
         self.queries.append(query)
+        return _FakeIssueSearchResults()
+
+    def search_code(self, query: str) -> _FakeIssueSearchResults:
+        self.code_queries.append(query)
         return _FakeIssueSearchResults()
 
 
@@ -1894,3 +1899,73 @@ def test_github_rejects_unsupported_actions(tmp_path: Path) -> None:
     assert json.loads(tool.github_write_repo(action="bogus")) == {
         "error": "Unsupported GitHub repo write action: bogus",
     }
+
+
+def test_issue_search_allows_qualifier_only_queries_and_rejects_empty_search(tmp_path: Path) -> None:
+    """Qualifier-only issue searches succeed, while searches with neither text nor qualifiers fail."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _SearchGithub()
+    tool.g = github
+
+    empty_text_result = json.loads(
+        tool.github_read_issues_prs(
+            action="search_issues_and_prs",
+            query="",
+            repo_name="example/project",
+            label="bug",
+        ),
+    )
+    none_text_result = json.loads(
+        tool.github_read_issues_prs(
+            action="search_issues_and_prs",
+            repo_name="example/project",
+            type_filter="pr",
+            state="open",
+        ),
+    )
+    missing_all = json.loads(tool.github_read_issues_prs(action="search_issues_and_prs"))
+    only_state_all = json.loads(tool.github_read_issues_prs(action="search_issues_and_prs", query="  ", state="all"))
+
+    assert github.queries == [
+        "repo:example/project label:bug",
+        "state:open is:pr repo:example/project",
+    ]
+    assert empty_text_result["query"] == "repo:example/project label:bug"
+    assert none_text_result["query"] == "state:open is:pr repo:example/project"
+    assert missing_all == {"error": "query is required for search_issues_and_prs"}
+    assert only_state_all == {"error": "query is required for search_issues_and_prs"}
+
+
+def test_code_search_allows_qualifier_only_queries_and_rejects_empty_search(tmp_path: Path) -> None:
+    """Qualifier-only code searches succeed, while searches with neither text nor qualifiers fail."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _SearchGithub()
+    tool.g = github
+
+    result = json.loads(
+        tool.github_read_repo(
+            action="search_code",
+            query="",
+            repo_name="example/project",
+            filename="Dockerfile",
+        ),
+    )
+    missing_all = json.loads(tool.github_read_repo(action="search_code"))
+
+    assert github.code_queries == ["repo:example/project filename:Dockerfile"]
+    assert result["query"] == "repo:example/project filename:Dockerfile"
+    assert missing_all == {"error": "query is required for search_code"}

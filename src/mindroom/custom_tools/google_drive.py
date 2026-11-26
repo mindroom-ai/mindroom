@@ -20,6 +20,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import (
@@ -330,7 +331,20 @@ class GoogleDriveTools(GoogleApiToolkit):
             tools.append(self.google_drive_read)
         if write:
             tools.append(self.google_drive_write)
-        tools = filter_google_tools(tools, include_tools, exclude_tools)
+        retired_drive_tools = {
+            **RETIRED_CONSOLIDATED_FUNCTIONS["google_drive"],
+            **{
+                old.removeprefix("google_drive_"): new
+                for old, new in RETIRED_CONSOLIDATED_FUNCTIONS["google_drive"].items()
+            },
+        }
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=retired_drive_tools,
+            known_tools=("google_drive_read", "google_drive_write"),
+        )
 
         super().__init__(
             name="google_drive",
@@ -498,9 +512,11 @@ class GoogleDriveTools(GoogleApiToolkit):
         max_results: int = 10,
         page_token: str | None = None,
     ) -> str:
+        if max_results < 1:
+            return json.dumps({"error": "max_results must be greater than 0"})
         try:
             service = self._google_api_service()
-            effective_max = min(max_results, self.max_results, 100)
+            effective_max = min(max_results, self.max_results)
             if self.include_trashed:
                 effective_query = query or ""
             elif query:

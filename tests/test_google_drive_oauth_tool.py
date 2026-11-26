@@ -1997,3 +1997,59 @@ def test_google_drive_explicit_none_toggles_disable_operations(tmp_path: Path) -
         "search",
         "read",
     ]
+
+
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected_match"),
+    [
+        ({"exclude_tools": ["trash_file"]}, "google_drive_write"),
+        ({"exclude_tools": ["google_drive_trash_file"]}, "google_drive_write"),
+        ({"include_tools": ["list_files"]}, "google_drive_read"),
+        ({"include_tools": ["google_drive_search_files"]}, "google_drive_read"),
+        ({"exclude_tools": ["nonexistent_drive_fn"]}, "unknown function"),
+        ({"include_tools": ["nonexistent_drive_fn"]}, "unknown function"),
+    ],
+)
+def test_google_drive_constructor_rejects_retired_and_unknown_tool_filters(
+    tmp_path: Path,
+    filter_kwargs: dict[str, list[str]],
+    expected_match: str,
+) -> None:
+    """Direct GoogleDriveTools constructors fail closed on retired or unknown include/exclude tool names."""
+    with pytest.raises(ValueError, match=expected_match):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=_valid_credentials(),
+            tool_output_workspace_root=tmp_path,
+            **filter_kwargs,
+        )
+
+
+def test_google_drive_search_honors_limits_above_100_and_validates_positive_limit(tmp_path: Path) -> None:
+    """Drive search passes caller/constructor limits above 100 directly and rejects non-positive limits."""
+    tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+        tool_output_workspace_root=tmp_path,
+        max_results=500,
+    )
+    service = _FakeDriveService()
+    tool.service = service
+
+    cursor = "cursor-2"
+    result = json.loads(
+        tool.google_drive_read(
+            action="list",
+            max_results=250,
+            page_token=cursor,
+        ),
+    )
+    assert result["count"] == 0
+    assert service.files_resource.list_kwargs is not None
+    assert service.files_resource.list_kwargs["pageSize"] == 250
+    assert service.files_resource.list_kwargs["pageToken"] == "cursor-2"
+
+    invalid = json.loads(tool.google_drive_read(action="list", max_results=0))
+    assert invalid == {"error": "max_results must be greater than 0"}

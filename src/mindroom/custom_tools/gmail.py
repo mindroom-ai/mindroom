@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from googleapiclient.errors import HttpError
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import (
@@ -421,7 +422,7 @@ class GmailTools(GoogleApiToolkit):
         file_access: FileAccess = "workspace",
         scopes: Sequence[str] | None = None,
         max_results: int = 100,
-        max_body_length: int = 50000,
+        max_body_length: int | None = None,
         attachment_dir: str | None = None,
         include_html: bool = False,
         get_latest_emails: bool | None = True,
@@ -516,7 +517,13 @@ class GmailTools(GoogleApiToolkit):
         if self._manage_actions:
             selected.append(self.gmail_manage)
 
-        tools = filter_google_tools(selected, include_tools, exclude_tools)
+        tools = filter_google_tools(
+            selected,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["gmail"],
+            known_tools=("gmail_read", "gmail_draft", "gmail_send", "gmail_send_to_self", "gmail_manage"),
+        )
 
         super().__init__(
             name="gmail",
@@ -1092,9 +1099,11 @@ class GmailTools(GoogleApiToolkit):
         count: int,
         page_token: str | None,
     ) -> str | None:
+        user_value = user or ""
+        from_user_query = f"from:{user_value}" if "@" in user_value else f"from:{user_value}*"
         list_specs: dict[str, tuple[str | None, str, str]] = {
             "latest": (None, "get_latest_emails", "latest emails"),
-            "from_user": (f"from:{user or ''} OR to:{user or ''}", "get_emails_from_user", f"emails from {user or ''}"),
+            "from_user": (from_user_query, "get_emails_from_user", f"emails from {user_value}"),
             "unread": ("is:unread", "get_unread_emails", "unread emails"),
             "starred": ("is:starred", "get_starred_emails", "starred emails"),
             "by_context": (query or "", "get_emails_by_context", "emails by context"),
@@ -1130,7 +1139,7 @@ class GmailTools(GoogleApiToolkit):
         """Read and search Gmail messages, threads, drafts, and custom labels.
 
         - `latest`: latest inbox emails (`count`, `page_token`)
-        - `from_user`: emails from or to `user` (`count`, `page_token`)
+        - `from_user`: emails from sender `user` (`count`, `page_token`)
         - `unread`: unread emails (`count`, `page_token`)
         - `starred`: starred emails (`count`, `page_token`)
         - `by_context`: emails matching context `query` (`count`, `page_token`)

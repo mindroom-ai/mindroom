@@ -518,3 +518,27 @@ def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) 
     )
     assert isinstance(saved_config_tool, GoogleSheetsTools)
     assert set(saved_config_tool.functions) == {"google_sheets_read"}
+
+
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected_match"),
+    [
+        ({"exclude_tools": ["update_sheet"]}, "google_sheets_write"),
+        ({"include_tools": ["read_sheet"]}, "google_sheets_read"),
+        ({"exclude_tools": ["create_duplicate_sheet"]}, "google_sheets_write"),
+        ({"exclude_tools": ["nonexistent_sheets_fn"]}, "unknown function"),
+        ({"include_tools": ["nonexistent_sheets_fn"]}, "unknown function"),
+    ],
+)
+def test_google_sheets_constructor_rejects_retired_and_unknown_tool_filters(
+    tmp_path: Path,
+    filter_kwargs: dict[str, list[str]],
+    expected_match: str,
+) -> None:
+    """Direct GoogleSheetsTools constructors fail closed on retired or unknown include/exclude tool names."""
+    with pytest.raises(ValueError, match=expected_match):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            **filter_kwargs,
+        )
