@@ -198,7 +198,7 @@ def is_webp_transcode_candidate(
         or error.provider_code == _INVALID_IMAGE_URL_CODE
     ):
         return False
-    named = error.rejected_media & sent.keys() if isinstance(error, InvalidRequest) else frozenset()
+    named = error.rejected_media & sent.keys()
     if named and not (named & local_images):
         return False
     text = str(error).lower()[:MAX_SCANNED_ERROR_CHARS]

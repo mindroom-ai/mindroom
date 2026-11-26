@@ -439,6 +439,31 @@ async def test_chat_http_415_webp_rejection_transcodes_preserves_pdf_and_learns(
 
 
 @pytest.mark.asyncio
+async def test_chat_attributed_http_415_on_webp_transcodes_and_preserves_pdf(tmp_path: Path) -> None:
+    """An attributed HTTP 415 naming an image part transcodes the WebP to PNG and preserves the PDF."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(
+        415,
+        json={"error": {"message": "Unsupported Media Type", "param": "messages[0].content[1].image_url"}},
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert prompt_text(wire.body(1)) == _PROMPT
+    url = user_parts(wire.body(1))[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+    assert sends(wire.body(1), b"%PDF-1.4 report")
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
 async def test_learned_webp_route_attributed_413_on_pdf_drops_only_pdf_and_keeps_image(
     tmp_path: Path,
 ) -> None:
