@@ -726,11 +726,21 @@ def _connecting(toolkit_class: type[AgnoToolkit] = AgnoToolkit) -> AgnoToolkit:
     return toolkit
 
 
-def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
-    """An owned toolkit never connects; an Agno toolkit connects when it says so."""
+class _NativeConnectingTools(Toolkit):
+    """A native authoring toolkit that opts into run-scoped connect/close lifecycle."""
+
+    requires_connect = True
+
+    def __init__(self) -> None:
+        super().__init__(name="native_db")
+
+
+def test_toolkits_hold_a_connection_only_when_requires_connect_is_true() -> None:
+    """Plain native and Agno toolkits never connect; either connects when it sets requires_connect."""
     assert not requires_connect(GreeterTools())
     assert not requires_connect(AgnoToolkit(name="plain"))
     assert requires_connect(_connecting())
+    assert requires_connect(_NativeConnectingTools())
 
 
 class _PlacingToolkit(AgnoToolkit):

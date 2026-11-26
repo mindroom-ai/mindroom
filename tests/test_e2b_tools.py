@@ -727,3 +727,49 @@ def test_e2b_pins_domain_and_fails_closed_on_ambient_e2b_debug(monkeypatch: pyte
     assert list_err["status"] == "error"
     assert "E2B_DEBUG" in list_err["message"]
     assert list_calls == []
+
+
+def test_kill_background_retains_handle_on_error_and_distinguishes_false_from_true(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """kill_background keeps handles when kill() raises for retry, removes on completion, and distinguishes False vs True."""
+    tool = make_tool(workspace)
+    outcomes: list[object] = [RuntimeError("temporary rpc error"), True, False]
+
+    class _ScriptedHandle:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def kill(self) -> bool:
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return bool(outcome)
+
+    pids = iter((401, 402))
+
+    def _run_bg(_cmd: str, *, background: bool) -> _ScriptedHandle:
+        assert background is True
+        return _ScriptedHandle(next(pids))
+
+    tool.sandbox.commands.run = _run_bg  # type: ignore[assignment]
+
+    started_1 = json.loads(tool.e2b_run("background_command", command="sleep 60"))
+    assert started_1 == {"status": "started", "pid": 401}
+
+    # Transient exception preserves the handle so retrying kill_background with the same PID works.
+    failed = json.loads(tool.e2b_run("kill_background", pid=401))
+    assert failed["status"] == "error"
+    assert "temporary rpc error" in failed["message"]
+    assert 401 in tool._background_commands
+
+    assert tool.e2b_run("kill_background", pid=401) == "Background command 401 terminated successfully."
+    assert 401 not in tool._background_commands
+    assert json.loads(tool.e2b_run("kill_background", pid=401))["status"] == "error"
+
+    # kill() returning False removes the handle and reports that the process was not found / already exited.
+    started_2 = json.loads(tool.e2b_run("background_command", command="sleep 1"))
+    assert started_2 == {"status": "started", "pid": 402}
+    assert tool.e2b_run("kill_background", pid=402) == "Background command 402 was not found or already exited."
+    assert 402 not in tool._background_commands

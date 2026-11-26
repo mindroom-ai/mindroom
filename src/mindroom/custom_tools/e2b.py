@@ -270,9 +270,14 @@ class MindRoomE2BTools(Toolkit):
             if action == "kill_background":
                 if pid is None or pid not in self._background_commands:
                     return _error_json(f"Unknown background command pid: {pid}")
-                handle = self._background_commands.pop(pid)
-                handle.kill()
-                return f"Background command {pid} terminated successfully."
+                handle = self._background_commands[pid]
+                killed = handle.kill()
+                self._background_commands.pop(pid, None)
+                return (
+                    f"Background command {pid} terminated successfully."
+                    if killed
+                    else f"Background command {pid} was not found or already exited."
+                )
             if action == "server":
                 cmd = require_non_empty(command, "command")
                 if port is None:

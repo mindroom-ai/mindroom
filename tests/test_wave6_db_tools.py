@@ -21,6 +21,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkit_connections import run_connection
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -204,6 +205,10 @@ def test_postgres_scoped_credentials_read_only_and_export(
     conninfo_str = psycopg.conninfo.make_conninfo("", **conninfo_kwargs)
     psycopg.pq.Conninfo.parse(conninfo_str.encode())
     assert fake_conn.read_only is True
+    assert run_connection(tool) is not None
+    # Connection stays open and reused across calls within a run until close().
+    assert fake_conn.closed is False
+    tool.close()
     assert fake_conn.closed is True
 
     # Ambient PGSERVICE and PGHOSTADDR both fail closed before reaching libpq.
@@ -229,6 +234,7 @@ def test_postgres_scoped_credentials_read_only_and_export(
     out_csv = tmp_path / "users.csv"
     assert "Successfully exported" in export_tool.export_table_to_path("users", str(out_csv))
     assert out_csv.read_text(encoding="utf-8").splitlines() == ["id,name", "1,alice"]
+    export_tool.close()
     assert export_conn.closed is False
 
 
@@ -439,7 +445,25 @@ def test_sql_postgresql_scoped_credentials_and_libpq_isolation(monkeypatch: pyte
     finally:
         tool.db_engine.dispose()
 
-    # Unix-socket PostgreSQL URL with ?host=/var/run/postgresql is accepted and pins port + empty passfile.
+
+def test_sql_postgresql_unix_socket_and_embedded_host_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SQLTools accepts ?host= Unix-socket URLs and preserves explicit ports embedded in ?host=... entries."""
+    import sqlalchemy  # noqa: PLC0415
+
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    monkeypatch.delenv("PGHOSTADDR", raising=False)
+    sql_cls = cast("Any", builtin_tool_registry().factory("sql")())
+
+    captured: list[tuple[object, dict[str, object]]] = []
+    real_create_engine = sqlalchemy.create_engine
+
+    def spy_create_engine(url: object, **kwargs: object) -> object:
+        captured.append((url, dict(kwargs)))
+        return real_create_engine(url, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", spy_create_engine)
+
+    # Unix-socket PostgreSQL URL with ?host=/var/run/postgresql defaults port to 5432 + empty passfile.
     unix_tool = sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@/app?host=/var/run/postgresql")
     try:
         unix_url, unix_kwargs = captured[-1]
@@ -448,6 +472,20 @@ def test_sql_postgresql_scoped_credentials_and_libpq_isolation(monkeypatch: pyte
         assert unix_kwargs["connect_args"] == {"passfile": "", "port": 5432}
     finally:
         unix_tool.db_engine.dispose()
+
+    # Explicit ports embedded in ?host=... (single or multi-host) are preserved instead of clobbered with 5432.
+    for embedded_url, expected_port in (
+        (f"postgresql+psycopg://u:{_DUMMY_SECRET}@/app?host=db.example:6432", "6432"),
+        (f"postgresql+psycopg://u:{_DUMMY_SECRET}@/app?host=a:6432&host=b:6433", "6432,6433"),
+    ):
+        emb_tool = sql_cls(db_url=embedded_url)
+        try:
+            emb_url, emb_kwargs = captured[-1]
+            assert emb_kwargs["connect_args"] == {"passfile": ""}
+            _, dialect_params = emb_tool.db_engine.dialect.create_connect_args(emb_url)
+            assert dialect_params["port"] == expected_port
+        finally:
+            emb_tool.db_engine.dispose()
 
 
 class _StatefulRedshiftCursor:
@@ -468,9 +506,13 @@ class _StatefulRedshiftCursor:
             self._conn.temp_rows.append((1, "alpha"))
             self.description = None
             self._rows = []
-        elif query.startswith("FAIL"):
+        elif query.startswith("FAIL") or "broken_export" in query:
+            self._conn.aborted = True
             self._conn.temp_rows.append((2, "should-rollback"))
             msg = "redshift boom"
+            raise redshift_connector.Error(msg)
+        elif self._conn.aborted:
+            msg = "current transaction is aborted"
             raise redshift_connector.Error(msg)
         elif query.startswith("EXPLAIN "):
             self.description = [("QUERY PLAN",)]
@@ -488,6 +530,7 @@ class _StatefulRedshiftConnection:
         self.executed: list[str] = []
         self.temp_rows: list[tuple[int, str]] = []
         self.committed = False
+        self.aborted = False
         self.rolled_back = False
         self.closed = False
 
@@ -498,6 +541,7 @@ class _StatefulRedshiftConnection:
         self.committed = True
 
     def rollback(self) -> None:
+        self.aborted = False
         self.temp_rows.clear()
         self.rolled_back = True
 
@@ -506,6 +550,7 @@ class _StatefulRedshiftConnection:
 
 
 def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_semicolons(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Redshift lazily reuses one connection without auto-commit, rolls back on Error, and keeps EXPLAIN literals."""
@@ -534,8 +579,21 @@ def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_sem
     assert tool.redshift_inspect("inspect_query", query="SELECT ';' AS separator;") == "QUERY PLAN\nResult"
     assert connections[0].executed[-1] == "EXPLAIN SELECT ';' AS separator"
 
+    assert run_connection(tool) is not None
+
     # redshift_connector.Error rolls back the active transaction without closing the reused connection.
     assert "Error executing query: redshift boom" in tool.run_query("FAIL AFTER STAGING")
     assert connections[0].rolled_back is True
     assert connections[0].committed is False
     assert connections[0].closed is False
+
+    # Failed export_table_to_path also rolls back so subsequent queries succeed on the reused connection.
+    connections[0].rolled_back = False
+    assert "Error exporting table: redshift boom" in tool.export_table_to_path("broken_export", str(tmp_path / "x.csv"))
+    assert connections[0].rolled_back is True
+    assert tool.run_query("CREATE TEMP TABLE t2 AS SELECT 1") == "Query executed successfully."
+
+    # close() closes and clears the cached run-scoped connection.
+    tool.close()
+    assert connections[0].closed is True
+    assert tool._connection is None

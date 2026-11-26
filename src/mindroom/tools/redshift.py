@@ -40,6 +40,8 @@ _TEXT_TYPES = ("char", "varchar", "text", "uuid")
 class _RedshiftTools(Toolkit):
     """Inspect, query, and export Amazon Redshift data warehouse tables."""
 
+    requires_connect = True
+
     def __init__(
         self,
         host: str | None = None,
@@ -126,6 +128,18 @@ class _RedshiftTools(Toolkit):
             self._connection = redshift_connector.connect(**self._build_connection_kwargs())
         return self._connection
 
+    def connect(self) -> None:
+        """Open the Redshift connection for the run."""
+        self._ensure_connection()
+
+    def close(self) -> None:
+        """Close and clear the cached Redshift connection."""
+        connection = self._connection
+        self._connection = None
+        if connection is not None:
+            with suppress(Exception):
+                connection.close()
+
     def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
         import redshift_connector
 
@@ -150,6 +164,9 @@ class _RedshiftTools(Toolkit):
             return f"Error executing query: {exc}"
 
     def _summarize_table(self, table: str) -> str:
+        import redshift_connector
+
+        connection: Any | None = None
         try:
             full_table = f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table)}"
             connection = self._ensure_connection()
@@ -192,6 +209,12 @@ class _RedshiftTools(Toolkit):
                         rendered = f"{value:.2f}" if isinstance(value, float) else str(value)
                         summary_parts.append(f"  {key}: {rendered}")
                 return "\n".join(summary_parts)
+        except redshift_connector.Error as exc:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            logger.exception("Error summarizing Redshift table", table=table)
+            return f"Error summarizing table: {exc}"
         except Exception as exc:
             logger.exception("Error summarizing Redshift table", table=table)
             return f"Error summarizing table: {exc}"
@@ -238,6 +261,9 @@ class _RedshiftTools(Toolkit):
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a Redshift table as a local CSV file at `path`."""
+        import redshift_connector
+
+        connection: Any | None = None
         try:
             table_name = require_non_empty(table, "table")
             target_path = Path(require_non_empty(path, "path"))
@@ -253,6 +279,12 @@ class _RedshiftTools(Toolkit):
                     writer = csv.writer(handle)
                     writer.writerow(columns)
                     writer.writerows(cursor)
+        except redshift_connector.Error as exc:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            logger.exception("Error exporting Redshift table", table=table, path=path)
+            return f"Error exporting table: {exc}"
         except Exception as exc:
             logger.exception("Error exporting Redshift table", table=table, path=path)
             return f"Error exporting table: {exc}"

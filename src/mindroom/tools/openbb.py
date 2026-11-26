@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import subprocess
@@ -51,8 +52,8 @@ def _build_isolated_openbb_app(obb: Any) -> Any:  # noqa: ANN401 - OpenBB app ob
     return type(obb)(command_runner=CommandRunner(user_settings=isolated_settings))
 
 
-def _load_openbb_app() -> Any:  # noqa: ANN401 - openbb.obb is dynamically generated on first import
-    """Import ``openbb.obb`` under an install-local lock and return a credential-isolated App instance."""
+def _import_openbb_singleton() -> Any:  # noqa: ANN401 - openbb.obb is dynamically generated on first import
+    """Import ``openbb.obb`` under an install-local lock so concurrent first-import builds wait safely."""
     spec = importlib.util.find_spec("openbb")
     if spec is None or spec.origin is None:
         msg = "No module named 'openbb'"
@@ -64,8 +65,14 @@ def _load_openbb_app() -> Any:  # noqa: ANN401 - openbb.obb is dynamically gener
             # OpenBB's build installs a signal handler, which only the main thread may do,
             # so a build needed off the main thread runs in a child process before retrying.
             subprocess.run([sys.executable, "-c", "import openbb"], check=True)
+            importlib.invalidate_caches()
             from openbb import obb
-    return _build_isolated_openbb_app(obb)
+    return obb
+
+
+def _load_openbb_app() -> Any:  # noqa: ANN401 - openbb.obb is dynamically generated on first import
+    """Import ``openbb.obb`` safely and return a credential-isolated App instance."""
+    return _build_isolated_openbb_app(_import_openbb_singleton())
 
 
 class _OpenBBTools(Toolkit):
@@ -130,12 +137,18 @@ class _OpenBBTools(Toolkit):
         )
         return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
 
-    def _client(self) -> Any:  # noqa: ANN401 - OpenBB app object
+    @property
+    def obb(self) -> Any:  # noqa: ANN401 - OpenBB app object
+        """Return the isolated OpenBB app, loading and building it lazily on first access."""
         if self._obb is None:
             self._obb = _load_openbb_app()
+        return self._obb
+
+    def _client(self) -> Any:  # noqa: ANN401 - OpenBB app object
+        obb = self.obb
         if self.openbb_pat and not self._logged_in and not self._pat_attempted:
             self._pat_attempted = True
-            account = getattr(self._obb, "account", None)
+            account = getattr(obb, "account", None)
             login = getattr(account, "login", None)
             if not callable(login):
                 logger.warning(
@@ -154,7 +167,7 @@ class _OpenBBTools(Toolkit):
                         error=str(exc).replace(self.openbb_pat, "[REDACTED]"),
                     )
         if not self._logged_in and self.provider != "yfinance":
-            credentials = getattr(getattr(self._obb, "user", None), "credentials", None)
+            credentials = getattr(getattr(obb, "user", None), "credentials", None)
             origins = getattr(credentials, "origins", None)
             required = origins.get(self.provider) if isinstance(origins, dict) else None
             missing_creds = required is None or any(not getattr(credentials, key, None) for key in required)
@@ -322,5 +335,6 @@ class _OpenBBTools(Toolkit):
     action_scoped_grants=("openbb_get",),
 )
 def openbb_tools() -> type[Toolkit]:
-    """Return OpenBB tools for financial data."""
+    """Return OpenBB tools, coordinating OpenBB's first-import package build across processes."""
+    _import_openbb_singleton()
     return _OpenBBTools

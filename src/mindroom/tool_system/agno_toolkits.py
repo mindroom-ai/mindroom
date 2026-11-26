@@ -139,13 +139,13 @@ def _aliased(functions: Mapping[str, Function], aliases: Mapping[str, str]) -> d
     return aliased
 
 
-def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit]:
-    """Whether ``toolkit`` holds a connection this process opens and closes around its calls, as Agno's Postgres does.
+def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit | authoring.Toolkit]:
+    """Whether ``toolkit`` holds a connection this process opens and closes around its calls, as Postgres and Redshift do.
 
     A toolkit whose calls go to a worker connects there instead, unless it keeps some of its calls here
     (``SupportsPrimaryCallPlacement``).
     """
-    if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
+    if not isinstance(toolkit, (Toolkit, authoring.Toolkit)) or not toolkit.requires_connect:
         return False
     return toolkit_worker_stand_ins(toolkit) is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
 

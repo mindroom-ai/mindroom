@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import csv
-from contextlib import contextmanager
+from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
@@ -13,9 +13,6 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import format_tabular_rows, require_non_empty
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 logger = get_logger(__name__)
 
@@ -26,6 +23,8 @@ _TEXT_TYPES = ("char", "text", "uuid")
 
 class _PostgresTools(Toolkit):
     """Read-only PostgreSQL inspection, querying, and CSV table export."""
+
+    requires_connect = True
 
     def __init__(
         self,
@@ -38,6 +37,7 @@ class _PostgresTools(Toolkit):
         table_schema: str = "public",
     ) -> None:
         self._connection: Any | None = connection
+        self._owns_connection: bool = False
         self.db_name = db_name
         self.user = user
         self.password = password
@@ -90,36 +90,45 @@ class _PostgresTools(Toolkit):
             cursor.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         return connection
 
-    @contextmanager
-    def _connection_scope(self) -> Iterator[Any]:
-        if self._connection is not None and not getattr(self._connection, "closed", False):
-            yield self._connection
-            return
-        connection = self._open_connection()
-        try:
-            yield connection
-        finally:
-            if not getattr(connection, "closed", False):
+    def _ensure_connection(self) -> Any:  # noqa: ANN401 - optional psycopg connection
+        if self._connection is None or getattr(self._connection, "closed", False):
+            self._connection = self._open_connection()
+            self._owns_connection = True
+        return self._connection
+
+    def connect(self) -> None:
+        """Open the PostgreSQL connection for the run."""
+        self._ensure_connection()
+
+    def close(self) -> None:
+        """Close and clear a toolkit-owned PostgreSQL connection."""
+        connection = self._connection
+        owns = self._owns_connection
+        self._connection = None
+        self._owns_connection = False
+        if owns and connection is not None and not getattr(connection, "closed", False):
+            with suppress(Exception):
                 connection.close()
 
     def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
         try:
-            with self._connection_scope() as connection:
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute(query, params)
-                        if cursor.description is None:
-                            return cursor.statusmessage or "Query executed successfully with no output."
-                        columns = [desc[0] for desc in cursor.description]
-                        rows = cursor.fetchall()
-                        if not rows:
-                            return f"Query returned no results.\nColumns: {', '.join(columns)}"
-                        row_values = [tuple(row.values()) if isinstance(row, dict) else tuple(row) for row in rows]
-                        return format_tabular_rows(columns, row_values)
-                except Exception:
-                    if not getattr(connection, "closed", False):
+            connection = self._ensure_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    if cursor.description is None:
+                        return cursor.statusmessage or "Query executed successfully with no output."
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = cursor.fetchall()
+                    if not rows:
+                        return f"Query returned no results.\nColumns: {', '.join(columns)}"
+                    row_values = [tuple(row.values()) if isinstance(row, dict) else tuple(row) for row in rows]
+                    return format_tabular_rows(columns, row_values)
+            except Exception:
+                if not getattr(connection, "closed", False):
+                    with suppress(Exception):
                         connection.rollback()
-                    raise
+                raise
         except Exception as exc:
             logger.exception("Error executing PostgreSQL query")
             return f"Error executing query: {exc}"
@@ -127,8 +136,10 @@ class _PostgresTools(Toolkit):
     def _summarize_table(self, table: str) -> str:
         from psycopg import sql
 
+        connection: Any | None = None
         try:
-            with self._connection_scope() as connection, connection.cursor() as cursor:
+            connection = self._ensure_connection()
+            with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT column_name, data_type FROM information_schema.columns "
                     "WHERE table_schema = %s AND table_name = %s;",
@@ -174,6 +185,9 @@ class _PostgresTools(Toolkit):
                         summary_parts.append(f"  {key}: {rendered}")
                 return "\n".join(summary_parts)
         except Exception as exc:
+            if connection is not None and not getattr(connection, "closed", False):
+                with suppress(Exception):
+                    connection.rollback()
             logger.exception("Error summarizing PostgreSQL table", table=table)
             return f"Error summarizing table: {exc}"
 
@@ -219,13 +233,15 @@ class _PostgresTools(Toolkit):
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a PostgreSQL table as a local CSV file at `path`."""
+        connection: Any | None = None
         try:
             from psycopg import sql
 
             table_name = require_non_empty(table, "table")
             target_path = Path(require_non_empty(path, "path"))
             stmt = sql.SQL("SELECT * FROM {tbl};").format(tbl=sql.Identifier(self.table_schema, table_name))
-            with self._connection_scope() as connection, connection.cursor() as cursor:
+            connection = self._ensure_connection()
+            with connection.cursor() as cursor:
                 cursor.execute(stmt)
                 if cursor.description is None:
                     return f"Error: Query returned no description for table '{table_name}'."
@@ -235,6 +251,9 @@ class _PostgresTools(Toolkit):
                     writer.writerow(columns)
                     writer.writerows(row.values() if isinstance(row, dict) else row for row in cursor)
         except Exception as exc:
+            if connection is not None and not getattr(connection, "closed", False):
+                with suppress(Exception):
+                    connection.rollback()
             logger.exception("Error exporting PostgreSQL table", table=table, path=path)
             return f"Error exporting table: {exc}"
         return f"Successfully exported table '{table_name}' to '{target_path}'."

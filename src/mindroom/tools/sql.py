@@ -28,12 +28,37 @@ _POSTGRES_BACKENDS = frozenset({"postgresql", "postgres"})
 _LIBPQ_DRIVERS = frozenset({"", "psycopg", "psycopg2", "psycopg2cffi"})
 
 
-def _first_query_str(value: object) -> str | None:
+def _query_values(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)) and value and isinstance(value[0], str):
-        return value[0]
-    return None
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(item for item in value if isinstance(item, str))
+    return ()
+
+
+def _first_query_str(value: object) -> str | None:
+    values = _query_values(value)
+    return values[0] if values else None
+
+
+def _host_entry_has_port(entry: str) -> bool:
+    stripped = entry.strip()
+    if not stripped or stripped.startswith("/"):
+        return False
+    if stripped.startswith("["):
+        return "]:" in stripped
+    host_part, sep, port_part = stripped.rpartition(":")
+    return bool(sep and host_part and ":" not in host_part and port_part.isdigit())
+
+
+def _has_explicit_port(url: Any, query_lower: dict[str, object]) -> bool:  # noqa: ANN401 - optional sqlalchemy URL
+    if url.port is not None:
+        return True
+    if any(value.strip() for value in _query_values(query_lower.get("port"))):
+        return True
+    return any(
+        _host_entry_has_port(entry) for raw in _query_values(query_lower.get("host")) for entry in raw.split(",")
+    )
 
 
 def _prepare_engine_target(url: Any) -> tuple[Any, dict[str, Any]]:  # noqa: ANN401 - optional sqlalchemy URL
@@ -70,7 +95,7 @@ def _prepare_engine_target(url: Any) -> tuple[Any, dict[str, Any]]:  # noqa: ANN
         has_hostaddr = bool((_first_query_str(query_lower.get("hostaddr")) or "").strip())
         reject_ambient_libpq_env(allow_hostaddr=has_hostaddr)
         connect_args: dict[str, Any] = {"passfile": ""}
-        if url.port is None and not (_first_query_str(query_lower.get("port")) or "").strip():
+        if not _has_explicit_port(url, query_lower):
             if url.host:
                 url = url.set(port=5432)
             else:
