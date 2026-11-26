@@ -1320,13 +1320,19 @@ async def _await_reader_tasks_with_grace(
 
 
 _SHELL_SYSTEMD_SLICE_ENV = "MINDROOM_SHELL_SYSTEMD_SLICE"
-_SYSTEMD_USER_BUS_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+_SYSTEMD_SCOPE_DESCRIPTION = "MindRoom shell"
 
 
 class _IdleLaunch(NamedTuple):
     argv: list[str]
     env: dict[str, str]
     uses_chrt: bool
+
+
+class _SystemdSliceLauncher(NamedTuple):
+    prefix: tuple[str, ...]
+    env_bin: str
+    bus_env: tuple[tuple[str, str | None], ...]
 
 
 @functools.cache
@@ -1361,30 +1367,46 @@ def _probe_systemd_slice_launcher(
     slice_name: str,
     runtime_dir: str | None,
     dbus_addr: str | None,
-) -> tuple[str, ...] | None:
-    """Return a ``systemd-run --user --scope`` prefix when probing *slice_name* succeeds, else ``None``."""
+) -> _SystemdSliceLauncher | None:
+    """Return a ``systemd-run --user --scope`` launcher when probing *slice_name* succeeds, else ``None``."""
     systemd_run = shutil.which("systemd-run")
-    if systemd_run is None:
+    env_bin = shutil.which("env")
+    if systemd_run is None or env_bin is None:
         return None
     systemd_run = str(Path(systemd_run).absolute())  # commands run in other directories
-    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv; older versions fail open here.
-    prefix = (systemd_run, "--user", "--scope", "--quiet", "--expand-environment=no", f"--slice={slice_name}", "--")
-    probe_env = {k: v for k, v in (("XDG_RUNTIME_DIR", runtime_dir), ("DBUS_SESSION_BUS_ADDRESS", dbus_addr)) if v}
+    env_bin = str(Path(env_bin).absolute())
+    # --description hides raw argv from the systemd user journal;
+    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here).
+    prefix = (
+        systemd_run,
+        "--user",
+        "--scope",
+        "--quiet",
+        f"--description={_SYSTEMD_SCOPE_DESCRIPTION}",
+        "--expand-environment=no",
+        f"--slice={slice_name}",
+        "--",
+    )
+    bus_env: tuple[tuple[str, str | None], ...] = (
+        ("XDG_RUNTIME_DIR", runtime_dir),
+        ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
+    )
+    probe_env = {k: v for k, v in bus_env if v is not None}
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         probe = subprocess.run(
-            [*prefix, systemd_run, "--version"],
+            [*prefix, env_bin, "-u", "MINDROOM_PROBE_UNSET", "--", "MINDROOM_PROBE_SET=1", systemd_run, "--version"],
             capture_output=True,
             timeout=5,
             check=False,
             env=probe_env,
         )
         if probe.returncode == 0:
-            return prefix
+            return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
     return None
 
 
-def _systemd_slice_launcher() -> tuple[str, ...] | None:
-    """Return a ``systemd-run --user --scope`` prefix for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
+def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
+    """Return a ``systemd-run --user --scope`` launcher for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
     slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
     if (
         len(slice_name) <= len(".slice")
@@ -1493,17 +1515,30 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
     spawn_env = env
     ionice = _idle_io_launcher()
     chrt = _idle_launcher()
-    systemd_prefix = _systemd_slice_launcher()
+    systemd_launcher = _systemd_slice_launcher()
     if ionice is not None:
         spawn_argv = [ionice, "-c", "3", "--", *spawn_argv]
     if chrt is not None:
         spawn_argv = [chrt, "-i", "0", *spawn_argv]
-    if systemd_prefix is not None:
-        spawn_argv = [*systemd_prefix, *spawn_argv]
+    if systemd_launcher is not None:
+        # systemd-run needs the verified backend user bus, while the payload must keep the caller's exact
+        # values and omissions for those bus variables.
         spawn_env = dict(env)
-        for key in _SYSTEMD_USER_BUS_ENV_KEYS:
-            if key not in spawn_env and (value := os.environ.get(key)):
-                spawn_env[key] = value
+        unset_ops: list[str] = []
+        set_ops: list[str] = []
+        for key, bus_value in systemd_launcher.bus_env:
+            if bus_value is None:
+                spawn_env.pop(key, None)
+            else:
+                spawn_env[key] = bus_value
+            if (key in spawn_env) != (key in env) or spawn_env.get(key) != env.get(key):
+                if key in env:
+                    set_ops.append(f"{key}={env[key]}")
+                else:
+                    unset_ops.extend(["-u", key])
+        if unset_ops or set_ops:
+            spawn_argv = [systemd_launcher.env_bin, *unset_ops, "--", *set_ops, *spawn_argv]
+        spawn_argv = [*systemd_launcher.prefix, *spawn_argv]
     return _IdleLaunch(spawn_argv, spawn_env, uses_chrt=chrt is not None)
 
 

@@ -25,6 +25,7 @@ from mindroom.shell.execution import (
     _probe_systemd_slice_launcher,
     _schedule_process_tree_idle,
     _systemd_slice_launcher,
+    _SystemdSliceLauncher,
     check_command,
     kill_all_records,
     kill_command,
@@ -545,30 +546,80 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Systemd slice wraps before chrt/ionice, copies env without mutating it, and leaves missing commands unwrapped."""
+    """Systemd slice uses the backend bus for systemd-run, restores caller bus vars/omissions, and skips missing commands."""
     program = tmp_path / "run-me"
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
-    prefix = ("/systemd-run", "--user", "--scope", "--quiet", "--expand-environment=no", "--slice=s.slice", "--")
+    prefix = (
+        "/systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--description=MindRoom shell",
+        "--expand-environment=no",
+        "--slice=s.slice",
+        "--",
+    )
+    xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
+    launcher = _SystemdSliceLauncher(
+        prefix=prefix,
+        env_bin="/env",
+        bus_env=(("XDG_RUNTIME_DIR", xdg), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+    )
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
     monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: "/ionice")
-    monkeypatch.setattr("mindroom.shell.execution._systemd_slice_launcher", lambda: prefix)
-    xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
-    monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
-    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", bus)
+    monkeypatch.setattr("mindroom.shell.execution._systemd_slice_launcher", lambda: launcher)
 
     caller_env = {"PATH": str(tmp_path)}
     argv = ["run-me", "$$", "$VAR"]
     launch = _idle_launch_argv(argv, caller_env, str(tmp_path))
 
-    assert launch.argv == [*prefix, "/chrt", "-i", "0", "/ionice", "-c", "3", "--", *argv]
+    assert launch.argv == [
+        *prefix,
+        "/env",
+        "-u",
+        "XDG_RUNTIME_DIR",
+        "-u",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "--",
+        "/chrt",
+        "-i",
+        "0",
+        "/ionice",
+        "-c",
+        "3",
+        "--",
+        *argv,
+    ]
     assert launch.uses_chrt is True
     assert launch.env == {"PATH": str(tmp_path), "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}
     assert caller_env == {"PATH": str(tmp_path)}
-    assert (
-        _idle_launch_argv(argv, {**caller_env, "XDG_RUNTIME_DIR": "/custom"}, str(tmp_path)).env["XDG_RUNTIME_DIR"]
-        == "/custom"
+
+    custom = _idle_launch_argv(argv, {**caller_env, "XDG_RUNTIME_DIR": "/custom"}, str(tmp_path))
+    assert custom.env == {"PATH": str(tmp_path), "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}
+    assert custom.argv == [
+        *prefix,
+        "/env",
+        "-u",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "--",
+        "XDG_RUNTIME_DIR=/custom",
+        "/chrt",
+        "-i",
+        "0",
+        "/ionice",
+        "-c",
+        "3",
+        "--",
+        *argv,
+    ]
+
+    exact = _idle_launch_argv(
+        argv,
+        {**caller_env, "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus},
+        str(tmp_path),
     )
+    assert exact.argv == [*prefix, "/chrt", "-i", "0", "/ionice", "-c", "3", "--", *argv]
 
     missing = ["./no-such-program"]
     missing_launch = _idle_launch_argv(missing, caller_env, str(tmp_path))
@@ -578,7 +629,20 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
 
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
     no_chrt = _idle_launch_argv(argv, caller_env, str(tmp_path))
-    assert no_chrt.argv == [*prefix, "/ionice", "-c", "3", "--", *argv]
+    assert no_chrt.argv == [
+        *prefix,
+        "/env",
+        "-u",
+        "XDG_RUNTIME_DIR",
+        "-u",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "--",
+        "/ionice",
+        "-c",
+        "3",
+        "--",
+        *argv,
+    ]
     assert no_chrt.uses_chrt is False
 
 
@@ -586,12 +650,17 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
 def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_rejected_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe passes --expand-environment=no, keys cache on bus env, and fails open on bad slices or errors."""
+    """The probe passes --description and --expand-environment=no, keys cache on bus env, and fails open on errors."""
     real_which = shutil.which
-    monkeypatch.setattr(
-        "mindroom.shell.execution.shutil.which",
-        lambda name, *args, **kwargs: "/systemd-run" if name == "systemd-run" else real_which(name, *args, **kwargs),
-    )
+
+    def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
+        if name == "systemd-run":
+            return "/systemd-run"
+        if name == "env":
+            return "/env"
+        return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("mindroom.shell.execution.shutil.which", fake_which)
     probe_calls: list[tuple[list[str], dict[str, str]]] = []
     probe_rc = 0
 
@@ -608,16 +677,46 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", " s.slice ")
         monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
         monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", bus)
-        expected = ("/systemd-run", "--user", "--scope", "--quiet", "--expand-environment=no", "--slice=s.slice", "--")
+        expected_prefix = (
+            "/systemd-run",
+            "--user",
+            "--scope",
+            "--quiet",
+            "--description=MindRoom shell",
+            "--expand-environment=no",
+            "--slice=s.slice",
+            "--",
+        )
+        expected = _SystemdSliceLauncher(
+            prefix=expected_prefix,
+            env_bin="/env",
+            bus_env=(("XDG_RUNTIME_DIR", xdg), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+        )
 
         assert _systemd_slice_launcher() == expected
         assert _systemd_slice_launcher() == expected
         assert probe_calls == [
-            ([*expected, "/systemd-run", "--version"], {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}),
+            (
+                [
+                    *expected_prefix,
+                    "/env",
+                    "-u",
+                    "MINDROOM_PROBE_UNSET",
+                    "--",
+                    "MINDROOM_PROBE_SET=1",
+                    "/systemd-run",
+                    "--version",
+                ],
+                {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus},
+            ),
         ]
 
         monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/99")
-        assert _systemd_slice_launcher() == expected
+        assert _systemd_slice_launcher() == _SystemdSliceLauncher(
+            prefix=expected_prefix,
+            env_bin="/env",
+            bus_env=(("XDG_RUNTIME_DIR", "/run/user/99"), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+        )
         assert len(probe_calls) == 2
 
         for invalid in ("", "   ", "mindroom.service", ".slice", "-bad.slice", "a/b.slice", "a b.slice", "a\tb.slice"):
@@ -673,7 +772,11 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
         pytest.skip("requires a live systemd --user bus supporting --expand-environment=no")
 
     caller_env = {"PATH": os.environ["PATH"], "MINDROOM_TEST_VAR": "expanded"}
-    script = "import pathlib, sys; print(sys.argv[1:], pathlib.Path('/proc/self/cgroup').read_text().strip())"
+    script = (
+        "import os, pathlib, sys; "
+        "print(sys.argv[1:], os.environ.get('XDG_RUNTIME_DIR'), os.environ.get('DBUS_SESSION_BUS_ADDRESS'), "
+        "pathlib.Path('/proc/self/cgroup').read_text().strip())"
+    )
     argv = [sys.executable, "-c", script, "$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
     result = await run_command(
         registry,
@@ -686,9 +789,28 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
     )
 
     assert result.handle is None
-    assert result.message.startswith("['$$', '$MINDROOM_TEST_VAR', '${MINDROOM_TEST_VAR}'] ")
+    assert result.message.startswith("['$$', '$MINDROOM_TEST_VAR', '${MINDROOM_TEST_VAR}'] None None ")
     assert "/app.slice/" in result.message
     assert "XDG_RUNTIME_DIR" not in caller_env
+
+    # Custom caller bus vars (pointing nowhere) must not break systemd-run and must reach the command verbatim.
+    custom_xdg = str(tmp_path / "no-bus-here")
+    custom_dbus = "unix:path=/nonexistent/bus"
+    custom_result = await run_command(
+        registry,
+        namespace="test",
+        argv=argv,
+        env={**caller_env, "XDG_RUNTIME_DIR": custom_xdg, "DBUS_SESSION_BUS_ADDRESS": custom_dbus},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+    )
+
+    assert custom_result.handle is None
+    assert custom_result.message.startswith(
+        f"['$$', '$MINDROOM_TEST_VAR', '${{MINDROOM_TEST_VAR}}'] {custom_xdg} {custom_dbus} ",
+    )
+    assert "/app.slice/" in custom_result.message
 
 
 def _process_group_threads(pgid: int) -> list[int]:
