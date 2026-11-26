@@ -213,6 +213,27 @@ def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
     return value
 
 
+# LEGACY_COMPAT: Retired overlapping built-in toolkits.
+# Legacy format: Authored tool lists accepted web_browser_tools, jira, confluence, and python.
+# Last legacy release: v2026.11.615; replacement: unreleased; use browser, atlassian, or shell and filesystem.
+# Handling: Reject the old names with explicit migration guidance; never grant replacement capabilities implicitly.
+# Coverage: tests/test_retired_tools.py.
+_RETIRED_TOOL_REPLACEMENTS = {
+    "web_browser_tools": "choose and configure `browser` explicitly if you want Chromium or desktop browser access",
+    "jira": "configure the `atlassian` tool and connect an Atlassian account",
+    "confluence": "configure the `atlassian` tool and connect an Atlassian account",
+    "python": "use `shell` to run Python and `filesystem` to read and write files",
+}
+
+
+def retired_tool_message(name: str) -> str | None:
+    """Return migration guidance for a retired toolkit or one of its functions."""
+    toolkit = name.partition(".")[0]
+    if toolkit in _RETIRED_TOOL_REPLACEMENTS:
+        return f"Tool {toolkit!r} was removed; {_RETIRED_TOOL_REPLACEMENTS[toolkit]}."
+    return None
+
+
 # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
 # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
 # Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and
@@ -301,10 +322,11 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 
 # LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
 # Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
-#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
-#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
-#   function taking an `action` parameter.
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key) and
+#   later a separate watch_pr function, which could appear in tool_approval.rules[].match globs or
+#   include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480 (original 8) and v2026.11.633 (watch_pr); replacement: unreleased; all 9 were
+#   collapsed into a single `triggers` function taking an `action` parameter.
 # Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
 #   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
 #   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
@@ -320,6 +342,7 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
     "watch_thread": "triggers",
+    "watch_pr": "triggers",
     "subscribe_event": "triggers",
     "create_trigger": "triggers",
     "list_triggers": "triggers",
@@ -329,11 +352,12 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 }
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
-# Legacy format: scheduler, searxng, memory, todo, and the Wave 6 native toolkits (csv, duckdb, sql, postgres,
-#   redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona) previously exposed
-#   individual per-operation function names that could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Wave 6: v2026.11.625 / unreleased); replacement: unreleased; consolidated into
-#   action-dispatched and risk-scoped functions.
+# Legacy format: scheduler, searxng, memory, todo, Wave 5 native toolkits (file_generation, visualization, unsplash),
+#   and Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona) previously exposed individual per-operation function names that could appear in
+#   tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Wave 5 & Wave 6: v2026.11.625 / unreleased); replacement: unreleased; consolidated
+#   into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).
@@ -513,6 +537,28 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_file": "daytona_files",
         "delete_file": "daytona_files",
         "change_directory": "daytona_files",
+    },
+    "file_generation": {
+        "generate_json_file": "generate_file",
+        "generate_csv_file": "generate_file",
+        "generate_pdf_file": "generate_file",
+        "generate_docx_file": "generate_file",
+        "generate_text_file": "generate_file",
+        "generate_html_file": "generate_file",
+        "generate_code_file": "generate_file",
+    },
+    "visualization": {
+        "create_bar_chart": "create_chart",
+        "create_line_chart": "create_chart",
+        "create_pie_chart": "create_chart",
+        "create_scatter_plot": "create_chart",
+        "create_histogram": "create_chart",
+    },
+    "unsplash": {
+        "search_photos": "unsplash",
+        "get_photo": "unsplash",
+        "get_random_photo": "unsplash",
+        "download_photo": "unsplash",
     },
 }
 

@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, BinaryIO, Self
 import httpx
 import pytest
 
-import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.chat_ui as chat_ui_module
@@ -28,21 +27,24 @@ import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
+import mindroom.custom_tools.groq_media as groq_module
+import mindroom.custom_tools.moviepy_video as moviepy_module
+import mindroom.custom_tools.openai_media as openai_module
 import mindroom.file_access as file_access_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.path_safety as path_safety_module
 import mindroom.tools.agno_compat_airflow as airflow_module
-import mindroom.tools.agno_compat_groq as groq_module
-import mindroom.tools.agno_compat_openai as openai_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
-from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.custom_tools.groq_media import GroqTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
+from mindroom.custom_tools.moviepy_video import MoviePyVideoTools
+from mindroom.custom_tools.openai_media import OpenAITools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.path_confinement import MAX_READ_BYTES
@@ -50,8 +52,6 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
-from mindroom.tools.agno_compat_groq import MindRoomGroqTools
-from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
 from tests.microsoft_graph_test_support import FakeGraph
 from tests.microsoft_graph_test_support import publish_grant as publish_microsoft_grant
@@ -141,19 +141,17 @@ async def _view_file(
 
 
 async def _stage_gmail_attachment(
-    tmp_path: Path,
+    _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
     workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    staging = tmp_path / "gmail-staging"
-    staging.mkdir(exist_ok=True)
     try:
-        staged = gmail_module._stage_attachments(workspace, [raw_path], staging, file_access=file_access)
+        loaded = gmail_module._read_attachments(workspace, [raw_path], file_access=file_access)
     except ValueError:
         return False
-    return [Path(path).read_bytes() for path in staged] == [_PNG]
+    return [data for _name, data in loaded] == [_PNG]
 
 
 async def _upload_to_google_drive(
@@ -233,7 +231,7 @@ async def _transcribe_with_openai(
     endpoint = _AudioEndpoint()
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint))
     monkeypatch.setattr(openai_module, "OpenAIClient", lambda **_kwargs: client)
-    tool = MindRoomOpenAITools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    tool = OpenAITools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
     tool.transcribe_audio(raw_path)
     return endpoint.uploads == [_PNG]
 
@@ -246,7 +244,7 @@ async def _transcribe_with_groq(
     raw_path: str,
 ) -> bool:
     endpoint = _AudioEndpoint()
-    tool = MindRoomGroqTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    tool = GroqTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
     monkeypatch.setattr(tool, "client", SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint)))
     tool.transcribe_audio(raw_path)
     return endpoint.uploads == [_PNG]
@@ -268,7 +266,7 @@ async def _extract_audio_with_moviepy(
 
     monkeypatch.setattr(moviepy_module, "VideoFileClip", open_video)
     monkeypatch.setattr(moviepy_module, "_require_plain_media", lambda _path: None)
-    tool = MindRoomMoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
+    tool = MoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
     tool.extract_audio(raw_path, "audio.wav")
     return videos == [_PNG]
 

@@ -15,7 +15,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
+    from mindroom.custom_tools.moviepy_video import MoviePyVideoTools
 
 
 @register_tool_with_metadata(
@@ -24,10 +24,10 @@ if TYPE_CHECKING:
     display_name="MoviePy Video Tools",
     description="Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,  # No authentication required
-    setup_type=SetupType.NONE,  # No authentication needed
-    icon="FaVideo",  # React icon name for video
-    icon_color="text-purple-600",  # Purple color for video processing
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    icon="FaVideo",
+    icon_color="text-purple-600",
     config_fields=[
         ConfigField(
             name="enable_process_video",
@@ -62,16 +62,13 @@ if TYPE_CHECKING:
     dependencies=["moviepy"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#moviepy_video_tools",
     function_names=(
-        "create_caption_clips",
         "create_srt",
         "embed_captions",
         "extract_audio",
-        "parse_srt",
-        "split_text_into_lines",
     ),
 )
-def moviepy_video_tools() -> type[MindRoomMoviePyVideoTools]:
+def moviepy_video_tools() -> type[MoviePyVideoTools]:
     """Return MoviePy Video Tools whose media paths follow the agent's file_access."""
-    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
+    from mindroom.custom_tools.moviepy_video import MoviePyVideoTools
 
-    return MindRoomMoviePyVideoTools
+    return MoviePyVideoTools

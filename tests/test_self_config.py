@@ -436,11 +436,11 @@ class TestUpdateOwnConfig:
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             with _as_requester(tool):
-                result = tool.update_own_config(tools=["openclaw_compat", "python"])
+                result = tool.update_own_config(tools=["openclaw_compat", "calculator"])
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
-            assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
+            assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "calculator"]
             effective = reloaded.resolve_agent("coder").tools.tool_names
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective

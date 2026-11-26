@@ -84,7 +84,7 @@ Services whose access the user does not grant on the consent screen stay unconne
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](oauth-framework.md#who-can-connect-an-account), and connections made here are the same ones tools use.
-An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](deployment/egress-broker.md#using-a-connected-account)).
+An agent's shell commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](deployment/egress-broker.md#using-a-connected-account)).
 Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](oauth-framework.md#where-connections-are-stored).
 While the [egress broker](deployment/egress-broker.md) is on, the portal and its Agent Keys page link to each other.

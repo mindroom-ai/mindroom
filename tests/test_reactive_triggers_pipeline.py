@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -56,6 +58,7 @@ from mindroom.reactive_triggers import (
     matches_external_event,
     matches_room_message,
 )
+from mindroom.thread_tags import ThreadTagsPermissionError
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -1728,3 +1731,130 @@ async def test_include_bots_uses_persisted_account_not_synthetic_generated_id(tm
             memberships=memberships,
             known_room_states={_ROOM_A: room_state},
         ) == DispatchResult(status="skipped", reason="source_sender_is_target")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_dispatch_reactive_trigger_reopen_on_fire_flows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reactive reopen_on_fire reopens fixed/origin/continued threads before send, skips new/room, and survives errors."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+    events_order: list[str] = []
+
+    async def fake_read_state(_client: object, room_id: str) -> RoomStateSnapshot:
+        return _joined_room_state(room_id, _OWNER)
+
+    async def fake_reopen(
+        _client: object,
+        room_id: str,
+        thread_root_id: str,
+        *,
+        requester_user_id: str | None = None,
+    ) -> bool:
+        assert requester_user_id == _OWNER
+        events_order.append(f"reopen:{room_id}:{thread_root_id}")
+        return True
+
+    async def fake_send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        events_order.append("send")
+        return DeliveredMatrixEvent(event_id="$sent-root", content_sent={})
+
+    async def run(rule: ReactiveTriggerRecord, firing: FiringRecord) -> DispatchResult:
+        events_order.clear()
+        return await dispatch_reactive_trigger(
+            rule=rule,
+            firing=firing,
+            triage_reason=None,
+            store=store,
+            target_bot=_bot(),
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+        )
+
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.read_room_state", fake_read_state)
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.reopen_thread_if_resolved", fake_reopen)
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.send_matrix_message", fake_send)
+
+    # Fixed thread, origin thread, thread_key (first fire skips; second reopens), and room timeline (skips).
+    fixed_rule = _rule(
+        trigger_id="reopen_fixed",
+        target=TriggerTargetSpec(
+            agent="research",
+            room_id=_ROOM_B,
+            thread_id="$fixed-root",
+            prompt="Check.",
+            reopen_on_fire=True,
+        ),
+    )
+    assert (await run(fixed_rule, _firing(trigger_id="reopen_fixed"))).status == "delivered"
+    assert events_order == [f"reopen:{_ROOM_B}:$fixed-root", "send"]
+
+    origin_rule = _rule(
+        trigger_id="reopen_origin",
+        target=TriggerTargetSpec(
+            agent="research",
+            room_id=_ROOM_A,
+            thread_id="origin",
+            prompt="Reply.",
+            reopen_on_fire=True,
+        ),
+    )
+    origin_firing = _firing(
+        trigger_id="reopen_origin",
+        event=_room_event(room_id=_ROOM_A, event_id="$msg-1", thread_id="$orig-thread"),
+    )
+    assert (await run(origin_rule, origin_firing)).status == "delivered"
+    assert events_order == [f"reopen:{_ROOM_A}:$orig-thread", "send"]
+
+    keyed_rule = store.create_trigger(
+        _rule(
+            trigger_id="reopen_keyed",
+            target=TriggerTargetSpec(
+                agent="research",
+                room_id=_ROOM_B,
+                new_thread=True,
+                thread_key="deploy-1",
+                prompt="Grouped.",
+                reopen_on_fire=True,
+            ),
+        ),
+    )
+    assert (
+        await run(keyed_rule, _firing(trigger_id="reopen_keyed", rule_uid=keyed_rule.rule_uid, dedupe_key="d-1"))
+    ).status == "delivered"
+    assert events_order == ["send"]
+    assert (
+        await run(keyed_rule, _firing(trigger_id="reopen_keyed", rule_uid=keyed_rule.rule_uid, dedupe_key="d-2"))
+    ).status == "delivered"
+    assert events_order == [f"reopen:{_ROOM_B}:$sent-root", "send"]
+
+    room_rule = _rule(
+        trigger_id="reopen_room",
+        target=TriggerTargetSpec(agent="research", room_id=_ROOM_B, prompt="Room.", reopen_on_fire=True),
+    )
+    assert (await run(room_rule, _firing(trigger_id="reopen_room"))).status == "delivered"
+    assert events_order == ["send"]
+
+    # Permission error warns and still delivers; CancelledError propagates without sending.
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.dispatch.reopen_thread_if_resolved",
+        AsyncMock(side_effect=ThreadTagsPermissionError("forbidden")),
+    )
+    with capture_logs() as logs:
+        assert (await run(fixed_rule, _firing(trigger_id="reopen_fixed"))).status == "delivered"
+    assert events_order == ["send"]
+    assert any(entry.get("log_level") == "warning" and entry.get("trigger_id") == "reopen_fixed" for entry in logs)
+
+    monkeypatch.setattr(
+        "mindroom.reactive_triggers.dispatch.reopen_thread_if_resolved",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await run(fixed_rule, _firing(trigger_id="reopen_fixed"))
+    assert events_order == []

@@ -25,6 +25,23 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
 ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "logging_config.py"})
 REEXPORT = "tool_system/agno_toolkits.py"
+# Once a builtin goes native, neither its registration nor its implementation can import Agno again.
+NATIVE_WAVE_2 = {
+    "arxiv": "arxiv",
+    "baidusearch": "baidusearch",
+    "calculator": "calculator",
+    "custom_api": None,
+    "duckduckgo": "ddgs_search",
+    "googlesearch": "ddgs_search",
+    "hackernews": "hackernews",
+    "pubmed": "pubmed",
+    "reasoning": "reasoning",
+    "serpapi": "serpapi",
+    "serper": "serper",
+    "sleep": "sleep",
+    "wikipedia": "wikipedia",
+    "youtube": "youtube",
+}
 TESTS_ROOT = Path(__file__).resolve().parent
 # The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
 # MindRoom's seams (#3120).
@@ -53,8 +70,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_agent_personas.py",
         "test_agent_tool_calls.py",
         "test_agent_turn_runtime.py",
-        "test_agent_worker_routing.py",
-        "test_agentql_tools.py",
         "test_agents.py",
         "test_agno_tool_wrapping.py",
         "test_ai_provider_retry.py",
@@ -67,14 +82,9 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_computer_announcement.py",
         "test_delegation_execution.py",
         "test_dynamic_toolkits.py",
-        "test_gemini_tools.py",
-        "test_github_oauth_tool.py",
-        "test_gmail_tools.py",
-        "test_google_tool_wrappers.py",
         "test_init.py",
         "test_issue_154_logging_integration.py",
         "test_logging_config.py",
-        "test_lumalabs_tool.py",
         "test_matrix_rtc_call_tools.py",
         "test_mcp_gateway_execution.py",
         "test_mcp_gateway_tools.py",
@@ -85,16 +95,13 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_mid_turn_compaction_resume_and_team.py",
         "test_minimal_agent_parity.py",
         "test_openai_compat.py",
-        "test_openai_toolkit_speech.py",
         "test_queued_message_notify.py",
-        "test_replicate_tools.py",
         "test_response_runner_focused.py",
         "test_sandbox_proxy.py",
         "test_scheduled_tool_approval.py",
         "test_script_run_policy.py",
         "test_script_tool_broker.py",
         "test_skill_learning.py",
-        "test_structured_tool_config.py",
         "test_subagent_runtime.py",
         "test_team_turn_runtime.py",
         "test_tool_access.py",
@@ -105,7 +112,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_tool_output_files.py",
         "test_toolkit_aliases.py",
         "test_tools_metadata.py",
-        "test_trafilatura_tool.py",
         "test_worker_media.py",
         "test_worker_tool_transport.py",
         "tool_system/agno_parity_support.py",
@@ -290,6 +296,14 @@ def test_native_tool_modules_have_no_agno_imports_or_compat_markers() -> None:
 
     assert not agno_hits, f"Native tool modules importing Agno: {agno_hits}"
     assert not marker_hits, f"Native tool modules with AGNO_COMPAT markers: {marker_hits}"
+
+
+def test_wave_2_toolkits_do_not_import_agno() -> None:
+    """Both halves of each converted toolkit stay inside MindRoom's native authoring boundary."""
+    paths = {SOURCE_ROOT / "tools" / f"{name}.py" for name in NATIVE_WAVE_2}
+    paths.update(SOURCE_ROOT / "custom_tools" / f"{name}.py" for name in NATIVE_WAVE_2.values() if name is not None)
+    imports = {str(path.relative_to(SOURCE_ROOT)): agno_imports(path.read_text(encoding="utf-8")) for path in paths}
+    assert not {path: modules for path, modules in imports.items() if modules}
 
 
 def test_reexported_agno_names_are_the_names_the_reexport_binds_from_agno() -> None:

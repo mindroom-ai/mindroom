@@ -432,6 +432,13 @@ def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: py
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
     )
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(
+            name=tool_name,
+            tools=[Function(name="echo", entrypoint=_echo), Function(name="other", entrypoint=_echo)],
+        )
+
     adapted: list[str] = []
     adapt = agno_toolkits._adapt
 
@@ -439,14 +446,15 @@ def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: py
         adapted.append(function.name)
         return adapt(function, finishing)
 
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
     monkeypatch.setattr(agno_toolkits, "_adapt", counting_adapt)
 
-    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo"))
 
     assert resolved is not None
-    assert adapted == ["add"]
+    assert adapted == ["echo"]
     assert (resolved.function.name, resolved.function.toolkit, resolved.function.registered_toolkit) == (
-        "add",
+        "echo",
         "calculator",
         "calculator",
     )

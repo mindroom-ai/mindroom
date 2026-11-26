@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import base64
 import contextlib
@@ -3092,7 +3091,7 @@ def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.Mo
 
 @pytest.mark.parametrize(
     "worker_tools",
-    [["coding"], ["docker"], ["python"], ["shell", "coding"], ["browser_mcp"]],
+    [["coding"], ["docker"], ["shell", "coding"], ["browser_mcp"]],
 )
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
@@ -3376,83 +3375,6 @@ def test_a_worker_routed_browser_toolkit_is_collected_once_its_functions_are_rel
 
     assert released() is None
     assert released_function() is None
-
-
-def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution(tmp_path: Path) -> None:
-    """Direct in-process Python execution should not emulate committed runtime env."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
-            "OPENAI_BASE_URL": "http://example.invalid/v1",
-            "MINDROOM_NAMESPACE": "alpha1234",
-        },
-    )
-
-    tool = get_tool_by_name("python", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = blocking_entrypoint(tool, "run_python_code")
-
-    result = entrypoint(
-        'import os\nresult = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), "namespace": os.environ.get("MINDROOM_NAMESPACE"), "storage": os.environ.get("MINDROOM_STORAGE_PATH")}',
-        "result",
-    )
-
-    assert ast.literal_eval(result) == {
-        "openai_base_url": None,
-        "namespace": None,
-        "storage": None,
-    }
-
-
-def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_execution(tmp_path: Path) -> None:
-    """Direct file-backed Python execution should also avoid runtime env emulation."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
-            "OPENAI_BASE_URL": "http://example.invalid/v1",
-            "MINDROOM_NAMESPACE": "alpha1234",
-        },
-    )
-
-    tool = get_tool_by_name(
-        "python",
-        runtime_paths,
-        tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_target=None,
-        tools=builtin_tool_registry(),
-    )
-    save_entrypoint = blocking_entrypoint(tool, "save_to_file_and_run")
-    run_file_entrypoint = blocking_entrypoint(tool, "run_python_file_return_variable")
-
-    code = (
-        "import os\n"
-        'result = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), '
-        '"namespace": os.environ.get("MINDROOM_NAMESPACE"), '
-        '"storage": os.environ.get("MINDROOM_STORAGE_PATH")}'
-    )
-    save_result = save_entrypoint("runtime_values.py", code, "result")
-    run_result = run_file_entrypoint("runtime_values.py", "result")
-    expected = {
-        "openai_base_url": None,
-        "namespace": None,
-        "storage": None,
-    }
-
-    assert ast.literal_eval(save_result) == expected
-    assert ast.literal_eval(run_result) == expected
 
 
 def test_shell_subprocess_path_keeps_existing_path_without_prepend() -> None:
@@ -6459,24 +6381,17 @@ def _shell_call(pid_file: Path) -> tuple[str, str, tuple[object, ...], dict[str,
     return "shell", "run_shell_command", (["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"],), {"timeout": 60}
 
 
-def _python_call(pid_file: Path) -> tuple[str, str, tuple[object, ...], dict[str, object]]:
-    code = f"import os, pathlib, time\npathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\ntime.sleep(30)"
-    return "python", "run_python_code", (code,), {}
-
-
 @requires_linux()
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runner_execution_mode", ["inprocess", "subprocess", "forkserver"])
-@pytest.mark.parametrize("worker_call", [_shell_call, _python_call], ids=["async-shell", "sync-python"])
 async def test_cancelling_a_worker_call_stops_its_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     runner_execution_mode: str,
-    worker_call: Callable[[Path], tuple[str, str, tuple[object, ...], dict[str, object]]],
 ) -> None:
-    """Stopping a response stops the work its worker call started, whether the tool function is async or sync."""
+    """Stopping a response stops the work its worker call started, in every runner execution mode."""
     pid_file = tmp_path / "work.pid"
-    tool_name, function_name, args, kwargs = worker_call(pid_file)
+    tool_name, function_name, args, kwargs = _shell_call(pid_file)
     primary_paths, workspace, _sent_payloads = _forward_proxy_to_seeded_runner(
         monkeypatch,
         tmp_path,

@@ -108,12 +108,12 @@ mcp_servers:
   team_wiki:
     display_name: Team Wiki
     summary: Search and edit team documentation
-    icon: SiConfluence
+    icon: SiAtlassian
     transport: streamable-http
     url: https://wiki.example.com/mcp
 ```
 
-`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
+`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiAtlassian` or `SiGooglecalendar`.
 Without a usable icon, Connections picks one matching the server's name, or a plug icon.
 
 ## Server Options

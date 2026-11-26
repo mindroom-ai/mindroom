@@ -177,6 +177,7 @@ class TestMemoryIntegration:
                 "title": "Reply failed",
                 "summary": "Model error",
                 "retryable": False,
+                "fallback": "⚠️ Model error",
             }
 
     @pytest.mark.asyncio

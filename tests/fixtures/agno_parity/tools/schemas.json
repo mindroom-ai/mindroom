@@ -1037,7 +1037,7 @@
       },
       {
         "name": "inline_image",
-        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nIn an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
+        "description": "Upload an image so it can appear inline in a reply.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nWhen this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1575,7 +1575,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to scrape"
+              "description": "URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1600,13 +1600,13 @@
       },
       {
         "name": "get_screenshot",
-        "description": "Capture a screenshot of a webpage",
+        "description": "Capture a screenshot of a webpage.",
         "parameters": {
           "type": "object",
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) URL to screenshot"
+              "description": "URL to screenshot."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1637,23 +1637,37 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Search query"
+              "description": "Search query."
             },
             "engine": {
               "type": "string",
-              "description": "(str) Search engine - 'google', 'bing', or 'yandex'"
+              "description": "Search engine - 'google', 'bing', or 'yandex'."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return"
+              "description": "Number of results to return."
             },
             "language": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter language code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter language code."
             },
             "country_code": {
-              "type": "string",
-              "description": "(Optional[str]) Two-letter country code"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Two-letter country code."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1684,15 +1698,22 @@
           "properties": {
             "source_type": {
               "type": "string",
-              "description": "(str) Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')"
+              "description": "Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')."
             },
             "url": {
               "type": "string",
-              "description": "(str) URL of the web resource to retrieve data from"
+              "description": "URL of the web resource to retrieve data from."
             },
             "num_of_reviews": {
-              "type": "integer",
-              "description": "(Optional[int]) Number of reviews to retrieve"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Number of reviews to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3395,11 +3416,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to navigate to"
+              "description": "The URL to navigate to."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3430,15 +3458,22 @@
           "properties": {
             "path": {
               "type": "string",
-              "description": "(str) Where to save the screenshot"
+              "description": "Where to save the screenshot."
             },
             "full_page": {
               "type": "boolean",
-              "description": "(bool) Whether to capture the full page"
+              "description": "Whether to capture the full page."
             },
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3468,8 +3503,15 @@
           "type": "object",
           "properties": {
             "connect_url": {
-              "type": "string",
-              "description": "(str) The connection URL from an existing session"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4028,17 +4070,24 @@
     "functions": [
       {
         "name": "text_to_speech",
-        "description": "Convert text to speech.",
+        "description": "Synthesize MP3 speech audio from text using Cartesia.",
         "parameters": {
           "type": "object",
           "properties": {
             "transcript": {
               "type": "string",
-              "description": "The text to convert to speech"
+              "description": "Text to synthesize into speech."
             },
             "voice_id": {
-              "type": "string",
-              "description": "(optional) The ID of the voice to use for the text-to-speech. If None, uses the default voice ID configured in the tool. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional voice ID; defaults to the configured `default_voice_id`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4063,7 +4112,7 @@
       },
       {
         "name": "list_voices",
-        "description": "List available voices from Cartesia (first page).",
+        "description": "List available Cartesia voices (first page) as JSON.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4971,225 +5020,6 @@
             "display_name",
             "role",
             "agents"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
-  "confluence": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "get_page_content",
-        "description": "Retrieve the content of a specific page in a Confluence space.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "space_name": {
-              "type": "string",
-              "description": "(str) Name of the Confluence space."
-            },
-            "page_title": {
-              "type": "string",
-              "description": "(str) Title of the page to retrieve."
-            },
-            "expand": {
-              "type": "string",
-              "description": "(str) Fields to expand in the page response. Defaults to \"body.storage\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "space_name",
-            "page_title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_space_key",
-        "description": "Get the space key for a particular Confluence space.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "space_name": {
-              "type": "string",
-              "description": "(str) Name of the space whose key is required."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "space_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_page",
-        "description": "Create a new page in Confluence.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "space_name": {
-              "type": "string",
-              "description": "(str) Name of the Confluence space."
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the new page."
-            },
-            "body": {
-              "type": "string",
-              "description": "(str) Content of the new page."
-            },
-            "parent_id": {
-              "type": "string",
-              "description": "(str) ID of the parent page if creating a child page. Defaults to None."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "space_name",
-            "title",
-            "body"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_page",
-        "description": "Update an existing Confluence page.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "page_id": {
-              "type": "string",
-              "description": "(str) ID of the page to update."
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) New title for the page."
-            },
-            "body": {
-              "type": "string",
-              "description": "(str) Updated content for the page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "page_id",
-            "title",
-            "body"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_all_space_detail",
-        "description": "Retrieve details about all Confluence spaces.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_all_page_from_space",
-        "description": "Retrieve all pages from a specific Confluence space.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "space_name": {
-              "type": "string",
-              "description": "(str) Name of the Confluence space."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "space_name"
           ]
         },
         "strict": false,
@@ -7462,7 +7292,7 @@
     "functions": [
       {
         "name": "get_voices",
-        "description": "Get all the voices available.",
+        "description": "List available ElevenLabs voices with ID, name, and description.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -7487,17 +7317,24 @@
       },
       {
         "name": "generate_sound_effect",
-        "description": "Generate a sound effect from a text description.",
+        "description": "Generate a sound effect from a text prompt.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) Description of the sound effect"
+              "description": "Sound effect description."
             },
             "duration_seconds": {
-              "type": "number",
-              "description": "(Optional[float]) Duration in seconds to generate audio from. Has to be between 0.5 and 22."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional duration in seconds (0.5-22)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7522,13 +7359,13 @@
       },
       {
         "name": "text_to_speech",
-        "description": "Convert text to speech.",
+        "description": "Convert text to speech audio using ElevenLabs.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) Text to generate audio from."
+              "description": "Text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7700,15 +7537,22 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "description": "The query to search for."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) Number of results to return. Defaults to 5."
+              "description": "Number of results to return. Defaults to 5."
             },
             "category": {
-              "type": "string",
-              "description": "(Optional[str]) The category to filter search results.\nOptions are \"company\", \"research paper\", \"news\", \"pdf\", \"github\",\n\"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7742,7 +7586,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(list(str)) A list of URLs from which to fetch content."
+              "description": "A list of URLs from which to fetch content."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7773,11 +7617,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL for which to find similar links."
+              "description": "The URL for which to find similar links."
             },
             "num_results": {
               "type": "integer",
-              "description": "(int) The number of similar links to return. Defaults to 5."
+              "description": "The number of similar links to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7808,11 +7652,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The question or query to answer."
+              "description": "The question or query to answer."
             },
             "text": {
               "type": "boolean",
-              "description": "(bool) Include full text from citation. Default is False."
+              "description": "Include full text from citation. Default is False."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7843,13 +7687,13 @@
     "functions": [
       {
         "name": "generate_media",
-        "description": "Generate media with the configured Fal model.",
+        "description": "Generate an image or video with the configured Fal model.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text describing the media to generate."
+              "description": "Text description of the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7879,39 +7723,44 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_json_file",
-        "description": "Generate a JSON file from the provided data.",
+        "name": "generate_file",
+        "description": "Generate a file artifact in the requested format (and save it inside the workspace when configured).\n- `json`: `content` is a dict, list, or JSON string.\n- `csv`: `content` is a list of dicts, list of rows (optional `headers`), or CSV string.\n- `pdf` / `docx`: `content` is text split into paragraphs by blank lines; optional `title`.\n- `html` / `txt`: `content` is raw HTML5 or plain text.\n- `code`: `content` is source code; optional `language` (e.g. `python`, `typescript`, `go`) sets the extension.",
         "parameters": {
           "type": "object",
           "properties": {
-            "data": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv",
+                "pdf",
+                "docx",
+                "html",
+                "txt",
+                "code"
+              ],
+              "description": "Output file format."
+            },
+            "content": {
               "anyOf": [
+                {
+                  "type": "string"
+                },
                 {
                   "type": "object",
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "string"
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "string"
+                  "items": {}
                 }
               ],
-              "description": "The data to write to the JSON file. Can be a dictionary, list, or JSON string."
+              "description": "File payload matching `format`."
             },
             "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -7920,250 +7769,43 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_csv_file",
-        "description": "Generate a CSV file from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
+              "description": "Optional base filename; extension is appended when missing."
+            },
+            "title": {
               "anyOf": [
                 {
-                  "type": "array",
-                  "items": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
                   "type": "string"
+                },
+                {
+                  "type": "null"
                 }
               ],
-              "description": "The data to write to the CSV file. Can be a list of lists, list of dictionaries, or CSV string."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
+              "description": "Optional document title (`pdf`, `docx`)."
             },
             "headers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Optional headers for the CSV. Used when data is a list of lists."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_pdf_file",
-        "description": "Generate a PDF file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the PDF file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "title": {
-              "type": "string",
-              "description": "Optional title for the PDF document."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_docx_file",
-        "description": "Generate a DOCX file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the DOCX file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "title": {
-              "type": "string",
-              "description": "Optional title for the DOCX document."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_text_file",
-        "description": "Generate a text file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "The text content to write to the file."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_html_file",
-        "description": "Generate an HTML file from the provided content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "type": "string",
-              "description": "A complete, valid HTML5 document (including doctype, html, head, and body tags)."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "generate_code_file",
-        "description": "Generate a source code file for any programming language.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "code": {
-              "type": "string",
-              "description": "The source code to write to the file."
+              "description": "Optional column headers (`csv` list-of-rows input)."
             },
             "language": {
-              "type": "string",
-              "description": "Programming language (e.g. \"python\", \"typescript\", \"go\"). Determines the\nfile extension. If not provided, the extension is taken from `filename` when\npresent; otherwise the file is written as plain text."
-            },
-            "filename": {
-              "type": "string",
-              "description": "Optional filename for the generated file. If it has no extension, the\nlanguage's extension is appended. If not provided, a UUID-based name is used."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional programming language (`code`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8179,7 +7821,8 @@
             }
           },
           "required": [
-            "code"
+            "format",
+            "content"
           ]
         },
         "strict": false,
@@ -8667,7 +8310,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8703,7 +8346,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the image to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8728,13 +8372,13 @@
       },
       {
         "name": "generate_video",
-        "description": "Generate a video based on a text prompt.",
+        "description": "Generate a video from a text prompt using Vertex AI Veo.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) The text prompt to generate the video from."
+              "description": "Text description of the video to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8765,13 +8409,13 @@
     "functions": [
       {
         "name": "search_gifs",
-        "description": "Find a GIPHY gif",
+        "description": "Search Giphy for GIFs matching a query.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) A text description of the required gif."
+              "description": "Search text describing the GIF."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8808,23 +8452,23 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query keywords."
+              "description": "The search query keywords."
             },
             "sort": {
               "type": "string",
-              "description": "(str) The field to sort results by. Can be 'stars', 'forks', or 'updated'. Defaults to 'stars'."
+              "description": "The field to sort results by ('stars', 'forks', or 'updated'). Defaults to 'stars'."
             },
             "order": {
               "type": "string",
-              "description": "(str) The order of results. Can be 'asc' or 'desc'. Defaults to 'desc'."
+              "description": "The order of results ('asc' or 'desc'). Defaults to 'desc'."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number of results to return, counting from 1. Defaults to 1."
+              "description": "Page number of results to return, counting from 1. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Max 100. Defaults to 30."
+              "description": "Number of results per page. Max 100. Defaults to 30."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8880,7 +8524,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8911,11 +8555,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8947,11 +8591,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8983,15 +8627,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "title": {
               "type": "string",
-              "description": "(str) The title of the issue."
+              "description": "The title of the issue."
             },
             "body": {
-              "type": "string",
-              "description": "(str) The body content of the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The body content of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9023,23 +8674,37 @@
           "properties": {
             "name": {
               "type": "string",
-              "description": "(str) The name of the repository."
+              "description": "The name of the repository."
             },
             "private": {
               "type": "boolean",
-              "description": "(bool) Whether the repository is private. Defaults to False."
+              "description": "Whether the repository is private. Defaults to False."
             },
             "description": {
-              "type": "string",
-              "description": "(str) A short description of the repository."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A short description of the repository."
             },
             "auto_init": {
               "type": "boolean",
-              "description": "(bool) Whether to initialize the repository with a README. Defaults to False."
+              "description": "Whether to initialize the repository with a README. Defaults to False."
             },
             "organization": {
-              "type": "string",
-              "description": "(str) Name of organization to create repo in. If None, creates in user account."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Name of organization to create repo in. If None, creates in user account."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9064,12 +8729,13 @@
       },
       {
         "name": "delete_repository",
-        "description": "Delete a repository (requires admin permissions).\nArgs:\n        repo_name (str): The full name of the repository to delete (e.g., 'owner/repo').",
+        "description": "Delete a repository (requires admin permissions).",
         "parameters": {
           "type": "object",
           "properties": {
             "repo_name": {
-              "type": "string"
+              "type": "string",
+              "description": "Full repository name (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9100,7 +8766,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) Full repository name (e.g., 'owner/repo')."
+              "description": "Full repository name (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9131,7 +8797,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9162,23 +8828,44 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'."
+              "description": "The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'."
             },
             "author": {
-              "type": "string",
-              "description": "(str) Filter PRs by author username."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by author username."
             },
             "base": {
-              "type": "string",
-              "description": "(str) Filter PRs by base branch name."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by base branch name."
             },
             "head": {
-              "type": "string",
-              "description": "(str) Filter PRs by head branch name."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter PRs by head branch name."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9209,7 +8896,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9240,23 +8927,23 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) State of the PRs to retrieve. Can be 'open', 'closed', or 'all'. Defaults to 'open'."
+              "description": "State of the PRs to retrieve ('open', 'closed', or 'all'). Defaults to 'open'."
             },
             "sort": {
               "type": "string",
-              "description": "(str) What to sort results by. Can be 'created', 'updated', 'popularity', 'long-running'. Defaults to 'created'."
+              "description": "Sort field ('created', 'updated', 'popularity', 'long-running'). Defaults to 'created'."
             },
             "direction": {
               "type": "string",
-              "description": "(str) The direction of the sort. Can be 'asc' or 'desc'. Defaults to 'desc'."
+              "description": "Sort direction ('asc' or 'desc'). Defaults to 'desc'."
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The maximum number of pull requests to return. Defaults to 50."
+              "description": "Maximum number of pull requests to return. Defaults to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9287,15 +8974,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "include_issue_comments": {
               "type": "boolean",
-              "description": "(bool) Whether to include general PR comments. Defaults to True."
+              "description": "Whether to include general PR comments. Defaults to True."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9327,27 +9014,27 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "body": {
               "type": "string",
-              "description": "(str) The text of the comment."
+              "description": "The text of the comment."
             },
             "commit_id": {
               "type": "string",
-              "description": "(str) The SHA of the commit to comment on."
+              "description": "The SHA of the commit to comment on."
             },
             "path": {
               "type": "string",
-              "description": "(str) The relative path to the file to comment on."
+              "description": "The relative path to the file to comment on."
             },
             "position": {
               "type": "integer",
-              "description": "(int) The line index in the diff to comment on."
+              "description": "The line index in the diff to comment on."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9383,15 +9070,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "comment_id": {
               "type": "integer",
-              "description": "(int) The id of the comment to edit."
+              "description": "The id of the comment to edit."
             },
             "body": {
               "type": "string",
-              "description": "(str) The new text of the comment."
+              "description": "The new text of the comment."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9424,11 +9111,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9460,7 +9147,7 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9491,19 +9178,19 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "state": {
               "type": "string",
-              "description": "(str) The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'."
+              "description": "The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number of results to return, counting from 1. Defaults to 1."
+              "description": "Page number of results to return, counting from 1. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Defaults to 20."
+              "description": "Number of results per page. Defaults to 20."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9534,11 +9221,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9570,15 +9257,15 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "comment_body": {
               "type": "string",
-              "description": "(str) The content of the comment."
+              "description": "The content of the comment."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9611,11 +9298,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9647,11 +9334,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9683,18 +9370,18 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "assignees": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) A list of usernames to assign."
+              "description": "A list of usernames to assign."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9727,18 +9414,18 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "labels": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) A list of label names to add."
+              "description": "A list of label names to add."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9771,11 +9458,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9807,19 +9494,33 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository."
+              "description": "The full name of the repository."
             },
             "issue_number": {
               "type": "integer",
-              "description": "(int) The number of the issue."
+              "description": "The number of the issue."
             },
             "title": {
-              "type": "string",
-              "description": "(str) The new title for the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new title for the issue."
             },
             "body": {
-              "type": "string",
-              "description": "(str) The new body content for the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new body content for the issue."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9851,31 +9552,31 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "title": {
               "type": "string",
-              "description": "(str) The title of the pull request."
+              "description": "The title of the pull request."
             },
             "body": {
               "type": "string",
-              "description": "(str) The body text of the pull request."
+              "description": "The body text of the pull request."
             },
             "head": {
               "type": "string",
-              "description": "(str) The name of the branch where your changes are implemented."
+              "description": "The name of the branch where your changes are implemented."
             },
             "base": {
               "type": "string",
-              "description": "(str) The name of the branch you want the changes pulled into."
+              "description": "The name of the branch you want the changes pulled into."
             },
             "draft": {
               "type": "boolean",
-              "description": "(bool) Whether the pull request is a draft. Defaults to False."
+              "description": "Whether the pull request is a draft. Defaults to False."
             },
             "maintainer_can_modify": {
               "type": "boolean",
-              "description": "(bool) Whether maintainers can modify the PR. Defaults to True."
+              "description": "Whether maintainers can modify the PR. Defaults to True."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9910,23 +9611,30 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "content": {
               "type": "string",
-              "description": "(str) The content of the file."
+              "description": "The content of the file."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9960,15 +9668,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "ref": {
-              "type": "string",
-              "description": "(str) The name of the commit/branch/tag. Defaults to the repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The name of the commit/branch/tag. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10000,27 +9715,34 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "content": {
               "type": "string",
-              "description": "(str) The new content of the file."
+              "description": "The new content of the file."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "sha": {
               "type": "string",
-              "description": "(str) The blob SHA of the file being replaced."
+              "description": "The blob SHA of the file being replaced."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10055,23 +9777,30 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the file in the repository."
+              "description": "The path to the file in the repository."
             },
             "message": {
               "type": "string",
-              "description": "(str) The commit message."
+              "description": "The commit message."
             },
             "sha": {
               "type": "string",
-              "description": "(str) The blob SHA of the file being deleted."
+              "description": "The blob SHA of the file being deleted."
             },
             "branch": {
-              "type": "string",
-              "description": "(str) The branch to commit to. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch to commit to. Defaults to the repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10105,15 +9834,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "path": {
               "type": "string",
-              "description": "(str) The path to the directory in the repository. Use empty string for root."
+              "description": "The path to the directory in the repository. Use empty string for root."
             },
             "ref": {
-              "type": "string",
-              "description": "(str) The name of the commit/branch/tag. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The name of the commit/branch/tag. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10145,11 +9881,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch": {
               "type": "string",
-              "description": "(str) The branch name. Defaults to \"main\"."
+              "description": "The branch name. Defaults to \"main\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10180,15 +9916,22 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch_name": {
               "type": "string",
-              "description": "(str) The name of the new branch."
+              "description": "The name of the new branch."
             },
             "source_branch": {
-              "type": "string",
-              "description": "(str) The source branch to create from. Defaults to repository's default branch."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The source branch to create from. Defaults to repository's default branch."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10220,11 +9963,11 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "branch_name": {
               "type": "string",
-              "description": "(str) The name of the branch to set as default."
+              "description": "The name of the branch to set as default."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10256,27 +9999,62 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query."
+              "description": "The search query."
             },
             "language": {
-              "type": "string",
-              "description": "(str) Filter by language. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by language. Defaults to None."
             },
             "repo": {
-              "type": "string",
-              "description": "(str) Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
             },
             "user": {
-              "type": "string",
-              "description": "(str) Filter by user or organization. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user or organization. Defaults to None."
             },
             "path": {
-              "type": "string",
-              "description": "(str) Filter by file path. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by file path. Defaults to None."
             },
             "filename": {
-              "type": "string",
-              "description": "(str) Filter by filename. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by filename. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10307,43 +10085,78 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The search query."
+              "description": "The search query."
             },
             "state": {
-              "type": "string",
-              "description": "(str) Filter by state ('open', 'closed'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by state ('open', 'closed'). Defaults to None."
             },
             "type_filter": {
-              "type": "string",
-              "description": "(str) Filter by type ('issue', 'pr'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by type ('issue', 'pr'). Defaults to None."
             },
             "repo": {
-              "type": "string",
-              "description": "(str) Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
             },
             "user": {
-              "type": "string",
-              "description": "(str) Filter by user or organization. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user or organization. Defaults to None."
             },
             "label": {
-              "type": "string",
-              "description": "(str) Filter by label. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by label. Defaults to None."
             },
             "sort": {
               "type": "string",
-              "description": "(str) Sort results by ('created', 'updated', 'comments'). Defaults to \"created\"."
+              "description": "Sort results by ('created', 'updated', 'comments'). Defaults to \"created\"."
             },
             "order": {
               "type": "string",
-              "description": "(str) Sort order ('asc', 'desc'). Defaults to \"desc\"."
+              "description": "Sort order ('asc', 'desc'). Defaults to \"desc\"."
             },
             "page": {
               "type": "integer",
-              "description": "(int) Page number for pagination. Defaults to 1."
+              "description": "Page number for pagination. Defaults to 1."
             },
             "per_page": {
               "type": "integer",
-              "description": "(int) Number of results per page. Defaults to 30."
+              "description": "Number of results per page. Defaults to 30."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10374,25 +10187,32 @@
           "properties": {
             "repo_name": {
               "type": "string",
-              "description": "(str) The full name of the repository (e.g., 'owner/repo')."
+              "description": "The full name of the repository (e.g., 'owner/repo')."
             },
             "pr_number": {
               "type": "integer",
-              "description": "(int) The number of the pull request."
+              "description": "The number of the pull request."
             },
             "reviewers": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) List of user logins that will be requested to review."
+              "description": "List of user logins that will be requested to review."
             },
             "team_reviewers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) List of team slugs that will be requested to review. Defaults to None."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "List of team slugs that will be requested to review. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10420,8 +10240,8 @@
     ]
   },
   "gmail": {
-    "instructions": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(message_id, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
-    "guidance": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(message_id, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
+    "instructions": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(thread_id, message_id, to, subject, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
+    "guidance": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(thread_id, message_id, to, subject, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
     "functions": [
       {
         "name": "get_latest_emails",
@@ -10431,11 +10251,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Number of latest emails to retrieve"
+              "description": "Number of latest emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10464,15 +10291,22 @@
           "properties": {
             "user": {
               "type": "string",
-              "description": "(str) Name or email address of the sender"
+              "description": "Name or email address of the sender."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to retrieve"
+              "description": "Maximum number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10501,11 +10335,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of unread emails to retrieve"
+              "description": "Maximum number of unread emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10534,11 +10375,18 @@
           "properties": {
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of starred emails to retrieve"
+              "description": "Maximum number of starred emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10567,15 +10415,22 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Search term or context to match in emails"
+              "description": "Search term or context to match in emails."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to retrieve"
+              "description": "Maximum number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10604,19 +10459,40 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date in YYYY/MM/DD format (e.g. \"2026/03/01\")."
+              "description": "Start date in YYYY/MM/DD format (e.g. \"2026/03/01\")."
             },
             "range_in_days": {
-              "type": "integer",
-              "description": "(Optional[int]) Number of days to include in the range (default: None, meaning all emails after start_date)."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Number of days to include in the range (default: None, meaning all emails after start_date)."
             },
             "num_emails": {
-              "type": "integer",
-              "description": "(Optional[int]) Maximum number of emails to retrieve (default: 10)."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Maximum number of emails to retrieve (default: 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10645,7 +10521,7 @@
           "properties": {
             "thread_id": {
               "type": "string",
-              "description": "(str) The ID of the email thread."
+              "description": "The ID of the email thread."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10674,15 +10550,22 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Natural language query to search for"
+              "description": "Natural language query to search for."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Number of emails to retrieve"
+              "description": "Number of emails to retrieve."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10705,13 +10588,13 @@
       },
       {
         "name": "mark_email_as_read",
-        "description": "Mark a specific email as read by removing the 'UNREAD' label.\nThis is crucial for long polling scenarios to prevent processing the same email multiple times.",
+        "description": "Mark a specific email as read by removing the 'UNREAD' label.",
         "parameters": {
           "type": "object",
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to mark as read"
+              "description": "The ID of the message to mark as read."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10734,13 +10617,13 @@
       },
       {
         "name": "mark_email_as_unread",
-        "description": "Mark a specific email as unread by adding the 'UNREAD' label.\nThis is useful for flagging emails that need attention or re-processing.",
+        "description": "Mark a specific email as unread by adding the 'UNREAD' label.",
         "parameters": {
           "type": "object",
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to mark as unread"
+              "description": "The ID of the message to mark as unread."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10769,7 +10652,7 @@
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to star."
+              "description": "The ID of the message to star."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10798,7 +10681,7 @@
           "properties": {
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the message to unstar."
+              "description": "The ID of the message to unstar."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10821,29 +10704,43 @@
       },
       {
         "name": "create_draft_email",
-        "description": "Create and save a draft email. To reply to a thread, provide thread_id and message_id.\nto, cc and bcc are comma separated string of email ids.",
+        "description": "Create and save a draft email.",
         "parameters": {
           "type": "object",
           "properties": {
             "to": {
               "type": "string",
-              "description": "(str) Comma separated string of recipient email addresses"
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject"
+              "description": "Email subject."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content"
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of CC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of BCC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -10860,15 +10757,29 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
-              "description": "(Optional[str]) Thread ID to reply to (optional, makes this a reply draft)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread ID for reply drafts (optional)."
             },
             "message_id": {
-              "type": "string",
-              "description": "(Optional[str]) Message ID being replied to (optional, used with thread_id)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10891,29 +10802,43 @@
       },
       {
         "name": "send_email",
-        "description": "Send an email immediately. To reply to a thread, provide thread_id and message_id.\nto, cc and bcc are comma separated string of email ids.",
+        "description": "Send an email immediately.",
         "parameters": {
           "type": "object",
           "properties": {
             "to": {
               "type": "string",
-              "description": "(str) Comma separated string of recipient email addresses"
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject"
+              "description": "Email subject."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content"
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of CC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma separated string of BCC email addresses (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -10930,15 +10855,29 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
-              "description": "(Optional[str]) Thread ID to reply to (optional, makes this a reply)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread ID to send as a reply (optional)."
             },
             "message_id": {
-              "type": "string",
-              "description": "(Optional[str]) Message ID being replied to (optional, used with thread_id)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10967,27 +10906,34 @@
           "properties": {
             "thread_id": {
               "type": "string",
-              "description": "(str) The ID of the email thread to reply to."
+              "description": "The ID of the email thread to reply to."
             },
             "message_id": {
               "type": "string",
-              "description": "(str) The ID of the email being replied to."
+              "description": "The ID of the email being replied to."
             },
             "to": {
               "type": "string",
-              "description": "(str) Comma-separated recipient email addresses."
+              "description": "Comma-separated recipient email addresses."
             },
             "subject": {
               "type": "string",
-              "description": "(str) Email subject (prefixed with \"Re:\" if not already)."
+              "description": "Email subject (prefixed with \"Re:\" if not already)."
             },
             "body": {
               "type": "string",
-              "description": "(str) Email body content."
+              "description": "Email body content."
             },
             "cc": {
-              "type": "string",
-              "description": "(Optional[str]) Comma-separated CC email addresses (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated CC email addresses (optional)."
             },
             "attachments": {
               "anyOf": [
@@ -11004,7 +10950,7 @@
                   "type": "null"
                 }
               ],
-              "description": "(Optional[Union[str, List[str]]]) File path(s) for attachments (optional)"
+              "description": "File path(s) for attachments (optional)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11058,15 +11004,15 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Gmail search query (e.g., 'is:unread category:promotions')"
+              "description": "Gmail search query (e.g., 'is:unread category:promotions')."
             },
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to apply"
+              "description": "Name of the label to apply."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to process"
+              "description": "Maximum number of emails to process."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11095,15 +11041,15 @@
           "properties": {
             "context": {
               "type": "string",
-              "description": "(str) Gmail search query (e.g., 'is:unread category:promotions')"
+              "description": "Gmail search query."
             },
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to remove"
+              "description": "Name of the label to remove."
             },
             "count": {
               "type": "integer",
-              "description": "(int) Maximum number of emails to process"
+              "description": "Maximum number of emails to process."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11132,11 +11078,11 @@
           "properties": {
             "label_name": {
               "type": "string",
-              "description": "(str) Name of the label to delete"
+              "description": "Name of the label to delete."
             },
             "confirm": {
               "type": "boolean",
-              "description": "(bool) Must be True to actually delete the label"
+              "description": "Must be True to actually delete the label."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11221,7 +11167,7 @@
       },
       {
         "name": "search_threads",
-        "description": "Search Gmail threads using Gmail query syntax. Returns thread IDs and snippets, not full message content.",
+        "description": "Search Gmail threads using Gmail query syntax.\nReturns thread IDs and snippets, not full message content.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -11234,7 +11180,14 @@
               "description": "Maximum number of threads to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
@@ -11296,7 +11249,14 @@
               "description": "Maximum number of drafts to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
@@ -11341,11 +11301,25 @@
               "description": "Email body content."
             },
             "cc": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Comma-separated CC email addresses (optional)."
             },
             "bcc": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Comma-separated BCC email addresses (optional)."
             },
             "attachments": {
@@ -11366,11 +11340,25 @@
               "description": "File path(s) for attachments (optional)."
             },
             "thread_id": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Thread ID for reply drafts (optional)."
             },
             "message_id": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "description": "Message ID being replied to, used with thread_id (optional)."
             },
             "mindroom_output_path": {
@@ -11535,19 +11523,40 @@
           "properties": {
             "limit": {
               "type": "integer",
-              "description": "(int) Number of events to return (default: 10)"
+              "description": "Number of events to return (default: 10)."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End date in ISO format. Only events starting before this are returned."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End date in ISO format. Only events starting before this are returned."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11576,7 +11585,7 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) The unique identifier of the event"
+              "description": "The unique identifier of the event."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11605,15 +11614,29 @@
           "properties": {
             "max_results": {
               "type": "integer",
-              "description": "(int) Number of events to fetch per page (default: 10, max: 100)"
+              "description": "Number of events to fetch per page (default: 10, max: 100)."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start of range in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End of range in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11642,15 +11665,15 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date in ISO format (YYYY-MM-DD)"
+              "description": "Start date in ISO format (YYYY-MM-DD)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End date in ISO format (YYYY-MM-DD)"
+              "description": "End date in ISO format (YYYY-MM-DD)."
             },
             "duration_minutes": {
               "type": "integer",
-              "description": "(int) Length of the desired slot in minutes (default: 30)"
+              "description": "Length of the desired slot in minutes (default: 30)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11678,8 +11701,15 @@
           "type": "object",
           "properties": {
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11708,22 +11738,36 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "attendee_emails": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) Email addresses to check availability for. Defaults to the authenticated user's calendar if not provided. Use \"me\" for the authenticated user alongside other emails."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Email addresses to check availability for. Defaults to the authenticated user's calendar\nif not provided. Use \"me\" for the authenticated user alongside other emails."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) Timezone for the query (default: UTC)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Timezone for the query (default: UTC)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11752,7 +11796,7 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event"
+              "description": "ID of the event."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11781,23 +11825,44 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Free-text search terms"
+              "description": "Free-text search terms."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) Start of search window in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of search window in ISO format."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) End of search window in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of search window in ISO format."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Maximum number of events to return (default: 10)"
+              "description": "Maximum number of events to return (default: 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(Optional[str]) Token from a previous response to fetch the next page."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11826,42 +11891,91 @@
           "properties": {
             "start_date": {
               "type": "string",
-              "description": "(str) Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "end_date": {
               "type": "string",
-              "description": "(str) End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)"
+              "description": "End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
             },
             "title": {
-              "type": "string",
-              "description": "(Optional[str]) Title/summary of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Title/summary of the event."
             },
             "description": {
-              "type": "string",
-              "description": "(Optional[str]) Detailed description of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Detailed description of the event."
             },
             "location": {
-              "type": "string",
-              "description": "(Optional[str]) Location of the event"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Location of the event."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) Timezone for the event (default: UTC)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Timezone for the event (default: UTC)."
             },
             "attendees": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) List of attendee email addresses"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "List of attendee email addresses."
             },
             "add_google_meet_link": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to add a Google Meet video link"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to add a Google Meet video link."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send email notifications to attendees"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send email notifications to attendees."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11890,42 +12004,98 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to update"
+              "description": "ID of the event to update."
             },
             "title": {
-              "type": "string",
-              "description": "(Optional[str]) New title/summary"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New title/summary."
             },
             "description": {
-              "type": "string",
-              "description": "(Optional[str]) New description"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New description."
             },
             "location": {
-              "type": "string",
-              "description": "(Optional[str]) New location"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New location."
             },
             "start_date": {
-              "type": "string",
-              "description": "(Optional[str]) New start date/time in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New start date/time in ISO format."
             },
             "end_date": {
-              "type": "string",
-              "description": "(Optional[str]) New end date/time in ISO format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New end date/time in ISO format."
             },
             "timezone": {
-              "type": "string",
-              "description": "(Optional[str]) New timezone"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New timezone."
             },
             "attendees": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(Optional[List[str]]) Updated list of attendee email addresses"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Updated list of attendee email addresses."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send email notifications"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send email notifications."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11954,11 +12124,18 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to delete"
+              "description": "ID of the event to delete."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to send notifications to attendees (default: True)"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to send notifications to attendees (default: True)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11981,13 +12158,13 @@
       },
       {
         "name": "quick_add_event",
-        "description": "Create a Google Calendar event from a natural language description.\nExamples: \"Meeting with John tomorrow 3pm\", \"Lunch at noon on Friday\"",
+        "description": "Create a Google Calendar event from a natural language description.\nExamples: \"Meeting with John tomorrow 3pm\", \"Lunch at noon on Friday\".",
         "parameters": {
           "type": "object",
           "properties": {
             "text": {
               "type": "string",
-              "description": "(str) Natural language description of the event including date, time, and title"
+              "description": "Natural language description of the event including date, time, and title."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12016,15 +12193,22 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event to move"
+              "description": "ID of the event to move."
             },
             "destination_calendar_id": {
               "type": "string",
-              "description": "(str) ID of the target calendar"
+              "description": "ID of the target calendar."
             },
             "notify_attendees": {
-              "type": "boolean",
-              "description": "(Optional[bool]) Whether to notify attendees of the move"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to notify attendees of the move."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12053,11 +12237,11 @@
           "properties": {
             "event_id": {
               "type": "string",
-              "description": "(str) ID of the event"
+              "description": "ID of the event."
             },
             "response": {
               "type": "string",
-              "description": "(str) Response status - one of \"accepted\", \"declined\", or \"tentative\""
+              "description": "Response status - one of \"accepted\", \"declined\", or \"tentative\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12334,16 +12518,30 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) Optional Drive query to filter results"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Drive query to filter results."
             },
             "page_size": {
               "type": "integer",
-              "description": "(int) Number of files to return (default 10)"
+              "description": "Number of files to return (default 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(str) Token from a previous response to fetch the next page"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12371,16 +12569,30 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string",
-              "description": "(str) Drive query expression (see instructions for syntax)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Drive query expression (see instructions for syntax)."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Number of files to return (default 10)"
+              "description": "Number of files to return (default 10)."
             },
             "page_token": {
-              "type": "string",
-              "description": "(str) Token from a previous response to fetch the next page"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13115,12 +13327,26 @@
           "type": "object",
           "properties": {
             "spreadsheet_id": {
-              "type": "string",
-              "description": "Fallback spreadsheet ID if instance attribute is None"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fallback spreadsheet ID if instance attribute is None."
             },
             "spreadsheet_range": {
-              "type": "string",
-              "description": "Fallback range if instance attribute is None"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fallback range if instance attribute is None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13149,7 +13375,7 @@
           "properties": {
             "title": {
               "type": "string",
-              "description": "The title of the Google Sheet"
+              "description": "The title of the Google Sheet."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13174,7 +13400,7 @@
       },
       {
         "name": "update_sheet",
-        "description": "Updates a Google Sheet with the provided data.\nNote: This function can overwrite existing data in the sheet.\nUser needs to ensure that the provided range correctly matches the data that needs to be updated.",
+        "description": "Update a Google Sheet with the provided data.\nNote: This function can overwrite existing data in the sheet.\nUser needs to ensure that the provided range correctly matches the data that needs to be updated.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -13184,15 +13410,29 @@
                 "type": "array",
                 "items": {}
               },
-              "description": "The data to update the sheet with"
+              "description": "The data to update the sheet with."
             },
             "spreadsheet_id": {
-              "type": "string",
-              "description": "The ID of the Google Sheet"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The ID of the Google Sheet."
             },
             "range_name": {
-              "type": "string",
-              "description": "The range of the Google Sheet to update"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The range of the Google Sheet to update."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13614,13 +13854,13 @@
     "functions": [
       {
         "name": "transcribe_audio",
-        "description": "Transcribe audio file or URL using Groq's Whisper API.",
+        "description": "Transcribe audio from an http(s) URL or local file using Groq Whisper.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_source": {
               "type": "string",
-              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
+              "description": "http(s) URL or local audio path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13645,13 +13885,13 @@
       },
       {
         "name": "translate_audio",
-        "description": "Translate audio file or URL to English using Groq's Whisper API.",
+        "description": "Translate audio from an http(s) URL or local file into English using Groq Whisper.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_source": {
               "type": "string",
-              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
+              "description": "http(s) URL or local audio path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13676,13 +13916,13 @@
       },
       {
         "name": "generate_speech",
-        "description": "Generate speech from text using Groq's Text-to-Speech API.",
+        "description": "Synthesize speech audio from text using Groq TTS.",
         "parameters": {
           "type": "object",
           "properties": {
             "text_input": {
               "type": "string",
-              "description": "The text to synthesize into speech."
+              "description": "Text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14223,199 +14463,6 @@
       }
     ]
   },
-  "jira": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "get_issue",
-        "description": "Retrieves issue details from Jira.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_issue",
-        "description": "Creates a new issue in Jira.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "project_key": {
-              "type": "string",
-              "description": "The key of the project in which to create the issue."
-            },
-            "summary": {
-              "type": "string",
-              "description": "The summary of the issue."
-            },
-            "description": {
-              "type": "string",
-              "description": "The description of the issue."
-            },
-            "issuetype": {
-              "type": "string",
-              "description": "The type of issue to create."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "project_key",
-            "summary",
-            "description"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_issues",
-        "description": "Searches for issues using a JQL query.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "jql_str": {
-              "type": "string",
-              "description": "The JQL query string."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "jql_str"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_comment",
-        "description": "Adds a comment to an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue."
-            },
-            "comment": {
-              "type": "string",
-              "description": "The comment text."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key",
-            "comment"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_worklog",
-        "description": "Adds a worklog entry to log time spent on a specific Jira issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_key": {
-              "type": "string",
-              "description": "The key of the issue to log work against (e.g., 'PROJ-123')."
-            },
-            "time_spent": {
-              "type": "string",
-              "description": "The amount of time spent. Use Jira's format, e.g., '2h', '30m', '1d 4h'."
-            },
-            "comment": {
-              "type": "string",
-              "description": "An optional comment describing the work done."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_key",
-            "time_spent"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
   "knowledge_graph": {
     "instructions": null,
     "guidance": null,
@@ -14893,15 +14940,29 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "depth": {
-              "type": "string",
-              "description": "(str) (deep|standard) Depth of the search. Defaults to 'standard'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(deep|standard) Depth of the search. Defaults to 'standard'."
             },
             "output_type": {
-              "type": "string",
-              "description": "(str) (sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "(sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14932,15 +14993,17 @@
     "functions": [
       {
         "name": "generate_video",
-        "description": "Use this function to generate a video given a prompt.",
+        "description": "Generate a video from a text prompt and optional keyframes.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the desired video."
             },
             "loop": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Whether the video should loop seamlessly."
             },
             "aspect_ratio": {
               "type": "string",
@@ -14952,22 +15015,31 @@
                 "3:4",
                 "21:9",
                 "9:21"
-              ]
+              ],
+              "description": "Output aspect ratio."
             },
             "keyframes": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
                 },
-                "additionalProperties": {
-                  "type": "string"
+                {
+                  "type": "null"
                 }
-              }
+              ],
+              "description": "Optional raw keyframe mapping (e.g. `{\"frame0\": {\"type\": \"image\", \"url\": \"...\"}}`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14998,19 +15070,26 @@
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text description of the desired video"
+              "description": "Text description of the desired video."
             },
             "start_image_url": {
               "type": "string",
-              "description": "URL of the starting image"
+              "description": "URL of the starting image."
             },
             "end_image_url": {
-              "type": "string",
-              "description": "Optional URL of the ending image"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional URL of the ending image."
             },
             "loop": {
               "type": "boolean",
-              "description": "Whether the video should loop"
+              "description": "Whether the video should loop seamlessly."
             },
             "aspect_ratio": {
               "type": "string",
@@ -15023,7 +15102,7 @@
                 "21:9",
                 "9:21"
               ],
-              "description": "Aspect ratio of the output video"
+              "description": "Output aspect ratio."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -15362,7 +15441,7 @@
     "functions": [
       {
         "name": "matrix_room",
-        "description": "Inspect Matrix room metadata, available agents, members, threads, and state (`room_id` defaults to current room).\nActions:\n- room-info: Room metadata + current thread_id, reply_to_event_id, requester_id, agent_name.\n- members: Joined members with display names and power levels.\n- agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message=\"...\")` (separate from `run_subagent` allowlist).\n- threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow=\"all\"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: questions only in unencrypted rooms; single runtime; filtered pages may be shorter than `limit`. `room_id=\"all\"` spans all shared rooms (one page/room; pair with `workflow=\"needs_you\"` for \"what needs me?\").\n- state: Without `event_type`, summary of all state events (`m.room.member` elided); `event_type` alone lists all events of that type with full `content`; `event_type` + `state_key` (including `\"\"`) fetches one specific state event.",
+        "description": "Inspect Matrix room metadata, available agents, members, threads, and state (`room_id` defaults to current room).\nActions:\n- room-info: Room metadata + current thread_id, reply_to_event_id, requester_id, agent_name.\n- members: Joined members with display names and power levels.\n- agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message=\"...\")` (separate from `run_subagent` allowlist).\n- threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow=\"all\"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: single runtime; filtered pages may be shorter than `limit`. `room_id=\"all\"` spans all shared rooms (one page/room; pair with `workflow=\"needs_you\"` for \"what needs me?\").\n- state: Without `event_type`, summary of all state events (`m.room.member` elided); `event_type` alone lists all events of that type with full `content`; `event_type` + `state_key` (including `\"\"`) fetches one specific state event.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18176,12 +18255,13 @@
     "functions": [
       {
         "name": "generate_media",
-        "description": "Generate media (video, image, or audio) given a prompt.",
+        "description": "Generate an image, video, audio clip, or GIF from a text prompt using ModelsLab.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18212,17 +18292,17 @@
     "functions": [
       {
         "name": "extract_audio",
-        "description": "Converts video to audio using MoviePy.",
+        "description": "Extract the audio track from a video file.",
         "parameters": {
           "type": "object",
           "properties": {
             "video_path": {
               "type": "string",
-              "description": "Path to the video file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input video path (confined to workspace unless `file_access: unrestricted`)."
             },
             "output_path": {
               "type": "string",
-              "description": "Path where the audio will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Destination audio path (e.g. `.wav` or `.mp3`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18248,17 +18328,17 @@
       },
       {
         "name": "create_srt",
-        "description": "Save transcription text to SRT formatted file.",
+        "description": "Write SRT-formatted subtitle text to a file.",
         "parameters": {
           "type": "object",
           "properties": {
             "transcription": {
               "type": "string",
-              "description": "Text transcription in SRT format"
+              "description": "SRT subtitle text."
             },
             "output_path": {
               "type": "string",
-              "description": "Path where the SRT file will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Destination `.srt` path."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18284,17 +18364,17 @@
       },
       {
         "name": "embed_captions",
-        "description": "Create a new video with embedded captions and word-level highlighting.",
+        "description": "Burn word-highlighted SRT captions onto a video.",
         "parameters": {
           "type": "object",
           "properties": {
             "video_path": {
               "type": "string",
-              "description": "Path to the input video file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input video path."
             },
             "srt_path": {
               "type": "string",
-              "description": "Path to the SRT caption file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Input `.srt` subtitle path."
             },
             "output_path": {
               "anyOf": [
@@ -18305,23 +18385,23 @@
                   "type": "null"
                 }
               ],
-              "description": "Path for the output video (optional); with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Optional output video path (defaults to `<video_stem>_captioned.mp4` beside input)."
             },
             "font_size": {
               "type": "integer",
-              "description": "Size of caption text"
+              "description": "Caption font size in pixels."
             },
             "font_color": {
               "type": "string",
-              "description": "Color of caption text"
+              "description": "Base text color."
             },
             "stroke_color": {
               "type": "string",
-              "description": "Color of text outline"
+              "description": "Outline color."
             },
             "stroke_width": {
               "type": "integer",
-              "description": "Width of text outline"
+              "description": "Outline width in pixels."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18430,7 +18510,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the article."
+              "description": "The URL of the article."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18612,13 +18692,13 @@
     "functions": [
       {
         "name": "transcribe_audio",
-        "description": "Transcribe audio file using OpenAI's Whisper API.",
+        "description": "Transcribe an audio file using OpenAI speech-to-text.",
         "parameters": {
           "type": "object",
           "properties": {
             "audio_path": {
               "type": "string",
-              "description": "Path to the audio file; with ``file_access: workspace`` it must be inside the agent workspace"
+              "description": "Local audio file path (confined to workspace unless `file_access: unrestricted`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18643,13 +18723,13 @@
       },
       {
         "name": "generate_image",
-        "description": "Generate images based on a text prompt.",
+        "description": "Generate an image from a text prompt using OpenAI.",
         "parameters": {
           "type": "object",
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "(str) The text prompt to generate the image from."
+              "description": "Text description of the image to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18674,13 +18754,13 @@
       },
       {
         "name": "generate_speech",
-        "description": "Generate speech from text using OpenAI's Text-to-Speech API.",
+        "description": "Synthesize speech audio from text using OpenAI.",
         "parameters": {
           "type": "object",
           "properties": {
             "text_input": {
               "type": "string",
-              "description": "(str) The text to synthesize into speech."
+              "description": "Text to read aloud verbatim."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19958,11 +20038,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "Search query"
+              "description": "Search query."
             },
             "domain_code": {
               "type": "string",
-              "description": "Google domain to search (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Google domain to search (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19993,11 +20073,11 @@
           "properties": {
             "asin": {
               "type": "string",
-              "description": "Amazon Standard Identification Number (10 alphanumeric characters, e.g., \"B07FZ8S74R\")"
+              "description": "Amazon Standard Identification Number (10 alphanumeric characters, e.g., \"B07FZ8S74R\")."
             },
             "domain_code": {
               "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20028,11 +20108,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "Product search query"
+              "description": "Product search query."
             },
             "domain_code": {
               "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")"
+              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20063,15 +20143,22 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "Website URL to scrape (must start with http:// or https://)"
+              "description": "Website URL to scrape (must start with http:// or https://)."
             },
             "render_javascript": {
               "type": "boolean",
-              "description": "Whether to enable JavaScript rendering for dynamic content (default: False)"
+              "description": "Whether to enable JavaScript rendering for dynamic content (default: False)."
             },
             "markdown": {
-              "type": "boolean",
-              "description": "Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting)"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20363,242 +20450,6 @@
           "required": [
             "query"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
-  "python": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "save_to_file_and_run",
-        "description": "This function saves Python code to a file called `file_name` and then runs it.\nIf successful, returns the value of `variable_to_return` if provided otherwise returns a success message.\nIf failed, returns an error message.\n\nMake sure the file_name ends with `.py`",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string",
-              "description": "The name of the file the code will be saved to."
-            },
-            "code": {
-              "type": "string",
-              "description": "The code to save and run."
-            },
-            "variable_to_return": {
-              "type": "string",
-              "description": "The variable to return."
-            },
-            "overwrite": {
-              "type": "boolean",
-              "description": "Overwrite the file if it already exists."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_name",
-            "code"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "run_python_code",
-        "description": "This function to runs Python code in the current environment.\nIf successful, returns the value of `variable_to_return` if provided otherwise returns a success message.\nIf failed, returns an error message.\n\nReturns the value of `variable_to_return` if successful, otherwise returns an error message.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "code": {
-              "type": "string",
-              "description": "The code to run."
-            },
-            "variable_to_return": {
-              "type": "string",
-              "description": "The variable to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "code"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "pip_install_package",
-        "description": "Install a package into the current interpreter environment.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "package_name": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "package_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "uv_pip_install_package",
-        "description": "Install a package into the current interpreter environment, as pip_install_package does.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "package_name": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "package_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "run_python_file_return_variable",
-        "description": "This function runs code in a Python file.\nIf successful, returns the value of `variable_to_return` if provided otherwise returns a success message.\nIf failed, returns an error message.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string",
-              "description": "The name of the file to run."
-            },
-            "variable_to_return": {
-              "type": "string",
-              "description": "The variable to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "read_file",
-        "description": "Reads the contents of the file `file_name` and returns the contents if successful.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string",
-              "description": "The name of the file to read."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_files",
-        "description": "Returns a list of files in the base directory",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -21176,7 +21027,7 @@
           "properties": {
             "prompt": {
               "type": "string",
-              "description": "Text describing the media to generate."
+              "description": "Text description of the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21594,11 +21445,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to scrape."
+              "description": "The URL to scrape."
             },
             "prompt": {
               "type": "string",
-              "description": "(str) Natural language prompt describing what to extract."
+              "description": "Natural language prompt describing what to extract."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23650,11 +23501,18 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search the web with."
+              "description": "The query to search the web with."
             },
             "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23685,7 +23543,7 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to scrape."
+              "description": "The URL of the webpage to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23716,11 +23574,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL of the webpage to crawl."
+              "description": "The URL of the webpage to crawl."
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) The maximum number of pages to crawl. Defaults to 10."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The maximum number of pages to crawl. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -24566,11 +24431,11 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) Query to search for."
+              "description": "Query to search for."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) Maximum number of results to return. Defaults to 5."
+              "description": "Maximum number of results to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25767,11 +25632,18 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract content from."
+              "description": "The URL to extract content from."
             },
             "output_format": {
-              "type": "string",
-              "description": "(Optional[str]) Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25802,11 +25674,11 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "(str) The URL to extract metadata from."
+              "description": "The URL to extract metadata from."
             },
             "as_json": {
               "type": "boolean",
-              "description": "(bool) Whether to return metadata as JSON string."
+              "description": "Whether to return metadata as JSON string."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25837,11 +25709,11 @@
           "properties": {
             "html_content": {
               "type": "string",
-              "description": "(str) The HTML content to convert."
+              "description": "The HTML content to convert."
             },
             "clean": {
               "type": "boolean",
-              "description": "(bool) Whether to remove potentially undesirable elements."
+              "description": "Whether to remove potentially undesirable elements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25875,7 +25747,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "(List[str]) List of URLs to extract content from."
+              "description": "List of URLs to extract content from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25906,11 +25778,11 @@
           "properties": {
             "homepage_url": {
               "type": "string",
-              "description": "(str) The starting URL (preferably homepage) to crawl from."
+              "description": "The starting URL (preferably homepage) to crawl from."
             },
             "extract_content": {
               "type": "boolean",
-              "description": "(bool) Whether to extract content from discovered URLs."
+              "description": "Whether to extract content from discovered URLs."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -26194,7 +26066,7 @@
     "functions": [
       {
         "name": "triggers",
-        "description": "Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).\nActions (key params):\n- watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).\n- watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).\n- subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).\n- create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).\n- list (optional `include_disabled`=True): list triggers and authorized `event_sources`.\n- update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).\n- set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).\n- history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.\n- test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.\n\nDelivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`). Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).\nTriage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).",
+        "description": "Manage reactive triggers (GitHub PRs, room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).\nActions (key params):\n- watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).\n- watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).\n- watch_pr (`repo` 'owner/repo', `number`): watch one open GitHub PR (`events`=['activity','ci','merge','close'] — Check Runs; `ignore_actors`, `include_bots`=False, `auto_disable_on_close`=True, `reopen_on_fire`=True, `expires_in_hours`=720, `poll_interval_seconds`).\n- subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).\n- create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).\n- list (optional `include_disabled`=True): list triggers and authorized `event_sources`.\n- update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).\n- set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).\n- history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.\n- test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.\n\nDelivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. Omitting `target_thread_id` defaults to the current thread in the current room (same-room `watch_room`: `'origin'`); pass `'room'` for the room timeline; `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).\nTriage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).\nOnly pass parameters for the chosen action (omit others; `enabled` is only for `set_enabled`/`update`).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -26203,6 +26075,7 @@
               "enum": [
                 "watch_room",
                 "watch_thread",
+                "watch_pr",
                 "subscribe_event",
                 "create",
                 "list",
@@ -26312,6 +26185,78 @@
               "enum": [
                 "added",
                 "removed"
+              ]
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "number": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "activity",
+                      "ci",
+                      "merge",
+                      "close"
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ignore_actors": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "auto_disable_on_close": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "poll_interval_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "source_id": {
@@ -26435,6 +26380,16 @@
               "anyOf": [
                 {
                   "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reopen_on_fire": {
+              "anyOf": [
+                {
+                  "type": "boolean"
                 },
                 {
                   "type": "null"
@@ -26726,30 +26681,83 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_photos",
-        "description": "Search for photos on Unsplash by keyword.",
+        "name": "unsplash",
+        "description": "Search, fetch, pick random photos, or track downloads on Unsplash.\n- `search`: requires `query`; optional `count` (1-30, default 10), `page`, `orientation`, `color`.\n- `get`: requires `photo_id`; returns photo metadata, EXIF, location, views, downloads.\n- `random`: optional `query`, `orientation`, `count` (1-30, default 1).\n- `download`: requires `photo_id`; triggers Unsplash download tracking and returns `download_url`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The search query string (e.g., \"mountain sunset\", \"office workspace\")."
+              "enum": [
+                "search",
+                "get",
+                "random",
+                "download"
+              ],
+              "description": "Operation to run."
             },
-            "per_page": {
-              "type": "integer",
-              "description": "Number of results per page (1-30). Default: 10."
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search keywords (`search` required, `random` optional)."
+            },
+            "photo_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unsplash photo ID (`get`, `download`)."
+            },
+            "count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Result count (`search` per_page default 10, `random` default 1; clamped to 1-30)."
             },
             "page": {
               "type": "integer",
-              "description": "Page number to retrieve. Default: 1."
+              "description": "Result page number (`search`, default 1)."
             },
             "orientation": {
               "type": "string",
-              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
+              "enum": [
+                "landscape",
+                "portrait",
+                "squarish"
+              ],
+              "description": "Optional orientation filter (`search`, `random`)."
             },
             "color": {
               "type": "string",
-              "description": "Filter by color: \"black_and_white\", \"black\", \"white\", \"yellow\",\n\"orange\", \"red\", \"purple\", \"magenta\", \"green\", \"teal\", \"blue\"."
+              "enum": [
+                "black_and_white",
+                "black",
+                "white",
+                "yellow",
+                "orange",
+                "red",
+                "purple",
+                "magenta",
+                "green",
+                "teal",
+                "blue"
+              ],
+              "description": "Optional color filter (`search`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -26765,76 +26773,8 @@
             }
           },
           "required": [
-            "query"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_photo",
-        "description": "Get detailed information about a specific photo.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "photo_id": {
-              "type": "string",
-              "description": "The unique identifier of the photo."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "photo_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_random_photo",
-        "description": "Get random photo(s) from Unsplash.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Optional search query to filter random photos."
-            },
-            "orientation": {
-              "type": "string",
-              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Number of random photos to return (1-30). Default: 1."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -26942,11 +26882,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_bar_chart",
-        "description": "Create a bar chart from the provided data.",
+        "name": "create_chart",
+        "description": "Render a matplotlib chart and save it inside the agent workspace.\n- `bar` / `line` / `pie`: `data` as `{label: value}`, list of dicts, or JSON string.\n- `scatter`: `x_data` & `y_data`, or `data` as `{\"x\": [...], \"y\": [...]}` or `[[x, y], ...]`.\n- `histogram`: `data` as a list of numbers; optional `bins`.",
         "parameters": {
           "type": "object",
           "properties": {
+            "chart_type": {
+              "type": "string",
+              "enum": [
+                "bar",
+                "line",
+                "pie",
+                "scatter",
+                "histogram"
+              ],
+              "description": "Chart kind to render."
+            },
             "data": {
               "anyOf": [
                 {
@@ -26961,121 +26912,27 @@
                       },
                       {
                         "type": "number"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_line_chart",
-        "description": "Create a line chart from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
                       },
                       {
-                        "type": "number"
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ]
+                        }
                       }
                     ]
                   }
                 },
                 {
                   "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
+                  "items": {}
                 },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with x-values as keys and y-values as numbers,\nor list of dictionaries, or JSON string"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
                 {
                   "type": "string"
                 },
@@ -27083,207 +26940,51 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_pie_chart",
-        "description": "Create a pie chart from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
+              "description": "Primary chart dataset (dict, list, or JSON string)."
             },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_scatter_plot",
-        "description": "Create a scatter plot from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "x_data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
-                ]
-              },
-              "description": "List of x-values (can also use 'x' parameter)"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "X-axis numeric series (`scatter`)."
             },
             "y_data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              },
-              "description": "List of y-values (can also use 'y' parameter)"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
-            },
-            "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
-            },
-            "x": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              }
-            },
-            "y": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              }
-            },
-            "data": {
               "anyOf": [
                 {
                   "type": "array",
                   "items": {
-                    "type": "array",
-                    "items": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "number"
-                        }
-                      ]
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "number"
-                        }
-                      ]
-                    }
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Alternative format - list of [x,y] pairs or dict with 'x' and 'y' keys"
+              "description": "Y-axis numeric series (`scatter`)."
             },
-            "mindroom_output_path": {
+            "title": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27292,55 +26993,44 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_histogram",
-        "description": "Create a histogram from the provided data.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              },
-              "description": "List of numeric values to plot"
+              "description": "Optional chart title."
+            },
+            "x_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional X-axis label."
+            },
+            "y_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Y-axis label."
             },
             "bins": {
               "type": "integer",
-              "description": "(int) Number of bins for the histogram"
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) Title of the chart"
-            },
-            "x_label": {
-              "type": "string",
-              "description": "(str) Label for x-axis"
-            },
-            "y_label": {
-              "type": "string",
-              "description": "(str) Label for y-axis"
+              "description": "Histogram bin count (default 10)."
             },
             "filename": {
-              "type": "string",
-              "description": "(Optional[str]) Custom filename for the chart image"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional plain filename (no directory components); defaults to `<type>_<n>.png`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27356,48 +27046,7 @@
             }
           },
           "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
-  "web_browser_tools": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "open_page",
-        "description": "Open an http or https URL in a browser window.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "(str) http or https URL to open"
-            },
-            "new_window": {
-              "type": "boolean",
-              "description": "(bool) If True, open in a new window, otherwise open in a new tab. Default is False."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "url"
+            "chart_type"
           ]
         },
         "strict": false,

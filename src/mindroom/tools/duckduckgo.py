@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.duckduckgo import DuckDuckGoTools
+    from mindroom.custom_tools.ddgs_search import DuckDuckGoTools
 
 
 @register_tool_with_metadata(
@@ -99,6 +99,6 @@ if TYPE_CHECKING:
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search and news."""
-    from agno.tools.duckduckgo import DuckDuckGoTools
+    from mindroom.custom_tools.ddgs_search import DuckDuckGoTools
 
     return DuckDuckGoTools

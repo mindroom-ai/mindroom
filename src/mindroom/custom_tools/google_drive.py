@@ -2,37 +2,33 @@
 
 from __future__ import annotations
 
+import io
 import json
 import mimetypes
 import re
+import textwrap
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
-from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
-from agno.utils.log import log_error
 from google.auth.credentials import CredentialsWithQuotaProject
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
-from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
-from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
 from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, GOOGLE_DRIVE_WRITE_SCOPE, google_oauth_provider
-from mindroom.oauth.service import (
-    OAUTH_MISSING_WRITE_SCOPE_REASON,
-    oauth_connection_required,
-)
+from mindroom.oauth.service import OAUTH_MISSING_WRITE_SCOPE_REASON, oauth_connection_required
 from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
@@ -41,16 +37,22 @@ from mindroom.tool_system.agno_toolkits import rename_toolkit_functions, toolkit
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator, Sequence
     from typing import BinaryIO
 
-    from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
+
+_WORKSPACE_PREFIX = "application/vnd.google-apps."
+_DOCUMENT_MIME_TYPE = f"{_WORKSPACE_PREFIX}document"
+_SPREADSHEET_MIME_TYPE = f"{_WORKSPACE_PREFIX}spreadsheet"
+_PRESENTATION_MIME_TYPE = f"{_WORKSPACE_PREFIX}presentation"
+_DRAWING_MIME_TYPE = f"{_WORKSPACE_PREFIX}drawing"
+_SCRIPT_MIME_TYPE = f"{_WORKSPACE_PREFIX}script"
+_FOLDER_MIME_TYPE = f"{_WORKSPACE_PREFIX}folder"
 
 _MODEL_FUNCTION_NAME_ALIASES = {
     "list_files": "google_drive_list_files",
@@ -64,9 +66,22 @@ _MODEL_FUNCTION_NAME_ALIASES = {
     "trash_file": "google_drive_trash_file",
 }
 _WRITE_FUNCTION_NAMES = ("upload_file", "update_file", "create_folder", "move_file", "trash_file")
+_DRIVE_READ_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/drive.readonly",
+        GOOGLE_DRIVE_WRITE_SCOPE,
+    },
+)
+_DRIVE_WRITE_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/drive.file",
+        GOOGLE_DRIVE_WRITE_SCOPE,
+    },
+)
+_DRIVE_READ_TOOLS = frozenset({"list_files", "search_files", "read_file", "download_file"})
+_DRIVE_WRITE_TOOLS = frozenset(_WRITE_FUNCTION_NAMES)
 _WRITE_RESULT_FIELDS = "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink"
-_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
-_GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
+_DEFAULT_MAX_READ_SIZE = 10 * 1024 * 1024
 # Downloads land on the primary's storage volume, so one file must not fill it.
 _DEFAULT_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 _DOWNLOAD_LIMIT_ADVICE = "Raise the google_drive max_download_size setting to download it."
@@ -95,6 +110,49 @@ _BINARY_MIME_TYPES = frozenset(
         "application/zip",
     },
 )
+
+_DRIVE_QUERY_INSTRUCTIONS = textwrap.dedent(f"""\
+    You have access to Google Drive tools for searching, reading, uploading, and downloading files.
+
+    ## Drive Query Syntax
+    Use these operators in search and list query parameters:
+    - `name contains 'report'` — files with "report" in the name
+    - `name = 'Budget 2025.xlsx'` — exact name match
+    - `mimeType = '{_DOCUMENT_MIME_TYPE}'` — Google Docs only
+    - `mimeType = '{_SPREADSHEET_MIME_TYPE}'` — Google Sheets only
+    - `mimeType = 'application/pdf'` — PDF files only
+    - `mimeType = '{_FOLDER_MIME_TYPE}'` — folders only
+    - `modifiedTime > '2025-01-01T00:00:00'` — modified after date
+    - `'<folder_id>' in parents` — files inside a specific folder
+    - `sharedWithMe` — files shared with the user
+    - `starred` — starred files
+    - Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`
+    - Trashed files are filtered automatically. Do not add trashed clauses.
+
+    ## Handling Incomplete Results
+    If search returns `incompleteSearch: true`, some shared drives could not be searched.
+    This is a server-side limitation of the `allDrives` corpus, not a problem with your query.
+    - Inform the user that results may be incomplete due to shared drive limitations
+    - Do NOT retry the same query — the limitation is server-side
+    - For complete results, the user must reconfigure with `corpora="user"` or `corpora="drive"`""")
+
+
+def _validate_drive_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
+    """Ensure explicit scopes cover every registered Drive operation."""
+    registered = set(registered_names)
+    scope_set = set(scopes)
+    if registered & _DRIVE_READ_TOOLS and not (_DRIVE_READ_SCOPES & scope_set):
+        msg = (
+            "A Google Drive read scope (https://www.googleapis.com/auth/drive.readonly or "
+            "https://www.googleapis.com/auth/drive) is required for read operations"
+        )
+        raise ValueError(msg)
+    if registered & _DRIVE_WRITE_TOOLS and not (_DRIVE_WRITE_SCOPES & scope_set):
+        msg = (
+            "A Google Drive write scope (https://www.googleapis.com/auth/drive.file or "
+            "https://www.googleapis.com/auth/drive) is required for write operations"
+        )
+        raise ValueError(msg)
 
 
 def _size_limit_finite_error(field_name: str, value: object) -> TypeError | ValueError:
@@ -174,30 +232,43 @@ def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[M
         yield MediaIoBaseUpload(file, mimetype=mime_type, resumable=True)
 
 
-class GoogleDriveTools(
-    ScopedOAuthClientMixin,
-    AgnoGoogleAuthBindingMixin,
-    ThreadLocalGoogleServiceMixin,
-    AgnoGoogleDriveTools,
-):
-    """Google Drive toolkit that uses MindRoom-scoped OAuth credentials."""
+class GoogleDriveTools(GoogleApiToolkit):
+    """Google Drive toolkit backed by MindRoom-scoped OAuth credentials."""
 
     _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
-    # AGNO_COMPAT: Drive `download_file` exports Google Vids, which the Drive API never exports.
-    # Reason: Agno 3.2.1 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
-    # every Vids file with `fileNotExportable`, so a Vids download, and the download advice a refused read gives,
-    # end in an API error. Without the mapping, MindRoom refuses Vids as an unsupported Workspace type.
-    # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: None identified.
-    # Remove when: Agno's `DOWNLOAD_EXPORT_TYPES` no longer maps Google Vids to a `files.export` format.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves.
-    # Agno leaves its class attribute unannotated, so ty reads it as an instance variable.
-    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {  # ty: ignore[incompatible-attribute-override]
-        mime_type: export
-        for mime_type, export in AgnoGoogleDriveTools.DOWNLOAD_EXPORT_TYPES.items()
-        if mime_type != WorkspaceType.VID
+    _google_api_name = "drive"
+    _google_api_version = "v3"
+
+    TEXT_EXPORT_TYPES: ClassVar[dict[str, str]] = {
+        _DOCUMENT_MIME_TYPE: "text/plain",
+        _SPREADSHEET_MIME_TYPE: "text/csv",
+        _PRESENTATION_MIME_TYPE: "text/plain",
+        _SCRIPT_MIME_TYPE: "application/json",
     }
+    # Google Vids is intentionally absent: files.export refuses it with fileNotExportable.
+    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {
+        _DOCUMENT_MIME_TYPE: (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docx",
+        ),
+        _SPREADSHEET_MIME_TYPE: (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsx",
+        ),
+        _PRESENTATION_MIME_TYPE: (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".pptx",
+        ),
+        _DRAWING_MIME_TYPE: ("image/png", ".png"),
+        _SCRIPT_MIME_TYPE: ("application/vnd.google-apps.script+json", ".json"),
+    }
+    SEARCH_FIELDS: ClassVar[str] = (
+        "nextPageToken, incompleteSearch, "
+        "files(id, name, mimeType, modifiedTime, size, parents, description, "
+        "webViewLink, webContentLink, owners(displayName, emailAddress))"
+    )
+    READ_METADATA_FIELDS: ClassVar[str] = "id,name,mimeType,modifiedTime,size,webViewLink"
 
     def __init__(
         self,
@@ -208,68 +279,90 @@ class GoogleDriveTools(
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
-        write: bool = True,
+        scopes: Sequence[str] | None = None,
+        list_files: bool | None = True,
+        search_files: bool | None = True,
+        read_file: bool | None = True,
+        download_file: object = True,
+        write: bool | None = True,
+        max_read_size: object = _DEFAULT_MAX_READ_SIZE,
+        max_download_size: object = _DEFAULT_MAX_DOWNLOAD_SIZE,
+        quota_project_id: object = None,
+        include_trashed: bool = False,
+        corpora: str = "allDrives",
+        supports_all_drives: bool = True,
+        include_items_from_all_drives: bool = True,
+        drive_id: str | None = None,
+        max_results: int = 20,
+        include_tools: Sequence[str] | None = None,
+        exclude_tools: Sequence[str] | None = None,
+        instructions: str | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
-        provided_creds = kwargs.pop("creds", None)
-        if credentials_manager is None:
-            msg = "GoogleDriveTools requires an explicit credentials_manager"
-            raise RuntimeError(msg)
-        if "max_read_size" in kwargs:
-            max_read_size = self._coerce_size_limit("max_read_size", kwargs["max_read_size"])
-            if max_read_size is None:
-                kwargs.pop("max_read_size")
-            else:
-                kwargs["max_read_size"] = max_read_size
-        max_download_size = self._coerce_size_limit("max_download_size", kwargs.pop("max_download_size", None))
-        self.max_download_size = _DEFAULT_MAX_DOWNLOAD_SIZE if max_download_size is None else max_download_size
+        coerced_read_size = self._coerce_size_limit("max_read_size", max_read_size)
+        self.max_read_size: int | float = _DEFAULT_MAX_READ_SIZE if coerced_read_size is None else coerced_read_size
+        coerced_download_size = self._coerce_size_limit("max_download_size", max_download_size)
+        self.max_download_size: int | float = (
+            _DEFAULT_MAX_DOWNLOAD_SIZE if coerced_download_size is None else coerced_download_size
+        )
+
         if tool_output_workspace_root is None:
-            if kwargs.get("download_file"):
+            if download_file:
                 logger.warning(
                     "Google Drive downloads are disabled because this toolkit was built without a workspace root",
                 )
-            kwargs["download_file"] = False
+            download_enabled = False
         else:
-            kwargs.setdefault("download_file", True)
-        kwargs["upload_file"] = False
-        kwargs.setdefault("scopes", [GOOGLE_DRIVE_WRITE_SCOPE])
-        # Search every drive the account can see; Agno reports ``incompleteSearch`` itself.
-        kwargs.setdefault("corpora", "allDrives")
-        kwargs.setdefault("supports_all_drives", True)
-        kwargs.setdefault("include_items_from_all_drives", True)
-        quota_project_id = kwargs.get("quota_project_id") or runtime_paths.env_value(
-            "GOOGLE_CLOUD_QUOTA_PROJECT_ID",
-        )
-        if quota_project_id is not None and not isinstance(quota_project_id, str):
+            download_enabled = bool(download_file)
+
+        resolved_quota_project_id = quota_project_id or runtime_paths.env_value("GOOGLE_CLOUD_QUOTA_PROJECT_ID")
+        if resolved_quota_project_id is not None and not isinstance(resolved_quota_project_id, str):
             msg = "Google Drive quota_project_id must be a string"
             raise TypeError(msg)
-        if quota_project_id is not None:
-            kwargs["quota_project_id"] = quota_project_id
-        self._runtime_paths = runtime_paths
-        self._creds_manager = credentials_manager
+        self.quota_project_id: str | None = resolved_quota_project_id
+
+        self.include_trashed = include_trashed
+        self.corpora = corpora
+        self.supports_all_drives = supports_all_drives
+        self.include_items_from_all_drives = include_items_from_all_drives
+        self.drive_id = drive_id
+        self.max_results = max_results
+        self.scopes = [GOOGLE_DRIVE_WRITE_SCOPE] if scopes is None else list(scopes)
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
-        defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
-        creds = self._initialize_oauth_client(
-            worker_target=worker_target,
-            config=runtime_config,
-            provided_creds=provided_creds,
-            logger=logger,
-            defer_to_original_auth=defer_to_original_auth,
-            quota_project_id=quota_project_id,
-        )
-        super().__init__(creds=creds, **kwargs)
-        # Agno's async variants run Drive calls on the event loop's default executor, which the
-        # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
-        self.async_functions.clear()
+
+        tools: list[Callable[..., str]] = []
+        if list_files:
+            tools.append(self.list_files)
+        if search_files:
+            tools.append(self.search_files)
+        if read_file:
+            tools.append(self.read_file)
+        if download_enabled:
+            tools.append(self.download_file)
         if write:
-            self._register_write_tools()
-        self._set_original_auth(AgnoGoogleDriveTools._resolve_creds)
-        self._wrap_oauth_function_entrypoints()
+            tools.extend([self.upload_file, self.update_file, self.create_folder, self.move_file, self.trash_file])
+        tools = filter_google_tools(tools, include_tools, exclude_tools)
+
+        super().__init__(
+            name="google_drive",
+            tools=tools,
+            instructions=_DRIVE_QUERY_INSTRUCTIONS if instructions is None else instructions,
+            quota_project_id=self.quota_project_id,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            **kwargs,
+        )
+        _validate_drive_scopes(self.functions, self.scopes)
         self._wrap_write_scope_entrypoints()
         rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
-        # A rename, such as an additional Google workspace's prefix, renames this function in place.
-        self._download_function = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])
+        self._download_entrypoint = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])
+
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return Drive service-account scopes, defaulting to the Drive API scope."""
+        return tuple(self.scopes)
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""
@@ -285,19 +378,12 @@ class GoogleDriveTools(
         ):
             credentials = credentials.with_quota_project(self.quota_project_id)
             self.creds = credentials
-        return build("drive", "v3", http=self._google_authorized_http(credentials))
-
-    def _register_write_tools(self) -> None:
-        write_tools = (
-            (self._upload_file, "upload_file"),
-            (self.update_file, "update_file"),
-            (self.create_folder, "create_folder"),
-            (self.move_file, "move_file"),
-            (self.trash_file, "trash_file"),
+        return build(
+            self._google_api_name,
+            self._google_api_version,
+            http=self._google_authorized_http(credentials),
+            cache_discovery=False,
         )
-        self.tools = (*self.tools, *(tool for tool, _name in write_tools))
-        for tool, name in write_tools:
-            self.register(tool, name=name)
 
     def _stored_credentials_have_required_scopes(self, token_data: dict[str, Any]) -> bool:
         """Let old read-only grants continue authenticating read operations."""
@@ -321,10 +407,9 @@ class GoogleDriveTools(
     def _wrap_write_scope_entrypoints(self) -> None:
         """Require full Drive scope only for registered write functions."""
         for function_name in _WRITE_FUNCTION_NAMES:
-            function = self.functions.get(function_name)
-            if function is None or function.entrypoint is None:
+            entrypoint = self.functions.get(function_name)
+            if entrypoint is None:
                 continue
-            entrypoint = function.entrypoint
 
             @wraps(entrypoint)
             def write_scope_entrypoint(
@@ -336,7 +421,7 @@ class GoogleDriveTools(
                     return result
                 return _entrypoint(*args, **kwargs)
 
-            function.entrypoint = write_scope_entrypoint
+            self.functions[function_name] = write_scope_entrypoint
             setattr(self, function_name, write_scope_entrypoint)
 
     def _coerce_size_limit(self, field_name: str, value: object) -> int | float | None:
@@ -350,6 +435,21 @@ class GoogleDriveTools(
         except ValueError as exc:
             msg = f"Google Drive {field_name} must be a number"
             raise ValueError(msg) from exc
+
+    def _get_file_metadata(self, service: Any, file_id: str, fields: str) -> dict[str, Any]:  # noqa: ANN401
+        return cast(
+            "dict[str, Any]",
+            service.files().get(fileId=file_id, fields=fields, supportsAllDrives=self.supports_all_drives).execute(),
+        )
+
+    def _download_bytes(self, request: Any) -> bytes:  # noqa: ANN401
+        """Download a Drive API media request into memory via MediaIoBaseDownload."""
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return buffer.getvalue()
 
     def _resolve_upload_file(self, local_path: str) -> AuthorizedFile:
         return resolve_agent_file(
@@ -372,24 +472,122 @@ class GoogleDriveTools(
         mime_type = metadata.get("mimeType", "")
         if (
             not export_format
-            and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
+            and mime_type.startswith(_WORKSPACE_PREFIX)
             and mime_type not in self.DOWNLOAD_EXPORT_TYPES
         ):
             return f"Unsupported Workspace file type for download: {mime_type}"
         return None
 
+    def _offered_download_name(self) -> str | None:
+        """Return the active model-facing download function name when offered, even after workspace renaming."""
+        if self._download_entrypoint is None:
+            return None
+        offered = set(toolkit_function_names(self))
+        for name, function in self.functions.items():
+            if function is self._download_entrypoint and name in offered:
+                return name
+        return None
+
     def _read_refusal(self, error: str, metadata: dict[str, Any]) -> str:
         """Refuse a read; name the download function while offered, or quote why it would refuse the file too."""
-        download = self._download_function
-        if download is not None and download.name in toolkit_function_names(self):
+        if download_name := self._offered_download_name():
             if download_refusal := self._download_refusal(metadata):
-                error += f" {download.name} would refuse it too: {download_refusal}"
+                error += f" {download_name} would refuse it too: {download_refusal}"
             else:
-                error += f" Use {download.name} instead."
+                error += f" Use {download_name} instead."
         return json.dumps({"error": error, "file": metadata})
 
-    @authenticate
-    def _upload_file(
+    def _search_files(
+        self,
+        query: str | None = None,
+        max_results: int = 10,
+        page_token: str | None = None,
+    ) -> str:
+        if max_results < 1:
+            return json.dumps({"error": "max_results must be greater than 0"})
+        try:
+            service = self._google_api_service()
+            effective_max = min(max_results, self.max_results)
+            if self.include_trashed:
+                effective_query = query or ""
+            elif query:
+                effective_query = f"({query}) and trashed=false"
+            else:
+                effective_query = "trashed=false"
+            list_kwargs: dict[str, Any] = {
+                "q": effective_query,
+                "pageSize": effective_max,
+                "orderBy": "modifiedTime desc",
+                "fields": self.SEARCH_FIELDS,
+                "corpora": self.corpora,
+                "supportsAllDrives": self.supports_all_drives,
+                "includeItemsFromAllDrives": self.include_items_from_all_drives,
+            }
+            if self.drive_id:
+                list_kwargs["driveId"] = self.drive_id
+            if page_token:
+                list_kwargs["pageToken"] = page_token
+            results = service.files().list(**list_kwargs).execute()
+            files = results.get("files", [])
+            incomplete = results.get("incompleteSearch", False)
+            if incomplete:
+                logger.debug("google_drive_incomplete_search", corpora=self.corpora)
+            return json.dumps(
+                {
+                    "query": effective_query,
+                    "files": files,
+                    "count": len(files),
+                    "nextPageToken": results.get("nextPageToken"),
+                    "incompleteSearch": incomplete,
+                },
+            )
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_search_failed", error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def list_files(
+        self,
+        query: str | None = None,
+        page_size: int = 10,
+        page_token: str | None = None,
+    ) -> str:
+        """List recent files and folders from Google Drive.
+
+        Args:
+            query: Optional Drive query to filter results.
+            page_size: Number of files to return (default 10).
+            page_token: Token from a previous response to fetch the next page.
+
+        Returns:
+            JSON string containing file metadata or error message.
+
+        """
+        return self._search_files(query=query, max_results=page_size, page_token=page_token)
+
+    def search_files(
+        self,
+        query: str | None = None,
+        max_results: int = 10,
+        page_token: str | None = None,
+    ) -> str:
+        """Search Google Drive using a query expression.
+
+        Searches in file name, type, folder, owner, and modification date.
+
+        Args:
+            query: Drive query expression (see instructions for syntax).
+            max_results: Number of files to return (default 10).
+            page_token: Token from a previous response to fetch the next page.
+
+        Returns:
+            JSON string containing matching files and metadata or error message.
+
+        """
+        return self._search_files(query=query, max_results=max_results, page_token=page_token)
+
+    def upload_file(
         self,
         local_path: str,
         folder_id: str | None = None,
@@ -416,9 +614,9 @@ class GoogleDriveTools(
             body["parents"] = [folder_id]
         if convert_to:
             body["name"] = name or Path(authorized.name).stem
-            body["mimeType"] = f"{_GOOGLE_WORKSPACE_MIME_PREFIX}{convert_to}"
+            body["mimeType"] = f"{_WORKSPACE_PREFIX}{convert_to}"
         try:
-            service = cast("Any", self.service)
+            service = self._google_api_service()
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
                 uploaded_file = (
                     service.files()
@@ -434,10 +632,9 @@ class GoogleDriveTools(
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not upload file '{authorized.display_path}': {exc}")
+            logger.warning("google_drive_upload_failed", error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
         """Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.
 
@@ -453,7 +650,7 @@ class GoogleDriveTools(
 
         try:
             resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
-            service = cast("Any", self.service)
+            service = self._google_api_service()
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
                 updated_file = (
                     service.files()
@@ -469,10 +666,9 @@ class GoogleDriveTools(
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not update Google Drive file '{file_id}': {exc}")
+            logger.warning("google_drive_update_failed", file_id=file_id, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         """Create a Google Drive folder, optionally under one parent folder."""
         if not name.strip():
@@ -481,16 +677,15 @@ class GoogleDriveTools(
         if parent_id:
             body["parents"] = [parent_id]
         try:
-            service = cast("Any", self.service)
+            service = self._google_api_service()
             folder = service.files().create(body=body, fields=_WRITE_RESULT_FIELDS, supportsAllDrives=True).execute()
             return json.dumps(folder)
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not create Google Drive folder '{name}': {exc}")
+            logger.warning("google_drive_create_folder_failed", error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
     def move_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
         """Move one Drive file to a new parent and optionally rename it."""
         if not new_parent_id.strip():
@@ -498,7 +693,8 @@ class GoogleDriveTools(
         if name is not None and not name.strip():
             return json.dumps({"error": "Google Drive file name must not be empty"})
         try:
-            metadata = self._get_file_metadata(file_id, "parents")
+            service = self._google_api_service()
+            metadata = self._get_file_metadata(service, file_id, "parents")
             current_parents = [parent for parent in metadata.get("parents", []) if isinstance(parent, str) and parent]
             update_kwargs: dict[str, object] = {
                 "fileId": file_id,
@@ -511,20 +707,18 @@ class GoogleDriveTools(
             removed_parents = [parent for parent in current_parents if parent != new_parent_id]
             if removed_parents:
                 update_kwargs["removeParents"] = ",".join(removed_parents)
-            service = cast("Any", self.service)
             moved_file = service.files().update(**update_kwargs).execute()
             return json.dumps(moved_file)
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not move Google Drive file '{file_id}': {exc}")
+            logger.warning("google_drive_move_failed", file_id=file_id, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
     def trash_file(self, file_id: str) -> str:
         """Move one Drive file to trash without permanently deleting it."""
         try:
-            service = cast("Any", self.service)
+            service = self._google_api_service()
             trashed_file = (
                 service.files()
                 .update(
@@ -539,39 +733,19 @@ class GoogleDriveTools(
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
+            logger.warning("google_drive_trash_failed", file_id=file_id, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
-    # Reason: Agno 3.2.1 refuses every `application/octet-stream` file, including text MindRoom's own uploads
-    # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
-    # `google_drive_download_file` or disables it, and although its `download_file` refuses folders and other
-    # Workspace types it cannot export. This override decides text by content instead, and refuses a binary type
-    # over `max_read_size` as binary rather than as too large. It also refuses Office files, which Agno's
-    # MIME-based branch would extract without tables, grouped shapes, or line breaks, or reject with an install
-    # hint when the extraction packages are missing.
-    # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11, so in the pinned 3.2.1) covers only grouped
-    # shapes and line breaks in `.pptx` text; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
-    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit word the advice
-    # after a refused read, and extracts complete Office text with dependencies MindRoom ships or refuses it;
-    # keep MindRoom's function aliases and the advice that quotes `_download_refusal`.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_large_binary_type_as_binary_without_fetching_it.
-    @authenticate
     def read_file(self, file_id: str) -> str:
         """Read a Drive file and return its text content, including files in Shared Drives."""
         try:
-            service = cast("Any", self.service)
-            metadata = self._get_file_metadata(file_id, self.READ_METADATA_FIELDS)
+            service = self._google_api_service()
+            metadata = self._get_file_metadata(service, file_id, self.READ_METADATA_FIELDS)
             mime_type = metadata.get("mimeType", "")
 
             if mime_type in self.TEXT_EXPORT_TYPES:
                 export_mime = self.TEXT_EXPORT_TYPES[mime_type]
-            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+            elif mime_type.startswith(_WORKSPACE_PREFIX):
                 return self._read_refusal(f"Cannot read {mime_type} as text.", metadata)
             else:
                 export_mime = None
@@ -609,10 +783,9 @@ class GoogleDriveTools(
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not read Google Drive file {file_id}: {exc}")
+            logger.warning("google_drive_read_failed", file_id=file_id, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    @authenticate
     def download_file(self, file_id: str, export_format: str | None = None) -> str:
         """Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.
 
@@ -629,8 +802,8 @@ class GoogleDriveTools(
         try:
             if self._workspace_root is None:
                 return json.dumps({"error": "Google Drive downloads require an agent workspace"})
-            service = cast("Any", self.service)
-            metadata = self._get_file_metadata(file_id, "id,name,mimeType,size")
+            service = self._google_api_service()
+            metadata = self._get_file_metadata(service, file_id, "id,name,mimeType,size")
             mime_type = metadata.get("mimeType", "")
             refusal = self._download_refusal(metadata, export_format)
             if refusal:
@@ -673,6 +846,6 @@ class GoogleDriveTools(
         except ByteLimitExceededError as exc:
             error = str(exc)
         except Exception as exc:
-            log_error(f"Could not download file '{file_id}': {exc}")
+            logger.warning("google_drive_download_failed", file_id=file_id, error_type=type(exc).__name__)
             error = f"Unexpected error: {type(exc).__name__}: {exc}"
         return json.dumps({"error": error})

@@ -1,4 +1,4 @@
-"""File generation tool configuration."""
+"""File Generation tool configuration."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.file_generation import FileGenerationTools
+    from mindroom.custom_tools.file_generation import FileGenerationTools
 
 
 @register_tool_with_metadata(
     name="file_generation",
     file_access=ToolFileAccess.NONE,
     display_name="File Generation",
-    description="Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
+    description="Generate JSON, CSV, PDF, DOCX, HTML, text, and code files inside the agent workspace",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -104,18 +104,10 @@ if TYPE_CHECKING:
     dependencies=["python-docx", "reportlab"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#file_generation",
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
-    function_names=(
-        "generate_code_file",
-        "generate_csv_file",
-        "generate_docx_file",
-        "generate_html_file",
-        "generate_json_file",
-        "generate_pdf_file",
-        "generate_text_file",
-    ),
+    function_names=("generate_file",),
 )
 def file_generation_tools() -> type[FileGenerationTools]:
     """Return File Generation tools that save generated files only inside the agent workspace."""
-    from mindroom.tools.agno_compat_file_generation import WorkspaceFileGenerationTools
+    from mindroom.custom_tools.file_generation import FileGenerationTools
 
-    return WorkspaceFileGenerationTools
+    return FileGenerationTools

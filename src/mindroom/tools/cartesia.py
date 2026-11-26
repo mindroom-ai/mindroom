@@ -9,20 +9,19 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.cartesia import CartesiaTools
+    from mindroom.custom_tools.cartesia import CartesiaTools
 
 
 @register_tool_with_metadata(
     name="cartesia",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("text_to_speech",),
     display_name="Cartesia",
     description="Voice AI services including text-to-speech and voice localization",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.REQUIRES_CONFIG,  # requires API key
-    setup_type=SetupType.API_KEY,  # API key authentication
-    icon="VolumeX",  # Voice/sound related icon
-    icon_color="text-purple-500",  # Purple for voice AI
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="VolumeX",
+    icon_color="text-purple-500",
     config_fields=[
         ConfigField(
             name="api_key",
@@ -81,6 +80,6 @@ if TYPE_CHECKING:
 )
 def cartesia_tools() -> type[CartesiaTools]:
     """Return Cartesia tools for voice AI services."""
-    from agno.tools.cartesia import CartesiaTools
+    from mindroom.custom_tools.cartesia import CartesiaTools
 
     return CartesiaTools

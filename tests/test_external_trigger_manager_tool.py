@@ -149,8 +149,9 @@ async def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path
     assert payload["trigger"]["target"] == {
         "agent": "watcher",
         "new_thread": False,
+        "reopen_on_fire": False,
         "room_id": "lobby",
-        "thread_id": None,
+        "thread_id": "$thread",
     }
     assert "public_key" not in payload["trigger"]
     assert payload["public_key_fingerprint"].startswith("sha256:")
@@ -206,8 +207,9 @@ async def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: 
     assert payload["trigger"]["target"] == {
         "agent": "watcher",
         "new_thread": False,
+        "reopen_on_fire": False,
         "room_id": "lobby",
-        "thread_id": None,
+        "thread_id": "$thread",
     }
 
 
@@ -241,8 +243,9 @@ async def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_pat
     assert payload["trigger"]["target"] == {
         "agent": "watcher",
         "new_thread": False,
+        "reopen_on_fire": False,
         "room_id": "!private:example.org",
-        "thread_id": None,
+        "thread_id": "$thread",
     }
 
 
@@ -651,6 +654,7 @@ async def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Pa
     assert payload["trigger"]["target"] == {
         "agent": "other",
         "new_thread": False,
+        "reopen_on_fire": False,
         "room_id": "other-room",
         "thread_id": "$target-thread",
     }
@@ -726,6 +730,7 @@ async def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(t
     assert payload["trigger"]["target"] == {
         "agent": "other",
         "new_thread": False,
+        "reopen_on_fire": False,
         "room_id": "other-room",
         "thread_id": None,
     }
@@ -749,3 +754,66 @@ async def test_admin_list_triggers_sees_all_owners(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     assert {trigger["trigger_id"] for trigger in payload["triggers"]} == {"owner", "other"}
+
+
+@pytest.mark.asyncio
+async def test_create_trigger_room_escape_reopen_on_fire_and_room_key_context(tmp_path: Path) -> None:
+    """Create defaults to current thread, supports target_thread_id='room', reopen_on_fire, and room-key context."""
+    tool = TriggersTools()
+    _record_rooms(tmp_path)
+    with tool_runtime_context(_context(tmp_path, room_id="lobby")):
+        # Room key context matches resolved !room ID for non-admin and defaults to current thread.
+        same_room_id = _payload(
+            await tool.triggers(
+                action="create",
+                trigger_id="same-room-id",
+                public_key=_PUBLIC_KEY,
+                target_room_id="!lobby:example.org",
+                reopen_on_fire=True,
+            ),
+        )
+        assert same_room_id["status"] == "ok", same_room_id
+        assert same_room_id["trigger"]["target"] == {
+            "agent": "watcher",
+            "new_thread": False,
+            "reopen_on_fire": True,
+            "room_id": "!lobby:example.org",
+            "thread_id": "$thread",
+        }
+
+        # Non-admin targeting a different room is still refused when context.room_id is a key.
+        other_room = _payload(
+            await tool.triggers(
+                action="create",
+                trigger_id="other-room-blocked",
+                public_key=_PUBLIC_KEY,
+                target_room_id="other-room",
+            ),
+        )
+        assert other_room["status"] == "error"
+        assert "Only external trigger admins" in other_room["message"]
+
+        # target_thread_id="room" targets room timeline (None) from inside a thread and never persists "room".
+        room_escape = _payload(
+            await tool.triggers(
+                action="create",
+                trigger_id="room-timeline",
+                public_key=_PUBLIC_KEY,
+                target_thread_id="room",
+            ),
+        )
+        assert room_escape["status"] == "ok", room_escape
+        assert room_escape["trigger"]["target"]["thread_id"] is None
+
+        # target_thread_id="room" with new_thread=True is rejected.
+        conflict = _payload(
+            await tool.triggers(
+                action="create",
+                trigger_id="room-new-conflict",
+                public_key=_PUBLIC_KEY,
+                target_thread_id="room",
+                new_thread=True,
+            ),
+        )
+        assert conflict["status"] == "error"
+        assert "mutually exclusive" in conflict["message"]

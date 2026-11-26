@@ -1,29 +1,38 @@
-"""Sleep toolkit with a bounded pause."""
+"""Native sleep toolkit with a bounded async pause."""
 
 from __future__ import annotations
 
 import asyncio
 
-from agno.tools.sleep import SleepTools as AgnoSleepTools
+from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit, tool
+
+logger = get_logger(__name__)
 
 _MAX_SLEEP_SECONDS = 300
 
 
-# AGNO_COMPAT: SleepTools blocks a thread in time.sleep for any requested duration.
-# Reason: Agno 3.2.1 SleepTools.sleep is synchronous and unbounded, so each call holds a thread of the
-# primary process's shared default executor for as long as the model asks, and parallel calls exhaust it.
-# Upstream issue: Tracking gap; no matching issue has been verified.
-# Upstream PR: No matching fix has been verified.
-# Remove when: Agno awaits its sleep instead of blocking a thread; the 300-second cap is MindRoom policy for
-# the shared primary and stays if Agno picks another bound.
-# Coverage: tests/test_sleep_tool.py::test_sleep_refuses_durations_outside_the_cap;
-# tests/test_sleep_tool.py::test_parallel_sleeps_hold_no_executor_thread.
-class SleepTools(AgnoSleepTools):
-    """Agno sleep toolkit whose pauses are capped and awaited, because it runs in the process shared by every agent."""
+class SleepTools(Toolkit):
+    """Sleep toolkit whose pauses are capped and awaited on the event loop."""
 
-    async def sleep(self, seconds: int) -> str:  # ty: ignore[incompatible-method-override]  # Agno awaits async tools
+    name = "sleep"
+
+    def __init__(
+        self,
+        enable_sleep: bool = True,
+        all: bool = False,  # noqa: A002
+    ) -> None:
+        tools = (self.sleep,) if (all or enable_sleep) else ()
+        super().__init__(name="sleep", tools=tools)
+        if not (all or enable_sleep):
+            self.functions.pop("sleep", None)
+
+    @tool
+    async def sleep(self, seconds: int) -> str:
         """Use this function to sleep for a given number of seconds, at most 300."""
         if not 0 <= seconds <= _MAX_SLEEP_SECONDS:
             return f"Sleep duration must be between 0 and {_MAX_SLEEP_SECONDS} seconds."
+        logger.info("Sleeping", seconds=seconds)
         await asyncio.sleep(seconds)
+        logger.info("Awake after sleep", seconds=seconds)
         return f"Slept for {seconds} seconds"

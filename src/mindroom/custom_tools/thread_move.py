@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from mindroom.constants import (
     COPIED_MENTIONS_KEY,
+    INLINE_MEDIA_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     TOOL_TRACE_CONTENT_KEY,
@@ -29,6 +30,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.inline_media import copy_referenced_inline_media, register_inline_media
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
@@ -72,6 +74,7 @@ def _plan_thread_copy(
     mover_id: str,
     display_names: Mapping[str, str],
     mentioned_user_ids: Callable[[dict[str, Any]], list[str]],
+    carry_inline_media: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the message contents, without thread relations, that recreate one thread in another room.
 
@@ -84,6 +87,8 @@ def _plan_thread_copy(
         if message.content.get("msgtype") == "m.notice" or message.stream_status in UNFINISHED_REPLY_STATUSES:
             continue
         content = {key: message.content[key] for key in _COPIED_CONTENT_KEYS if key in message.content}
+        if carry_inline_media:
+            copy_referenced_inline_media(message.content, content)
         # Copies are history, never requests: no mention in them may wake an agent.
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
@@ -188,6 +193,9 @@ class ThreadMoveTools(Toolkit):
                     message=f"Copied {copied} of {len(prepared.plan)} messages before a send failed.",
                     **partial,
                 )
+            if isinstance(inline_media := planned.get(INLINE_MEDIA_CONTENT_KEY), dict):
+                for mxc_uri, encrypted_file in inline_media.items():
+                    register_inline_media(prepared.target_room_id, mxc_uri, encrypted_file)
             previous_event_id = delivered.event_id
         assert new_root_id is not None
 
@@ -235,9 +243,9 @@ async def _prepare_move(  # noqa: PLR0911
     history = await complete_thread_history(context.conversation_reader, context.room_id, root_id)
     if not history.is_full_history:
         return "This thread could not be read in full, so it cannot be moved."
-    encryption_error = await _encryption_error(context.client, context.room_id, target_room_id)
-    if encryption_error is not None:
-        return encryption_error
+    carry_inline_media = await _check_move_encryption(context.client, context.room_id, target_room_id)
+    if isinstance(carry_inline_media, str):
+        return carry_inline_media
     plan = _plan_thread_copy(
         history,
         entity_name_for_sender=entity_identity_registry(
@@ -251,6 +259,7 @@ async def _prepare_move(  # noqa: PLR0911
             context.current_config,
             context.runtime_paths,
         ),
+        carry_inline_media=carry_inline_media,
     )
     if not plan:
         return "This thread has no messages to move."
@@ -263,15 +272,15 @@ async def _prepare_move(  # noqa: PLR0911
     )
 
 
-async def _encryption_error(client: nio.AsyncClient, source_room_id: str, target_room_id: str) -> str | None:
-    """Refuse to re-post end-to-end encrypted content in plaintext."""
+async def _check_move_encryption(client: nio.AsyncClient, source_room_id: str, target_room_id: str) -> bool | str:
+    """Refuse encrypted-to-plaintext moves; otherwise return whether both rooms are encrypted."""
     source_encrypted = await resolve_room_encryption_outcome(client, source_room_id, operation="thread_move")
     target_encrypted = await resolve_room_encryption_outcome(client, target_room_id, operation="thread_move")
     if isinstance(source_encrypted, MatrixDeliveryFailure) or isinstance(target_encrypted, MatrixDeliveryFailure):
         return "Could not determine whether the source and target rooms are encrypted."
     if source_encrypted and not target_encrypted:
         return "Cannot move a thread from an encrypted room into an unencrypted room."
-    return None
+    return source_encrypted and target_encrypted
 
 
 async def _copy_tags(

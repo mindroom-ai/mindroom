@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from mindroom.judgment.answers import JudgmentError
@@ -78,6 +79,7 @@ async def retrieve[T](
     """
     if reranker is None or not candidates:
         return _select(candidates, selection, reranked=False)
+    started = perf_counter()
     try:
         scores = await asyncio.wait_for(reranker.ascore(query, [c.text for c in candidates]), deadline_seconds)
         # A threshold reads the scores on the [0, 1] scale; an order alone reads any finite scale.
@@ -87,10 +89,23 @@ async def retrieve[T](
             raise _InvalidScoresError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
     except (JudgmentError, TimeoutError, _InvalidScoresError) as exc:
         # Known failures can repeat every turn, such as a lasting outage; their cause needs no traceback.
-        logger.warning("Reranking failed; keeping search order", error=f"{type(exc).__name__}: {exc}")
+        detail = str(exc)
+        logger.warning(
+            "Reranking failed; keeping search order",
+            error=f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
+            latency_ms=max(0, round((perf_counter() - started) * 1000)),
+            candidate_count=len(candidates),
+            deadline_seconds=deadline_seconds,
+        )
         return _select(candidates, selection, reranked=False)
     except Exception:
-        logger.warning("Reranking failed; keeping search order", exc_info=True)
+        logger.warning(
+            "Reranking failed; keeping search order",
+            latency_ms=max(0, round((perf_counter() - started) * 1000)),
+            candidate_count=len(candidates),
+            deadline_seconds=deadline_seconds,
+            exc_info=True,
+        )
         return _select(candidates, selection, reranked=False)
     rescored = [replace(candidate, score=score) for candidate, score in zip(candidates, scores, strict=True)]
     return _select(sorted(rescored, key=lambda candidate: -candidate.score), selection, reranked=True)

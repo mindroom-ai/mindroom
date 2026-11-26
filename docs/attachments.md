@@ -88,7 +88,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
-| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply |
 
 ```python
 list_attachments()
@@ -125,7 +125,7 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem` or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](deployment/sandbox-proxy.md#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](deployment/sandbox-proxy.md) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
@@ -140,8 +140,9 @@ The alt text defaults to the filename.
 
 Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
 up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
-Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
-In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
+In encrypted rooms, MindRoom encrypts the upload (or reuses turn-scoped encrypted image media)
+and attaches decryption keys under `io.mindroom.inline_media` for each embedded image.
+When `inline_image` refuses, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 
