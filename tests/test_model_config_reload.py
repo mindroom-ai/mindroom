@@ -17,10 +17,8 @@ from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.policy import (
     _compaction_input_budget,
+    _resolve_history_execution_plan,
     resolve_history_preparation_inputs,
-)
-from mindroom.history.policy import (
-    _resolve_history_execution_plan as resolve_history_execution_plan,
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -153,7 +151,7 @@ def _temperature(model: ModelProvider) -> float | None:
 def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
     model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
-    return resolve_history_execution_plan(
+    return _resolve_history_execution_plan(
         config=config,
         history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,

@@ -18,12 +18,8 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.history.policy import (
-    _context_budget_after_reserve as context_budget_after_reserve,
-)
-from mindroom.history.policy import (
-    _resolve_history_execution_plan as resolve_history_execution_plan,
-)
-from mindroom.history.policy import (
+    _context_budget_after_reserve,
+    _resolve_history_execution_plan,
     classify_compaction_decision,
     resolve_history_preparation_inputs,
 )
@@ -254,7 +250,7 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
         context_window=1_000_000,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -393,7 +389,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
     assert resolved.timeout_seconds == 75.0
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -444,7 +440,7 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
         _runtime_paths(tmp_path),
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -716,7 +712,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_fi
 def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Path) -> None:
     config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -752,7 +748,7 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
         runtime_paths,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -880,7 +876,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         runtime_paths,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -979,7 +975,7 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
         context_window=4_096,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1010,7 +1006,7 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
         context_window=context_window_tokens,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1036,7 +1032,7 @@ def test_context_budget_after_reserve_preserves_replay_budget_bounds(
     reserve_tokens: int,
     expected: int,
 ) -> None:
-    assert context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
+    assert _context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
@@ -1051,7 +1047,7 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
         context_window=1_000,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1082,7 +1078,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         context_window=active_context_window,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",

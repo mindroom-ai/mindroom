@@ -40,9 +40,9 @@ from mindroom.history.summary_call import (
     CompactionSummaryOutputLimitError,
     SummaryRetryPolicy,
     _CompactionSummaryEmptyResultError,
+    _SummaryRetryDecision,
     generate_compaction_summary,
 )
-from mindroom.history.summary_call import _SummaryRetryDecision as SummaryRetryDecision
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
@@ -490,7 +490,7 @@ def test_retry_policy_clamps_shrink_target_to_minimum_progress_input() -> None:
         error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
     )
 
-    assert decision == SummaryRetryDecision(budget=6_230, kind="shrink")
+    assert decision == _SummaryRetryDecision(budget=6_230, kind="shrink")
 
 
 def test_retry_policy_declines_shrink_when_no_smaller_progress_input_exists() -> None:
@@ -517,7 +517,7 @@ def test_retry_policy_shrink_classification_precedes_transient_status() -> None:
         error=error,
     )
 
-    assert decision == SummaryRetryDecision(budget=3_000, kind="shrink")
+    assert decision == _SummaryRetryDecision(budget=3_000, kind="shrink")
 
 
 def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink() -> None:
@@ -530,7 +530,7 @@ def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink(
         error=error,
     )
 
-    assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
+    assert decision == _SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
     assert (
         _retry_budget_value(
             DEFAULT_SUMMARY_RETRY_POLICY,
@@ -568,7 +568,7 @@ def test_retry_policy_retries_transient_provider_errors_at_same_budget(status_co
         error=error,
     )
 
-    assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
+    assert decision == _SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
     assert (
         _retry_budget_value(
             DEFAULT_SUMMARY_RETRY_POLICY,
@@ -614,7 +614,7 @@ def test_retry_policy_retries_a_transport_failure_at_the_same_budget(cause: http
         error=_transport_failure(cause),
     )
 
-    assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
+    assert decision == _SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
 
 
 def test_retry_policy_does_not_retry_a_final_provider_error() -> None:

@@ -2172,10 +2172,22 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.room_reads"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.room_steward",
+]
+visibility = [
+    "mindroom.api.room_triggers",
+    "mindroom.orchestration.plugin_http_runtime",
+]
+
+[[modules]]
 path = "mindroom.api.room_triggers"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.room_reads",
     "mindroom.matrix.state",
     "mindroom.plugin_http",
     "mindroom.reactive_triggers.management",
@@ -6779,6 +6791,14 @@ depends_on = []
 visibility = []
 
 [[modules]]
+path = "mindroom.workers.sandbox_mounts"
+depends_on = [
+    "mindroom.path_confinement",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = []
+
+[[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.path_confinement",
@@ -9670,10 +9690,10 @@ depends_on = [
 path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.api.room_reads",
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
-    "mindroom.plugin_http",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 

@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal
 from uuid import uuid4
 
 from mindroom.script_runs.models import utc_timestamp
@@ -43,25 +43,6 @@ class WorkflowNodeState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INDETERMINATE = "indeterminate"
-
-
-class WorkflowNodeLinks(TypedDict):
-    """IDs and correction metadata that a workflow node may persist."""
-
-    agent: NotRequired[str]
-    child_run_id: NotRequired[str]
-    delegation_id: NotRequired[str]
-    event_id: NotRequired[str]
-    job_id: NotRequired[str]
-    made: NotRequired[bool]
-    model: NotRequired[str]
-    subagent_id: NotRequired[str]
-    turn: NotRequired[int]
-
-
-def _node_links() -> WorkflowNodeLinks:
-    """Return an empty node-links value for dataclass construction."""
-    return {}
 
 
 UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
@@ -189,7 +170,7 @@ class WorkflowNode:
     result_file: str | None = None
     """Set when the result was too large for the row: the file's path relative to the store's directory."""
     error: dict[str, object] | None = None
-    links: WorkflowNodeLinks = field(default_factory=_node_links)
+    links: dict[str, str] = field(default_factory=dict)
     """IDs of what the node made: `delegation_id`, `subagent_id`, `job_id`, `event_id`, `child_run_id`."""
 
 

@@ -38,7 +38,7 @@ class _RunningApplication(Protocol):
 class _Workspace(Protocol):
     def runningApplications(self) -> list[_RunningApplication]: ...  # noqa: N802
 
-    def URLForApplicationWithBundleIdentifier_(self, _bundle_identifier: str, /) -> object | None: ...  # noqa: N802
+    def URLForApplicationWithBundleIdentifier_(self, _bundle_identifier: str) -> object | None: ...  # noqa: N802
 
     def openApplicationAtURL_configuration_completionHandler_(  # noqa: N802
         self,

@@ -24,7 +24,7 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.compaction import compact_scope_history
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.policy import _resolve_history_execution_plan as resolve_history_execution_plan
+from mindroom.history.policy import _resolve_history_execution_plan
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
@@ -196,7 +196,7 @@ def _inputs(config: Any, *, compaction_model: str | None = None) -> HistoryPrepa
             settings,
             compaction_config=settings.compaction_config.model_copy(update={"model": compaction_model}),
         )
-    plan = resolve_history_execution_plan(
+    plan = _resolve_history_execution_plan(
         config=config,
         history_settings=settings,
         active_model_name="default",
@@ -375,7 +375,7 @@ def test_execution_plan_exposes_compaction_context_window(tmp_path: Path) -> Non
         ("no_window", 100_000, None),
     ]:
         settings = replace(_ALL_HISTORY_SETTINGS, compaction_config=CompactionConfig(enabled=True, model=model_name))
-        plan = resolve_history_execution_plan(
+        plan = _resolve_history_execution_plan(
             config=config,
             history_settings=settings,
             active_model_name="default",

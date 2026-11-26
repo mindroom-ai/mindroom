@@ -336,7 +336,7 @@ copy_credentials  # unused function (src/mindroom/api/credentials.py)
 config_edit  # unused function (src/mindroom/cli/config.py)
 config_validate  # unused function (src/mindroom/cli/config.py)
 config_resolve  # unused function (src/mindroom/cli/config.py)
-update_schedule  # FastAPI route (src/mindroom/api/schedules.py)
+update_schedule  # unused function (src/mindroom/api/schedules.py)
 list_schedules  # FastAPI route (src/mindroom/api/schedules.py)
 cancel_schedule  # FastAPI route (src/mindroom/api/schedules.py)
 get_registered_tools  # unused function (src/mindroom/api/tools.py)
@@ -395,8 +395,6 @@ _.extract_audio  # MoviePyVideoTools registers this file_access override (src/mi
 _.create_srt  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
 _.save_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
 _.read_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
-
-is_conditional  # Legacy serialized Pydantic field (src/mindroom/scheduling/tasks.py)
 
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)

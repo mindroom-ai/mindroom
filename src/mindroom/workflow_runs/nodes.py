@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 from uuid import NAMESPACE_OID, uuid5
 
 from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
@@ -96,6 +96,11 @@ _RATE_WAIT_SECONDS = 1.0
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 
+class _ReuseStamp(TypedDict, total=False):
+    phase: str | None
+    members: tuple[str, ...] | None
+
+
 @dataclass(frozen=True, slots=True)
 class _TurnContext:
     """Resolved session, live sibling turns, earlier turns, last completed turn, and digest for one `turn` call."""
@@ -149,15 +154,6 @@ def _value(args: dict[str, object]) -> object:
         return secrets.SystemRandom().random()
     msg = f"A value call is now or random, not {args.get('op')!r}."
     raise WorkflowRunStoreError(msg)
-
-
-def _saved_turn_number(node: WorkflowNode) -> int:
-    """Return one saved session turn's validated positive integer sequence number."""
-    turn = node.request.get("turn")
-    if type(turn) is not int or turn < 1:
-        msg = "Saved session turn number must be a whole number of at least 1."
-        raise WorkflowRunStoreError(msg)
-    return turn
 
 
 async def _current_run(engine: WorkflowEngine, attempt: ScriptRunRecord) -> WorkflowRun:
@@ -329,8 +325,11 @@ async def _reuse_saved(
     action: str,
 ) -> NodeReceipt:
     """Adopt a saved node for this attempt (`hit`, `attach`, or `raise_indeterminate`)."""
-    phase = cast("str | None", meta.get("phase"))
-    regrouped = members != saved.members
+    extra: _ReuseStamp = {}
+    if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
+        extra["phase"] = phase
+    if regrouped := members != saved.members:
+        extra["members"] = members
     await engine.stamp(
         saved,
         epoch,
@@ -338,8 +337,7 @@ async def _reuse_saved(
         attempt=run.attempt,
         stale=False,
         cached=action == "hit",
-        phase=phase,
-        members=members,
+        **extra,
     )
     if action == "raise_indeterminate":
         return replace(receipt(saved), state=WorkflowNodeState.FAILED)
@@ -514,6 +512,14 @@ async def _save_immediate(
     return receipt(await asyncio.to_thread(engine.store.put_node, done_node, epoch, dirty_after=True))
 
 
+def _turn_number(turn: WorkflowNode) -> int:
+    value = turn.request["turn"]
+    if type(value) is not int:
+        msg = "Session turn number must be a whole number of at least 1."
+        raise WorkflowRunStoreError(msg)
+    return value
+
+
 def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
     """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
     session_key, turn_num = args.get("session"), args.get("turn")
@@ -530,8 +536,8 @@ def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict
         if turn.attempt == run.attempt and not turn.stale
     ]
     earlier = sorted(
-        (turn for turn in in_attempt if turn.key != key and _saved_turn_number(turn) < turn_num),
-        key=lambda turn: (_saved_turn_number(turn), turn.seq),
+        (turn for turn in in_attempt if turn.key != key and _turn_number(turn) < turn_num),
+        key=lambda turn: (_turn_number(turn), turn.seq),
     )
     prev = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
     lineage = [(session.digest, session.generation), *((t.key, t.digest, t.generation) for t in earlier)]

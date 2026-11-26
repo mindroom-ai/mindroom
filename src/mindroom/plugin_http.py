@@ -37,7 +37,6 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.entity_directory import entity_directory
 from mindroom.hooks.types import format_hook_source
-from mindroom.logging_config import get_logger
 from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
@@ -99,7 +98,6 @@ __all__ = [
     "client_user_oauth_access_token",
     "plugin_context",
     "plugin_origin_url",
-    "read_in_room",
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
@@ -119,11 +117,6 @@ _open_streams: Counter[str] = Counter()
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 _NOT_A_MEMBER = "Not a member of this room."
-# A client can tell the condition that lasts until a bot joins the room from a failure worth retrying.
-_NO_BOT_IN_ROOM = "No running MindRoom bot is in this room."
-# As long as the computers API waits for the same membership check.
-_ROOM_READ_TIMEOUT_SECONDS = 20
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -651,30 +644,6 @@ def _room_bot(
     if bot is None:
         raise HTTPException(503, "No MindRoom agent is in this room.")
     return bot
-
-
-async def read_in_room[T](
-    app: FastAPI,
-    room_id: str,
-    read: Callable[[nio.AsyncClient], Awaitable[T]],
-    failed: str,
-) -> T:
-    """Return ``read`` made through the client of the room's steward, else answer 503 with ``failed``.
-
-    It answers 503 too when no running bot is in the room, or when ``read`` raises or outlasts the lookup timeout.
-    """
-    bots = ensure_app_state(app).room_bots
-    steward = None if bots is None else room_steward(bots, room_id)
-    client = None if steward is None else steward.client
-    if client is None:
-        raise HTTPException(503, _NO_BOT_IN_ROOM)
-    try:
-        async with asyncio.timeout(_ROOM_READ_TIMEOUT_SECONDS):
-            return await read(client)
-    except Exception as error:
-        # A failed or timed-out read leaves the answer unknown, which must never pass for a yes or a no.
-        logger.warning("Room read failed", room_id=room_id, detail=failed, error_type=type(error).__name__)
-        raise HTTPException(503, failed) from None
 
 
 def _bound[T](reader: T | None) -> T:

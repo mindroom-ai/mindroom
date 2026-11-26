@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workflow_runs.engine import WorkflowEngine
-    from mindroom.workflow_runs.models import NodeReceipt, WorkflowNodeLinks, WorkflowRun
+    from mindroom.workflow_runs.models import NodeReceipt, WorkflowRun
     from mindroom.workflow_runs.store import WorkflowRunStore
 
 logger = get_logger(__name__)
@@ -387,17 +387,15 @@ async def launch_child(
             dispatched=False,
             work_until=None if timeout is None else time.time() + timeout,
         )
-        links: WorkflowNodeLinks = {
+        links = {
             "job_id": job_id,
             "delegation_id": child.delegation_id,
             "subagent_id": child.subagent_id,
             # And what the call resolved to, which its arguments need not name.
             "agent": target.agent_name,
             "model": child.model_name,
+            **({"turn": turn, "made": made} if turn > 1 else {}),
         }
-        if turn > 1:
-            links["turn"] = turn
-            links["made"] = made
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         if (saved := await asyncio.to_thread(store.save_dispatched, node, epoch)) is None:
             # The node that waited for its place has an end by now: its run ended.
@@ -418,11 +416,7 @@ async def launch_child(
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:
-        session_links: WorkflowNodeLinks = {
-            "subagent_id": child.subagent_id,
-            "agent": target.agent_name,
-            "model": child.model_name,
-        }
+        session_links = {"subagent_id": child.subagent_id, "agent": target.agent_name, "model": child.model_name}
         await asyncio.to_thread(
             store.update_node,
             run.run_id,
@@ -522,7 +516,7 @@ async def _job_outcome(
     """
     child = delegation_child(job)
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
-    continued, turn_num = bool(spent), node.links.get("turn", 1)
+    continued, turn_num = bool(spent), int(node.links.get("turn", 1))
     *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
     text = (
         job.result

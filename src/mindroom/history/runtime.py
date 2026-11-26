@@ -88,15 +88,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = [
-    "PreparedScopeHistory",
-    "compact_scope_now",
-    "finalize_history_preparation",
-    "note_prepared_history_timing",
-    "prepare_scope_history",
-    "run_scope_compaction_with_lifecycle",
-]
-
 
 def _remember_scope_frame(
     scope_context: ScopeSessionContext | None,
