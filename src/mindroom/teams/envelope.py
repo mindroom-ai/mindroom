@@ -250,7 +250,7 @@ def _leader_run(
     storage: RunStorage,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
-    outside_matrix: bool = False,
+    wait_for_connectivity: bool = False,
 ) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
@@ -272,7 +272,7 @@ def _leader_run(
             ),
         ),
         request_template=with_native_history(
-            ModelRequest(messages=(), overrides=RequestOverrides(wait_for_connectivity=not outside_matrix)),
+            ModelRequest(messages=(), overrides=RequestOverrides(wait_for_connectivity=wait_for_connectivity)),
             history.native_history,
         ),
         model_name=prepared.runtime_model_name,
@@ -301,7 +301,7 @@ def run_prepared_team(
         storage=storage,
         compaction_lifecycle=None,
         turn_recorder=None,
-        outside_matrix=True,
+        wait_for_connectivity=False,
     )
     scope = ShellBackgroundScope()
 
@@ -515,7 +515,8 @@ class _TeamTurn:
             storage=storage,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
             turn_recorder=run.record,
-            outside_matrix=self.ctx.outside_matrix,
+            wait_for_connectivity=not self.ctx.outside_matrix
+            and (self.ctx.execution_identity is None or self.ctx.execution_identity.channel == "matrix"),
         )
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,

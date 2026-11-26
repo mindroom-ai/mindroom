@@ -32,6 +32,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -61,7 +62,9 @@ from mindroom.providers.pipeline import connectivity as connectivity_stage
 from mindroom.providers.pipeline import fallback as fallback_stage
 from mindroom.providers.pipeline.connectivity import connectivity_retry_stream
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
+from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
@@ -519,15 +522,20 @@ async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
     assert fallback_stage._COOLDOWN_UNTIL["conc-pk"] == newer_until
     assert "conc-sk" not in fallback_stage._COOLDOWN_UNTIL
 
-    # 3. Expired TLS cert primary fails over immediately to healthy fallback without retrying or waiting.
+    # 3. Expired TLS cert primary with inline image skips media retry and fails over with the image intact.
     tls_err = provider_failure(ssl.SSLCertVerificationError(1, "certificate expired"), provider="openai")
     assert tls_err is not None
     assert (tls_err.retryable, tls_err.code) == (False, TLS_CERTIFICATE_ERROR)
     bad_tls = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[tls_err]])
     healthy = _Scripted(ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK), [[_turn("backup ok")]])
+    media_primary = WrappedProvider(
+        bad_tls,
+        partial(media_fallback_stream, fallback_prompt="no media"),
+        media_fallback_projection("no media"),
+    )
     tls_chain = WrappedProvider(
         WrappedProvider(
-            bad_tls,
+            media_primary,
             partial(
                 fallback_stream,
                 model_name="p",
@@ -537,10 +545,17 @@ async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
         ),
         connectivity_retry_stream,
     )
-    tls_events = await drain(tls_chain, _req())
+    img = Image(id="att_img1", content=b"pngbytes", mime_type="image/png")
+    img_req = ModelRequest(
+        messages=(Message(role="user", content="describe", images=(img,)),),
+        overrides=RequestOverrides(wait_for_connectivity=True),
+    )
+    tls_events = await drain(tls_chain, img_req)
     assert isinstance(tls_events[-1], TurnCompleted)
     assert tls_events[-1].message.content == "backup ok"
     assert (len(bad_tls.requests), len(healthy.requests)) == (1, 1)
+    assert bad_tls.requests[0].messages[0].images == (img,)
+    assert healthy.requests[0].messages[0].images == (img,)
 
     # 4. Reconnect logs record only host:port, never credential-bearing path tokens.
     monkeypatch.setattr(connectivity_stage, "corroborate_offline", connectivity.corroborate_offline)
@@ -771,3 +786,38 @@ async def test_matrix_health_sync_transitions_and_ssl_cert_non_retryable(
         mapped = provider_failure(raw, provider="openai")
         assert type(mapped) is ProviderError
         assert (mapped.retryable, mapped.code) == (False, TLS_CERTIFICATE_ERROR)
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "expected"),
+    [
+        ({}, "https://generativelanguage.googleapis.com"),
+        ({"vertexai": True, "location": "us-central1"}, "https://us-central1-aiplatform.googleapis.com"),
+        ({"vertexai": True, "location": "global"}, "https://aiplatform.googleapis.com"),
+        ({"vertexai": True}, "https://aiplatform.googleapis.com"),
+        (
+            {"client_params": {"http_options": {"base_url": "https://gemini-proxy.example/"}}},
+            "https://gemini-proxy.example",
+        ),
+    ],
+)
+def test_gemini_identity_resolves_effective_endpoint(
+    tmp_path: Path,
+    extra_kwargs: dict[str, object],
+    expected: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="google",
+                id="gemini-2.5-pro",
+                api_key="test-key",
+                extra_kwargs=extra_kwargs,
+            ),
+        },
+    )
+    provider = build_model_provider(config, runtime_paths, "default")
+    assert provider.identity.endpoint == expected

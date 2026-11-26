@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from mindroom.connectivity import (
     note_matrix_sync_cleared,
     note_matrix_sync_failed,
-    note_matrix_sync_started,
     note_matrix_sync_succeeded,
     reset_connectivity_state,
 )
@@ -113,7 +112,6 @@ def mark_matrix_sync_loop_started(entity_name: str) -> None:
         state.running = True
         if state.loop_started_time is None:
             state.loop_started_time = _normalize_sync_time(datetime.now(UTC))
-    note_matrix_sync_started(entity_name)
 
 
 def mark_matrix_sync_failure(entity_name: str) -> None:

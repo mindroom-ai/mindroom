@@ -1719,15 +1719,33 @@ async def test_connectivity_activity_renders_in_live_frames_and_durable_edits_wi
         progress_delivered=live_hooks["progress_delivered"],
     )
     resp._shows_stream = True
-    resp.live = MagicMock(running=True)
+    resp.live = MagicMock(running=True, checkpoint=MagicMock(return_value={"seq": 1}))
     assert resp.set_connectivity_activity("w1", notice) is True
     assert resp.set_connectivity_activity("w2", notice) is False
     live = resp.live_state()
     assert live is not None
     assert live[1].activity == notice
     assert resp.accumulated_text == "Step 1 done."
+    assert resp.has_undelivered_connectivity_activity() is True
+    delivered = await resp._prepare_delivery_async(is_final=False, allow_empty_progress=False)
+    assert delivered is not None
+    checkpoint_gateway = _FakeGateway()
+    with patch("mindroom.streaming.edit_message_result", new=checkpoint_gateway.edit):
+        assert await resp._send_prepared_delivery(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            prepared_delivery=delivered,
+            is_final=False,
+        )
+    # Once delivered, repeated live-frame ticks do not re-trigger durable edits for the same notice.
+    assert resp.has_undelivered_connectivity_activity() is False
     assert resp.set_connectivity_activity("w1", None) is False
     assert resp.set_connectivity_activity("w2", None) is True
+    # Clearing the notice schedules one more edit while online, suppressed while Matrix is offline.
+    assert resp.has_undelivered_connectivity_activity() is True
+    mark_matrix_sync_failure("helper")
+    assert resp.has_undelivered_connectivity_activity() is False
+    mark_matrix_sync_success("helper")
+    assert resp.has_undelivered_connectivity_activity() is True
     live = resp.live_state()
     assert live is not None
     assert live[1].activity == ""

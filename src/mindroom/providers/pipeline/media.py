@@ -25,6 +25,7 @@ from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     QUOTA_EXHAUSTED,
     SAFEGUARD_REFUSAL,
+    TLS_CERTIFICATE_ERROR,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -62,7 +63,7 @@ _ATTACHMENT_ID_PREFIX = "att_"
 _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 # A retried media-free request must not repeat a failure the media cannot have caused.
 _NOT_MEDIA_RELATED_CODES = frozenset(
-    {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED},
+    {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED, TLS_CERTIFICATE_ERROR},
 )
 _PAYLOAD_TOO_LARGE_STATUS = 413
 # Provider errors naming a capability are short; capping the scan keeps the list patterns cheap on huge errors.

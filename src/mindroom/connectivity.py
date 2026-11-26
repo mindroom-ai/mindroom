@@ -29,7 +29,6 @@ __all__ = [
     "note_endpoint_reachable",
     "note_matrix_sync_cleared",
     "note_matrix_sync_failed",
-    "note_matrix_sync_started",
     "note_matrix_sync_succeeded",
     "register_matrix_homeserver",
     "reset_connectivity_state",
@@ -102,11 +101,6 @@ def register_matrix_homeserver(url: str, *, ssl_verify: bool | ssl.SSLContext = 
     cleaned = url.strip().rstrip("/")
     with _lock:
         _homeserver = (cleaned, ssl_verify) if cleaned else None
-
-
-def note_matrix_sync_started(entity_name: str) -> None:
-    """Retain existing sync failure state when ``entity_name`` starts or restarts its sync loop."""
-    del entity_name
 
 
 def note_matrix_sync_failed(entity_name: str) -> None:
@@ -328,6 +322,11 @@ async def _connectivity_restored(
     return await _probe_tcp_reachable(endpoint, timeout=min(_PROBE_TIMEOUT_SECONDS, remaining))
 
 
+async def _sleep_jitter(jitter_range: tuple[float, float], deadline: float, loop: asyncio.AbstractEventLoop) -> None:
+    if (jitter := min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
+        await asyncio.sleep(jitter)
+
+
 async def wait_for_connectivity(
     endpoint: str | None,
     *,
@@ -344,9 +343,9 @@ async def wait_for_connectivity(
         sleep_for = min(probe_backoff[min(attempt, len(probe_backoff) - 1)], remaining)
         remote_hs = _remote_homeserver_config() is not None
         woken, seen_generation = await _wait_for_sync_or_sleep(loop, sleep_for, seen_generation, remote_hs=remote_hs)
-        if woken and (jitter := min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
-            await asyncio.sleep(jitter)
-        elif not woken:
+        if woken:
+            await _sleep_jitter(jitter_range, deadline, loop)
+        else:
             attempt += 1
         if await _connectivity_restored(
             endpoint,
@@ -355,8 +354,8 @@ async def wait_for_connectivity(
             deadline=deadline,
             loop=loop,
         ):
-            if not woken and (jitter := min(random.uniform(*jitter_range), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
-                await asyncio.sleep(jitter)
+            if not woken:
+                await _sleep_jitter(jitter_range, deadline, loop)
             return True
     return False
 

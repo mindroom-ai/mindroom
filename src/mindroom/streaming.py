@@ -397,6 +397,7 @@ class _PreparedStreamingDelivery:
     had_warmup_suffix: bool
     # The stream's pending-character count when this delivery's state was captured.
     chars_since_last_update: int
+    connectivity_activity_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +425,7 @@ class _StreamingDeliverySnapshot:
     untransformed_text: str | None = None
     suppress_push: bool = False
     tool_trace_version: int = 0
+    connectivity_activity_version: int = 0
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -541,6 +543,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
         chars_since_last_update=snapshot.chars_since_last_update,
+        connectivity_activity_version=snapshot.connectivity_activity_version,
     )
 
 
@@ -670,6 +673,7 @@ class StreamingResponse:
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _connectivity_activities: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _connectivity_activity_version: int = field(default=0, init=False, repr=False)
+    _delivered_connectivity_version: int = field(default=0, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
         default_factory=lambda: lru_cache(maxsize=1)(markdown_to_html),
@@ -865,6 +869,10 @@ class StreamingResponse:
         elif after:
             self._warmup_state.needs_warmup_clear_edit = False
         return True
+
+    def has_undelivered_connectivity_activity(self) -> bool:
+        """Return whether connectivity activity changed since the last durable delivery while Matrix is online."""
+        return not matrix_offline() and self._connectivity_activity_version != self._delivered_connectivity_version
 
     def clear_connectivity_activities(self) -> None:
         """Drop any transient connectivity activity lines before terminal finalization."""
@@ -1298,6 +1306,7 @@ class StreamingResponse:
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
+            self._delivered_connectivity_version = prepared_delivery.connectivity_activity_version
             self._mark_delivery_committed(prepared_delivery.committed_state)
             self._committed_live_seq = prepared_delivery.content.get(LIVE_CHECKPOINT_KEY, {}).get("seq", -1)
             self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
@@ -1387,6 +1396,7 @@ class StreamingResponse:
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
             tool_trace_version=self._tool_trace_version,
+            connectivity_activity_version=self._connectivity_activity_version,
         )
 
     def _active_model_payload(self) -> dict[str, str] | None:
@@ -2426,7 +2436,7 @@ async def _run_live_frames(
             and (
                 streaming.has_uncommitted_presentation()
                 or streaming._warmup_state.active_warmups
-                or (streaming._connectivity_activities and not matrix_offline())
+                or streaming.has_undelivered_connectivity_activity()
                 or streaming._warmup_state.needs_warmup_clear_edit
             )
         ):
