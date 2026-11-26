@@ -27354,7 +27354,7 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` and `worker_cold_start` are `info` records, so keep `LOG_LEVEL` at `INFO` or lower, or raise only their loggers with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO,mindroom.workers.progress:INFO`.
-`agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
+`event_loop_stall_detected` and `event_loop_stall_ongoing` are `error` records, `agent_error` is `warning` for `ModelSafeguardRefusal` and `error` otherwise, and the other stable events below are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
@@ -27676,7 +27676,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
 - `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
-- `ModelSafeguardRefusal`: the model's safeguards refused the request.
+- `ModelSafeguardRefusal`: the model's safeguards refused the request (logged at `warning` rather than `error`).
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
 - `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 

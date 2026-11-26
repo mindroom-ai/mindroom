@@ -381,10 +381,11 @@ def log_reply_error(
     model_label: str | None = None,
     provider: str | None = None,
 ) -> _ReplyErrorInfo:
-    """Log ``error`` as ``agent_error`` and return its structured ``_ReplyErrorInfo`` classification."""
+    """Log ``error`` as ``agent_error`` (``warning`` for safeguard refusals) and return its ``_ReplyErrorInfo``."""
     provider_error = error if isinstance(error, ProviderError) else None
+    log = logger.warning if isinstance(error, ModelSafeguardRefusal) else logger.error
 
-    logger.error(
+    log(
         "agent_error",
         agent=agent_name or "agent",
         error_type=type(error).__name__,
