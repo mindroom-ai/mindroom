@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from google.api_core.exceptions import GoogleAPICallError
@@ -17,7 +18,7 @@ from mindroom.oauth.google import google_service_scopes
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -113,9 +115,38 @@ def filter_google_tools(
     tools: Sequence[Callable[..., str]],
     include_tools: Sequence[str] | None = None,
     exclude_tools: Sequence[str] | None = None,
+    *,
+    retired_tools: Mapping[str, str] | None = None,
+    known_tools: Collection[str] | None = None,
 ) -> list[Callable[..., str]]:
-    """Filter Google toolkit methods by optional include and exclude name lists."""
+    """Filter Google toolkit methods by optional include and exclude name lists.
+
+    Fails closed when either filter names a retired per-operation function (with
+    migration guidance) or an unknown function name.
+    """
     selected = list(tools)
+    valid_names = {getattr(tool, "__name__", "") for tool in selected}
+    if known_tools is not None:
+        valid_names.update(known_tools)
+    for param_name, names in (("include_tools", include_tools), ("exclude_tools", exclude_tools)):
+        if names is None:
+            continue
+        if retired_tools:
+            retired_matches = [
+                f"{name!r} (now {retired_tools[name]!r})" for name in dict.fromkeys(names) if name in retired_tools
+            ]
+            if retired_matches:
+                msg = (
+                    f"{param_name} contains retired function name(s): {', '.join(retired_matches)}. "
+                    "Use the consolidated function name(s), per-action constructor options, or "
+                    "tool_approval.rules instead."
+                )
+                raise ValueError(msg)
+        if known_tools is not None:
+            unknown = sorted(set(names) - valid_names)
+            if unknown:
+                msg = f"{param_name} contains unknown function name(s): {', '.join(unknown)}"
+                raise ValueError(msg)
     if include_tools is not None:
         included = set(include_tools)
         selected = [tool for tool in selected if getattr(tool, "__name__", "") in included]
@@ -123,6 +154,36 @@ def filter_google_tools(
         excluded = set(exclude_tools)
         selected = [tool for tool in selected if getattr(tool, "__name__", "") not in excluded]
     return selected
+
+
+def matches_google_function(function_name: str, base_name: str) -> bool:
+    """Return whether ``function_name`` is ``base_name`` or a workspace-prefixed variant."""
+    return function_name == base_name or function_name.endswith(f"_{base_name}")
+
+
+def restrict_google_actions(
+    function: ToolFunction,
+    allowed: Sequence[str],
+    fields: Mapping[str, str] | None = None,
+    *,
+    common: tuple[str, ...] = (),
+) -> ToolFunction:
+    """Narrow an action-dispatched Google tool's schema and bullets to ``allowed`` actions."""
+    allowed_list = list(allowed)
+    properties = dict(function.parameters["properties"])
+    properties["action"] = {**properties["action"], "enum": allowed_list}
+    if fields is not None:
+        keep = {"action", *common, *(field for action in allowed_list for field in fields[action].split())}
+        properties = {name: value for name, value in properties.items() if name in keep}
+    description = "\n".join(
+        line
+        for line in (function.description or "").splitlines()
+        if not line.startswith("- `") or any(f"`{action}`" in line.partition(":")[0] for action in allowed_list)
+    )
+    parameters = {**function.parameters, "properties": properties}
+    if "required" in parameters:
+        parameters["required"] = [name for name in parameters["required"] if name in properties]
+    return replace(function, description=description, parameters=parameters)
 
 
 class _ThreadLocalGoogleServiceMixin:

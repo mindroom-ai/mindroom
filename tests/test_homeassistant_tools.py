@@ -57,24 +57,14 @@ class TestHomeAssistantTools:
         ha_tools = HomeAssistantTools(credentials_manager=mock_credentials_manager)
 
         assert ha_tools.name == "homeassistant"
-        assert len(ha_tools.functions) == 11
+        assert len(ha_tools.functions) == 2
 
         expected_methods = [
-            "get_entity_state",
-            "list_entities",
-            "turn_on",
-            "turn_off",
-            "toggle",
-            "set_brightness",
-            "set_color",
-            "set_temperature",
-            "activate_scene",
-            "trigger_automation",
-            "call_service",
+            "homeassistant_read",
+            "homeassistant_control",
         ]
         method_names = [tool.__name__ for tool in ha_tools.functions.values()]
-        for expected in expected_methods:
-            assert expected in method_names
+        assert method_names == expected_methods
 
     def test_tool_metadata_passes_worker_scope_to_wrapper(
         self,
@@ -458,7 +448,10 @@ class TestHomeAssistantTools:
                 "attributes": {"brightness": 255},
             }
 
-            result = await ha_tools_with_mocked_creds.get_entity_state("light.living_room")
+            result = await ha_tools_with_mocked_creds.homeassistant_read(
+                action="get_state",
+                entity_id="light.living_room",
+            )
             result_dict = json.loads(result)
 
             assert result_dict["entity_id"] == "light.living_room"
@@ -484,7 +477,7 @@ class TestHomeAssistantTools:
                 },
             ]
 
-            result = await ha_tools_with_mocked_creds.list_entities()
+            result = await ha_tools_with_mocked_creds.homeassistant_read(action="list_entities")
             result_list = json.loads(result)
 
             assert len(result_list) == 2
@@ -499,7 +492,10 @@ class TestHomeAssistantTools:
         with patch.object(ha_tools_with_mocked_creds, "_api_request") as mock_request:
             mock_request.return_value = {"success": True}
 
-            result = await ha_tools_with_mocked_creds.turn_on("light.living_room")
+            result = await ha_tools_with_mocked_creds.homeassistant_control(
+                action="turn_on",
+                entity_id="light.living_room",
+            )
             result_dict = json.loads(result)
 
             assert result_dict["success"] is True
@@ -518,7 +514,11 @@ class TestHomeAssistantTools:
         with patch.object(ha_tools_with_mocked_creds, "_api_request") as mock_request:
             mock_request.return_value = {"success": True}
 
-            result = await ha_tools_with_mocked_creds.set_brightness("light.living_room", 128)
+            result = await ha_tools_with_mocked_creds.homeassistant_control(
+                action="set_brightness",
+                entity_id="light.living_room",
+                brightness=128,
+            )
             result_dict = json.loads(result)
 
             assert result_dict["success"] is True
@@ -534,7 +534,11 @@ class TestHomeAssistantTools:
         ha_tools_with_mocked_creds: HomeAssistantTools,
     ) -> None:
         """Test setting brightness with invalid value."""
-        result = await ha_tools_with_mocked_creds.set_brightness("light.living_room", 300)
+        result = await ha_tools_with_mocked_creds.homeassistant_control(
+            action="set_brightness",
+            entity_id="light.living_room",
+            brightness=300,
+        )
         result_dict = json.loads(result)
 
         assert result_dict["error"] == "Brightness must be between 0 and 255"
@@ -545,7 +549,11 @@ class TestHomeAssistantTools:
         with patch.object(ha_tools_with_mocked_creds, "_api_request") as mock_request:
             mock_request.return_value = {"success": True}
 
-            result = await ha_tools_with_mocked_creds.set_color("light.living_room", 255, 128, 0)
+            result = await ha_tools_with_mocked_creds.homeassistant_control(
+                action="set_color",
+                entity_id="light.living_room",
+                rgb_color=[255, 128, 0],
+            )
             result_dict = json.loads(result)
 
             assert result_dict["success"] is True
@@ -558,10 +566,14 @@ class TestHomeAssistantTools:
     @pytest.mark.asyncio
     async def test_set_color_invalid(self, ha_tools_with_mocked_creds: HomeAssistantTools) -> None:
         """Test setting color with invalid RGB values."""
-        result = await ha_tools_with_mocked_creds.set_color("light.living_room", 255, 300, 0)
+        result = await ha_tools_with_mocked_creds.homeassistant_control(
+            action="set_color",
+            entity_id="light.living_room",
+            rgb_color=[255, 300, 0],
+        )
         result_dict = json.loads(result)
 
-        assert result_dict["error"] == "RGB values must be between 0 and 255"
+        assert result_dict["error"] == "RGB values must be three integers between 0 and 255"
 
     @pytest.mark.asyncio
     async def test_call_service_with_json_data(
@@ -573,11 +585,12 @@ class TestHomeAssistantTools:
             mock_request.return_value = {"success": True}
 
             data_json = '{"brightness": 200, "transition": 2}'
-            result = await ha_tools_with_mocked_creds.call_service(
-                "light",
-                "turn_on",
-                "light.living_room",
-                data_json,
+            result = await ha_tools_with_mocked_creds.homeassistant_control(
+                action="call_service",
+                domain="light",
+                service="turn_on",
+                entity_id="light.living_room",
+                data=data_json,
             )
             result_dict = json.loads(result)
 
@@ -594,11 +607,12 @@ class TestHomeAssistantTools:
         ha_tools_with_mocked_creds: HomeAssistantTools,
     ) -> None:
         """Test calling a service with invalid JSON data."""
-        result = await ha_tools_with_mocked_creds.call_service(
-            "light",
-            "turn_on",
-            "light.living_room",
-            "invalid json{",
+        result = await ha_tools_with_mocked_creds.homeassistant_control(
+            action="call_service",
+            domain="light",
+            service="turn_on",
+            entity_id="light.living_room",
+            data="invalid json{",
         )
         result_dict = json.loads(result)
 

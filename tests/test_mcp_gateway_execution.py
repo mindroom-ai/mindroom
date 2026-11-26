@@ -629,8 +629,8 @@ async def test_cancelled_google_drive_call_keeps_capacity_until_its_body_returns
         return await gateway.invoke_tool(
             context,
             toolkit="calculator",
-            function="google_drive_create_folder",
-            arguments={"name": "Plans"},
+            function="google_drive_write",
+            arguments={"action": "create_folder", "name": "Plans"},
         )
 
     async with _client(dispatch, max_active_calls=1) as client:

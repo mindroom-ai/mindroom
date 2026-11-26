@@ -148,6 +148,7 @@ def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
                 dependency_extra=service,
                 auth_provider=provider.id,
                 function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
+                action_scoped_grants=tuple(f"{workspace.name}_{name}" for name in base.action_scoped_grants),
                 factory=_workspace_tool_factory(base, provider, workspace.name),
             ),
         )

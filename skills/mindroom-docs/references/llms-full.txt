@@ -12530,21 +12530,14 @@ agents:
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.
 
-| Function | What it does |
-| --- | --- |
-| `google_drive_list_files()` | Lists recently modified files. |
-| `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
-| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None, convert_to=None)` | Uploads a local file; relative paths start at the agent workspace. With `convert_to` set to `document`, `spreadsheet`, or `presentation`, Drive converts the file into a Google Doc, Sheet, or Slides file. |
-| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing file, which keeps its ID, link, and sharing. |
-| `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
-| `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
-| `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
+| Function | Actions | What it does |
+| --- | --- | --- |
+| `google_drive_read(action, ...)` | `list`, `search`, `read`, `download` | Lists recently modified files, searches metadata with a Drive `query` such as `name contains 'budget'`, returns Google Docs, Sheets, Slides, Apps Script, and plain-text files up to `max_read_size` as text, or saves `file_id` into `google-drive-downloads/<file id>/` in the agent workspace (exporting Workspace files to a native format or `export_format`). |
+| `google_drive_write(action, ...)` | `upload`, `update`, `create_folder`, `move`, `trash` | Uploads `local_path` (with optional `parent_id`, `name`, `mime_type`, `convert_to` `document`/`spreadsheet`/`presentation`), replaces contents of `file_id` keeping its ID and sharing, creates folders, moves or renames files, or moves a file to trash (never permanent delete). |
 
-Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Use `google_drive_read(action="read", ...)` to read a document or text file, and `google_drive_read(action="download", ...)` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
 Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
-When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
+When `google_drive_read(action="read", ...)` refuses a file and the `download` action is enabled, the error suggests `google_drive_read(action="download")` if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
@@ -12558,28 +12551,20 @@ Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `list_files` | `boolean` | `true` | Enable file listing. |
-| `search_files` | `boolean` | `true` | Enable metadata search. |
-| `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
-| `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
+| `list_files` | `boolean` | `true` | Enable `google_drive_read(action="list")`. |
+| `search_files` | `boolean` | `true` | Enable `google_drive_read(action="search")`. |
+| `read_file` | `boolean` | `true` | Enable `google_drive_read(action="read")`. |
+| `download_file` | `boolean` | `true` | Enable `google_drive_read(action="download")` into the agent workspace. |
+| `write` | `boolean` | `true` | Enable `google_drive_write()` (`upload`, `update`, `create_folder`, `move`, and `trash`); `false` removes it. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read(action="read")` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_read(action="download")` saves, in bytes. |
 
-To require a person to approve each Drive change, add [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules:
+To require a person to approve each Drive change, add a [Tool Approval](https://docs.mindroom.chat/tool-approval/) rule:
 
 ```yaml
 tool_approval:
   rules:
-    - match: google_drive_upload_file
-      action: require_approval
-    - match: google_drive_update_file
-      action: require_approval
-    - match: google_drive_create_folder
-      action: require_approval
-    - match: google_drive_move_file
-      action: require_approval
-    - match: google_drive_trash_file
+    - match: google_drive_write
       action: require_approval
 ```
 
@@ -12608,21 +12593,31 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 ## [`google_sheets`]
 
-`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, `update_sheet(data, spreadsheet_id=None, range_name=None)`, and `batch_update_sheet(spreadsheet_id, requests)`.
-When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
-`update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
-`update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
-`batch_update_sheet()` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
-`batch_update_sheet()` can also delete sheets, rows, and ranges, and a [Tool Approval](https://docs.mindroom.chat/tool-approval/) rule for `update_sheet` does not match it; a `*update_sheet` rule matches both, including the prefixed names of additional Google workspace accounts.
+`google_sheets` provides `google_sheets_read(spreadsheet_id=None, spreadsheet_range=None)` and `google_sheets_write(action, ...)` with actions `create`, `update`, and `batch_update`.
+When `spreadsheet_id` or `spreadsheet_range` is configured, `google_sheets_read()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
+`google_sheets_write(action="update", ...)` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
+`google_sheets_write(action="update", ...)` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+`google_sheets_write(action="batch_update", ...)` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
+`google_sheets_write(action="batch_update", ...)` can also delete sheets, rows, and ranges; add exact [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules for `google_sheets_write` and for each prefixed workspace function (such as `work_google_sheets_write`) to gate every Sheets write action:
+
+```yaml
+tool_approval:
+  rules:
+    - match: google_sheets_write
+      action: require_approval
+    - match: work_google_sheets_write
+      action: require_approval
+```
+
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `spreadsheet_id` | `text` | `null` | Spreadsheet ID used by every `read_sheet()` call. |
-| `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
-| `read` | `boolean` | `true` | Enable `read_sheet()`. |
-| `create` | `boolean` | `true` | Enable `create_sheet()`. |
-| `update` | `boolean` | `true` | Enable `update_sheet()` and `batch_update_sheet()`. |
+| `spreadsheet_id` | `text` | `null` | Spreadsheet ID used by every `google_sheets_read()` call. |
+| `spreadsheet_range` | `text` | `null` | Range used by every `google_sheets_read()` call, such as `Sheet1!A1:Z100`. |
+| `read` | `boolean` | `true` | Enable `google_sheets_read()`. |
+| `create` | `boolean` | `true` | Enable `google_sheets_write(action="create")`. |
+| `update` | `boolean` | `true` | Enable `google_sheets_write()` `update` and `batch_update` actions. |
 
 ```yaml
 agents:
@@ -14772,9 +14767,15 @@ Connect the account through the `google_gmail` OAuth provider; when no usable co
 To use a Google Workspace service account instead, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the key file path and `GOOGLE_DELEGATED_USER` to the mailbox to impersonate through domain-wide delegation.
 `gmail` always runs in the primary MindRoom runtime, even for agents whose other tools run in a worker, so workers never receive Google credentials.
 
-Its functions are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
-Archiving, trashing, attachment downloads, and sending existing drafts are not available.
-`send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
+Its functions are grouped by risk boundary:
+
+- `gmail_read(action, ...)`: `latest`, `from_user`, `unread`, `starred`, `by_context`, `by_date`, `by_thread`, `search_emails`, `get_message`, `get_thread`, `search_threads`, `get_draft`, `list_drafts`, and `list_custom_labels`.
+- `gmail_draft(action, ...)`: `create` and `update` drafts without sending.
+- `gmail_send(action, ...)`: `send` and `reply` to external recipients immediately.
+- `gmail_send_to_self(subject, body)`: always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `gmail_send`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
+- `gmail_manage(action, ...)`: `mark_read`, `mark_unread`, `star`, `unstar`, `apply_label`, `remove_label`, and `delete_custom_label`.
+
+Archiving, trashing, and sending existing drafts are not available.
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
 Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
@@ -14782,20 +14783,20 @@ With `unrestricted`, any file MindRoom can read is allowed.
 Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
-Each option below defaults to `true`, and setting it to `false` removes the matching function.
+Each option below defaults to `true`, and setting it to `false` disables the matching action (and removes the parent function once all of its actions are disabled).
 
 | Option | Type | Default | Controls |
 | --- | --- | --- | --- |
-| `get_latest_emails` | `boolean` | `true` | `get_latest_emails()` |
-| `get_emails_from_user` | `boolean` | `true` | `get_emails_from_user()` |
-| `get_unread_emails` | `boolean` | `true` | `get_unread_emails()` |
-| `get_starred_emails` | `boolean` | `true` | `get_starred_emails()` |
-| `search_emails` | `boolean` | `true` | `search_emails()` |
-| `create_draft_email` | `boolean` | `true` | `create_draft_email()` |
-| `send_email` | `boolean` | `true` | `send_email()` |
-| `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
+| `get_latest_emails` | `boolean` | `true` | `gmail_read(action="latest")` |
+| `get_emails_from_user` | `boolean` | `true` | `gmail_read(action="from_user")` |
+| `get_unread_emails` | `boolean` | `true` | `gmail_read(action="unread")` |
+| `get_starred_emails` | `boolean` | `true` | `gmail_read(action="starred")` |
+| `search_emails` | `boolean` | `true` | `gmail_read(action="search_emails")` |
+| `create_draft_email` | `boolean` | `true` | `gmail_draft(action="create")` |
+| `send_email` | `boolean` | `true` | `gmail_send(action="send")` |
+| `send_email_reply` | `boolean` | `true` | `gmail_send(action="reply")` |
 
-Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
+Use [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules matching `gmail_send`, `gmail_draft`, or `gmail_manage` to gate writes and sends separately from `gmail_read` and `gmail_send_to_self`.
 
 ## [`discord`]
 
@@ -15045,7 +15046,7 @@ Missing Python dependencies are installed at first use, as described in [Automat
 
 ## [`github`]
 
-`github` covers repository search and stats, branches, files, issues, labels, pull requests, review requests, and code search.
+`github` covers repository search and stats, branches, files, issues, labels, pull requests, review requests, and code search through five risk-scoped functions: `github_read_repo()`, `github_read_issues_prs()`, `github_write_issues()`, `github_write_pr()`, and `github_write_repo()`.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -16527,15 +16528,19 @@ If an agent calls either tool before the account is connected, the tool returns 
   <source src="https://github.com/user-attachments/assets/108f8f22-6752-414e-93dd-38154715981c" type="video/mp4">
 </video>
 
-`google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
-`find_available_slots()` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
+`google_calendar` exposes two risk-scoped functions:
+
+- `google_calendar_read(action, ...)`: `list_events`, `get_event`, `fetch_all_events`, `search_events`, `get_event_attendees`, `list_calendars`, `check_availability`, and `find_available_slots`.
+- `google_calendar_write(action, ...)`: `create_event`, `update_event`, `delete_event`, `quick_add_event`, `move_event`, and `respond_to_event`.
+
+`google_calendar_read(action="find_available_slots", ...)` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
 It reads dates and working hours in the calendar's own timezone and returns ISO timestamps with that timezone's offset, falling back to UTC only when the calendar's timezone cannot be loaded; the result's `timezone` field names the one used.
-`list_calendars()` returns the IDs of the other calendars the connected account can use.
+`google_calendar_read(action="list_calendars")` returns the IDs of the other calendars the connected account can use.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `true` | Expose `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`; set `false` for a read-only agent. |
+| `allow_update` | `boolean` | `no` | `true` | Expose `google_calendar_write()`; set `false` for a read-only agent. |
 
 ```yaml
 agents:
@@ -16547,9 +16552,10 @@ agents:
 ```
 
 ```python
-list_events(limit=5)
-find_available_slots(start_date="2026-04-01", end_date="2026-04-03", duration_minutes=30)
-create_event(
+google_calendar_read(action="list_events", limit=5)
+google_calendar_read(action="find_available_slots", start_date="2026-04-01", end_date="2026-04-03", duration_minutes=30)
+google_calendar_write(
+    action="create_event",
     start_date="2026-04-02T15:00:00",
     end_date="2026-04-02T15:30:00",
     timezone="America/Los_Angeles",
@@ -16560,8 +16566,8 @@ create_event(
 )
 ```
 
-`create_event()` reads times without an offset in its `timezone` argument, which defaults to UTC rather than MindRoom's configured `timezone`, so pass the user's IANA timezone or include an offset.
-`create_event()` emails invitations to attendees only when called with `notify_attendees=True`; by default guests are added without an email.
+`google_calendar_write(action="create_event", ...)` reads times without an offset in its `timezone` argument, which defaults to UTC rather than MindRoom's configured `timezone`, so pass the user's IANA timezone or include an offset.
+`google_calendar_write(action="create_event", ...)` emails invitations to attendees only when called with `notify_attendees=True`; by default guests are added without an email.
 
 If the Google Calendar connection lacks any required Calendar permission, the tool stays unavailable until the user reconnects and grants it.
 
@@ -16916,7 +16922,7 @@ Errors:
 ### Authored Subagents
 
 An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
-Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
+Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.gmail_read`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](https://docs.mindroom.chat/knowledge/) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
 Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) and [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) through `search_knowledge_base`.
@@ -17802,10 +17808,10 @@ shopify_analytics(action="average_order_value", group_by="day", created_after="2
   <source src="https://github.com/user-attachments/assets/30f0c744-ecaf-4fbe-9c95-08576425ab3f" type="video/mp4">
 </video>
 
-`homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
-`list_entities()` returns at most 50 entities, so pass a domain such as `light` or `sensor` to narrow it.
-`set_brightness()` takes `0` to `255`, `set_color()` takes RGB channels in the same range, and `call_service()` takes extra service data as a JSON string.
-`set_temperature()` uses the temperature unit configured in Home Assistant.
+`homeassistant` exposes two risk-scoped functions: `homeassistant_read(action, ...)` (`list_entities`, `get_state`) and `homeassistant_control(action, ...)` (`turn_on`, `turn_off`, `toggle`, `set_brightness`, `set_color`, `set_temperature`, `activate_scene`, `trigger_automation`, `call_service`).
+`homeassistant_read(action="list_entities", ...)` returns at most 50 entities, so pass a `domain` such as `light` or `sensor` to narrow it.
+`set_brightness` takes `0` to `255`, `set_color` takes `rgb_color` channels in the same range, and `call_service` takes extra service `data` as a dict or JSON string.
+`set_temperature` uses the temperature unit configured in Home Assistant.
 
 `homeassistant` requires `worker_scope` unset or `shared` (see [Shared-only integrations](https://docs.mindroom.chat/deployment/sandbox-proxy/#shared-only-integrations)).
 
@@ -17817,11 +17823,11 @@ agents:
 ```
 
 ```python
-list_entities("light")
-get_entity_state("climate.thermostat")
-set_brightness("light.living_room", 128)
-activate_scene("scene.movie_time")
-call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
+homeassistant_read(action="list_entities", domain="light")
+homeassistant_read(action="get_state", entity_id="climate.thermostat")
+homeassistant_control(action="set_brightness", entity_id="light.living_room", brightness=128)
+homeassistant_control(action="activate_scene", entity_id="scene.movie_time")
+homeassistant_control(action="call_service", domain="notify", service="send_message", data='{"message": "Dinner is ready"}')
 ```
 
 ### Connecting Home Assistant
@@ -19312,7 +19318,7 @@ Do not report or "fix" these; they are deliberate.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
-- `google_drive_download_file`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
+- `google_drive_read(action="download")`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, as is a started profile's running browser with its open tabs, so one requester can use web sessions another signed in, read pages another left open, and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
@@ -20498,7 +20504,7 @@ To set up a workspace:
 
 When a workspace tool needs a login, it returns its own chat authorization link.
 Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
-Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
+Functions are prefixed, such as `secondary_gmail_read` and `secondary_gmail_send`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `gmail_send` does not match `secondary_gmail_send`.
 
 ### Google Cloud tools
 

@@ -76,7 +76,7 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
         worker_target=_worker_target(),
     )
 
-    result = json.loads(tool.read_sheet(spreadsheet_id="sheet-id", spreadsheet_range="A1:B2"))
+    result = json.loads(tool.google_sheets_read(spreadsheet_id="sheet-id", spreadsheet_range="A1:B2"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "google_sheets"
@@ -89,13 +89,15 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
         create=True,
         update=True,
     )
-    result = json.loads(writable_tool.create_sheet("Budget"))
+    result = json.loads(writable_tool.google_sheets_write(action="create", title="Budget"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "google_sheets"
     assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
-    result = json.loads(writable_tool.batch_update_sheet("sheet-id", []))
+    result = json.loads(
+        writable_tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=[]),
+    )
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "google_sheets"
@@ -145,11 +147,9 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert list(tool.functions) == [
-        "create_sheet",
-        "update_sheet",
-        "batch_update_sheet",
-    ]
+    assert list(tool.functions) == ["google_sheets_write"]
+    offered = toolkit_offers(tool, "google_sheets_write")
+    assert offered.parameters["properties"]["action"]["enum"] == ["create", "update", "batch_update"]
 
 
 def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
@@ -164,7 +164,24 @@ def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> Non
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert "batch_update_sheet" not in tool.functions
+    offered = toolkit_offers(tool, "google_sheets_write")
+    assert offered.parameters["properties"]["action"]["enum"] == ["create"]
+    assert "requests" not in offered.parameters["properties"]
+    connected = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        update=False,
+        creds=GoogleOAuthCredentials(
+            token="valid-access-token",  # noqa: S106
+            refresh_token="valid-refresh-token",  # noqa: S106
+            token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+            client_id="client-id",
+            client_secret="client-secret",  # noqa: S106
+            scopes=("https://www.googleapis.com/auth/spreadsheets",),
+            expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+        ),
+    )
+    assert "disabled" in connected.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=[])
 
 
 def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: Path) -> None:
@@ -178,12 +195,9 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert set(tool.functions) == {
-        "read_sheet",
-        "create_sheet",
-        "update_sheet",
-        "batch_update_sheet",
-    }
+    assert set(tool.functions) == {"google_sheets_read", "google_sheets_write"}
+    offered = toolkit_offers(tool, "google_sheets_write")
+    assert offered.parameters["properties"]["action"]["enum"] == ["create", "update", "batch_update"]
 
 
 class _FakeSheetsRequest:
@@ -278,7 +292,9 @@ _FORMAT_REQUESTS: list[dict[str, object]] = [
 def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> None:
     tool, service = _connected_sheets_tool(tmp_path)
 
-    result = json.loads(tool.batch_update_sheet("sheet-id", _FORMAT_REQUESTS))
+    result = json.loads(
+        tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=_FORMAT_REQUESTS),
+    )
 
     assert result == {"spreadsheetId": "sheet-id", "replies": [{}]}
     assert service.spreadsheets_resource.batch_update_kwargs == {
@@ -290,13 +306,19 @@ def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> N
 def test_google_sheets_schemas_accept_sheets_api_requests_and_cell_values(tmp_path: Path) -> None:
     tool, _service = _connected_sheets_tool(tmp_path)
 
+    write_params = dict(toolkit_offers(tool, "google_sheets_write").parameters)
     validate_tool_arguments(
-        dict(toolkit_offers(tool, "batch_update_sheet").parameters),
-        {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
+        write_params,
+        {"action": "batch_update", "spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
     )
     validate_tool_arguments(
-        dict(toolkit_offers(tool, "update_sheet").parameters),
-        {"spreadsheet_id": "sheet-id", "range_name": "A1:C2", "data": [["Item", "Count", "Done"], ["lamp", 2, True]]},
+        write_params,
+        {
+            "action": "update",
+            "spreadsheet_id": "sheet-id",
+            "range_name": "A1:C2",
+            "data": [["Item", "Count", "Done"], ["lamp", 2, True]],
+        },
     )
 
 
@@ -320,7 +342,13 @@ def test_google_sheets_batch_update_returns_sanitized_http_error(tmp_path: Path)
         b'{"error":{"message":"provider detail"}}',
     )
 
-    result = json.loads(tool.batch_update_sheet("sheet-id", [{"deleteSheet": {"sheetId": 7}}]))
+    result = json.loads(
+        tool.google_sheets_write(
+            action="batch_update",
+            spreadsheet_id="sheet-id",
+            requests=[{"deleteSheet": {"sheetId": 7}}],
+        ),
+    )
 
     assert result == {"error": "Google Sheets request failed (HTTP 400)"}
 
@@ -332,7 +360,8 @@ def test_google_sheets_update_sheet_targets_explicit_call_args_over_configured_r
         spreadsheet_range="ReadSheet!A1:B2",
     )
 
-    write_result = tool.update_sheet(
+    write_result = tool.google_sheets_write(
+        action="update",
         data=[["Item", 42]],
         spreadsheet_id="write-sheet-id",
         range_name="WriteSheet!C3:D4",
@@ -346,7 +375,7 @@ def test_google_sheets_update_sheet_targets_explicit_call_args_over_configured_r
         "body": {"values": [["Item", 42]]},
     }
 
-    read_result = json.loads(tool.read_sheet(spreadsheet_id="ignored-read-id", spreadsheet_range="Ignored!Z9"))
+    read_result = json.loads(tool.google_sheets_read(spreadsheet_id="ignored-read-id", spreadsheet_range="Ignored!Z9"))
 
     assert read_result == [["ok"]]
     assert service.spreadsheets_resource.values_resource.get_kwargs == {
@@ -376,7 +405,12 @@ def test_google_sheets_update_sheet_requires_explicit_args_even_with_read_defaul
         spreadsheet_range="ReadSheet!A1:B2",
     )
 
-    result = tool.update_sheet(data=[["Item", 42]], spreadsheet_id=spreadsheet_id, range_name=range_name)
+    result = tool.google_sheets_write(
+        action="update",
+        data=[["Item", 42]],
+        spreadsheet_id=spreadsheet_id,
+        range_name=range_name,
+    )
 
     assert "must be provided" in result
     assert service.spreadsheets_resource.values_resource.update_kwargs is None
@@ -409,7 +443,7 @@ def test_google_sheets_readonly_scopes_reject_write_operations_even_with_write_c
         create=False,
         update=False,
     )
-    assert set(read_only_tool.functions) == {"read_sheet"}
+    assert set(read_only_tool.functions) == {"google_sheets_read"}
 
     writable_tool = GoogleSheetsTools(
         runtime_paths=_runtime_paths(tmp_path),
@@ -417,7 +451,7 @@ def test_google_sheets_readonly_scopes_reject_write_operations_even_with_write_c
         creds=write_capable_creds,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    assert "update_sheet" in writable_tool.functions
+    assert "google_sheets_write" in writable_tool.functions
 
 
 def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) -> None:
@@ -427,7 +461,7 @@ def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) 
         create=None,
         update=None,
     )
-    assert set(direct_read_only.functions) == {"read_sheet"}
+    assert set(direct_read_only.functions) == {"google_sheets_read"}
     assert direct_read_only.scopes == ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
     direct_alias_read_only = GoogleSheetsTools(
@@ -436,7 +470,7 @@ def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) 
         create_sheet=None,
         update_sheet=None,
     )
-    assert set(direct_alias_read_only.functions) == {"read_sheet"}
+    assert set(direct_alias_read_only.functions) == {"google_sheets_read"}
 
     direct_all_disabled = GoogleSheetsTools(
         runtime_paths=_runtime_paths(tmp_path),
@@ -467,7 +501,7 @@ def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) 
         tools=builtin_tool_registry(),
     )
     assert isinstance(override_tool, GoogleSheetsTools)
-    assert set(override_tool.functions) == {"read_sheet"}
+    assert set(override_tool.functions) == {"google_sheets_read"}
 
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials(
@@ -483,4 +517,28 @@ def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) 
         tools=builtin_tool_registry(),
     )
     assert isinstance(saved_config_tool, GoogleSheetsTools)
-    assert set(saved_config_tool.functions) == {"read_sheet"}
+    assert set(saved_config_tool.functions) == {"google_sheets_read"}
+
+
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected_match"),
+    [
+        ({"exclude_tools": ["update_sheet"]}, "google_sheets_write"),
+        ({"include_tools": ["read_sheet"]}, "google_sheets_read"),
+        ({"exclude_tools": ["create_duplicate_sheet"]}, "google_sheets_write"),
+        ({"exclude_tools": ["nonexistent_sheets_fn"]}, "unknown function"),
+        ({"include_tools": ["nonexistent_sheets_fn"]}, "unknown function"),
+    ],
+)
+def test_google_sheets_constructor_rejects_retired_and_unknown_tool_filters(
+    tmp_path: Path,
+    filter_kwargs: dict[str, list[str]],
+    expected_match: str,
+) -> None:
+    """Direct GoogleSheetsTools constructors fail closed on retired or unknown include/exclude tool names."""
+    with pytest.raises(ValueError, match=expected_match):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            **filter_kwargs,
+        )

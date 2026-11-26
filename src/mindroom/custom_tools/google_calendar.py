@@ -5,34 +5,63 @@ from __future__ import annotations
 import datetime
 import json
 import uuid
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from googleapiclient.errors import HttpError
 
-from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, visible_google_function_map
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
+from mindroom.custom_tools.google_service import (
+    GoogleApiToolkit,
+    filter_google_tools,
+    matches_google_function,
+    restrict_google_actions,
+    visible_google_function_map,
+)
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
 
-_CALENDAR_FUNCTION_NAMES = (
+_CALENDAR_FUNCTION_NAMES = ("google_calendar_read", "google_calendar_write")
+_ReadAction = Literal[
     "list_events",
     "get_event",
     "fetch_all_events",
-    "find_available_slots",
+    "search_events",
+    "get_event_attendees",
     "list_calendars",
     "check_availability",
-    "get_event_attendees",
+    "find_available_slots",
+]
+_WriteAction = Literal[
+    "create_event",
+    "update_event",
+    "delete_event",
+    "quick_add_event",
+    "move_event",
+    "respond_to_event",
+]
+_ALL_READ_ACTIONS: tuple[str, ...] = (
+    "list_events",
+    "get_event",
+    "fetch_all_events",
     "search_events",
+    "get_event_attendees",
+    "list_calendars",
+    "check_availability",
+    "find_available_slots",
+)
+_ALL_WRITE_ACTIONS: tuple[str, ...] = (
     "create_event",
     "update_event",
     "delete_event",
@@ -40,6 +69,24 @@ _CALENDAR_FUNCTION_NAMES = (
     "move_event",
     "respond_to_event",
 )
+_READ_ACTION_FIELDS: dict[str, str] = {
+    "list_events": "limit start_date end_date page_token",
+    "get_event": "event_id",
+    "fetch_all_events": "limit start_date end_date",
+    "search_events": "query limit start_date end_date page_token",
+    "get_event_attendees": "event_id",
+    "list_calendars": "page_token",
+    "check_availability": "start_date end_date attendee_emails timezone",
+    "find_available_slots": "start_date end_date duration_minutes",
+}
+_WRITE_ACTION_FIELDS: dict[str, str] = {
+    "create_event": "title start_date end_date description location timezone attendees add_google_meet_link notify_attendees",
+    "update_event": "event_id title start_date end_date description location timezone attendees notify_attendees",
+    "delete_event": "event_id notify_attendees",
+    "quick_add_event": "text",
+    "move_event": "event_id destination_calendar_id notify_attendees",
+    "respond_to_event": "event_id response",
+}
 _UNSET = object()
 _VALID_RESPONSES = frozenset({"accepted", "declined", "tentative"})
 _CALENDAR_WRITE_SCOPES = frozenset(
@@ -72,17 +119,7 @@ _CALENDAR_FREEBUSY_SCOPES = frozenset(
         "https://www.googleapis.com/auth/calendar.events.freebusy",
     },
 )
-_CALENDAR_WRITE_TOOLS = frozenset(
-    {
-        "create_event",
-        "update_event",
-        "delete_event",
-        "quick_add_event",
-        "move_event",
-        "respond_to_event",
-    },
-)
-_CALENDAR_EVENT_READ_TOOLS = frozenset(
+_CALENDAR_EVENT_READ_ACTIONS = frozenset(
     {
         "list_events",
         "get_event",
@@ -92,46 +129,35 @@ _CALENDAR_EVENT_READ_TOOLS = frozenset(
         "search_events",
     },
 )
-_CALENDAR_LIST_TOOLS = frozenset({"list_calendars"})
-_CALENDAR_FREEBUSY_TOOLS = frozenset({"check_availability"})
 
 
-def _validate_calendar_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
-    """Ensure explicit scopes cover every registered Calendar operation."""
+def _validate_calendar_scopes(
+    registered_names: Collection[str],
+    *,
+    read_actions: Collection[str],
+    write_actions: Collection[str],
+    scopes: Collection[str],
+) -> None:
+    """Ensure explicit scopes cover every enabled Calendar operation."""
     registered = set(registered_names)
     scope_set = set(scopes)
-    if registered & _CALENDAR_WRITE_TOOLS and not (_CALENDAR_WRITE_SCOPES & scope_set):
+    if "google_calendar_write" in registered and write_actions and not (_CALENDAR_WRITE_SCOPES & scope_set):
         msg = (
             "A Google Calendar write scope (https://www.googleapis.com/auth/calendar or "
             "https://www.googleapis.com/auth/calendar.events) is required for write operations"
         )
         raise ValueError(msg)
-    if registered & _CALENDAR_EVENT_READ_TOOLS and not (_CALENDAR_EVENT_READ_SCOPES & scope_set):
-        msg = "A Google Calendar event read scope is required for event read operations"
-        raise ValueError(msg)
-    if registered & _CALENDAR_LIST_TOOLS and not (_CALENDAR_LIST_SCOPES & scope_set):
-        msg = "A Google Calendar list scope is required for list_calendars"
-        raise ValueError(msg)
-    if registered & _CALENDAR_FREEBUSY_TOOLS and not (_CALENDAR_FREEBUSY_SCOPES & scope_set):
-        msg = "A Google Calendar free/busy scope is required for check_availability"
-        raise ValueError(msg)
-
-
-def _calendar_tips(visible: dict[str, str]) -> list[str]:
-    tips: list[str] = []
-    if "get_event" in visible and "update_event" in visible:
-        tips.append(f"- Use {visible['get_event']} to fetch full details before updating an event")
-    if "check_availability" in visible:
-        tips.append(f"- Use {visible['check_availability']} to check multiple people's schedules at once")
-    if "quick_add_event" in visible:
-        tips.append(f"- Use {visible['quick_add_event']} for simple events from natural language descriptions")
-    if "search_events" in visible:
-        tips.append(f"- Use {visible['search_events']} for full-text search across event fields")
-    if "list_events" in visible:
-        id_consumers = [visible[name] for name in ("get_event", "update_event", "delete_event") if name in visible]
-        if id_consumers:
-            tips.append(f"- Event IDs from {visible['list_events']} can be used with {', '.join(id_consumers)}")
-    return tips
+    if "google_calendar_read" in registered:
+        enabled_reads = set(read_actions)
+        if enabled_reads & _CALENDAR_EVENT_READ_ACTIONS and not (_CALENDAR_EVENT_READ_SCOPES & scope_set):
+            msg = "A Google Calendar event read scope is required for event read operations"
+            raise ValueError(msg)
+        if "list_calendars" in enabled_reads and not (_CALENDAR_LIST_SCOPES & scope_set):
+            msg = "A Google Calendar list scope is required for list_calendars"
+            raise ValueError(msg)
+        if "check_availability" in enabled_reads and not (_CALENDAR_FREEBUSY_SCOPES & scope_set):
+            msg = "A Google Calendar free/busy scope is required for check_availability"
+            raise ValueError(msg)
 
 
 def _to_local_date(value: str, tz: datetime.tzinfo) -> datetime.date:
@@ -280,11 +306,11 @@ class GoogleCalendarTools(GoogleApiToolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
-        scopes: Sequence[str] | None = None,
         calendar_id: str = "primary",
+        allow_update: bool | None = True,
+        scopes: Sequence[str] | None = None,
         max_results: int = 20,
         expand_recurring: bool = True,
-        allow_update: bool | None = True,
         list_events: bool | None = True,
         get_event: bool | None = True,
         fetch_all_events: bool | None = True,
@@ -310,28 +336,43 @@ class GoogleCalendarTools(GoogleApiToolkit):
         self.scopes = list(self.default_scopes) if scopes is None else list(scopes)
         self._custom_instructions = instructions
 
+        read_toggles: tuple[tuple[bool | None, str], ...] = (
+            (list_events, "list_events"),
+            (get_event, "get_event"),
+            (fetch_all_events, "fetch_all_events"),
+            (search_events, "search_events"),
+            (get_event_attendees, "get_event_attendees"),
+            (list_calendars, "list_calendars"),
+            (check_availability, "check_availability"),
+            (find_available_slots, "find_available_slots"),
+        )
+        self._read_actions: tuple[str, ...] = tuple(action for enabled, action in read_toggles if enabled)
+
         writes_allowed = allow_update is True
-        read_toggles: tuple[tuple[bool | None, Callable[..., str]], ...] = (
-            (list_events, self.list_events),
-            (get_event, self.get_event),
-            (fetch_all_events, self.fetch_all_events),
-            (find_available_slots, self.find_available_slots),
-            (list_calendars, self.list_calendars),
-            (check_availability, self.check_availability),
-            (get_event_attendees, self.get_event_attendees),
-            (search_events, self.search_events),
+        write_toggles: tuple[tuple[object, str], ...] = (
+            (create_event, "create_event"),
+            (update_event, "update_event"),
+            (delete_event, "delete_event"),
+            (quick_add_event, "quick_add_event"),
+            (move_event, "move_event"),
+            (respond_to_event, "respond_to_event"),
         )
-        write_toggles: tuple[tuple[object, Callable[..., str]], ...] = (
-            (create_event, self.create_event),
-            (update_event, self.update_event),
-            (delete_event, self.delete_event),
-            (quick_add_event, self.quick_add_event),
-            (move_event, self.move_event),
-            (respond_to_event, self.respond_to_event),
+        self._write_actions: tuple[str, ...] = tuple(
+            action for flag, action in write_toggles if writes_allowed and (flag is _UNSET or bool(flag))
         )
-        tools: list[Callable[..., str]] = [method for enabled, method in read_toggles if enabled]
-        tools.extend(method for flag, method in write_toggles if writes_allowed and (flag is _UNSET or bool(flag)))
-        tools = filter_google_tools(tools, include_tools, exclude_tools)
+
+        tools: list[Callable[..., str]] = []
+        if self._read_actions:
+            tools.append(self.google_calendar_read)
+        if self._write_actions:
+            tools.append(self.google_calendar_write)
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_calendar"],
+            known_tools=("google_calendar_read", "google_calendar_write"),
+        )
 
         super().__init__(
             name="google_calendar",
@@ -342,11 +383,28 @@ class GoogleCalendarTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
-        _validate_calendar_scopes(self.functions, self.scopes)
+        _validate_calendar_scopes(
+            self.functions,
+            read_actions=self._read_actions,
+            write_actions=self._write_actions,
+            scopes=self.scopes,
+        )
 
     def _service_account_scopes(self) -> tuple[str, ...]:
         """Return Calendar service-account scopes, honoring explicit constructor scopes."""
         return tuple(self.scopes)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict calendar action enums and parameters to enabled actions."""
+        if matches_google_function(function.name, "google_calendar_read") and len(self._read_actions) < len(
+            _ALL_READ_ACTIONS,
+        ):
+            return restrict_google_actions(function, self._read_actions, _READ_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_calendar_write") and len(self._write_actions) < len(
+            _ALL_WRITE_ACTIONS,
+        ):
+            return restrict_google_actions(function, self._write_actions, _WRITE_ACTION_FIELDS)
+        return function
 
     @property
     def instructions(self) -> str:  # ty: ignore[incompatible-property-override]
@@ -354,44 +412,29 @@ class GoogleCalendarTools(GoogleApiToolkit):
         return self.instructions_for(self.functions)
 
     def instructions_for(self, function_names: Collection[str]) -> str:
-        """Return Google Calendar guidance naming only the functions offered in ``function_names``."""
+        """Return Google Calendar guidance naming only offered functions."""
         if self._custom_instructions is not None:
             return self._custom_instructions
         visible = visible_google_function_map(function_names, _CALENDAR_FUNCTION_NAMES)
         if not visible:
             return ""
+        lines = ["- All dates use ISO format: YYYY-MM-DDTHH:MM:SS"]
+        if "google_calendar_write" in visible and (
+            "create_event" in self._write_actions or "update_event" in self._write_actions
+        ):
+            lines.append(
+                f"- When calling `{visible['google_calendar_write']}` to create or update events, "
+                "specify an IANA `timezone` or include an offset (defaults to UTC)",
+            )
+        return "\n".join(lines)
 
-        date_lines = ["- All dates use ISO format: YYYY-MM-DDTHH:MM:SS"]
-        if "create_event" in visible or "update_event" in visible:
-            date_lines.append("- Always specify timezone when creating events")
-
-        sections = [
-            "You have access to Google Calendar tools for managing events and scheduling.",
-            "## Date/Time Formats\n" + "\n".join(date_lines),
-        ]
-        if tips := _calendar_tips(visible):
-            sections.append("## Tips\n" + "\n".join(tips))
-        return "\n\n".join(sections)
-
-    def list_events(
+    def _list_events(
         self,
         limit: int = 10,
         start_date: str | None = None,
         end_date: str | None = None,
         page_token: str | None = None,
     ) -> str:
-        """List upcoming events from the user's Google Calendar.
-
-        Args:
-            limit: Number of events to return (default: 10).
-            start_date: Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now.
-            end_date: End date in ISO format. Only events starting before this are returned.
-            page_token: Token from a previous response to fetch the next page.
-
-        Returns:
-            JSON string containing events and nextPageToken if more results exist.
-
-        """
         if start_date is None:
             resolved_start = datetime.datetime.now(datetime.UTC).isoformat()
         else:
@@ -432,156 +475,6 @@ class GoogleCalendarTools(GoogleApiToolkit):
             result["message"] = "No upcoming events found."
         return json.dumps(result)
 
-    def create_event(
-        self,
-        start_date: str = "",
-        end_date: str = "",
-        title: str | None = None,
-        description: str | None = None,
-        location: str | None = None,
-        timezone: str | None = "UTC",
-        attendees: list[str] | None = None,
-        add_google_meet_link: bool | None = False,
-        notify_attendees: bool | None = False,
-    ) -> str:
-        """Create a new event in the Google Calendar.
-
-        Args:
-            start_date: Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS).
-            end_date: End date and time in ISO format (YYYY-MM-DDTHH:MM:SS).
-            title: Title/summary of the event.
-            description: Detailed description of the event.
-            location: Location of the event.
-            timezone: Timezone for the event (default: UTC).
-            attendees: List of attendee email addresses.
-            add_google_meet_link: Whether to add a Google Meet video link.
-            notify_attendees: Whether to send email notifications to attendees.
-
-        Returns:
-            JSON string containing the created event or error message.
-
-        """
-        try:
-            start_time = _format_event_datetime(start_date)
-            end_time = _format_event_datetime(end_date)
-        except ValueError:
-            return json.dumps({"error": "Invalid datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS)."})
-
-        event: dict[str, Any] = {
-            "summary": title,
-            "location": location,
-            "description": description,
-            "start": {"dateTime": start_time, "timeZone": timezone},
-            "end": {"dateTime": end_time, "timeZone": timezone},
-            "attendees": [{"email": attendee} for attendee in attendees] if attendees else [],
-        }
-        if add_google_meet_link:
-            event["conferenceData"] = {
-                "createRequest": {"requestId": str(uuid.uuid4()), "conferenceSolutionKey": {"type": "hangoutsMeet"}},
-            }
-        event = {key: value for key, value in event.items() if value is not None}
-        send_updates = "all" if notify_attendees and attendees else "none"
-
-        try:
-            service = self._google_api_service()
-            event_result = (
-                service.events()
-                .insert(
-                    calendarId=self.calendar_id,
-                    body=event,
-                    conferenceDataVersion=1 if add_google_meet_link else 0,
-                    sendUpdates=send_updates,
-                )
-                .execute()
-            )
-        except HttpError as exc:
-            return _calendar_http_error("create_event", exc)
-        return json.dumps(event_result)
-
-    def update_event(
-        self,
-        event_id: str = "",
-        title: str | None = None,
-        description: str | None = None,
-        location: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        timezone: str | None = None,
-        attendees: list[str] | None = None,
-        notify_attendees: bool | None = False,
-    ) -> str:
-        """Update an existing event in the Google Calendar.
-
-        Args:
-            event_id: ID of the event to update.
-            title: New title/summary.
-            description: New description.
-            location: New location.
-            start_date: New start date/time in ISO format.
-            end_date: New end date/time in ISO format.
-            timezone: New timezone.
-            attendees: Updated list of attendee email addresses.
-            notify_attendees: Whether to send email notifications.
-
-        Returns:
-            JSON string containing the updated event or error message.
-
-        """
-        formatted_start: str | None = None
-        formatted_end: str | None = None
-        if start_date:
-            try:
-                formatted_start = _format_event_datetime(start_date)
-            except ValueError:
-                return json.dumps({"error": f"Invalid start datetime format: {start_date}. Use ISO format."})
-        if end_date:
-            try:
-                formatted_end = _format_event_datetime(end_date)
-            except ValueError:
-                return json.dumps({"error": f"Invalid end datetime format: {end_date}. Use ISO format."})
-
-        try:
-            service = self._google_api_service()
-            event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
-            _apply_event_updates(
-                event,
-                title=title,
-                description=description,
-                location=location,
-                attendees=attendees,
-                formatted_start=formatted_start,
-                formatted_end=formatted_end,
-                timezone=timezone,
-            )
-            send_updates = "all" if notify_attendees and attendees else "none"
-            updated_event = (
-                service.events()
-                .update(calendarId=self.calendar_id, eventId=event_id, body=event, sendUpdates=send_updates)
-                .execute()
-            )
-        except HttpError as exc:
-            return _calendar_http_error("update_event", exc)
-        return json.dumps(updated_event)
-
-    def delete_event(self, event_id: str = "", notify_attendees: bool | None = True) -> str:
-        """Delete an event from the Google Calendar.
-
-        Args:
-            event_id: ID of the event to delete.
-            notify_attendees: Whether to send notifications to attendees (default: True).
-
-        Returns:
-            JSON string containing success or error message.
-
-        """
-        send_updates = "all" if notify_attendees else "none"
-        try:
-            service = self._google_api_service()
-            service.events().delete(calendarId=self.calendar_id, eventId=event_id, sendUpdates=send_updates).execute()
-        except HttpError as exc:
-            return _calendar_http_error("delete_event", exc)
-        return json.dumps({"success": True, "message": f"Event {event_id} deleted successfully."})
-
     def _fetch_all_events_list(
         self,
         max_results: int = 10,
@@ -612,25 +505,12 @@ class GoogleCalendarTools(GoogleApiToolkit):
                 break
         return all_events
 
-    def fetch_all_events(
+    def _fetch_all_events(
         self,
         max_results: int = 10,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> str:
-        """Fetch all Google Calendar events in a given date range.
-
-        Paginates through results automatically to retrieve every matching event.
-
-        Args:
-            max_results: Number of events to fetch per page (default: 10, max: 100).
-            start_date: Start of range in ISO format (YYYY-MM-DDTHH:MM:SS).
-            end_date: End of range in ISO format (YYYY-MM-DDTHH:MM:SS).
-
-        Returns:
-            JSON string containing all events or error message.
-
-        """
         try:
             all_events = self._fetch_all_events_list(
                 max_results=max_results,
@@ -657,27 +537,12 @@ class GoogleCalendarTools(GoogleApiToolkit):
         start_hour, end_hour = _working_hours_for_locale(locale)
         return start_hour, end_hour, tz, locale
 
-    def find_available_slots(
+    def _find_available_slots(
         self,
         start_date: str = "",
         end_date: str = "",
         duration_minutes: int = 30,
     ) -> str:
-        """Find available time slots within a date range based on your calendar.
-
-        Checks existing events against working hours to find free windows.
-        Dates, working hours and the returned slots are in your Google Calendar timezone, or UTC if that
-        timezone cannot be loaded; the result's "timezone" field names the one used.
-
-        Args:
-            start_date: Start date in ISO format (YYYY-MM-DD).
-            end_date: End date in ISO format (YYYY-MM-DD).
-            duration_minutes: Length of the desired slot in minutes (default: 30).
-
-        Returns:
-            JSON string containing available time slots or error message.
-
-        """
         try:
             working_hours_start, working_hours_end, tz, locale = self._load_working_hours()
             user_tz: datetime.tzinfo
@@ -723,16 +588,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             logger.warning("google_calendar_find_slots_failed", error_type=type(exc).__name__)
             return json.dumps({"error": f"An error occurred: {exc}"})
 
-    def list_calendars(self, page_token: str | None = None) -> str:
-        """List all available Google Calendars for the authenticated user.
-
-        Args:
-            page_token: Token from a previous response to fetch the next page.
-
-        Returns:
-            JSON string containing calendars and nextPageToken if more results exist.
-
-        """
+    def _list_calendars(self, page_token: str | None = None) -> str:
         params: dict[str, Any] = {"maxResults": min(self.max_results, 250)}
         if page_token:
             params["pageToken"] = page_token
@@ -761,16 +617,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             result["nextPageToken"] = calendar_list["nextPageToken"]
         return json.dumps(result)
 
-    def get_event(self, event_id: str = "") -> str:
-        """Get full details of a single Google Calendar event by its ID.
-
-        Args:
-            event_id: The unique identifier of the event.
-
-        Returns:
-            JSON string with full event details.
-
-        """
+    def _get_event(self, event_id: str = "") -> str:
         try:
             service = self._google_api_service()
             event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
@@ -778,48 +625,13 @@ class GoogleCalendarTools(GoogleApiToolkit):
             return _calendar_http_error("get_event", exc)
         return json.dumps(event)
 
-    def quick_add_event(self, text: str = "") -> str:
-        """Create a Google Calendar event from a natural language description.
-
-        Examples: "Meeting with John tomorrow 3pm", "Lunch at noon on Friday".
-
-        Args:
-            text: Natural language description of the event including date, time, and title.
-
-        Returns:
-            JSON string containing the created event or error message.
-
-        """
-        try:
-            service = self._google_api_service()
-            event = service.events().quickAdd(calendarId=self.calendar_id, text=text).execute()
-        except HttpError as exc:
-            return _calendar_http_error("quick_add_event", exc)
-        return json.dumps(event)
-
-    def check_availability(
+    def _check_availability(
         self,
         start_date: str = "",
         end_date: str = "",
         attendee_emails: list[str] | None = None,
         timezone: str | None = None,
     ) -> str:
-        """Check availability of one or more people within a time window.
-
-        Returns busy time ranges for each attendee.
-        Use "me" or omit attendee_emails to check the authenticated user's own calendar.
-
-        Args:
-            start_date: Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS).
-            end_date: End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS).
-            attendee_emails: Email addresses to check availability for. Defaults to the authenticated user's calendar
-                if not provided. Use "me" for the authenticated user alongside other emails.
-            timezone: Timezone for the query (default: UTC).
-
-        Returns:
-            JSON string with busy periods for each attendee.
-
-        """
         resolved = ["primary" if email in ("me", "primary") else email for email in (attendee_emails or ["me"])]
         try:
             start_iso = _parse_utc_iso(start_date)
@@ -862,7 +674,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             },
         )
 
-    def search_events(
+    def _search_events(
         self,
         query: str = "",
         start_date: str | None = None,
@@ -870,21 +682,6 @@ class GoogleCalendarTools(GoogleApiToolkit):
         max_results: int = 10,
         page_token: str | None = None,
     ) -> str:
-        """Search Google Calendar events by text across summary, description, location, and attendees.
-
-        Unlike list_events which returns upcoming events, this performs full-text search.
-
-        Args:
-            query: Free-text search terms.
-            start_date: Start of search window in ISO format.
-            end_date: End of search window in ISO format.
-            max_results: Maximum number of events to return (default: 10).
-            page_token: Token from a previous response to fetch the next page.
-
-        Returns:
-            JSON string containing events and nextPageToken if more results exist.
-
-        """
         params: dict[str, Any] = {
             "calendarId": self.calendar_id,
             "q": query,
@@ -914,51 +711,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             result["message"] = f"No events found matching '{query}'."
         return json.dumps(result)
 
-    def move_event(
-        self,
-        event_id: str = "",
-        destination_calendar_id: str = "",
-        notify_attendees: bool | None = False,
-    ) -> str:
-        """Move a Google Calendar event to a different calendar.
-
-        Args:
-            event_id: ID of the event to move.
-            destination_calendar_id: ID of the target calendar.
-            notify_attendees: Whether to notify attendees of the move.
-
-        Returns:
-            JSON string containing the moved event or error message.
-
-        """
-        send_updates = "all" if notify_attendees else "none"
-        try:
-            service = self._google_api_service()
-            moved_event = (
-                service.events()
-                .move(
-                    calendarId=self.calendar_id,
-                    eventId=event_id,
-                    destination=destination_calendar_id,
-                    sendUpdates=send_updates,
-                )
-                .execute()
-            )
-        except HttpError as exc:
-            return _calendar_http_error("move_event", exc)
-        return json.dumps(moved_event)
-
-    def get_event_attendees(self, event_id: str = "") -> str:
-        """Get the attendee list and their RSVP statuses for a Google Calendar event.
-
-        Args:
-            event_id: ID of the event.
-
-        Returns:
-            JSON string with attendees, their emails, names, and response statuses
-            (accepted, declined, tentative, needsAction).
-
-        """
+    def _get_event_attendees(self, event_id: str = "") -> str:
         try:
             service = self._google_api_service()
             event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
@@ -984,17 +737,146 @@ class GoogleCalendarTools(GoogleApiToolkit):
             },
         )
 
-    def respond_to_event(self, event_id: str = "", response: str = "") -> str:
-        """Set the authenticated user's attendance response for a Google Calendar event.
+    def _create_event(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        title: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        timezone: str | None = None,
+        attendees: list[str] | None = None,
+        add_google_meet_link: bool = False,
+        notify_attendees: bool | None = None,
+    ) -> str:
+        try:
+            start_time = _format_event_datetime(start_date)
+            end_time = _format_event_datetime(end_date)
+        except ValueError:
+            return json.dumps({"error": "Invalid datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS)."})
 
-        Args:
-            event_id: ID of the event.
-            response: Response status - one of "accepted", "declined", or "tentative".
+        tz = timezone or "UTC"
+        event: dict[str, Any] = {
+            "summary": title,
+            "location": location,
+            "description": description,
+            "start": {"dateTime": start_time, "timeZone": tz},
+            "end": {"dateTime": end_time, "timeZone": tz},
+            "attendees": [{"email": attendee} for attendee in attendees] if attendees else [],
+        }
+        if add_google_meet_link:
+            event["conferenceData"] = {
+                "createRequest": {"requestId": str(uuid.uuid4()), "conferenceSolutionKey": {"type": "hangoutsMeet"}},
+            }
+        event = {key: value for key, value in event.items() if value is not None}
+        send_updates = "all" if notify_attendees and attendees else "none"
 
-        Returns:
-            JSON string containing the updated event or error message.
+        try:
+            service = self._google_api_service()
+            event_result = (
+                service.events()
+                .insert(
+                    calendarId=self.calendar_id,
+                    body=event,
+                    conferenceDataVersion=1 if add_google_meet_link else 0,
+                    sendUpdates=send_updates,
+                )
+                .execute()
+            )
+        except HttpError as exc:
+            return _calendar_http_error("create_event", exc)
+        return json.dumps(event_result)
 
-        """
+    def _update_event(
+        self,
+        event_id: str = "",
+        title: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        timezone: str | None = None,
+        attendees: list[str] | None = None,
+        notify_attendees: bool | None = None,
+    ) -> str:
+        formatted_start: str | None = None
+        formatted_end: str | None = None
+        if start_date:
+            try:
+                formatted_start = _format_event_datetime(start_date)
+            except ValueError:
+                return json.dumps({"error": f"Invalid start datetime format: {start_date}. Use ISO format."})
+        if end_date:
+            try:
+                formatted_end = _format_event_datetime(end_date)
+            except ValueError:
+                return json.dumps({"error": f"Invalid end datetime format: {end_date}. Use ISO format."})
+
+        try:
+            service = self._google_api_service()
+            event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
+            _apply_event_updates(
+                event,
+                title=title,
+                description=description,
+                location=location,
+                attendees=attendees,
+                formatted_start=formatted_start,
+                formatted_end=formatted_end,
+                timezone=timezone,
+            )
+            send_updates = "all" if notify_attendees and attendees else "none"
+            updated_event = (
+                service.events()
+                .update(calendarId=self.calendar_id, eventId=event_id, body=event, sendUpdates=send_updates)
+                .execute()
+            )
+        except HttpError as exc:
+            return _calendar_http_error("update_event", exc)
+        return json.dumps(updated_event)
+
+    def _delete_event(self, event_id: str = "", notify_attendees: bool | None = None) -> str:
+        should_notify = True if notify_attendees is None else notify_attendees
+        send_updates = "all" if should_notify else "none"
+        try:
+            service = self._google_api_service()
+            service.events().delete(calendarId=self.calendar_id, eventId=event_id, sendUpdates=send_updates).execute()
+        except HttpError as exc:
+            return _calendar_http_error("delete_event", exc)
+        return json.dumps({"success": True, "message": f"Event {event_id} deleted successfully."})
+
+    def _quick_add_event(self, text: str = "") -> str:
+        try:
+            service = self._google_api_service()
+            event = service.events().quickAdd(calendarId=self.calendar_id, text=text).execute()
+        except HttpError as exc:
+            return _calendar_http_error("quick_add_event", exc)
+        return json.dumps(event)
+
+    def _move_event(
+        self,
+        event_id: str = "",
+        destination_calendar_id: str = "",
+        notify_attendees: bool | None = None,
+    ) -> str:
+        send_updates = "all" if notify_attendees else "none"
+        try:
+            service = self._google_api_service()
+            moved_event = (
+                service.events()
+                .move(
+                    calendarId=self.calendar_id,
+                    eventId=event_id,
+                    destination=destination_calendar_id,
+                    sendUpdates=send_updates,
+                )
+                .execute()
+            )
+        except HttpError as exc:
+            return _calendar_http_error("move_event", exc)
+        return json.dumps(moved_event)
+
+    def _respond_to_event(self, event_id: str = "", response: str = "") -> str:
         if response not in _VALID_RESPONSES:
             valid = ", ".join(sorted(_VALID_RESPONSES))
             return json.dumps({"error": f"Invalid response '{response}'. Must be one of: {valid}"})
@@ -1027,3 +909,128 @@ class GoogleCalendarTools(GoogleApiToolkit):
         except HttpError as exc:
             return _calendar_http_error("respond_to_event", exc)
         return json.dumps(updated_event)
+
+    def google_calendar_read(  # noqa: PLR0911
+        self,
+        action: _ReadAction,
+        event_id: str | None = None,
+        query: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 10,
+        page_token: str | None = None,
+        duration_minutes: int = 30,
+        attendee_emails: list[str] | None = None,
+        timezone: str | None = None,
+    ) -> str:
+        """Read Google Calendar events, calendars, attendees, and availability.
+
+        - `list_events`: list upcoming events (`limit`, optional `start_date`, `end_date`, `page_token`)
+        - `get_event`: get full details for `event_id`
+        - `fetch_all_events`: paginate all events in range (`limit` per page, optional `start_date`, `end_date`)
+        - `search_events`: full-text search with `query` (`limit`, optional `start_date`, `end_date`, `page_token`)
+        - `get_event_attendees`: list attendees and RSVP statuses for `event_id`
+        - `list_calendars`: list accessible calendars (optional `page_token`)
+        - `check_availability`: check free/busy between `start_date` and `end_date` (optional `attendee_emails`, `timezone`)
+        - `find_available_slots`: find free working-hours slots of `duration_minutes` between `start_date` and `end_date`
+        """
+        if action not in self._read_actions:
+            return json.dumps({"error": f"Google Calendar action {action!r} is disabled."})
+        if action == "list_events":
+            return self._list_events(limit=limit, start_date=start_date, end_date=end_date, page_token=page_token)
+        if action == "get_event":
+            return self._get_event(event_id=event_id or "")
+        if action == "fetch_all_events":
+            return self._fetch_all_events(max_results=limit, start_date=start_date, end_date=end_date)
+        if action == "search_events":
+            return self._search_events(
+                query=query or "",
+                start_date=start_date,
+                end_date=end_date,
+                max_results=limit,
+                page_token=page_token,
+            )
+        if action == "get_event_attendees":
+            return self._get_event_attendees(event_id=event_id or "")
+        if action == "list_calendars":
+            return self._list_calendars(page_token=page_token)
+        if action == "check_availability":
+            return self._check_availability(
+                start_date=start_date or "",
+                end_date=end_date or "",
+                attendee_emails=attendee_emails,
+                timezone=timezone,
+            )
+        if action == "find_available_slots":
+            return self._find_available_slots(
+                start_date=start_date or "",
+                end_date=end_date or "",
+                duration_minutes=duration_minutes,
+            )
+        return json.dumps({"error": f"Unsupported Google Calendar read action {action!r}."})
+
+    def google_calendar_write(  # noqa: PLR0911
+        self,
+        action: _WriteAction,
+        event_id: str | None = None,
+        title: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        timezone: str | None = None,
+        attendees: list[str] | None = None,
+        add_google_meet_link: bool = False,
+        notify_attendees: bool | None = None,
+        text: str | None = None,
+        destination_calendar_id: str | None = None,
+        response: Literal["accepted", "declined", "tentative"] | None = None,
+    ) -> str:
+        """Create, update, move, RSVP to, or delete Google Calendar events.
+
+        - `create_event`: create event (`start_date`, `end_date`, optional `title`, `description`, `location`, `timezone` default UTC, `attendees`, `add_google_meet_link`, `notify_attendees` default False)
+        - `update_event`: update `event_id` (`title`, `start_date`, `end_date`, `description`, `location`, `timezone`, `attendees`, `notify_attendees` default False)
+        - `delete_event`: delete `event_id` (optional `notify_attendees` default True)
+        - `quick_add_event`: create event from natural-language `text`
+        - `move_event`: move `event_id` to `destination_calendar_id` (optional `notify_attendees` default False)
+        - `respond_to_event`: set RSVP on `event_id` (`response`: `accepted`, `declined`, or `tentative`)
+        """
+        if action not in self._write_actions:
+            return json.dumps({"error": f"Google Calendar action {action!r} is disabled."})
+        if action == "create_event":
+            return self._create_event(
+                start_date=start_date or "",
+                end_date=end_date or "",
+                title=title,
+                description=description,
+                location=location,
+                timezone=timezone,
+                attendees=attendees,
+                add_google_meet_link=add_google_meet_link,
+                notify_attendees=notify_attendees,
+            )
+        if action == "update_event":
+            return self._update_event(
+                event_id=event_id or "",
+                title=title,
+                description=description,
+                location=location,
+                start_date=start_date,
+                end_date=end_date,
+                timezone=timezone,
+                attendees=attendees,
+                notify_attendees=notify_attendees,
+            )
+        if action == "delete_event":
+            return self._delete_event(event_id=event_id or "", notify_attendees=notify_attendees)
+        if action == "quick_add_event":
+            return self._quick_add_event(text=text or "")
+        if action == "move_event":
+            return self._move_event(
+                event_id=event_id or "",
+                destination_calendar_id=destination_calendar_id or "",
+                notify_attendees=notify_attendees,
+            )
+        if action == "respond_to_event":
+            return self._respond_to_event(event_id=event_id or "", response=response or "")
+        return json.dumps({"error": f"Unsupported Google Calendar write action {action!r}."})

@@ -7704,9 +7704,9 @@ class TestWorkerToolsOverride:
             worker_target=_worker_target(runtime_paths, "shared", "general", None),
             tools=builtin_tool_registry(),
         )
-        entrypoint = _offered_entrypoint(tool, "list_entities")
+        entrypoint = _offered_entrypoint(tool, "homeassistant_read")
 
-        result = asyncio.run(entrypoint())
+        result = asyncio.run(entrypoint(action="list_entities"))
         assert "Home Assistant is not configured" in result
 
     def test_get_tool_by_name_passes_override(self, monkeypatch: pytest.MonkeyPatch) -> None:

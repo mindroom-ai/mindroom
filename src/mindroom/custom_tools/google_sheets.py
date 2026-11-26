@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, google_http_error_result
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
+from mindroom.custom_tools.google_service import (
+    GoogleApiToolkit,
+    filter_google_tools,
+    google_http_error_result,
+    matches_google_function,
+    restrict_google_actions,
+)
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -26,6 +34,15 @@ _SERVICE_NAME = "Google Sheets"
 _SHEETS_READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 _SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 _UNSET = object()
+
+_WriteAction = Literal["create", "update", "batch_update", "duplicate"]
+_ALL_WRITE_ACTIONS: tuple[str, ...] = ("create", "update", "batch_update", "duplicate")
+_WRITE_ACTION_FIELDS: dict[str, str] = {
+    "create": "title",
+    "update": "spreadsheet_id range_name data",
+    "batch_update": "spreadsheet_id requests",
+    "duplicate": "spreadsheet_id title copy_permissions",
+}
 
 
 def _resolve_toggle(
@@ -109,24 +126,33 @@ class GoogleSheetsTools(GoogleApiToolkit):
         enable_update = _resolve_toggle("update", "update_sheet", update, update_sheet)
         enable_duplicate = False if create_duplicate_sheet is _UNSET else bool(create_duplicate_sheet)
 
+        write_actions: list[str] = []
+        if enable_all or enable_create:
+            write_actions.append("create")
+        if enable_all or enable_update:
+            write_actions.extend(("update", "batch_update"))
+        if enable_all or enable_duplicate:
+            write_actions.append("duplicate")
+        self._write_actions: tuple[str, ...] = tuple(write_actions)
+
         tools: list[Callable[..., str]] = []
         if enable_all or enable_read:
-            tools.append(self.read_sheet)
-        if enable_all or enable_create:
-            tools.append(self.create_sheet)
-        if enable_all or enable_update:
-            tools.append(self.update_sheet)
-        if enable_all or enable_duplicate:
-            tools.append(self.create_duplicate_sheet)
-        if enable_all or enable_update:
-            tools.append(self.batch_update_sheet)
-        tools = filter_google_tools(tools, include_tools, exclude_tools)
+            tools.append(self.google_sheets_read)
+        if self._write_actions:
+            tools.append(self.google_sheets_write)
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_sheets"],
+            known_tools=("google_sheets_read", "google_sheets_write"),
+        )
 
         registered_names = {getattr(tool, "__name__", "") for tool in tools}
         self.scopes = _resolve_sheets_scopes(
             scopes,
-            has_read_tools="read_sheet" in registered_names,
-            has_write_tools=bool(registered_names - {"read_sheet"}),
+            has_read_tools="google_sheets_read" in registered_names,
+            has_write_tools="google_sheets_write" in registered_names,
         )
 
         super().__init__(
@@ -143,20 +169,22 @@ class GoogleSheetsTools(GoogleApiToolkit):
         """Return Sheets service-account scopes matching enabled operations or explicit scopes."""
         return tuple(self.scopes)
 
-    def read_sheet(
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``google_sheets_write``'s action enum and parameters to enabled actions."""
+        if matches_google_function(function.name, "google_sheets_write") and len(self._write_actions) < len(
+            _ALL_WRITE_ACTIONS,
+        ):
+            return restrict_google_actions(function, self._write_actions, _WRITE_ACTION_FIELDS)
+        return function
+
+    def google_sheets_read(
         self,
         spreadsheet_id: str | None = None,
         spreadsheet_range: str | None = None,
     ) -> str:
-        """Read values from a Google Sheet. Prioritizes instance attributes over method parameters.
+        """Read values from a Google Sheet range as a JSON list of rows.
 
-        Args:
-            spreadsheet_id: Fallback spreadsheet ID if instance attribute is None.
-            spreadsheet_range: Fallback range if instance attribute is None.
-
-        Returns:
-            JSON of list of rows, where each row is a list of values.
-
+        Configured toolkit `spreadsheet_id` and `spreadsheet_range` override call arguments when set.
         """
         sheet_id = self.spreadsheet_id or spreadsheet_id
         sheet_range = self.spreadsheet_range or spreadsheet_range
@@ -173,16 +201,9 @@ class GoogleSheetsTools(GoogleApiToolkit):
             return f"Error reading Google Sheet: {exc}"
         return json.dumps(result.get("values", []))
 
-    def create_sheet(self, title: str) -> str:
-        """Create a Google Sheet with a given title.
-
-        Args:
-            title: The title of the Google Sheet.
-
-        Returns:
-            The URL of the created Google Sheet.
-
-        """
+    def _create_sheet(self, title: str | None) -> str:
+        if not (title and title.strip()):
+            return "title must be provided for create"
         try:
             service = self._google_api_service()
             spreadsheet = (
@@ -196,28 +217,16 @@ class GoogleSheetsTools(GoogleApiToolkit):
         spreadsheet_id = spreadsheet.get("spreadsheetId")
         return f"Spreadsheet created: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
 
-    def update_sheet(
+    def _update_sheet(
         self,
-        data: list[list[Any]],
-        spreadsheet_id: str | None = None,
-        range_name: str | None = None,
+        spreadsheet_id: str | None,
+        range_name: str | None,
+        data: list[list[Any]] | None,
     ) -> str:
-        """Update a Google Sheet with the provided data.
-
-        Note: This function can overwrite existing data in the sheet.
-        User needs to ensure that the provided range correctly matches the data that needs to be updated.
-
-        Args:
-            data: The data to update the sheet with.
-            spreadsheet_id: The ID of the Google Sheet.
-            range_name: The range of the Google Sheet to update.
-
-        Returns:
-            A message indicating the success or failure of the operation.
-
-        """
         if not (spreadsheet_id and spreadsheet_id.strip()) or not (range_name and range_name.strip()):
-            return "Spreadsheet ID and range_name must be provided in update_sheet call"
+            return "Spreadsheet ID and range_name must be provided in update call"
+        if data is None:
+            return "data must be provided in update call"
 
         try:
             service = self._google_api_service()
@@ -234,23 +243,15 @@ class GoogleSheetsTools(GoogleApiToolkit):
             return f"Error updating Google Sheet: {exc}"
         return f"Sheet updated successfully: {spreadsheet_id}"
 
-    def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict[str, Any]]) -> str:
-        """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.
-
-        Use this for changes that update_sheet cannot make, such as cell formatting, column widths,
-        frozen rows, filters, conditional formatting, merged cells, and adding or renaming sheets.
-        Each request is one Sheets API Request object, for example
-        {"repeatCell": {"range": {"sheetId": 0, "endRowIndex": 1},
-        "cell": {"userEnteredFormat": {"textFormat": {"bold": true}}}, "fields": "userEnteredFormat.textFormat.bold"}}.
-
-        Args:
-            spreadsheet_id: The ID of the Google Sheet.
-            requests: Sheets API batchUpdate Request objects.
-
-        Returns:
-            JSON with the spreadsheet ID and one reply per request.
-
-        """
+    def _batch_update_sheet(
+        self,
+        spreadsheet_id: str | None,
+        requests: list[dict[str, Any]] | None,
+    ) -> str:
+        if not (spreadsheet_id and spreadsheet_id.strip()):
+            return "spreadsheet_id must be provided for batch_update"
+        if requests is None:
+            return "requests must be provided for batch_update"
         try:
             service = self._google_api_service()
             response = (
@@ -260,26 +261,14 @@ class GoogleSheetsTools(GoogleApiToolkit):
             return google_http_error_result(_SERVICE_NAME, "batch_update", exc)
         return json.dumps(response)
 
-    def create_duplicate_sheet(
+    def _duplicate_sheet(
         self,
-        source_id: str,
-        new_title: str | None = None,
-        copy_permissions: bool = True,
+        source_id: str | None,
+        new_title: str | None,
+        copy_permissions: bool,
     ) -> str:
-        """Duplicate a Google Spreadsheet using the Google Drive API's copy feature.
-
-        This ensures an exact duplicate including formatting and data.
-        Requires the drive scope ``https://www.googleapis.com/auth/drive``.
-
-        Args:
-            source_id: The ID of the source spreadsheet.
-            new_title: Optional new title for the duplicated spreadsheet. If not provided, the source title will be used.
-            copy_permissions: Whether to copy the permissions from the source spreadsheet. Defaults to True.
-
-        Returns:
-            A link to the duplicated spreadsheet.
-
-        """
+        if not (source_id and source_id.strip()):
+            return "spreadsheet_id must be provided for duplicate"
         try:
             service = self._google_api_service()
             drive_service = build(
@@ -319,3 +308,32 @@ class GoogleSheetsTools(GoogleApiToolkit):
             logger.warning("google_sheets_duplicate_failed", error_type=type(exc).__name__)
             return f"Error duplicating spreadsheet via Drive API: {exc}"
         return f"Spreadsheet duplicated successfully: https://docs.google.com/spreadsheets/d/{new_spreadsheet_id}"
+
+    def google_sheets_write(
+        self,
+        action: _WriteAction,
+        spreadsheet_id: str | None = None,
+        title: str | None = None,
+        range_name: str | None = None,
+        data: list[list[Any]] | None = None,
+        requests: list[dict[str, Any]] | None = None,
+        copy_permissions: bool = True,
+    ) -> str:
+        """Create, update, format, or duplicate Google Sheets.
+
+        - `create`: new spreadsheet with `title`
+        - `update`: overwrite `spreadsheet_id` at `range_name` with literal 2D `data` (ignores configured read defaults)
+        - `batch_update`: apply Sheets API `batchUpdate` `requests` to `spreadsheet_id` in order (formatting, widths, frozen rows, filters, sheet edits)
+        - `duplicate`: copy `spreadsheet_id` via Drive API (`title`, `copy_permissions`; requires Drive scope)
+        """
+        if action not in self._write_actions:
+            return f"Error: Google Sheets action {action!r} is disabled."
+        if action == "create":
+            return self._create_sheet(title)
+        if action == "update":
+            return self._update_sheet(spreadsheet_id, range_name, data)
+        if action == "batch_update":
+            return self._batch_update_sheet(spreadsheet_id, requests)
+        if action == "duplicate":
+            return self._duplicate_sheet(spreadsheet_id, title, copy_permissions)
+        return f"Error: Unsupported Google Sheets write action {action!r}."

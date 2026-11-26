@@ -875,48 +875,15 @@ def test_google_final_401_provider_text_is_redacted_before_toolkit_logging(
     tool.service = RejectedRequest()
     with capture_logs() as captured_logs:
         if operation == "calendar":
-            result = tool.list_events(limit=1, start_date="2026-01-01T00:00:00")
+            result = tool.google_calendar_read(action="list_events", limit=1, start_date="2026-01-01T00:00:00")
         else:
-            result = tool.get_latest_emails(1)
+            result = tool.gmail_read(action="latest", count=1)
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "access_rejected"
     assert "provider-controlled-final-401-secret" not in result
     assert "provider-controlled-final-401-secret" not in repr(captured_logs)
-
-
-def test_gmail_batch_tracks_final_item_401() -> None:
-    """A batch-level HTTP 200 must not hide a final per-item authorization rejection."""
-    tool = object.__new__(GmailTools)
-
-    class Batch:
-        def __init__(self, callback: Callable[..., None]) -> None:
-            self.callback = callback
-
-        def add(self, _request: object, *, request_id: str) -> None:
-            self.request_id = request_id
-
-        def execute(self) -> None:
-            response = SimpleNamespace(status=401, reason="Unauthorized")
-            self.callback(
-                self.request_id,
-                None,
-                HttpError(response, b'{"error":"provider-controlled"}'),
-            )
-
-    class Service:
-        @staticmethod
-        def new_batch_http_request(*, callback: Callable[..., None]) -> Batch:
-            return Batch(callback)
-
-    tool.service = Service()
-    tool.max_batch_size = 10
-
-    results = tool._batch_get(["message-1"], lambda _message_id: object())
-
-    assert results == [{"id": "message-1", "error": "Google request failed"}]
-    assert tool._consume_google_authorization_rejected() is True
 
 
 @pytest.mark.parametrize("operation_name", ["read_operation", "write_operation"])
@@ -2117,7 +2084,7 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         message = "refresh rejected"
         raise RefreshError(message, {"error": "invalid_grant"})
 
-    def upload_file(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def google_drive_write(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         try:
             self.creds.refresh(object())
         except RefreshError as exc:
@@ -2125,13 +2092,13 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         return "unexpected success"
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
-    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
+    monkeypatch.setattr(GoogleDriveTools, "google_drive_write", google_drive_write)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    entrypoint = tool.functions["google_drive_upload_file"]
+    entrypoint = tool.functions["google_drive_write"]
 
     payload = json.loads(entrypoint("unused"))
 
@@ -2715,17 +2682,17 @@ def test_google_drive_supplied_credentials_write_without_scope_upgrade_prompt(
         worker_target=None,
     )
 
-    def upload_file(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def google_drive_write(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         return "uploaded"
 
-    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
+    monkeypatch.setattr(GoogleDriveTools, "google_drive_write", google_drive_write)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
         creds=_valid_credentials(),
     )
-    entrypoint = tool.functions["google_drive_upload_file"]
+    entrypoint = tool.functions["google_drive_write"]
 
     assert entrypoint("unused") == "uploaded"
 
@@ -2825,7 +2792,7 @@ _GOOGLE_IDENTITY_SCOPES = frozenset(
             lambda rp, cm: GmailTools(
                 runtime_paths=rp,
                 credentials_manager=cm,
-                include_tools=["get_latest_emails"],
+                include_tools=["gmail_read"],
                 scopes=["https://www.googleapis.com/auth/gmail.readonly"],
             ),
             ("https://www.googleapis.com/auth/gmail.readonly",),

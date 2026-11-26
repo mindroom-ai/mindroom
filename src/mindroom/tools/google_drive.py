@@ -105,15 +105,12 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_drive",
     function_names=(
-        "google_drive_list_files",
-        "google_drive_search_files",
-        "google_drive_read_file",
-        "google_drive_download_file",
-        "google_drive_upload_file",
-        "google_drive_update_file",
-        "google_drive_create_folder",
-        "google_drive_move_file",
-        "google_drive_trash_file",
+        "google_drive_read",
+        "google_drive_write",
+    ),
+    action_scoped_grants=(
+        "google_drive_read",
+        "google_drive_write",
     ),
 )
 def google_drive_tools() -> type[GoogleDriveTools]:

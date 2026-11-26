@@ -1048,8 +1048,8 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
             config.tool_approval,
             "rules",
             [
-                ApprovalRuleConfig(match="google_drive_upload_file", script="approval_other_agent_only.py"),
-                ApprovalRuleConfig(match="create_sheet", script="approval_other_agent_only.py"),
+                ApprovalRuleConfig(match="google_drive_write", script="approval_other_agent_only.py"),
+                ApprovalRuleConfig(match="google_sheets_write", script="approval_other_agent_only.py"),
             ],
         ),
         True,

@@ -171,7 +171,7 @@ async def _upload_to_google_drive(
     )
     service = _FakeDriveService()
     tool.service = service
-    result = json.loads(tool.upload_file(raw_path))
+    result = json.loads(tool.google_drive_write(action="upload", local_path=raw_path))
     if "error" in result:
         return False
     assert service.files_resource.create_kwargs is not None
@@ -386,7 +386,7 @@ _PROBES = (
     _ToolProbe("attachments", "view_file", _view_file, media_delivery_module),
     _ToolProbe("matrix_message", "send attachments", _send_attachment_path, attachments_module),
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
-    _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
+    _ToolProbe("google_drive", "google_drive_write", _upload_to_google_drive, google_drive_module),
     # These check and read uploads through the shared upload helpers.
     _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, file_access_module),
     _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, file_access_module),
