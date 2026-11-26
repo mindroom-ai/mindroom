@@ -1807,7 +1807,7 @@ class AgentBot:
             # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
             self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
-            await self.steward_duties.started(client)
+            self.steward_duties.started()
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)

@@ -108,3 +108,71 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
     await _wait_for_controller(controller)
 
     mark_runtime_support_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_runs_orphaned_bot_cleanup_first_and_best_effort() -> None:
+    """Orphaned-bot cleanup runs before room setup (so blocked retries never starve it) and fails best-effort."""
+    call_order: list[str] = []
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    async def setup_rooms(_: list[object]) -> None:
+        call_order.append("setup")
+        setup_started.set()
+        await release_setup.wait()
+
+    async def sync_runtime_support(_: object) -> None:
+        call_order.append("support")
+
+    async def mark_runtime_support_ready() -> None:
+        call_order.append("approval_ready")
+
+    async def cleanup_orphaned_bots(_: object) -> None:
+        call_order.append("orphaned_bots")
+        msg = "cleanup boom"
+        raise RuntimeError(msg)
+
+    controller = StartupMaintenanceController(
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=sync_runtime_support,
+        mark_runtime_support_ready=mark_runtime_support_ready,
+        cleanup_orphaned_bots=cleanup_orphaned_bots,
+    )
+
+    controller.start([MagicMock()], MagicMock())
+    try:
+        await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+        assert call_order == ["orphaned_bots", "setup"]
+    finally:
+        release_setup.set()
+    await _wait_for_controller(controller)
+
+    assert call_order == ["orphaned_bots", "setup", "support", "approval_ready"]
+
+
+@pytest.mark.asyncio
+async def test_paused_startup_maintenance_reports_interruption_during_orphaned_bot_cleanup() -> None:
+    """Cancelling while orphaned-bot cleanup is in flight yields True and replays maintenance."""
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def cleanup_orphaned_bots(_: object) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    controller = StartupMaintenanceController(
+        setup_rooms_and_memberships=AsyncMock(),
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+        cleanup_orphaned_bots=cleanup_orphaned_bots,
+    )
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+
+    with patch.object(controller, "start") as start:
+        async with controller.paused(config_provider=MagicMock, running_bots=lambda: [MagicMock()]) as interrupted:
+            assert interrupted is True
+
+    start.assert_called_once()
+    release_cleanup.set()

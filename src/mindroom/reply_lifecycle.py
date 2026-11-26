@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.response_sources import ResponseSources
 
@@ -184,6 +184,8 @@ class OwedWrite:
     note: NoteKind
     # Text for notes whose wording is not fixed by their kind (errors).
     text: str | None = None
+    # Structured ``io.mindroom.ai_run["error"]`` payload when the note reports an error.
+    error_info: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1456,7 +1458,14 @@ def flush_owed_write(
     return Transition(outcome=Outcome.APPLIED, reply=updated, row=row)
 
 
-def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_ns: int) -> Transition:
+def dispatch_failed(
+    reply: Reply,
+    current: Span | None,
+    *,
+    error_text: str,
+    error_info: Mapping[str, Any] | None = None,
+    now_ns: int,
+) -> Transition:
     """A dispatch failed before or after a claim: the reply shows the error."""
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -1466,7 +1475,12 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         # A Stop recorded before the failure decides what the reply shows.
         return _ended_by_stop(reply, current, now_ns)
     updated, spans = _end_running(reply, current, SpanOutcome.FAILED)
-    owed = OwedWrite(reply.last_span_id, NoteKind.ERROR, error_text)
+    owed = OwedWrite(
+        reply.last_span_id,
+        NoteKind.ERROR,
+        error_text,
+        error_info=dict(error_info) if error_info is not None else None,
+    )
     updated = _set_state(updated, ReplyState.FAILED, now_ns, owed_write=owed)
     return Transition(outcome=Outcome.APPLIED, reply=updated, spans=spans, effects=(SettleSources(reply.last_span_id),))
 

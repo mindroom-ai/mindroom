@@ -291,12 +291,17 @@ class MCPServerManager:
                     for server_id, server_config in desired_servers.items()
                 )
             changed_server_ids: set[str] = set()
-            for server_id, server_config, state in desired_states:
+
+            async def _sync_state(
+                server_id: str,
+                server_config: MCPServerConfig,
+                state: MCPServerState | None,
+            ) -> None:
                 if state is None or state.retired:
-                    continue
+                    return
                 if server_config.auth is not None:
                     state.stale = False
-                    continue
+                    return
 
                 retry_pending = state.refresh_task is not None and not state.refresh_task.done()
                 if (
@@ -305,6 +310,10 @@ class MCPServerManager:
                     and await self._refresh_server_catalog(state, notify=False)
                 ):
                     changed_server_ids.add(server_id)
+
+            async with asyncio.TaskGroup() as sync_group:
+                for server_id, server_config, state in desired_states:
+                    sync_group.create_task(_sync_state(server_id, server_config, state))
 
             async with self._state_lifecycle_lock:
                 if self._shutdown:
@@ -413,24 +422,29 @@ class MCPServerManager:
 
     async def _drain_shutdown_states(self, states: tuple[MCPServerState, ...]) -> None:
         """Drain every captured state before publishing terminal manager shutdown."""
+
+        async def _drain_state(state: MCPServerState) -> None:
+            try:
+                await self._cancel_refresh_task(state)
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.warning(
+                    "MCP shutdown refresh cleanup failed",
+                    server_id=state.server_id,
+                    error_type=type(exc).__name__,
+                )
+            try:
+                await self._disconnect_state_when_idle(state)
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.warning(
+                    "MCP shutdown session cleanup failed",
+                    server_id=state.server_id,
+                    error_type=type(exc).__name__,
+                )
+
         try:
-            for state in states:
-                try:
-                    await self._cancel_refresh_task(state)
-                except (asyncio.CancelledError, Exception) as exc:
-                    logger.warning(
-                        "MCP shutdown refresh cleanup failed",
-                        server_id=state.server_id,
-                        error_type=type(exc).__name__,
-                    )
-                try:
-                    await self._disconnect_state_when_idle(state)
-                except (asyncio.CancelledError, Exception) as exc:
-                    logger.warning(
-                        "MCP shutdown session cleanup failed",
-                        server_id=state.server_id,
-                        error_type=type(exc).__name__,
-                    )
+            async with asyncio.TaskGroup() as shutdown_group:
+                for state in states:
+                    shutdown_group.create_task(_drain_state(state))
         finally:
             async with self._state_lifecycle_lock:
                 self._states.clear()

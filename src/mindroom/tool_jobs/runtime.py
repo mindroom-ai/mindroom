@@ -261,6 +261,11 @@ def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     return job
 
 
+def _parse_saved_jobs(saved_jobs: Sequence[SavedToolJob]) -> tuple[BackgroundJob, ...]:
+    """Validate saved snapshots in order without claiming or changing their execution."""
+    return tuple(_parse_saved_job(saved) for saved in saved_jobs)
+
+
 def _encoded(job: BackgroundJob, payload: EncodedResultPayload | None) -> tuple[str, str | None]:
     return json.dumps(asdict(job)), None if payload is None else json.dumps(payload)
 
@@ -860,10 +865,11 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_open()
             await self._store.require_ownership()
-            for saved in await self._store.load_all():
-                if saved.job_id in self._entries:
-                    continue
-                entry = _Entry(await asyncio.to_thread(_parse_saved_job, saved))
+            pending = [saved for saved in await self._store.load_all() if saved.job_id not in self._entries]
+            if not pending:
+                return
+            for job in await asyncio.to_thread(_parse_saved_jobs, pending):
+                entry = _Entry(job)
                 if entry.job.status not in TERMINAL_STATUSES:
                     await self._settle_stopped(entry)
                 self._add_entry(entry)
@@ -1633,6 +1639,8 @@ class ToolJobRuntime:
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
         for entry in self._entries.values():
+            if entry.saved and entry.job.status in TERMINAL_STATUSES:
+                continue
             # A job cancelled before the shutdown ends cancelled, as its cleanup was told.
             stopped = entry.control.cancelled and not entry.control.shutdown
             try:

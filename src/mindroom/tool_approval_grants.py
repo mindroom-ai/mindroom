@@ -12,6 +12,7 @@ from mindroom.mcp.config import resolved_mcp_tool_prefix
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.registry import ToolRegistry
 
 AUTO_APPROVE_OPTIONS = (300, 600, 1800)
 # How much of a scheduled tool call a requester approves while scheduling it.
@@ -84,7 +85,34 @@ _ACTION_SCOPED_TOOL_ARGS: dict[str, str] = {
 }
 
 
-def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]) -> ApprovalOperation | None:
+def _action_scoped_tool(
+    tool_name: str,
+    *,
+    tools: ToolRegistry | None,
+    toolkit_name: str | None,
+) -> tuple[str, str] | None:
+    if (dispatch_arg := _ACTION_SCOPED_TOOL_ARGS.get(tool_name)) is not None:
+        return tool_name, dispatch_arg
+    if tools is None:
+        return None
+    if toolkit_name is not None:
+        metadata = tools.entries.get(toolkit_name)
+        if metadata is not None and tool_name in metadata.action_scoped_grants:
+            return toolkit_name, "action"
+        return None
+    if any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values()):
+        return tool_name, "action"
+    return None
+
+
+def grant_operation(
+    config: Config,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    tools: ToolRegistry | None = None,
+    toolkit_name: str | None = None,
+) -> ApprovalOperation | None:
     """Bind a concrete tool operation, including generic MCP dispatch targets and action-dispatched tools."""
     for server_id, server in config.mcp_servers.items():
         prefix = resolved_mcp_tool_prefix(server_id, server)
@@ -93,11 +121,12 @@ def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
-    if (dispatch_arg := _ACTION_SCOPED_TOOL_ARGS.get(tool_name)) is not None:
+    if (action_scope := _action_scoped_tool(tool_name, tools=tools, toolkit_name=toolkit_name)) is not None:
+        scope_owner, dispatch_arg = action_scope
         dispatch_value = arguments.get(dispatch_arg)
         if not isinstance(dispatch_value, str) or not dispatch_value.strip():
             return None
-        return ApprovalOperation(approval_binding(config), tool_name, tool_name, dispatch_value.strip())
+        return ApprovalOperation(approval_binding(config), tool_name, scope_owner, dispatch_value.strip())
     return ApprovalOperation(approval_binding(config), tool_name)
 
 

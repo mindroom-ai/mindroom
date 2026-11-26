@@ -489,7 +489,7 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     # Below the call it had shown, the reply ends with the failure's own paragraph.
     assert text.split("\n\n")[-2:] == [
         "🔧 `touch` [1] ⏳",
-        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+        "⚠️ agent run 'run-1' paused on ['touch'] without an approval to ask for",
     ]
     assert probe.calls == []
     [paused] = replaced
@@ -640,7 +640,7 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
     chunks = await _stream(reply)
 
     [text] = streamed_text(chunks)
-    assert "Rate limited" in text
+    assert "Rate limit reached" in text
     [failed] = replaced
     assert failed.status is RunStatus.error
     assert (failed.content, failed.error) == (None, "slow down")
@@ -675,7 +675,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
 
     text = await _respond(reply)
 
-    assert "Rate limited" in text
+    assert "Rate limit reached" in text
     [failed] = replaced
     assert failed.status is RunStatus.error
     assert (failed.content, failed.error) == (None, "slow down")
@@ -710,7 +710,7 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
     text = await _respond(reply, thread_history=thread_history)
 
-    assert "Rate limited" in text
+    assert "Rate limit reached" in text
     [failed] = replaced
     assert [message.role for message in failed.messages if "green pixel" in str(message.content)] == ["user"]
     assert not [message for message in failed.messages if message.role == "assistant"]
@@ -1125,7 +1125,7 @@ async def test_a_reply_whose_preparation_fails_ends_with_a_failed_reply_that_car
 
     monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
 
-    assert await _stream(reply) == [FailedReply("[assistant] ⚠️ Error: history unavailable", error)]
+    assert await _stream(reply) == [FailedReply("⚠️ history unavailable", error)]
 
 
 @pytest.mark.asyncio
@@ -2037,7 +2037,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
 
     content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
     body = content.get("m.new_content", content)["body"]
-    assert body.startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.startswith("⚠️ agent run ")
     assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)

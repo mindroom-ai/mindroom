@@ -64,6 +64,7 @@ from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.listening.service import ListeningService
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.users import load_agent_user
 from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
@@ -95,6 +96,7 @@ from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.token_counting.families import start_loading_o200k
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import (
+    ConfigPlugins,
     PluginGeneration,
     PluginReloadResult,
     config_plugins,
@@ -517,6 +519,7 @@ class _MultiAgentOrchestrator:
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config),
             mark_runtime_support_ready=lambda: self._approval_recovery.mark_startup_runtime_support_ready(),
+            cleanup_orphaned_bots=self._cleanup_orphaned_bots,
         )
 
     @property
@@ -839,8 +842,20 @@ class _MultiAgentOrchestrator:
         await self._approval_recovery.reconcile_unavailable_entities(results.permanently_failed_entities)
         self.turn_recovery.schedule()
 
+    async def _cleanup_orphaned_bots(self, config: Config) -> None:
+        """Remove retired bot identities from rooms using the running owner account."""
+        owner_client = self.running_entity_client(ROUTER_AGENT_NAME)
+        if owner_client is None:
+            return
+        try:
+            await cleanup_all_orphaned_bots(owner_client, config, self.runtime_paths)
+        except Exception as error:
+            logger.warning("orphaned_bot_cleanup_failed", error=str(error))
+
     async def _setup_rooms_after_retry(self, entity_name: str) -> None:
         """Reconcile rooms after a background retry started one entity, and every bot's rooms after the owner started."""
+        if entity_name == ROUTER_AGENT_NAME:
+            await self._cleanup_orphaned_bots(self.config)
         bots_to_setup = self._running_bots_for_entities(
             self.agent_bots if entity_name == ROUTER_AGENT_NAME else (entity_name,),
         )
@@ -923,6 +938,11 @@ class _MultiAgentOrchestrator:
             try:
                 try:
                     generation = prepare_plugins(config, self.runtime_paths)
+                    try:
+                        config.validate_tool_registry(ConfigPlugins.of(generation, config, self.runtime_paths).tools)
+                    except BaseException:
+                        dispose_plugins(generation)
+                        raise
                 except Exception as exc:
                     logger.warning(
                         "Plugin reload failed; the previous plugins stay active",
@@ -1301,7 +1321,7 @@ class _MultiAgentOrchestrator:
                         entities=start_results.permanently_failed_entities,
                     )
 
-    def _paused_startup_maintenance(self) -> AbstractAsyncContextManager[None]:
+    def _paused_startup_maintenance(self) -> AbstractAsyncContextManager[bool]:
         """Pause startup maintenance across a runtime replacement, then replay it with the bots running after it."""
         return self._startup_maintenance.paused(
             config_provider=lambda: self.config if self.running else None,
@@ -1350,7 +1370,7 @@ class _MultiAgentOrchestrator:
             )
         await self._script_runtime.apply_update_plan(plan)
         try:
-            async with self._paused_startup_maintenance():
+            async with self._paused_startup_maintenance() as will_replay_startup_maintenance:
                 staged = self._stage_plugins(plan)
                 try:
                     # Removal first, while the removed entities' bots still edit their approval cards
@@ -1387,6 +1407,10 @@ class _MultiAgentOrchestrator:
                 changed_entities = set(plan.restart | plan.start | catalog_restarts)
                 await self.fleet.create(changed_entities)
                 start_results = await self.fleet.start(changed_entities)
+                if not will_replay_startup_maintenance and any(
+                    bot.agent_name == ROUTER_AGENT_NAME for bot in start_results.started_bots
+                ):
+                    await self._cleanup_orphaned_bots(new_config)
                 try:
                     await self._reconcile_post_update_rooms(plan, changed_entities)
                 except Exception:

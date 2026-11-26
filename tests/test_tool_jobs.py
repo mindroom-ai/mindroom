@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
-from contextlib import asynccontextmanager
+import sqlite3
+from contextlib import asynccontextmanager, closing
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -18,6 +19,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
+from mindroom.event_journal import tool_jobs as event_journal_tool_jobs
+from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.response_lifecycle import _Conversation
@@ -2688,3 +2691,114 @@ async def test_job_prefix_resolution_ignores_pending_grant_jobs(tmp_path: Path) 
         assert (exact_pending.job.job_id, exact_pending.claim) == (only_pending_id, None)
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_load_all_scans_without_index_and_returns_jobs_in_id_order(tmp_path: Path) -> None:
+    """load_all avoids random secondary-index seeks in SQLite while preserving ID-sorted output."""
+    with closing(sqlite3.connect(":memory:")) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        plan = " | ".join(
+            row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + event_journal_tool_jobs._LOAD_ALL_SQL)
+        )
+    assert "SCAN tool_jobs" in plan, plan
+    assert "USING INDEX" not in plan, plan
+    assert "USE TEMP B-TREE" not in plan, plan
+
+    runtime = await tool_job_runtime(tmp_path)
+    try:
+        owner = job_owner()
+        for job_id in ("job-c", "job-a", "job-b"):
+            await _start_done(runtime, job_id, owner)
+    finally:
+        await runtime.shutdown()
+
+    journal = tool_job_journal(tmp_path)
+    try:
+        loaded = await journal.tool_jobs("reader").load_all()
+        assert [saved.job_id for saved in loaded] == ["job-a", "job-b", "job-c"]
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_recover_parses_pending_jobs_in_one_thread_offload_and_surfaces_invalid_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recover() validates all pending saved jobs in a single thread offload while preserving invalid-snapshot errors."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    try:
+        for job_id in ("job-1", "job-2", "job-3"):
+            await _start_done(runtime, job_id, owner)
+    finally:
+        await runtime.shutdown()
+
+    parse_offloads: list[int] = []
+    real_to_thread = asyncio.to_thread
+
+    async def counting_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        if func is runtime_module._parse_saved_jobs:
+            parse_offloads.append(len(args[0]))
+        return await real_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    restored = await tool_job_runtime(tmp_path)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_module.asyncio, "to_thread", counting_to_thread)
+            await restored.recover()
+        assert parse_offloads == [3]
+        for job_id in ("job-1", "job-2", "job-3"):
+            assert (await lookup(restored, job_id, owner=owner, depth=0)).status == "completed"
+    finally:
+        await restored.shutdown()
+
+    corrupted = json.dumps({**asdict((await saved_jobs(tmp_path))["job-2"]), "unexpected_field": 1})
+    await write_saved_job(tmp_path, "job-2", corrupted)
+    failing = await tool_job_runtime(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Invalid tool job snapshot"):
+            await failing.recover()
+    finally:
+        await failing.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_skips_saved_terminal_entries_while_retrying_unsaved_terminal_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_shutdown skips already-saved terminal entries without skipping unsaved terminal retries."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    await _start_done(runtime, "saved-done", owner)
+
+    async def waiting() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def fail_cancelled_save(job: dict[str, object], _payload: object) -> None:
+        if job["status"] == "cancelled":
+            msg = "save failed"
+            raise OSError(msg)
+
+    await start_job(runtime, "unsaved-terminal", tool_name="tool", depth=0, adapter={}, owner=owner, operation=waiting)
+    with monkeypatch.context() as patch:
+        intercept_job_saves(patch, before=fail_cancelled_save)
+        with pytest.raises(OSError, match="save failed"):
+            await cancel_settled(runtime, "unsaved-terminal", owner=owner, depth=0)
+
+    settled_ids: list[str] = []
+    original_settle = runtime._settle
+
+    async def recording_settle(entry: runtime_module._Entry, default: BackgroundOutcome) -> None:
+        settled_ids.append(entry.job.job_id)
+        await original_settle(entry, default)
+
+    monkeypatch.setattr(runtime, "_settle", recording_settle)
+    await runtime.shutdown()
+
+    assert settled_ids == ["unsaved-terminal"]
+    assert (await saved_jobs(tmp_path))["unsaved-terminal"].status == "cancelled"

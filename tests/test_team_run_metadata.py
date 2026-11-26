@@ -189,7 +189,19 @@ async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_
     text = await team.respond(run_metadata_collector=collector)
 
     assert "team start failed" in text
-    assert collector == {AI_RUN_METADATA_KEY: {"version": 1, "status": "error"}}
+    assert collector == {
+        AI_RUN_METADATA_KEY: {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "team start failed",
+                "retryable": False,
+                "provider": "Synthetic",
+            },
+        },
+    }
 
 
 def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices(tmp_path: Path) -> None:

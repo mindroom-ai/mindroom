@@ -403,6 +403,8 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
+| `action_scoped_grants` | sequence of strings | `()` | Action-dispatched function names whose timed approval grants bind to `(tool_name, action)` instead of only `tool_name` (and whose scheduled calls never offer approving any arguments); a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
+| `retired_functions` | dict of retired name to replacement name | `None` | Retired function names mapped to their replacement function name so config validation fails closed when `tool_approval.rules` still decides a retired name differently from its replacement; a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
@@ -683,6 +685,11 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
+
+To resolve a room reference and enforce requester access inside a tool call, call `await resolve_accessible_room_id(context, room_id=None, *, contact_room_ok=False)` from `mindroom.plugin_api`: it defaults to `context.room_id` and returns `(resolved_room_id, None)` on success or `(None, error_message)` when the target room is invalid, unknown, unauthorized, or cannot be verified because of a transport failure.
+To list every room the agent has joined where a human effective requester (`context.requester_id`) is proven joined right now and authorized to access (preserving room order), call `await shared_room_ids(context, *, contact_room_ok=False)`; a non-human effective requester receives `[]`, including for the current room, while a trusted relay acting for a human uses that human's membership.
+Passing `contact_room_ok=True` to either helper permits read-only inspection of contact rooms, not unrestricted posts to active or removed contact rooms.
+A plugin that uses `resolve_accessible_room_id` or `shared_room_ids` states `"mindroom_plugin_api": "1.35"` in its manifest.
 
 ### Redacting credentials
 

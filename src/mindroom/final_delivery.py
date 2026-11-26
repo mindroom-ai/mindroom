@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -14,6 +14,8 @@ from mindroom.event_journal import ApprovalFailure
 from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.cancellation import CancelSource
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
@@ -78,6 +80,7 @@ class Failed:
 
     cause: FailureCause
     detail: str | None = None
+    error_info: Mapping[str, Any] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +104,8 @@ def approval_failure(ending: Cancelled | Failed | Suppressed) -> ApprovalFailure
     match ending:
         case Cancelled(source=source):
             return cancelled_failure(source)
-        case Failed(cause=FailureCause.ERROR, detail=detail):
-            return ApprovalFailure(ApprovalFailureKind.ERROR, detail)
+        case Failed(cause=FailureCause.ERROR, detail=detail, error_info=error_info):
+            return ApprovalFailure(ApprovalFailureKind.ERROR, detail, error_info=error_info)
         case _:
             return ApprovalFailure(ApprovalFailureKind.ERROR)
 

@@ -1,10 +1,10 @@
-"""Only the tool and knowledge-reader boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
+"""Only the vendor-toolkit boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
 
 Agno stays MindRoom's library of vendor toolkits: MindRoom's own tools use the owned authoring API
 (``tool_system/authoring.py``), tools return text or MindRoom's ``ToolValue``, and the toolkit adapter alone looks
 inside an Agno toolkit, reads a vendor toolkit's ``ToolResult`` as a ``ToolValue``, and hands its entrypoints what
-Agno would; Agno's knowledge readers stay. The built-in and custom tool packages, which register and extend vendor
-toolkits, the toolkit adapter, and the knowledge reader module may import Agno; ``logging_config`` may too, because it
+Agno would. MindRoom owns its knowledge readers and chunkers natively. The built-in and custom tool packages, which
+register and extend vendor toolkits, and the toolkit adapter may import Agno; ``logging_config`` may too, because it
 routes Agno's loggers, which vendor toolkits log through. No other module takes an Agno type, not even through the
 adapter's re-export.
 
@@ -23,7 +23,7 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 # Paths under ``src/mindroom`` that may import Agno: whole packages, then single modules.
 ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
-ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "knowledge/readers.py", "logging_config.py"})
+ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "logging_config.py"})
 REEXPORT = "tool_system/agno_toolkits.py"
 TESTS_ROOT = Path(__file__).resolve().parent
 # The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
@@ -72,8 +72,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_google_tool_wrappers.py",
         "test_init.py",
         "test_issue_154_logging_integration.py",
-        "test_knowledge_readers.py",
-        "test_knowledge_resumable_refresh.py",
         "test_logging_config.py",
         "test_matrix_rtc_call_tools.py",
         "test_mcp_gateway_execution.py",

@@ -167,7 +167,7 @@ async def _decide(
         timeout_seconds=max(0.0, (call.expires_at_ns - time.time_ns()) / 1_000_000_000),
         # Timed approvals bind to the conversation the job's reply answered, exactly as a paused reply's do.
         entity_name=owner.recipient,
-        grant_operation=timed_grant_operation(config, tool, call),
+        grant_operation=timed_grant_operation(config, tool, call, runtime_paths=runtime_paths),
         response_event_id=response_event_id,
     )
     return decision.status == "approved", decision.reason
