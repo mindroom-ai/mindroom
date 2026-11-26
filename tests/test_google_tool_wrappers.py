@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
-import logging
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,12 +14,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
-from agno.tools.google.gmail import GmailTools as AgnoGmailTools
-from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient import http as google_http_module
 from googleapiclient.errors import HttpError
+from structlog.testing import capture_logs
 
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -875,26 +872,17 @@ def test_google_final_401_provider_text_is_redacted_before_toolkit_logging(
 
     monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
     tool.service = RejectedRequest()
-    agno_log_output = io.StringIO()
-    agno_logger = agno_log_module.team_logger
-    agno_handler = logging.StreamHandler(agno_log_output)
-    agno_logger.addHandler(agno_handler)
-    monkeypatch.setattr(agno_log_module, "logger", agno_logger)
-
-    try:
+    with capture_logs() as captured_logs:
         if operation == "calendar":
             result = tool.list_events(limit=1, start_date="2026-01-01T00:00:00")
         else:
             result = tool.get_latest_emails(1)
-    finally:
-        agno_logger.removeHandler(agno_handler)
-        agno_handler.close()
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "access_rejected"
     assert "provider-controlled-final-401-secret" not in result
-    assert "provider-controlled-final-401-secret" not in agno_log_output.getvalue()
+    assert "provider-controlled-final-401-secret" not in repr(captured_logs)
 
 
 def test_gmail_batch_tracks_final_item_401() -> None:
@@ -2388,23 +2376,17 @@ def test_google_wrappers_read_the_service_account_from_env_file_under_a_blank_ex
 
     service_account_path = str(runtime_paths.config_dir / "google" / "sa.json")
     assert tool.creds is None
-    if isinstance(tool, GmailTools):
-        assert (tool._get_service_account_path(), tool._get_delegated_user()) == (
-            service_account_path,
-            "alice@example.com",
-        )
-    else:
-        assert (tool.service_account_path, tool.delegated_user) == (service_account_path, "alice@example.com")
+    assert (tool.service_account_path, tool.delegated_user) == (service_account_path, "alice@example.com")
     assert tool._should_fallback_to_original_auth() is True
 
 
 @pytest.mark.parametrize(
     ("toolkit_class", "auth_owner", "auth_name"),
     [
-        (GmailTools, AgnoGmailTools, "_resolve_creds"),
+        (GmailTools, google_service._GoogleOAuthToolkit, "_service_account_auth"),
         (GoogleDocsTools, google_service._GoogleOAuthToolkit, "_service_account_auth"),
     ],
-    ids=["agno-based", "owned"],
+    ids=["gmail", "google-docs"],
 )
 def test_a_service_account_toolkit_authenticates_through_its_class_own_auth(
     monkeypatch: pytest.MonkeyPatch,
@@ -2797,14 +2779,3 @@ def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_err
             creds=_valid_credentials(),
             max_read_size=max_read_size,
         )
-
-
-def test_agno_resolve_creds_routes_through_mindroom_auth(runtime_paths: RuntimePaths, tmp_path: Path) -> None:
-    """Agno's auth decorator resolves credentials via MindRoom's policy, never its own OAuth flow."""
-    tool = GmailTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-    )
-
-    with pytest.raises(OAuthConnectionRequired):
-        tool._resolve_creds()

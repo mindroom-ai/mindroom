@@ -323,7 +323,6 @@ def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instruct
     ("tool_name", "offering", "leaving_one_out"),
     [
         ("daytona", {}, {"exclude_tools": ["delete_file"]}),
-        ("gmail", {}, {"send_email": False}),
         ("reasoning", {}, {"enable_think": False}),
         ("zep", {}, {"enable_add_zep_message": False}),
     ],

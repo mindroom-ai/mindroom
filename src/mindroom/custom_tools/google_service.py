@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from google.api_core.exceptions import GoogleAPICallError
 from google_auth_httplib2 import AuthorizedHttp
@@ -118,15 +118,6 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().service = value
 
     @property
-    def _service(self) -> Any | None:  # noqa: ANN401
-        """Expose the same per-thread service under the name Agno's auth decorator reads."""
-        return self._google_service_state().service
-
-    @_service.setter
-    def _service(self, value: Any | None) -> None:  # noqa: ANN401
-        self._google_service_state().service = value
-
-    @property
     def _google_credential_key(self) -> object | None:
         """Return canonical scope and revision backing this thread's credentials."""
         return self._google_service_state().credential_key
@@ -179,6 +170,8 @@ class ThreadLocalGoogleServiceMixin:
 
 class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
     """Google toolkit with scoped OAuth credentials and optional service-account fallback."""
+
+    _require_delegated_user_for_service_account: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -235,6 +228,9 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
                 f"{self._oauth_provider.display_name} service-account authentication "
                 "requires GOOGLE_SERVICE_ACCOUNT_FILE"
             )
+            raise RuntimeError(msg)
+        if self._require_delegated_user_for_service_account and not self.delegated_user:
+            msg = f"{self._oauth_provider.display_name} service-account authentication requires GOOGLE_DELEGATED_USER"
             raise RuntimeError(msg)
         creds = service_account.Credentials.from_service_account_file(
             self.service_account_path,
