@@ -51,8 +51,9 @@ _RECEIPT_VERSION = 1
 # each fails only where it is read, as before. A clean pass over `subagent_sessions/` records a versioned receipt
 # (`subagent_snapshots_migrated.json`) in `tracking_dir` so later boots skip rescanning session files; any unreadable
 # directory, symlink, unreadable file, or rejected child withholds the receipt so repairing it lets the next boot
-# migrate it. Bump `_RECEIPT_VERSION` whenever the child snapshot shape changes so existing receipts re-run. The
-# rewrite has no removal date.
+# migrate it. Bump `_RECEIPT_VERSION` whenever the child snapshot shape changes so existing receipts re-run; restoring
+# legacy `subagent_sessions/` files without restoring `tracking/` requires deleting
+# `tracking/subagent_snapshots_migrated.json` so the next start rescans them. The rewrite has no removal date.
 # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
 # tests/test_legacy_delegation_snapshots.py::test_a_second_start_changes_nothing,
 # tests/test_legacy_delegation_snapshots.py::test_a_snapshot_the_reader_rejects_stays_as_stored,

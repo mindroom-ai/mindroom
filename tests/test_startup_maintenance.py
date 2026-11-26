@@ -111,12 +111,16 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_runs_orphaned_bot_cleanup_after_ready_best_effort() -> None:
-    """Orphaned-bot cleanup runs after runtime support is marked ready and never fails maintenance."""
+async def test_startup_maintenance_runs_orphaned_bot_cleanup_first_and_best_effort() -> None:
+    """Orphaned-bot cleanup runs before room setup (so blocked retries never starve it) and fails best-effort."""
     call_order: list[str] = []
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
 
     async def setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
+        setup_started.set()
+        await release_setup.wait()
 
     async def sync_runtime_support(_: object) -> None:
         call_order.append("support")
@@ -137,9 +141,14 @@ async def test_startup_maintenance_runs_orphaned_bot_cleanup_after_ready_best_ef
     )
 
     controller.start([MagicMock()], MagicMock())
+    try:
+        await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+        assert call_order == ["orphaned_bots", "setup"]
+    finally:
+        release_setup.set()
     await _wait_for_controller(controller)
 
-    assert call_order == ["setup", "support", "approval_ready", "orphaned_bots"]
+    assert call_order == ["orphaned_bots", "setup", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio

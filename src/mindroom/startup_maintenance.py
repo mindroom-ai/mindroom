@@ -82,6 +82,13 @@ class StartupMaintenanceController:
                     self.start(bots, config)
 
     async def _run(self, bots: list[AgentBot], config: Config) -> None:
+        if self.cleanup_orphaned_bots is not None:
+            cleanup = self.cleanup_orphaned_bots
+            await self._run_phase(
+                "startup_maintenance.orphaned_bots",
+                lambda: cleanup(config),
+                failure_message="Startup orphaned bot cleanup failed",
+            )
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),
@@ -94,13 +101,6 @@ class StartupMaintenanceController:
         )
         if runtime_support_ready:
             await self.mark_runtime_support_ready()
-        if self.cleanup_orphaned_bots is not None:
-            cleanup = self.cleanup_orphaned_bots
-            await self._run_phase(
-                "startup_maintenance.orphaned_bots",
-                lambda: cleanup(config),
-                failure_message="Startup orphaned bot cleanup failed",
-            )
 
     async def _run_phase(
         self,
