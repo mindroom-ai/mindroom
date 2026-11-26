@@ -49,9 +49,10 @@ _RECEIPT_VERSION = 1
 # requested one, no skills, and null knowledge, which follows the persona's tool list. A session file that does not
 # decode or holds no child is logged and left, and a snapshot the current reader rejects even so stays as stored, so
 # each fails only where it is read, as before. A clean pass over `subagent_sessions/` records a versioned receipt
-# (`subagent_snapshots_migrated.json`) in `tracking_dir` so later boots skip rescanning session files; any symlink,
-# unreadable file, or rejected child withholds the receipt so repairing it lets the next boot migrate it. The rewrite
-# has no removal date.
+# (`subagent_snapshots_migrated.json`) in `tracking_dir` so later boots skip rescanning session files; any unreadable
+# directory, symlink, unreadable file, or rejected child withholds the receipt so repairing it lets the next boot
+# migrate it. Bump `_RECEIPT_VERSION` whenever the child snapshot shape changes so existing receipts re-run. The
+# rewrite has no removal date.
 # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
 # tests/test_legacy_delegation_snapshots.py::test_a_second_start_changes_nothing,
 # tests/test_legacy_delegation_snapshots.py::test_a_snapshot_the_reader_rejects_stays_as_stored,
@@ -110,8 +111,13 @@ def _migrate_subagent_sessions(runtime_paths: RuntimePaths) -> None:
     root = subagent_sessions_dir(runtime_paths)
     if root.is_symlink() or not root.is_dir():
         return
+    try:
+        entries = sorted(path for path in root.iterdir() if path.name.endswith(".json"))
+    except OSError as error:
+        logger.warning("subagent_session_rewrite_skipped", path=str(root), error=str(error))
+        return
     clean = True
-    for path in sorted(root.glob("*.json")):
+    for path in entries:
         if path.is_symlink():
             clean = False
             continue

@@ -853,6 +853,8 @@ class _MultiAgentOrchestrator:
 
     async def _setup_rooms_after_retry(self, entity_name: str) -> None:
         """Reconcile rooms after a background retry started one entity, and every bot's rooms after the owner started."""
+        if entity_name == ROUTER_AGENT_NAME:
+            await self._cleanup_orphaned_bots(self.config)
         bots_to_setup = self._running_bots_for_entities(
             self.agent_bots if entity_name == ROUTER_AGENT_NAME else (entity_name,),
         )
@@ -860,8 +862,6 @@ class _MultiAgentOrchestrator:
             bots_to_setup,
             retry_step=f"Updating Matrix room memberships for {entity_name}",
         )
-        if entity_name == ROUTER_AGENT_NAME:
-            await self._cleanup_orphaned_bots(self.config)
 
     def _bind_trigger_runtimes(self) -> None:
         """Bind external-trigger, computer, and call-transcript work once their targets run, never after shutdown began."""
@@ -1401,6 +1401,10 @@ class _MultiAgentOrchestrator:
                 changed_entities = set(plan.restart | plan.start | catalog_restarts)
                 await self.fleet.create(changed_entities)
                 start_results = await self.fleet.start(changed_entities)
+                if not will_replay_startup_maintenance and any(
+                    bot.agent_name == ROUTER_AGENT_NAME for bot in start_results.started_bots
+                ):
+                    await self._cleanup_orphaned_bots(new_config)
                 try:
                     await self._reconcile_post_update_rooms(plan, changed_entities)
                 except Exception:
@@ -1417,10 +1421,6 @@ class _MultiAgentOrchestrator:
                     )
 
                 await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
-                if not will_replay_startup_maintenance and any(
-                    bot.agent_name == ROUTER_AGENT_NAME for bot in start_results.started_bots
-                ):
-                    await self._cleanup_orphaned_bots(new_config)
                 logger.info("configuration_update_complete", affected_bot_count=len(changed_entities))
                 return bool(changed_entities)
         finally:

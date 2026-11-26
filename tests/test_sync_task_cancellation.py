@@ -2806,12 +2806,17 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("maintenance_in_flight", [False, True])
+@pytest.mark.parametrize(
+    ("maintenance_in_flight", "room_reconcile_fails"),
+    [(False, False), (True, False), (False, True)],
+    ids=["direct", "replayed_maintenance", "room_reconcile_fails"],
+)
 async def test_config_reload_restarting_owner_runs_orphaned_bot_cleanup_once(
     tmp_path: Path,
     maintenance_in_flight: bool,
+    room_reconcile_fails: bool,
 ) -> None:
-    """Restarting the owner in a config update cleans orphaned bots once—directly or via replayed maintenance."""
+    """Restarting the owner in a config update cleans orphaned bots once, even if room reconciliation fails."""
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=current_config)
@@ -2832,6 +2837,9 @@ async def test_config_reload_restarting_owner_runs_orphaned_bot_cleanup_once(
         orchestrator._startup_maintenance.task = blocked_task
         await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
+    reconcile_rooms = (
+        AsyncMock(side_effect=RuntimeError("room reconcile failed")) if room_reconcile_fails else AsyncMock()
+    )
     try:
         with (
             patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
@@ -2845,13 +2853,17 @@ async def test_config_reload_restarting_owner_runs_orphaned_bot_cleanup_once(
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_refresh_running_bots", new=AsyncMock()),
-            patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+            patch.object(orchestrator, "_reconcile_post_update_rooms", new=reconcile_rooms),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
             patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
             patch("mindroom.orchestrator.cleanup_all_orphaned_bots", new=AsyncMock()) as cleanup_orphans,
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan)
+            if room_reconcile_fails:
+                with pytest.raises(RuntimeError, match="room reconcile failed"):
+                    await orchestrator._apply_config_update_plan(current_config, plan)
+            else:
+                await orchestrator._apply_config_update_plan(current_config, plan)
             if maintenance_in_flight:
                 replayed = orchestrator._startup_maintenance.task
                 assert replayed is not None

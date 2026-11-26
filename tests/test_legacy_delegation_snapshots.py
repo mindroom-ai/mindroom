@@ -541,3 +541,35 @@ async def test_missing_sessions_directory_does_not_write_receipt(tmp_path: Path)
     await migrate_subagent_sessions(paths)
 
     assert not receipt.exists()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_sessions_directory_withholds_the_receipt_until_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory listing failure logs a warning and withholds the receipt so a later readable boot migrates."""
+    paths = _restore("v2026.10.18", tmp_path)
+    sessions = subagent_sessions_dir(paths)
+    receipt = tracking_dir(paths) / legacy_snapshots._RECEIPT
+    original_iterdir = Path.iterdir
+
+    def unreadable_iterdir(self: Path) -> object:
+        if self == sessions:
+            msg = "directory unreadable"
+            raise PermissionError(msg)
+        return original_iterdir(self)
+
+    with monkeypatch.context() as patch, capture_logs() as logs:
+        patch.setattr(Path, "iterdir", unreadable_iterdir)
+        await migrate_subagent_sessions(paths)
+
+    assert not receipt.exists()
+    assert any(
+        entry["event"] == "subagent_session_rewrite_skipped" and entry["path"] == str(sessions) for entry in logs
+    )
+
+    await migrate_subagent_sessions(paths)
+
+    assert receipt.is_file()
+    assert all(set(child) == _CHILD_FIELDS for child in _session_children(paths).values())
