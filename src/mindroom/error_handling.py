@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
     ModelSafeguardRefusal,
@@ -27,6 +29,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+_PROVIDER_UNREACHABLE = (
+    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries. "
+    "If this keeps happening, check the MindRoom host's internet connection."
+)
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
 # The provider's own text names its billing pages, which the person in the room may not be able to open.
 _QUOTA_EXHAUSTED_MESSAGE = (
@@ -140,5 +146,5 @@ def _provider_error_message(error: ProviderError, safe_error: str) -> str:  # no
     if isinstance(error, RateLimited):
         return _RATE_LIMITED
     if isinstance(error, ProviderUnavailable):
-        return _PROVIDER_UNAVAILABLE
+        return _PROVIDER_UNREACHABLE if error.code in (TRANSPORT_TIMEOUT, CONNECTION_ERROR) else _PROVIDER_UNAVAILABLE
     return f"⚠️ Error: {safe_error}"

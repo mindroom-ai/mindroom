@@ -10,9 +10,11 @@ from mindroom.error_handling import (
     minimal_mode_failure_message,
 )
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -23,6 +25,7 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.errors import classify_provider_error, missing_api_key_error
+from mindroom.providers.pipeline.retry import STREAM_STALLED
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
@@ -90,6 +93,10 @@ def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
 _PROVIDER_UNAVAILABLE_MESSAGE = (
     "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 )
+_PROVIDER_UNREACHABLE_MESSAGE = (
+    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries. "
+    "If this keeps happening, check the MindRoom host's internet connection."
+)
 _RATE_LIMITED_MESSAGE = "⏱️ Rate limited. Please wait a moment and try again."
 # How the requests transport starts its report when the Google sign-in host cannot be reached.
 _OAUTH_HOST_UNREACHABLE = (
@@ -101,8 +108,8 @@ _OAUTH_HOST_UNREACHABLE = (
     ("error", "expected"),
     [
         pytest.param(
-            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code="connection_error"),
-            _PROVIDER_UNAVAILABLE_MESSAGE,
+            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code=CONNECTION_ERROR),
+            _PROVIDER_UNREACHABLE_MESSAGE,
             id="unavailable-host-name-holds-auth",
         ),
         pytest.param(
@@ -310,3 +317,26 @@ def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
     assert "renew the plan" in reply
     assert "(openrouter)" in reply
     assert "openrouter.ai" not in reply
+
+
+@pytest.mark.parametrize("code", [TRANSPORT_TIMEOUT, CONNECTION_ERROR])
+def test_transport_provider_unavailable_says_provider_could_not_be_reached(code: str) -> None:
+    """Transport failures before any HTTP response point to network reachability rather than a provider outage."""
+    error = ProviderUnavailable("Request timed out.", provider="OpenAI", code=code)
+    assert get_user_friendly_error_message(error) == _PROVIDER_UNREACHABLE_MESSAGE
+
+
+def test_non_transport_provider_unavailable_keeps_provider_unavailable_message() -> None:
+    """Server 5xx failures and stalled streams still report the model provider as temporarily unavailable."""
+    assert (
+        get_user_friendly_error_message(
+            classify_provider_error("Service Unavailable", provider="OpenAI", status_code=503),
+        )
+        == _PROVIDER_UNAVAILABLE_MESSAGE
+    )
+    assert (
+        get_user_friendly_error_message(
+            ProviderUnavailable("Model stream stalled", provider="OpenAI", status_code=504, code=STREAM_STALLED),
+        )
+        == _PROVIDER_UNAVAILABLE_MESSAGE
+    )

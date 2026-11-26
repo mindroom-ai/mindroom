@@ -2170,7 +2170,9 @@ _REQUESTS_OAUTH_HOST_FAILURE = (
     '(Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7f0>: '
     "Failed to resolve 'oauth2.googleapis.com' ([Errno -3] Temporary failure in name resolution)\"))"
 )
-_UNAVAILABLE_FINAL_MESSAGE = "⚠️ Model provider temporarily unavailable after automatic retries"
+_UNREACHABLE_FINAL_MESSAGE = (
+    "⚠️ Couldn't reach the model provider (network error or timeout), even after automatic retries"
+)
 
 
 class _RefreshFailingCredentials(Credentials):
@@ -2192,19 +2194,19 @@ class _RefreshFailingCredentials(Credentials):
             google.auth.exceptions.TransportError("token endpoint unreachable"),
             ProviderUnavailable,
             None,
-            _UNAVAILABLE_FINAL_MESSAGE,
+            _UNREACHABLE_FINAL_MESSAGE,
         ),
         (
             google.auth.exceptions.TransportError(_REQUESTS_OAUTH_HOST_FAILURE),
             ProviderUnavailable,
             None,
-            _UNAVAILABLE_FINAL_MESSAGE,
+            _UNREACHABLE_FINAL_MESSAGE,
         ),
         (
             google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True),
             ProviderUnavailable,
             None,
-            _UNAVAILABLE_FINAL_MESSAGE,
+            _UNREACHABLE_FINAL_MESSAGE,
         ),
         (
             google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."),
@@ -2223,7 +2225,7 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     status_code: int | None,
     final_message: str,
 ) -> None:
-    """A network failure while minting the Vertex token is retryable and ends as temporary unavailability.
+    """A network failure while minting the Vertex token is retryable and reports the provider as unreachable.
 
     Rejected credentials end as an authentication failure.
     """

@@ -17,6 +17,7 @@ import httpx
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
@@ -365,7 +366,7 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         # Claude SDKs send through httpx2, the Gemini and Ollama SDKs and the CLI login refreshes through httpx.
         timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError)
         timed_out = any(isinstance(cause, timeouts) for cause in chain)
-        code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
+        code = TRANSPORT_TIMEOUT if timed_out else CONNECTION_ERROR
         return ProviderUnavailable(failure_text(error), provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
