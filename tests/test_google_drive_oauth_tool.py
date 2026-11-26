@@ -943,7 +943,10 @@ def test_google_drive_upload_converts_a_file_to_a_google_workspace_file(
     (workspace_root / "launch.plan.html").write_text("<h1>Plan</h1><table><tr><td>cell</td></tr></table>")
 
     tool.google_drive_write(
-        action="upload", local_path="launch.plan.html", parent_id="folder-id", convert_to=convert_to
+        action="upload",
+        local_path="launch.plan.html",
+        parent_id="folder-id",
+        convert_to=convert_to,
     )
 
     assert service.files_resource.create_kwargs is not None
@@ -1095,7 +1098,7 @@ def test_google_drive_move_file_replaces_parents_and_optionally_renames(
     service.files_resource.file_metadata = {"parents": ["old-parent", "new-parent"]}
 
     result = json.loads(
-        tool.google_drive_write(action="move", file_id="file-id", parent_id="new-parent", name="Renamed.txt")
+        tool.google_drive_write(action="move", file_id="file-id", parent_id="new-parent", name="Renamed.txt"),
     )
 
     assert result == {"id": "file-id", "name": "Renamed.txt"}
@@ -1421,7 +1424,7 @@ def test_google_drive_download_exports_a_workspace_type_without_a_default_export
     service.files_resource.file_metadata = {"name": "Whiteboard", "mimeType": "application/vnd.google-apps.jam"}
 
     result = json.loads(
-        tool.google_drive_read(action="download", file_id="shared-drive-file-id", export_format="application/pdf")
+        tool.google_drive_read(action="download", file_id="shared-drive-file-id", export_format="application/pdf"),
     )
 
     assert result["status"] == "exported"

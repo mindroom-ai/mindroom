@@ -96,7 +96,7 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
     assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
     result = json.loads(
-        writable_tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=[])
+        writable_tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=[]),
     )
 
     assert result["oauth_connection_required"] is True
@@ -293,7 +293,7 @@ def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> N
     tool, service = _connected_sheets_tool(tmp_path)
 
     result = json.loads(
-        tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=_FORMAT_REQUESTS)
+        tool.google_sheets_write(action="batch_update", spreadsheet_id="sheet-id", requests=_FORMAT_REQUESTS),
     )
 
     assert result == {"spreadsheetId": "sheet-id", "replies": [{}]}
@@ -344,8 +344,10 @@ def test_google_sheets_batch_update_returns_sanitized_http_error(tmp_path: Path)
 
     result = json.loads(
         tool.google_sheets_write(
-            action="batch_update", spreadsheet_id="sheet-id", requests=[{"deleteSheet": {"sheetId": 7}}]
-        )
+            action="batch_update",
+            spreadsheet_id="sheet-id",
+            requests=[{"deleteSheet": {"sheetId": 7}}],
+        ),
     )
 
     assert result == {"error": "Google Sheets request failed (HTTP 400)"}
@@ -404,7 +406,10 @@ def test_google_sheets_update_sheet_requires_explicit_args_even_with_read_defaul
     )
 
     result = tool.google_sheets_write(
-        action="update", data=[["Item", 42]], spreadsheet_id=spreadsheet_id, range_name=range_name
+        action="update",
+        data=[["Item", 42]],
+        spreadsheet_id=spreadsheet_id,
+        range_name=range_name,
     )
 
     assert "must be provided" in result

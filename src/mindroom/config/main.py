@@ -1701,6 +1701,16 @@ class Config(BaseModel):
         for toolkit_name in sorted(enabled_toolkits):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             metadata = tools.entries.get(toolkit_name)
+            if (
+                builtin_renames is None
+                and metadata is not None
+                and metadata.dependency_extra in RETIRED_CONSOLIDATED_FUNCTIONS
+                and toolkit_name.endswith(f"_{metadata.dependency_extra}")
+            ):
+                base_renames = RETIRED_CONSOLIDATED_FUNCTIONS[metadata.dependency_extra]
+                prefix = toolkit_name.removesuffix(f"_{metadata.dependency_extra}")
+                if all(f"{prefix}_{new}" in metadata.function_names for new in set(base_renames.values())):
+                    builtin_renames = {f"{prefix}_{old}": f"{prefix}_{new}" for old, new in base_renames.items()}
             declared_renames = metadata.retired_functions if metadata is not None else None
             if not builtin_renames and not declared_renames:
                 continue

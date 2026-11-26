@@ -1044,6 +1044,25 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
         ("scheduler", "schedule", "scheduler"),
         ("searxng", "image_search", "searxng_search"),
         ("searxng", "search_web", "searxng_search"),
+        ("gmail", "send_email", "gmail_send"),
+        ("gmail", "send_email_to_self", "gmail_send_to_self"),
+        ("gmail", "create_draft_email", "gmail_draft"),
+        ("gmail", "delete_custom_label", "gmail_manage"),
+        ("gmail", "search_emails", "gmail_read"),
+        ("google_calendar", "create_event", "google_calendar_write"),
+        ("google_calendar", "list_events", "google_calendar_read"),
+        ("github", "delete_repository", "github_write_repo"),
+        ("github", "create_pull_request", "github_write_pr"),
+        ("github", "create_issue", "github_write_issues"),
+        ("github", "list_repositories", "github_read_repo"),
+        ("github", "get_pull_request", "github_read_issues_prs"),
+        ("google_drive", "google_drive_trash_file", "google_drive_write"),
+        ("google_drive", "google_drive_download_file", "google_drive_read"),
+        ("google_sheets", "create_sheet", "google_sheets_write"),
+        ("google_sheets", "create_duplicate_sheet", "google_sheets_write"),
+        ("google_sheets", "read_sheet", "google_sheets_read"),
+        ("homeassistant", "call_service", "homeassistant_control"),
+        ("homeassistant", "list_entities", "homeassistant_read"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
@@ -2762,3 +2781,144 @@ async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
         assert await _call_row(journal, "still-waiting") == (None, None)
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "tool_name", "actions"),
+    [
+        ("gmail", "gmail_read", ("latest", "search_emails", "get_draft")),
+        ("gmail", "gmail_draft", ("create", "update")),
+        ("gmail", "gmail_send", ("send", "reply")),
+        ("gmail", "gmail_manage", ("star", "apply_label", "delete_custom_label")),
+        ("google_calendar", "google_calendar_read", ("list_events", "check_availability")),
+        ("google_calendar", "google_calendar_write", ("create_event", "delete_event")),
+        ("github", "github_read_repo", ("list_repositories", "get_file_content")),
+        ("github", "github_read_issues_prs", ("list_issues", "get_pull_request")),
+        ("github", "github_write_issues", ("create_issue", "close_issue")),
+        ("github", "github_write_pr", ("create_pull_request", "create_review_request")),
+        ("github", "github_write_repo", ("create_file", "delete_repository")),
+        ("google_drive", "google_drive_read", ("list", "download")),
+        ("google_drive", "google_drive_write", ("upload", "trash")),
+        ("google_sheets", "google_sheets_write", ("create", "update", "batch_update")),
+        ("homeassistant", "homeassistant_read", ("list_entities", "get_state")),
+        ("homeassistant", "homeassistant_control", ("turn_on", "call_service")),
+    ],
+)
+def test_wave3b_registry_action_scoped_grants_bind_per_action(
+    toolkit_name: str,
+    tool_name: str,
+    actions: tuple[str, ...],
+) -> None:
+    """Consolidated Wave 3b tools bind timed approval grants to their action via registry metadata."""
+    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    assert tool_name in registry.entries[toolkit_name].action_scoped_grants
+    config = Config()
+    ops = [
+        grant_operation(config, tool_name, {"action": action}, tools=registry, toolkit_name=toolkit_name)
+        for action in actions
+    ]
+    assert all(op is not None for op in ops)
+    assert len({op.key for op in ops if op is not None}) == len(actions)
+    assert grant_operation(config, tool_name, {}, tools=registry, toolkit_name=toolkit_name) is None
+    assert grant_operation(config, tool_name, {"action": ""}, tools=registry, toolkit_name=toolkit_name) is None
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "tool_name"),
+    [
+        ("gmail", "gmail_send_to_self"),
+        ("google_sheets", "google_sheets_read"),
+    ],
+)
+def test_wave3b_single_operation_tools_keep_tool_wide_grants(toolkit_name: str, tool_name: str) -> None:
+    """Single-operation Wave 3b tools without an action enum use normal tool-wide grants."""
+    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    assert tool_name not in registry.entries[toolkit_name].action_scoped_grants
+    op = grant_operation(Config(), tool_name, {}, tools=registry, toolkit_name=toolkit_name)
+    assert op is not None
+    assert op.tool_name == tool_name
+    assert op.mcp_server_id is None
+    assert op.mcp_tool_name is None
+
+
+def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path: Path) -> None:
+    """Prefixed secondary Google Workspace plugin clones inherit both fail-closed rules and action-scoped grants."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+
+    plugin_root = tmp_path / "plugins" / "work_google"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "work_google",
+                "mindroom_plugin_api": "1.35",
+                "tools_module": "tools.py",
+                "oauth_module": "oauth.py",
+            },
+        ),
+        encoding="utf-8",
+    )
+    workspace_def = (
+        "from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig\n"
+        "WORKSPACE = GoogleWorkspaceConfig(\n"
+        "    name='work',\n"
+        "    display_name='Work Google',\n"
+        "    client_config_service='work_google_oauth_client',\n"
+        "    allowed_hosted_domains=('work.example',),\n"
+        "    services=('gmail',),\n"
+        ")\n"
+    )
+    (plugin_root / "oauth.py").write_text(
+        workspace_def
+        + "from mindroom.tool_system.google_workspaces import google_workspace_oauth_providers\n"
+        + "def register_oauth_providers():\n"
+        + "    return google_workspace_oauth_providers(WORKSPACE)\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        workspace_def
+        + "from mindroom.tool_system.google_workspaces import register_google_workspace_tools\n"
+        + "register_google_workspace_tools(WORKSPACE)\n",
+        encoding="utf-8",
+    )
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    base_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "plugins": [str(plugin_root)],
+        "agents": {"a": {"display_name": "A", "tools": ["work_gmail"], "include_default_tools": False}},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="work_gmail_send"):
+        Config.validate_with_runtime(
+            {**base_data, "tool_approval": {"rules": [{"match": "work_send_email", "action": "require_approval"}]}},
+            runtime_paths,
+        )
+
+    loaded = Config.validate_with_runtime(
+        {**base_data, "tool_approval": {"rules": [{"match": "work_gmail_send", "action": "require_approval"}]}},
+        runtime_paths,
+    )
+    registry = refresh_plugins(loaded, runtime_paths).tools
+    assert "work_gmail_manage" in registry.entries["work_gmail"].action_scoped_grants
+    star_op = grant_operation(
+        loaded,
+        "work_gmail_manage",
+        {"action": "star"},
+        tools=registry,
+        toolkit_name="work_gmail",
+    )
+    del_op = grant_operation(
+        loaded,
+        "work_gmail_manage",
+        {"action": "delete_custom_label"},
+        tools=registry,
+        toolkit_name="work_gmail",
+    )
+    assert star_op is not None
+    assert del_op is not None
+    assert star_op != del_op

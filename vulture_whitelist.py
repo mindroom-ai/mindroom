@@ -380,6 +380,7 @@ _.exchange_refresh_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_ga
 _.revoke_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 
 _.image_to_image  # FalTools registers this override as an image-editing tool (src/mindroom/custom_tools/fal.py)
+_.upload_file  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
 _.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
 _.read_file_content  # E2BTools registers this override as a sandbox file-read tool (src/mindroom/custom_tools/e2b.py)
 _.run_python_code  # E2BTools registers this override as a code-execution tool (src/mindroom/custom_tools/e2b.py)

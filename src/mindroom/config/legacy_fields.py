@@ -328,18 +328,20 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
-# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
-#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
-#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
-#   and todo respectively.
-# Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
-#   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
-#   differs from the replacement's effective decision (regardless of other toolkits).
+# LEGACY_COMPAT: Retired individual functions of consolidated built-in toolkits.
+# Legacy format: scheduler (4), searxng (8), memory (6), todo (6), gmail (26), google_calendar (14), github (39),
+#   google_drive (9), google_sheets (5 including create_duplicate_sheet), and homeassistant (11) exposed separate
+#   per-operation functions that could appear in tool_approval.rules[].match globs (including prefixed secondary
+#   Google Workspace plugin copies).
+# Last legacy release: v2026.11.610 (scheduler/searxng/memory/todo) and v2026.11.611 (gmail/google_calendar/github/
+#   google_drive/google_sheets/homeassistant); replacement: unreleased; consolidated into risk-scoped action tools.
+# Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone), allow configs with
+#   an explicit exact rule deciding the replacement function, and otherwise reject tool_approval.rules when any
+#   retired function's effective decision differs from the replacement's effective decision.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
-#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name.
+#   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
+#   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -372,6 +374,122 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "gmail": {
+        "get_latest_emails": "gmail_read",
+        "get_emails_from_user": "gmail_read",
+        "get_unread_emails": "gmail_read",
+        "get_starred_emails": "gmail_read",
+        "get_emails_by_context": "gmail_read",
+        "get_emails_by_date": "gmail_read",
+        "get_emails_by_thread": "gmail_read",
+        "search_emails": "gmail_read",
+        "get_message": "gmail_read",
+        "get_thread": "gmail_read",
+        "search_threads": "gmail_read",
+        "list_custom_labels": "gmail_read",
+        "get_draft": "gmail_read",
+        "list_drafts": "gmail_read",
+        "create_draft_email": "gmail_draft",
+        "update_draft": "gmail_draft",
+        "send_email": "gmail_send",
+        "send_email_reply": "gmail_send",
+        "send_email_to_self": "gmail_send_to_self",
+        "mark_email_as_read": "gmail_manage",
+        "mark_email_as_unread": "gmail_manage",
+        "star_email": "gmail_manage",
+        "unstar_email": "gmail_manage",
+        "apply_label": "gmail_manage",
+        "remove_label": "gmail_manage",
+        "delete_custom_label": "gmail_manage",
+    },
+    "google_calendar": {
+        "list_calendars": "google_calendar_read",
+        "list_events": "google_calendar_read",
+        "fetch_all_events": "google_calendar_read",
+        "get_event": "google_calendar_read",
+        "search_events": "google_calendar_read",
+        "get_event_attendees": "google_calendar_read",
+        "check_availability": "google_calendar_read",
+        "find_available_slots": "google_calendar_read",
+        "create_event": "google_calendar_write",
+        "update_event": "google_calendar_write",
+        "delete_event": "google_calendar_write",
+        "quick_add_event": "google_calendar_write",
+        "respond_to_event": "google_calendar_write",
+        "move_event": "google_calendar_write",
+    },
+    "github": {
+        "list_repositories": "github_read_repo",
+        "search_repositories": "github_read_repo",
+        "get_repository": "github_read_repo",
+        "get_repository_with_stats": "github_read_repo",
+        "get_repository_languages": "github_read_repo",
+        "get_repository_stars": "github_read_repo",
+        "list_branches": "github_read_repo",
+        "get_file_content": "github_read_repo",
+        "get_directory_content": "github_read_repo",
+        "get_branch_content": "github_read_repo",
+        "search_code": "github_read_repo",
+        "list_issues": "github_read_issues_prs",
+        "get_issue": "github_read_issues_prs",
+        "list_issue_comments": "github_read_issues_prs",
+        "get_pull_requests": "github_read_issues_prs",
+        "get_pull_request": "github_read_issues_prs",
+        "get_pull_request_changes": "github_read_issues_prs",
+        "get_pull_request_comments": "github_read_issues_prs",
+        "get_pull_request_with_details": "github_read_issues_prs",
+        "get_pull_request_count": "github_read_issues_prs",
+        "search_issues_and_prs": "github_read_issues_prs",
+        "create_issue": "github_write_issues",
+        "edit_issue": "github_write_issues",
+        "comment_on_issue": "github_write_issues",
+        "close_issue": "github_write_issues",
+        "reopen_issue": "github_write_issues",
+        "assign_issue": "github_write_issues",
+        "label_issue": "github_write_issues",
+        "create_pull_request": "github_write_pr",
+        "create_pull_request_comment": "github_write_pr",
+        "edit_pull_request_comment": "github_write_pr",
+        "create_review_request": "github_write_pr",
+        "create_repository": "github_write_repo",
+        "delete_repository": "github_write_repo",
+        "create_branch": "github_write_repo",
+        "set_default_branch": "github_write_repo",
+        "create_file": "github_write_repo",
+        "update_file": "github_write_repo",
+        "delete_file": "github_write_repo",
+    },
+    "google_drive": {
+        "google_drive_list_files": "google_drive_read",
+        "google_drive_search_files": "google_drive_read",
+        "google_drive_read_file": "google_drive_read",
+        "google_drive_download_file": "google_drive_read",
+        "google_drive_upload_file": "google_drive_write",
+        "google_drive_update_file": "google_drive_write",
+        "google_drive_create_folder": "google_drive_write",
+        "google_drive_move_file": "google_drive_write",
+        "google_drive_trash_file": "google_drive_write",
+    },
+    "google_sheets": {
+        "read_sheet": "google_sheets_read",
+        "create_sheet": "google_sheets_write",
+        "update_sheet": "google_sheets_write",
+        "batch_update_sheet": "google_sheets_write",
+        "create_duplicate_sheet": "google_sheets_write",
+    },
+    "homeassistant": {
+        "list_entities": "homeassistant_read",
+        "get_entity_state": "homeassistant_read",
+        "turn_on": "homeassistant_control",
+        "turn_off": "homeassistant_control",
+        "toggle": "homeassistant_control",
+        "set_brightness": "homeassistant_control",
+        "set_color": "homeassistant_control",
+        "set_temperature": "homeassistant_control",
+        "activate_scene": "homeassistant_control",
+        "trigger_automation": "homeassistant_control",
+        "call_service": "homeassistant_control",
     },
 }
 

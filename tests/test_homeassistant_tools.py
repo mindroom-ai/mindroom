@@ -449,7 +449,8 @@ class TestHomeAssistantTools:
             }
 
             result = await ha_tools_with_mocked_creds.homeassistant_read(
-                action="get_state", entity_id="light.living_room"
+                action="get_state",
+                entity_id="light.living_room",
             )
             result_dict = json.loads(result)
 
@@ -492,7 +493,8 @@ class TestHomeAssistantTools:
             mock_request.return_value = {"success": True}
 
             result = await ha_tools_with_mocked_creds.homeassistant_control(
-                action="turn_on", entity_id="light.living_room"
+                action="turn_on",
+                entity_id="light.living_room",
             )
             result_dict = json.loads(result)
 
@@ -513,7 +515,9 @@ class TestHomeAssistantTools:
             mock_request.return_value = {"success": True}
 
             result = await ha_tools_with_mocked_creds.homeassistant_control(
-                action="set_brightness", entity_id="light.living_room", brightness=128
+                action="set_brightness",
+                entity_id="light.living_room",
+                brightness=128,
             )
             result_dict = json.loads(result)
 
@@ -531,7 +535,9 @@ class TestHomeAssistantTools:
     ) -> None:
         """Test setting brightness with invalid value."""
         result = await ha_tools_with_mocked_creds.homeassistant_control(
-            action="set_brightness", entity_id="light.living_room", brightness=300
+            action="set_brightness",
+            entity_id="light.living_room",
+            brightness=300,
         )
         result_dict = json.loads(result)
 
@@ -544,7 +550,9 @@ class TestHomeAssistantTools:
             mock_request.return_value = {"success": True}
 
             result = await ha_tools_with_mocked_creds.homeassistant_control(
-                action="set_color", entity_id="light.living_room", rgb_color=[255, 128, 0]
+                action="set_color",
+                entity_id="light.living_room",
+                rgb_color=[255, 128, 0],
             )
             result_dict = json.loads(result)
 
@@ -559,7 +567,9 @@ class TestHomeAssistantTools:
     async def test_set_color_invalid(self, ha_tools_with_mocked_creds: HomeAssistantTools) -> None:
         """Test setting color with invalid RGB values."""
         result = await ha_tools_with_mocked_creds.homeassistant_control(
-            action="set_color", entity_id="light.living_room", rgb_color=[255, 300, 0]
+            action="set_color",
+            entity_id="light.living_room",
+            rgb_color=[255, 300, 0],
         )
         result_dict = json.loads(result)
 
