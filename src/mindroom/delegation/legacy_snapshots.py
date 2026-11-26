@@ -12,7 +12,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import subagent_sessions_dir
+from mindroom.constants import subagent_sessions_dir, tracking_dir
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild
 from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
@@ -21,11 +21,15 @@ from mindroom.session_storage.store import decoded_mapping
 
 if TYPE_CHECKING:
     import sqlite3
+    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.session_storage.schema import TableNames
 
 logger = get_logger(__name__)
+
+_RECEIPT = "subagent_snapshots_migrated.json"
+_RECEIPT_VERSION = 1
 
 
 # LEGACY_COMPAT: Delegation child snapshots stored without a field a later release added.
@@ -44,31 +48,54 @@ logger = get_logger(__name__)
 # those releases ran with: standard mode, no persona (the configured agent's own prompt), the recorded model as the
 # requested one, no skills, and null knowledge, which follows the persona's tool list. A session file that does not
 # decode or holds no child is logged and left, and a snapshot the current reader rejects even so stays as stored, so
-# each fails only where it is read, as before. The rewrite has no removal date.
+# each fails only where it is read, as before. A clean pass over `subagent_sessions/` records a versioned receipt
+# (`subagent_snapshots_migrated.json`) in `tracking_dir` so later boots skip rescanning session files; any symlink,
+# unreadable file, or rejected child withholds the receipt so repairing it lets the next boot migrate it. The rewrite
+# has no removal date.
 # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
 # tests/test_legacy_delegation_snapshots.py::test_a_second_start_changes_nothing,
 # tests/test_legacy_delegation_snapshots.py::test_a_snapshot_the_reader_rejects_stays_as_stored,
 # tests/test_legacy_delegation_snapshots.py::test_an_unreadable_session_file_neither_stops_startup_nor_changes,
 # tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
-def _current_child(child: object) -> object:
-    """Return the stored child snapshot ``child`` with every field it lacks, or ``child`` itself when it gets no rewrite.
+def _normalize_child(child: object) -> tuple[object, bool]:
+    """Return ``(normalized_child, clean)`` for a stored child snapshot.
 
-    It gets none when it holds every field already, or when the current reader rejects it even with them.
+    The returned child is ``child`` itself when it needs no rewrite or when the current reader rejects it even with
+    every legacy field filled. ``clean`` is ``False`` whenever ``child`` is not a dict or is rejected by
+    ``DelegationChild.from_dict``.
     """
     if not isinstance(child, dict):
-        return child
+        return child, False
     current: dict[str, Any] = {"agent_mode": "standard", "persona": None, **cast("dict[str, Any]", child)}
     if current.get("requested_model_name") is None:
         current["requested_model_name"] = current.get("model_name")
     if isinstance(persona := current["persona"], dict):
         current["persona"] = {"skills": [], "knowledge": None, **persona}
-    if current == child:
-        return child
     try:
         DelegationChild.from_dict(current)
     except (KeyError, TypeError):
-        return child
-    return current
+        return child, False
+    return (child if current == child else current), True
+
+
+def _current_child(child: object) -> object:
+    """Return the stored child snapshot ``child`` with every field it lacks, or ``child`` itself when it gets no rewrite.
+
+    It gets none when it holds every field already, or when the current reader rejects it even with them.
+    """
+    normalized, _clean = _normalize_child(child)
+    return normalized
+
+
+def _receipt_current(receipt: Path) -> bool:
+    """Return whether ``receipt`` records that this migration version already completed cleanly."""
+    if receipt.is_symlink() or not receipt.is_file():
+        return False
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("version") == _RECEIPT_VERSION
 
 
 async def migrate_subagent_sessions(runtime_paths: RuntimePaths) -> None:
@@ -77,11 +104,16 @@ async def migrate_subagent_sessions(runtime_paths: RuntimePaths) -> None:
 
 
 def _migrate_subagent_sessions(runtime_paths: RuntimePaths) -> None:
+    receipt = tracking_dir(runtime_paths) / _RECEIPT
+    if _receipt_current(receipt):
+        return
     root = subagent_sessions_dir(runtime_paths)
     if root.is_symlink() or not root.is_dir():
         return
+    clean = True
     for path in sorted(root.glob("*.json")):
         if path.is_symlink():
+            clean = False
             continue
         try:
             payload = json.loads(path.read_text())
@@ -89,11 +121,17 @@ def _migrate_subagent_sessions(runtime_paths: RuntimePaths) -> None:
         except (OSError, ValueError, KeyError, TypeError) as error:
             # Its reader fails for this subagent alone, as before the rewrite, so the rest of startup goes on.
             logger.warning("subagent_session_rewrite_skipped", path=str(path), error=str(error))
+            clean = False
             continue
-        child = _current_child(stored)
+        child, child_clean = _normalize_child(stored)
+        if not child_clean:
+            clean = False
+            continue
         if child is not stored:
             # The replacement is atomic, so a crash leaves the file in one shape or the other and the next start resumes.
             write_json_file_durable(path, {**payload, "child": child}, strict_atomic_replace=True)
+    if clean:
+        write_json_file_durable(receipt, {"version": _RECEIPT_VERSION}, strict_atomic_replace=True)
 
 
 def rewrite_run_snapshots(connection: sqlite3.Connection, names: TableNames) -> None:

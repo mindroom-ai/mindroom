@@ -3919,6 +3919,7 @@ depends_on = [
     "mindroom.integrations",
     "mindroom.knowledge.watch",
     "mindroom.matrix.provisioning_heartbeat",
+    "mindroom.matrix.room_cleanup",
     "mindroom.matrix.users",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",

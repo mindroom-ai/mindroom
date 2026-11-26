@@ -2806,6 +2806,67 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance_in_flight", [False, True])
+async def test_config_reload_restarting_owner_runs_orphaned_bot_cleanup_once(
+    tmp_path: Path,
+    maintenance_in_flight: bool,
+) -> None:
+    """Restarting the owner in a config update cleans orphaned bots once—directly or via replayed maintenance."""
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=current_config)
+    router_bot = MagicMock(spec=AgentBot, agent_name=ROUTER_AGENT_NAME, running=True)
+    router_bot.client = MagicMock()
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
+    orchestrator.running = True
+    plan = ConfigUpdatePlan(new_config=new_config, restart={ROUTER_AGENT_NAME})
+    blocked_task: asyncio.Task[None] | None = None
+    if maintenance_in_flight:
+        started = asyncio.Event()
+
+        async def blocked() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        blocked_task = asyncio.create_task(blocked())
+        orchestrator._startup_maintenance.task = blocked_task
+        await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    try:
+        with (
+            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
+            patch.object(orchestrator.fleet, "stop", new=AsyncMock()),
+            patch.object(orchestrator.fleet, "create", new=AsyncMock()),
+            patch.object(
+                orchestrator.fleet,
+                "start",
+                new=AsyncMock(return_value=EntityStartResults(started_bots=[router_bot])),
+            ),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_refresh_running_bots", new=AsyncMock()),
+            patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
+            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+            patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
+            patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
+            patch("mindroom.orchestrator.cleanup_all_orphaned_bots", new=AsyncMock()) as cleanup_orphans,
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan)
+            if maintenance_in_flight:
+                replayed = orchestrator._startup_maintenance.task
+                assert replayed is not None
+                await asyncio.wait_for(replayed, timeout=SETTLE_TIMEOUT_SECONDS)
+
+        cleanup_orphans.assert_awaited_once_with(router_bot.client, new_config, orchestrator.runtime_paths)
+    finally:
+        await orchestrator._startup_maintenance.cancel()
+        if blocked_task is not None and not blocked_task.done():
+            blocked_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await blocked_task
+
+
+@pytest.mark.asyncio
 @pytest.mark.timeout(10)
 async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyncLog) -> None:
     """Regression: a brand-new agent must only be started once.

@@ -49,7 +49,7 @@ class TestDMPreservationDuringCleanup:
         active = 0
         peak = 0
 
-        async def clean(_client: object, room_id: str, *_args: object) -> list[str]:
+        async def clean(_client: object, room_id: str, *_args: object, **_kwargs: object) -> list[str]:
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -64,6 +64,10 @@ class TestDMPreservationDuringCleanup:
 
         rooms = [f"!room{i}:server" for i in range(12)]
         with (
+            patch(
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
+                return_value=frozenset({"@old:server"}),
+            ),
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", AsyncMock(return_value=rooms)),
             patch("mindroom.matrix.room_cleanup._cleanup_orphaned_bots_in_room", clean),
         ):
@@ -492,3 +496,31 @@ class TestDMPreservationDuringCleanup:
             assert root_space_id not in result
             # No kicks at all (router is configured in lobby)
             assert not client.room_kick.called
+
+    async def test_cleanup_all_skips_matrix_calls_when_no_retired_bots_exist(self, tmp_path: Path) -> None:
+        """cleanup_all_orphaned_bots makes zero Matrix calls when every persisted bot is still configured."""
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={"agent": AgentConfig(display_name="Agent", role="Test agent")},
+        )
+        runtime_paths = runtime_paths_for(config)
+        domain = config.get_domain(runtime_paths)
+        client = AsyncMock()
+        get_joined = AsyncMock()
+        get_members = AsyncMock()
+        check_dm = AsyncMock()
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
+                return_value=frozenset({f"@mindroom_router:{domain}", f"@mindroom_agent:{domain}"}),
+            ),
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", get_joined),
+            patch("mindroom.matrix.room_cleanup.get_room_members", get_members),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", check_dm),
+        ):
+            assert await cleanup_all_orphaned_bots(client, config, runtime_paths) == {}
+
+        get_joined.assert_not_awaited()
+        get_members.assert_not_awaited()
+        check_dm.assert_not_awaited()
+        client.room_kick.assert_not_awaited()

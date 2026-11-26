@@ -5975,17 +5975,24 @@ async def test_owner_login_failure_does_not_block_agents(tmp_path: Path) -> None
         config=MagicMock(source_fingerprint=None),
     )
     owner = _startable_bot(ROUTER_AGENT_NAME, start=AsyncMock(side_effect=RuntimeError("login failed")))
+    owner.running = False
     general = _startable_bot("general")
     install_bots(orchestrator, {ROUTER_AGENT_NAME: owner, "general": general})
 
-    with _matrix_free_startup(orchestrator) as setup, patch.object(orchestrator.fleet, "schedule_retries") as retries:
+    with (
+        _matrix_free_startup(orchestrator) as setup,
+        patch.object(orchestrator.fleet, "schedule_retries") as retries,
+        patch("mindroom.orchestrator.cleanup_all_orphaned_bots", new=AsyncMock()) as cleanup_orphans,
+    ):
         await _run_orchestrator_start_until_ready(orchestrator, wait_for_startup_maintenance=True)
         setup.assert_awaited_once_with([general])
+        cleanup_orphans.assert_not_awaited()
         owner.running = general.running = True
         await orchestrator._setup_rooms_after_retry(ROUTER_AGENT_NAME)
 
     retries.assert_called_once_with([ROUTER_AGENT_NAME])
     assert setup.await_args_list[-1].args == ([owner, general],)
+    cleanup_orphans.assert_awaited_once_with(owner.client, orchestrator.config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio
