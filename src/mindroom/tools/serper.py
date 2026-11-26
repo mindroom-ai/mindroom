@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.serper import SerperTools
+    from mindroom.custom_tools.serper import SerperTools
 
 
 @register_tool_with_metadata(
@@ -107,6 +107,6 @@ if TYPE_CHECKING:
 )
 def serper_tools() -> type[SerperTools]:
     """Return Serper tools for Google search, news, academic papers, and web scraping."""
-    from agno.tools.serper import SerperTools
+    from mindroom.custom_tools.serper import SerperTools
 
     return SerperTools

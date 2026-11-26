@@ -1,4 +1,4 @@
-"""Custom API tool configuration."""
+"""Custom API tool configuration and native HTTP toolkit."""
 
 from __future__ import annotations
 
@@ -12,14 +12,13 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.public_fetch import CONNECT_TIMEOUT_SECONDS, run_fetch_sync
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.string_mapping import parse_string_mapping
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    from agno.tools.api import CustomApiTools
 
 _CREDENTIALS_NEED_BASE_URL = (
     "custom_api sends its configured api_key, username and password, and headers only to base_url; "
@@ -86,6 +85,103 @@ async def _read_final_response(client: httpx.AsyncClient, response: httpx.Respon
     if not response.is_success:
         result["error"] = "Request failed"
     return json.dumps(result, indent=2)
+
+
+class CustomApiTools(Toolkit):
+    """Native custom API toolkit with MindRoom destination-policy and transport protections."""
+
+    name = "api_tools"
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        api_key: str | None = None,
+        headers: dict[str, str] | str | None = None,
+        verify_ssl: bool = True,
+        timeout: float = 30,
+        enable_make_request: bool = True,
+        all: bool = False,  # noqa: A002
+    ) -> None:
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.api_key = api_key
+        # The dashboard stores headers as JSON text, while programmatic callers may pass a mapping.
+        self.default_headers = dict(parse_string_mapping(headers, field_name="headers") or {})
+        self.verify_ssl = verify_ssl
+        self.timeout = timeout
+        super().__init__(name="api_tools")
+        if not (all or enable_make_request):
+            self.functions.pop("make_request", None)
+
+    def _get_headers(self, additional_headers: dict[str, str] | None = None) -> dict[str, str]:
+        """Combine configured default headers, optional bearer auth, and per-call headers."""
+        merged = dict(self.default_headers)
+        if self.api_key:
+            merged["Authorization"] = f"Bearer {self.api_key}"
+        if additional_headers:
+            merged.update(additional_headers)
+        return merged
+
+    @tool
+    def make_request(
+        self,
+        endpoint: str,
+        method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = "GET",
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json_data: dict[str, Any] | None = None,
+    ) -> str:
+        """Make an HTTP request to a validated public HTTP(S) URL."""
+        auth = (self.username, self.password) if self.username and self.password else None
+        has_credentials = bool(self.api_key or auth or self.default_headers)
+        if has_credentials and not self.base_url:
+            return json.dumps({"error": _CREDENTIALS_NEED_BASE_URL}, indent=2)
+        url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
+        # The transport resolves the hostname and checks each dialed address within the timeout.
+        url = validate_server_fetch_url(url, resolve_hostnames=False)
+        event_hooks = None
+        request_headers = httpx.Headers(self._get_headers(headers))
+        if has_credentials and self.base_url:
+            # HTTPX already strips Authorization on these hops; configured headers need the same treatment.
+            credential_headers = frozenset({"Authorization", *self.default_headers})
+            event_hooks = {"request": [_credential_header_guard(self.base_url, credential_headers)]}
+            # The URL alone chooses the virtual host that receives the credentials.
+            request_headers.pop("Host", None)
+        request_headers["Accept-Encoding"] = "identity"
+
+        async def send() -> str:
+            # The timeout covers the request but not closing the client after a response was read.
+            async with (
+                httpx.AsyncClient(
+                    transport=ServerFetchAsyncHTTPTransport(verify=self.verify_ssl),
+                    event_hooks=event_hooks,
+                    timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
+                ) as client,
+                asyncio.timeout(self.timeout),
+            ):
+                request = client.build_request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    data=data,
+                    json=json_data,
+                    headers=request_headers,
+                )
+                return await _read_final_response(client, await client.send(request, auth=auth, stream=True))
+
+        try:
+            return run_fetch_sync(send())
+        except TimeoutError:
+            return json.dumps(
+                {"error": f"Request failed: the request did not finish within {self.timeout} seconds"},
+                indent=2,
+            )
+        except httpx.RequestError as exc:
+            return json.dumps({"error": f"Request failed: {exc}"}, indent=2)
 
 
 @register_tool_with_metadata(
@@ -171,93 +267,4 @@ async def _read_final_response(client: httpx.AsyncClient, response: httpx.Respon
 )
 def custom_api_tools() -> type[CustomApiTools]:
     """Return Custom API tools for making HTTP requests to external APIs."""
-    from agno.tools.api import CustomApiTools
-
-    class MindRoomCustomApiTools(CustomApiTools):
-        """Custom API toolkit with MindRoom server-fetch URL validation."""
-
-        def __init__(
-            self,
-            base_url: str | None = None,
-            username: str | None = None,
-            password: str | None = None,
-            api_key: str | None = None,
-            headers: dict[str, str] | str | None = None,
-            verify_ssl: bool = True,
-            timeout: int = 30,
-            enable_make_request: bool = True,
-            all: bool = False,  # noqa: A002
-            **kwargs: object,
-        ) -> None:
-            super().__init__(
-                base_url=base_url,
-                username=username,
-                password=password,
-                api_key=api_key,
-                # The dashboard stores headers as JSON text, while Agno expects a mapping.
-                headers=parse_string_mapping(headers, field_name="headers"),
-                verify_ssl=verify_ssl,
-                timeout=timeout,
-                enable_make_request=enable_make_request,
-                all=all,
-                **kwargs,
-            )
-
-        def make_request(
-            self,
-            endpoint: str,
-            method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = "GET",
-            params: dict[str, Any] | None = None,
-            data: dict[str, Any] | None = None,
-            headers: dict[str, str] | None = None,
-            json_data: dict[str, Any] | None = None,
-        ) -> str:
-            """Make an HTTP request to a validated public HTTP(S) URL."""
-            auth = (self.username, self.password) if self.username and self.password else None
-            has_credentials = bool(self.api_key or auth or self.default_headers)
-            if has_credentials and not self.base_url:
-                return json.dumps({"error": _CREDENTIALS_NEED_BASE_URL}, indent=2)
-            url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
-            # The transport resolves the hostname and checks each dialed address within the timeout.
-            url = validate_server_fetch_url(url, resolve_hostnames=False)
-            event_hooks = None
-            request_headers = httpx.Headers(self._get_headers(headers))
-            if has_credentials and self.base_url:
-                # HTTPX already strips Authorization on these hops; configured headers need the same treatment.
-                credential_headers = frozenset({"Authorization", *self.default_headers})
-                event_hooks = {"request": [_credential_header_guard(self.base_url, credential_headers)]}
-                # The URL alone chooses the virtual host that receives the credentials.
-                request_headers.pop("Host", None)
-            request_headers["Accept-Encoding"] = "identity"
-
-            async def send() -> str:
-                # The timeout covers the request but not closing the client after a response was read.
-                async with (
-                    httpx.AsyncClient(
-                        transport=ServerFetchAsyncHTTPTransport(verify=self.verify_ssl),
-                        event_hooks=event_hooks,
-                        timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
-                    ) as client,
-                    asyncio.timeout(self.timeout),
-                ):
-                    request = client.build_request(
-                        method=method,
-                        url=url,
-                        params=params,
-                        data=data,
-                        json=json_data,
-                        headers=request_headers,
-                    )
-                    return await _read_final_response(client, await client.send(request, auth=auth, stream=True))
-
-            try:
-                return run_fetch_sync(send())
-            except TimeoutError:
-                return json.dumps(
-                    {"error": f"Request failed: the request did not finish within {self.timeout} seconds"},
-                    indent=2,
-                )
-            except httpx.RequestError as e:
-                return json.dumps({"error": f"Request failed: {e}"}, indent=2)
-
-    return MindRoomCustomApiTools
+    return CustomApiTools

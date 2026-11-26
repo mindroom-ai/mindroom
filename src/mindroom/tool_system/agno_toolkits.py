@@ -219,15 +219,14 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 
 
 # AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
-# Reason: Agno 3.2.1's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
+# Reason: Agno 3.2.1's ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
 # instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
 # construction can remove any named function, so the prompt would tell the model to call a function it does not have.
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
 # Upstream PR: No matching fix has been verified.
 # Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
 # the check in with_offered_instructions with the last row; instructions set in a tool's settings must still show.
-# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered,
-#   tests/agent_loop/test_agent_build.py::test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered.
+# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered.
 # Each toolkit class, by import path and including subclasses, maps to the functions its default instructions can name.
 _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
     "agno.tools.daytona.DaytonaTools": frozenset(
@@ -253,7 +252,6 @@ _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
         },
     ),
     "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
-    "agno.tools.reasoning.ReasoningTools": frozenset({"analyze", "think"}),
     "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
 }
 
