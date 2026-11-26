@@ -316,7 +316,10 @@ def test_watch_room_problem_from_state_enforces_privacy_invariants(tmp_path: Pat
     )
     assert (
         _watch_room_problem_from_state(
-            _snapshot((ALICE_BRIDGE, agent_id), history_visibility="joined"), ALICE, config, paths,
+            _snapshot((ALICE_BRIDGE, agent_id), history_visibility="joined"),
+            ALICE,
+            config,
+            paths,
         )
         is None
     )
@@ -399,7 +402,9 @@ async def test_validate_subscription_normalization_oauth_and_immutable_binding(t
     # Shared target room rejected
     with pytest.raises(ValueError, match="Cannot watch Slack here: another person is in this room"):
         await source.validate_subscription(
-            replace(ctx, target_room_state=_snapshot((ALICE, agent_id, BOB))), kind="message", match={},
+            replace(ctx, target_room_state=_snapshot((ALICE, agent_id, BOB))),
+            kind="message",
+            match={},
         )
 
     # Valid subscription normalizes single & deduplicated multi-channel targets and produces verified binding
@@ -648,7 +653,12 @@ async def test_triggers_tool_history_paused_reason_and_watch_turn_guards_review_
 
     with tool_runtime_context(
         _tool_context(
-            config=config, paths=paths, client=client, service=service, room_id=ADMIN_ROOM, requester_id=ADMIN,
+            config=config,
+            paths=paths,
+            client=client,
+            service=service,
+            room_id=ADMIN_ROOM,
+            requester_id=ADMIN,
         ),
     ):
         admin_hist = json.loads(await tool.triggers(action="history", trigger_id=rule.trigger_id))
@@ -811,7 +821,12 @@ async def test_emit_prefilter_pagination_reopen_and_fail_soft_lookups(
 
     # Follow-up reply in the bound thread groups into the same Matrix thread and triggers reopen_on_fire
     reply = event_payload(
-        "message", author="dana", text="any update?", ts=REPLY_TS, thread_ts=ROOT_TS, channel=OTHER_CHANNEL,
+        "message",
+        author="dana",
+        text="any update?",
+        ts=REPLY_TS,
+        thread_ts=ROOT_TS,
+        channel=OTHER_CHANNEL,
     )
     assert await _send(reply) == "delivered"
     await service.drain_due_firings_once()

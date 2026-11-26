@@ -245,4 +245,3 @@ def test_project_wake_agent_answers_the_events_channel() -> None:
     assert project_wake_agent(replace(event, channel_id=OTHER_CHANNEL), answering) == answering[1]
     assert project_wake_agent(replace(event, channel_id="C0UNOWNED"), answering) is None
     assert project_wake_agent(event, ()) is None
-

@@ -151,7 +151,9 @@ def _make_rule(
     )
 
 
-def _bot(*, latest_thread_event_id: str | None = "$latest", joined_rooms: Collection[str] = (_ROOM_B,)) -> SimpleNamespace:
+def _bot(
+    *, latest_thread_event_id: str | None = "$latest", joined_rooms: Collection[str] = (_ROOM_B,)
+) -> SimpleNamespace:
     client = AsyncMock()
     client.rooms = {room_id: SimpleNamespace(room_id=room_id) for room_id in joined_rooms}
     return SimpleNamespace(
@@ -257,7 +259,11 @@ def test_external_event_models_and_list_matching() -> None:
             ExternalEventSourceSpec(source_id="slack", kind="message", match=bad_match)
 
     assert TriggerTargetSpec(
-        agent="research", room_id=_ROOM_B, new_thread=True, thread_key_from_event=True, prompt="go",
+        agent="research",
+        room_id=_ROOM_B,
+        new_thread=True,
+        thread_key_from_event=True,
+        prompt="go",
     ).thread_key_from_event
     with pytest.raises(ValidationError, match="thread_key_from_event requires new_thread=True"):
         TriggerTargetSpec(agent="research", room_id=_ROOM_B, new_thread=False, thread_key_from_event=True, prompt="go")
@@ -272,7 +278,12 @@ def test_external_event_models_and_list_matching() -> None:
         )
     with pytest.raises(ValidationError, match="mutually exclusive"):
         TriggerTargetSpec(
-            agent="research", room_id=_ROOM_B, thread_id="$t1", new_thread=True, thread_key_from_event=True, prompt="go",
+            agent="research",
+            room_id=_ROOM_B,
+            thread_id="$t1",
+            new_thread=True,
+            thread_key_from_event=True,
+            prompt="go",
         )
 
     ev = TriggerEvent(
@@ -305,7 +316,8 @@ def test_external_event_models_and_list_matching() -> None:
     )
     assert (
         matches_external_event(
-            ExternalEventSourceSpec(source_id="slack", kind="message", match={"urgent": ["True"]}), ev,
+            ExternalEventSourceSpec(source_id="slack", kind="message", match={"urgent": ["True"]}),
+            ev,
         )
         is False
     )
@@ -335,7 +347,10 @@ async def test_event_source_base_defaults(tmp_path: Path) -> None:
         allowed_kinds=("build.failed", "build.passed"),
     )
     assert await src.validate_subscription(
-        ctx, kind=" build.failed ", match={"repo": ["a/b"]}, existing_binding={"w": "1"},
+        ctx,
+        kind=" build.failed ",
+        match={"repo": ["a/b"]},
+        existing_binding={"w": "1"},
     ) == ValidatedSubscription(
         kind="build.failed",
         match={"repo": ["a/b"]},
@@ -365,7 +380,10 @@ def test_event_source_registry_validation_and_collisions(tmp_path: Path) -> None
         tmp_path,
         event_sources={
             "github": GitHubEventSourceConfig(
-                kind="github", secret_env="GH_SECRET", allowed_repos=["org/repo"], subscribers=[_OWNER],  # noqa: S106
+                kind="github",
+                secret_env="GH_SECRET",
+                allowed_repos=["org/repo"],
+                subscribers=[_OWNER],  # noqa: S106
             ),
         },
     )
@@ -508,7 +526,10 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
     upgraded.save_thread_key_binding("slack_watch_a", "C1:2", "$root-a2", now=2000.0)
     assert upgraded.get_bound_thread_keys([], "C1:1", now=1500.0) == frozenset()
     assert upgraded.get_bound_thread_keys(
-        ["collide_rule", "slack_watch_a"], "C1:1", ttl_seconds=600.0, now=1599.0,
+        ["collide_rule", "slack_watch_a"],
+        "C1:1",
+        ttl_seconds=600.0,
+        now=1599.0,
     ) == frozenset({"collide_rule", "slack_watch_a"})
     assert (
         upgraded.get_bound_thread_keys(["collide_rule", "slack_watch_a"], "C1:1", ttl_seconds=600.0, now=1600.0)
@@ -560,7 +581,8 @@ async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_acce
     t0, t6, t12 = 10_000.0, 10_000.0 + 6 * day, 10_000.0 + 12 * day
     with (
         patch(
-            "mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=state),
+            "mindroom.reactive_triggers.dispatch.read_room_state",
+            new=AsyncMock(return_value=state),
         ) as read_state_mock,
         patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=AsyncMock()) as send_mock,
         patch("mindroom.reactive_triggers.store.time.time", side_effect=[t0, t0, t6, t6, t12, t12]),
@@ -805,7 +827,8 @@ async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_acc
     with (
         patch("mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=state)),
         patch(
-            "mindroom.reactive_triggers.service.evaluate_triage", new=AsyncMock(return_value=TriageOutcome(act=True)),
+            "mindroom.reactive_triggers.service.evaluate_triage",
+            new=AsyncMock(return_value=TriageOutcome(act=True)),
         ) as triage_mock,
     ):
         await service.drain_due_firings_once()
@@ -815,14 +838,19 @@ async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_acc
     source.delivery_decision = None
     assert (
         await emitter.emit(
-            kind="message", event_id="ev-ok", thread_key="C1:thread1", owner_user_ids=[_OWNER], audience={"U_ALICE"},
+            kind="message",
+            event_id="ev-ok",
+            thread_key="C1:thread1",
+            owner_user_ids=[_OWNER],
+            audience={"U_ALICE"},
         )
         == 2
     )
     with (
         patch("mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=state)),
         patch(
-            "mindroom.reactive_triggers.service.evaluate_triage", new=AsyncMock(return_value=TriageOutcome(act=True)),
+            "mindroom.reactive_triggers.service.evaluate_triage",
+            new=AsyncMock(return_value=TriageOutcome(act=True)),
         ),
         patch(
             "mindroom.reactive_triggers.dispatch.send_matrix_message",
@@ -1073,6 +1101,7 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
             plugin_http.event_source_emitter(stale_request, "acme_builds")
     finally:
         await lifespans.stop()
+
 
 class _PrivateToolEventSource(EventSource):
     """Test EventSource exercising OAuth binding, private room checks, defaults, history, and dry-run audience."""
