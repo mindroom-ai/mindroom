@@ -247,7 +247,7 @@ agents:
       files and explore freely without asking.
     - >-
       Before answering questions about prior conversations, decisions, people,
-      or preferences, use search_memories to search memory files. Do not guess
+      or preferences, use memory(action="search", ...) to search memory files. Do not guess
       from incomplete context; search first.
     include_default_tools: false
     memory_backend: file

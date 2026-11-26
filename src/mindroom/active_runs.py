@@ -37,8 +37,13 @@ class _ActiveRunLease:
     room_id: str
     thread_id: str | None
     pauses: int = 0
-    registered: bool = False
+    activations: int = 0
     release_delay_seconds: float = 0.0
+
+    @property
+    def registered(self) -> bool:
+        """Return whether at least one active scope currently holds this lease."""
+        return self.activations > 0
 
 
 _CURRENT_LEASE: ContextVar[_ActiveRunLease | None] = ContextVar("mindroom_active_run_lease", default=None)
@@ -93,8 +98,17 @@ class ActiveRunPublisher:
         active: bool = True,
     ) -> AsyncIterator[_ActiveRunLease]:
         """Track a live reply run in ``room_id`` and bind its lease for foreground human-wait pauses."""
-        lease = _ActiveRunLease(publisher=self, room_id=room_id, thread_id=thread_id)
-        token = _CURRENT_LEASE.set(lease)
+        if (
+            (current := _CURRENT_LEASE.get()) is not None
+            and current.publisher is self
+            and current.room_id == room_id
+            and current.thread_id == thread_id
+        ):
+            lease = current
+            token = None
+        else:
+            lease = _ActiveRunLease(publisher=self, room_id=room_id, thread_id=thread_id)
+            token = _CURRENT_LEASE.set(lease)
         if active:
             self._register(lease)
         failed = False
@@ -104,21 +118,38 @@ class ActiveRunPublisher:
             failed = True
             raise
         finally:
-            _CURRENT_LEASE.reset(token)
-            self._unregister(lease, immediate=failed)
+            if token is not None:
+                _CURRENT_LEASE.reset(token)
+            if active:
+                self._unregister(lease, immediate=failed)
 
     @asynccontextmanager
     async def activate(self, lease: _ActiveRunLease) -> AsyncIterator[None]:
         """Register a deferred lease once progress becomes visible and unregister it on exit."""
-        self._register(lease)
+        async with self.deferred_activation(lease) as activate:
+            activate()
+            yield
+
+    @asynccontextmanager
+    async def deferred_activation(self, lease: _ActiveRunLease) -> AsyncIterator[Callable[[], None]]:
+        """Yield an idempotent callback that registers ``lease`` once and unregisters it on exit."""
+        activated = False
+
+        def activate() -> None:
+            nonlocal activated
+            if not activated:
+                activated = True
+                self._register(lease)
+
         failed = False
         try:
-            yield
+            yield activate
         except BaseException:
             failed = True
             raise
         finally:
-            self._unregister(lease, immediate=failed)
+            if activated:
+                self._unregister(lease, immediate=failed)
 
     def cancel(self) -> None:
         """Synchronously stop background workers and sweeps without yielding."""
@@ -183,15 +214,19 @@ class ActiveRunPublisher:
         return [room_id for room_id, state in self._published.items() if state != [] and room_id not in self._refused]
 
     def _register(self, lease: _ActiveRunLease) -> None:
-        if (handle := self._pending_releases.pop(lease, None)) is not None:
+        resumed = (handle := self._pending_releases.pop(lease, None)) is not None
+        if handle is not None:
             handle.cancel()
-        if not lease.registered:
-            lease.registered = True
+        lease.activations += 1
+        if lease.activations == 1 and not resumed:
             self._leases.setdefault(lease.room_id, []).append(lease)
             self._wake(lease.room_id)
 
     def _unregister(self, lease: _ActiveRunLease, *, immediate: bool = False) -> None:
-        if not lease.registered:
+        if lease.activations == 0:
+            return
+        lease.activations -= 1
+        if lease.activations > 0:
             return
         delay = 0.0 if immediate or self._closing else lease.release_delay_seconds
         if delay > 0:
@@ -213,7 +248,7 @@ class ActiveRunPublisher:
             self._wake(lease.room_id)
 
     def _remove_lease(self, lease: _ActiveRunLease) -> None:
-        lease.registered = False
+        lease.activations = 0
         leases = self._leases.get(lease.room_id)
         if leases is not None:
             with suppress(ValueError):

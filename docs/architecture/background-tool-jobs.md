@@ -82,6 +82,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 
 - Execution lifetime is independent of any caller's wait, so a released wait never stops work.
 - Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again.
+  Durable mid-turn checkpoints and saved team-member runs acknowledge each saved batch without waiting for turn finalization, shrinking the crash window before acknowledgement from the whole turn to the gap between the session and journal commits.
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
 - A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the card's sender cannot post the denial yet.

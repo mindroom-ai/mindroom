@@ -12,7 +12,7 @@ from mindroom.matrix.thread_forks import (
     _MAX_FORK_DEPTH,
     CrossRoomForkDecision,
     CrossRoomForkHop,
-    ThreadForkReference,
+    _ThreadForkReference,
     fork_parent_scopes,
     fork_reference,
     thread_fork_reference,
@@ -80,13 +80,13 @@ def _ids(history: ThreadHistoryResult) -> list[str]:
 
 def test_reference_parses_event_ids_and_validates_optional_room_id() -> None:
     """Reference accepts same-room or valid Matrix room IDs (including v12 serverless) and rejects malformed values."""
-    assert thread_fork_reference(_fork_content("$p", "$p2")) == ThreadForkReference(None, "$p", "$p2")
-    assert thread_fork_reference(_fork_content("$p", "$p2", room_id="!src:localhost")) == ThreadForkReference(
+    assert thread_fork_reference(_fork_content("$p", "$p2")) == _ThreadForkReference(None, "$p", "$p2")
+    assert thread_fork_reference(_fork_content("$p", "$p2", room_id="!src:localhost")) == _ThreadForkReference(
         "!src:localhost",
         "$p",
         "$p2",
     )
-    assert thread_fork_reference(_fork_content("$p", "$p2", room_id="!v12serverlessroom")) == ThreadForkReference(
+    assert thread_fork_reference(_fork_content("$p", "$p2", room_id="!v12serverlessroom")) == _ThreadForkReference(
         "!v12serverlessroom",
         "$p",
         "$p2",
@@ -392,7 +392,7 @@ def test_fork_parent_scopes_and_fork_reference() -> None:
         ],
         is_full_history=True,
     )
-    assert fork_reference(history, "$f", room_id=_ROOM_B) == ThreadForkReference(_ROOM_A, "$p", "$p")
+    assert fork_reference(history, "$f", room_id=_ROOM_B) == _ThreadForkReference(_ROOM_A, "$p", "$p")
     assert fork_parent_scopes(history, "$f", room_id=_ROOM_B) == frozenset({(_ROOM_A, "$p"), (_ROOM_A, "$g")})
     assert fork_parent_scopes(_thread("$t", ["$t1"]), "$t", room_id=_ROOM) == frozenset()
     unresolved = _thread("$f", ["$f1"], ("$p", "$p1"))

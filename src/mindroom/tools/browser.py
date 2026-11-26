@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser",
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.FILE_ACCESS,
         ToolManagedInitArg.AGENT_STATE_ROOT,

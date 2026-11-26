@@ -980,22 +980,142 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
     assert read != grant_operation(changed, "files_call_tool", {"tool_name": "read", "arguments": {}})
 
 
-def test_triggers_grant_operation_binds_to_action() -> None:
-    """Timed grants for the unified `triggers` tool must be scoped per action."""
+@pytest.mark.parametrize(
+    ("tool_name", "actions"),
+    [
+        ("triggers", ("list", "delete", "rotate_key")),
+        ("memory", ("list", "search", "delete")),
+        ("todo", ("list", "add", "update")),
+        ("scheduler", ("list", "create", "cancel")),
+    ],
+)
+def test_action_dispatched_grant_operation_binds_to_action(
+    tool_name: str,
+    actions: tuple[str, str, str],
+) -> None:
+    """Timed grants for unified action-dispatched tools must be scoped per action."""
     config = Config()
-    list_op = grant_operation(config, "triggers", {"action": "list"})
-    delete_op = grant_operation(config, "triggers", {"action": "delete", "trigger_id": "t1"})
-    rotate_op = grant_operation(config, "triggers", {"action": "rotate_key", "trigger_id": "t1"})
-    assert list_op is not None
-    assert delete_op is not None
-    assert rotate_op is not None
-    assert list_op == grant_operation(config, "triggers", {"action": " list "})
-    assert len({list_op, delete_op, rotate_op}) == 3
-    assert len({list_op.key, delete_op.key, rotate_op.key}) == 3
-    assert grant_operation(config, "triggers", {}) is None
-    assert grant_operation(config, "triggers", {"action": ""}) is None
-    assert grant_operation(config, "triggers", {"action": "   "}) is None
-    assert grant_operation(config, "triggers", {"action": 123}) is None
+    ops = [grant_operation(config, tool_name, {"action": action}) for action in actions]
+    assert all(op is not None for op in ops)
+    assert ops[0] == grant_operation(config, tool_name, {"action": f" {actions[0]} "})
+    assert len(set(ops)) == 3
+    assert len({op.key for op in ops if op is not None}) == 3
+    assert grant_operation(config, tool_name, {}) is None
+    assert grant_operation(config, tool_name, {"action": ""}) is None
+    assert grant_operation(config, tool_name, {"action": "   "}) is None
+    assert grant_operation(config, tool_name, {"action": 123}) is None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "action"),
+    [("triggers", "list"), ("memory", "list"), ("todo", "list"), ("scheduler", "list")],
+)
+def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
+    tool_name: str,
+    action: str,
+) -> None:
+    """Action-dispatched tools cannot offer any-arguments scheduled approvals that could switch actions."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+
+    config = Config()
+    assert (
+        scheduled_call_offers_any_arguments(
+            config,
+            tool_name,
+            {"action": action},
+            requester_id="@alice:example.org",
+            approver_id="@alice:example.org",
+            authored_confirmation=False,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "old_name", "new_name"),
+    [
+        ("memory", "delete_memory", "memory"),
+        ("memory", "add_memory", "memory"),
+        ("todo", "update_todo", "todo"),
+        ("scheduler", "schedule", "scheduler"),
+        ("searxng", "image_search", "searxng_search"),
+        ("searxng", "search_web", "searxng_search"),
+    ],
+)
+def test_retired_consolidated_approval_rules_fail_closed(
+    tmp_path: Path,
+    toolkit: str,
+    old_name: str,
+    new_name: str,
+) -> None:
+    """Approval rules targeting retired consolidated function names must fail config load instead of failing open."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    tool_entry: object = {toolkit: {"host": "https://search.example.test"}} if toolkit == "searxng" else toolkit
+    stale_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=new_name):
+        Config.validate_with_runtime(stale_data, runtime_paths)
+
+    updated_data = {
+        **stale_data,
+        "tool_approval": {"rules": [{"match": new_name, "action": "require_approval"}]},
+    }
+    loaded = Config.validate_with_runtime(updated_data, runtime_paths)
+    assert loaded.tool_approval.rules[0].match == new_name
+
+
+def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
+    """Shared names like `add_memory` (mem0) or `search_web` (serper) still fail closed until the new tool has a rule."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    base_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": ["memory", {"searxng": {"host": "https://search.example.test"}}],
+                "include_default_tools": False,
+            },
+            "b": {
+                "display_name": "B",
+                "tools": ["mem0", "serper"],
+                "include_default_tools": False,
+            },
+        },
+        "tool_approval": {
+            "rules": [
+                {"match": "add_memory", "action": "require_approval"},
+                {"match": "search_web", "action": "require_approval"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"searxng_search|memory"):
+        Config.validate_with_runtime(base_data, runtime_paths)
+
+    explicit_data = {
+        **base_data,
+        "tool_approval": {
+            "rules": [
+                {"match": "add_memory", "action": "require_approval"},
+                {"match": "memory", "action": "require_approval"},
+                {"match": "search_web", "action": "require_approval"},
+                {"match": "searxng_search", "action": "auto_approve"},
+            ],
+        },
+    }
+    loaded = Config.validate_with_runtime(explicit_data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == [
+        "add_memory",
+        "memory",
+        "search_web",
+        "searxng_search",
+    ]
 
 
 @pytest.mark.parametrize("seconds", [300, 600, 1800])

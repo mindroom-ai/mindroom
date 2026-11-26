@@ -5,19 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode
-from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError
+from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError, redact_json_text
 
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable, Collection, Iterable
 
 MAX_PEER_BYTES = 1024 * 1024
+_NAME_CHARS = 80
+_TEXT_CHARS = 200
+_PREVIEW_READ_CHARS = _TEXT_CHARS + 512
+_MAX_FULL_PREVIEW_BYTES = 64 * 1024
+_TRAILING_TOKEN_RE = re.compile(r"\S+\Z")
 
 _LIVE = frozenset(state.value for state in LIVE_NODE_STATES)
 _UNREACHABLE = "'{name}' has finished and will not read this. Use spawn() to keep an agent you want to talk to."
@@ -319,33 +326,124 @@ def list_peers(store: WorkflowRunStore, run_id: str) -> list[dict[str, object]]:
     return out
 
 
-def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[WorkflowNode]) -> list[tuple[str, str, int]]:
-    """Aggregate non-withdrawn messages into `(from_id, to_id, count)` graph edges (counts only, never text)."""
+def _message_index(
+    nodes: Iterable[WorkflowNode],
+) -> tuple[dict[str, str], dict[str, int], dict[str, str], dict[str, list[str]]]:
     current = [n for n in nodes if not n.stale]
     ids = {n.key: f"n{n.seq}" for n in current}
+    gens = {n.key: n.generation for n in current}
     sess_of = {n.key: n.session_key for n in current if n.session_key}
     by_name: dict[str, list[str]] = {}
     for n in current:
         if n.kind in ("agent", "session") and n.name:
             by_name.setdefault(n.name, []).append(ids[n.key])
-    q = "SELECT sender_key, recipient_name, recipient_keys_json FROM workflow_messages WHERE run_id = ? AND withdrawn = 0"
+    return ids, gens, sess_of, by_name
+
+
+def _resolved_recipients(
+    row: sqlite3.Row,
+    from_id: str,
+    ids: dict[str, str],
+    sess_of: dict[str, str],
+    by_name: dict[str, list[str]],
+) -> list[str]:
+    self_ids = {from_id} | ({ids[s]} if (s := sess_of.get(row["sender_key"])) and s in ids else set())
+    frozen = row["recipient_keys_json"]
+    pool = (
+        [ids[k] for k in json.loads(frozen) if k in ids]
+        if frozen is not None
+        else by_name.get(row["recipient_name"], ())
+    )
+    return [to_id for to_id in pool if to_id not in self_ids]
+
+
+def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[WorkflowNode]) -> list[tuple[str, str, int]]:
+    """Aggregate non-withdrawn current-generation messages into `(from_id, to_id, count)` graph edges."""
+    ids, gens, sess_of, by_name = _message_index(nodes)
+    q = (
+        "SELECT sender_key, sender_generation, recipient_name, recipient_keys_json "
+        "FROM workflow_messages WHERE run_id = ? AND withdrawn = 0"
+    )
     with store.read_connection() as conn:
         rows = conn.execute(q, (run_id,)).fetchall()
     counts: Counter[tuple[str, str]] = Counter()
     for r in rows:
-        if (from_id := ids.get(r["sender_key"])) is None:
+        sender_key = r["sender_key"]
+        if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
             continue
-        self_ids = {from_id} | ({ids[s]} if (s := sess_of.get(r["sender_key"])) and s in ids else set())
-        frozen = r["recipient_keys_json"]
-        pool = (
-            [ids[k] for k in json.loads(frozen) if k in ids]
-            if frozen is not None
-            else by_name.get(r["recipient_name"], ())
-        )
-        for to_id in pool:
-            if to_id not in self_ids:
-                counts[(from_id, to_id)] += 1
+        for to_id in _resolved_recipients(r, from_id, ids, sess_of, by_name):
+            counts[(from_id, to_id)] += 1
     return [(s, r, c) for (s, r), c in sorted(counts.items())]
+
+
+_VISIBLE_FROM = (
+    "FROM workflow_messages m "
+    "JOIN workflow_nodes n "
+    "  ON n.run_id = m.run_id AND n.key = m.sender_key AND n.stale = 0 AND n.generation = m.sender_generation "
+    "WHERE m.run_id = ? AND m.withdrawn = 0"
+)
+
+
+def visible_messages_with_omitted(
+    store: WorkflowRunStore,
+    run_id: str,
+    nodes: Iterable[WorkflowNode],
+    *,
+    limit: int = 50,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return `(messages, omitted)` for the newest *limit* redacted current-generation peer messages, oldest first."""
+    count_q = f"SELECT COUNT(*) {_VISIBLE_FROM}"
+    if limit <= 0:
+        with store.read_connection() as conn:
+            return [], int(conn.execute(count_q, (run_id,)).fetchone()[0])
+    ids, gens, sess_of, by_name = _message_index(nodes)
+    q = (
+        "SELECT m.seq, m.sender_key, m.sender_generation, m.sender_name, m.recipient_name, m.recipient_keys_json, "
+        "CASE WHEN octet_length(m.text) <= ? THEN m.text ELSE substr(m.text, 1, ?) END AS text, "
+        f"octet_length(m.text) > ? AS truncated_text, m.created_at {_VISIBLE_FROM} "
+        "ORDER BY m.seq DESC LIMIT ?"
+    )
+    with store.read_connection() as conn:
+        rows = conn.execute(
+            q,
+            (_MAX_FULL_PREVIEW_BYTES, _PREVIEW_READ_CHARS, _MAX_FULL_PREVIEW_BYTES, run_id, limit),
+        ).fetchall()
+        omitted = max(0, int(conn.execute(count_q, (run_id,)).fetchone()[0]) - len(rows)) if len(rows) == limit else 0
+    out: list[dict[str, Any]] = []
+    for r in reversed(rows):
+        sender_key = r["sender_key"]
+        if (from_id := ids.get(sender_key)) is None or int(r["sender_generation"]) != gens[sender_key]:
+            continue
+        if r["truncated_text"]:
+            raw_text = (
+                "[truncated]" if r["text"].lstrip().startswith(("{", "[")) else _TRAILING_TOKEN_RE.sub("", r["text"])
+            )
+        else:
+            raw_text = r["text"]
+        targets = _resolved_recipients(r, from_id, ids, sess_of, by_name)
+        out.append(
+            {
+                "seq": int(r["seq"]),
+                "from": from_id,
+                "from_name": redact_sensitive_text(r["sender_name"], max_length=_NAME_CHARS),
+                "to": targets[0] if len(targets) == 1 else None,
+                "to_name": redact_sensitive_text(r["recipient_name"], max_length=_NAME_CHARS),
+                "text": redact_sensitive_text(redact_json_text(raw_text), max_length=_TEXT_CHARS),
+                "sent_at": int(datetime.fromisoformat(r["created_at"]).timestamp()),
+            },
+        )
+    return out, omitted
+
+
+def visible_messages(
+    store: WorkflowRunStore,
+    run_id: str,
+    nodes: Iterable[WorkflowNode],
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return the newest *limit* redacted peer message previews for current-generation senders, oldest first."""
+    return visible_messages_with_omitted(store, run_id, nodes, limit=limit)[0]
 
 
 def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:

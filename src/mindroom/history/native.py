@@ -137,8 +137,18 @@ def native_history_route(native: NativeHistory | None) -> str | None:
     return native.native_compaction.route if native is not None and native.native_compaction is not None else None
 
 
+def latest_answer_used_native_compaction(runs: Sequence[AnyRunRecord]) -> bool:
+    """Return whether the newest stored assistant message in ``runs`` ran with native compaction active."""
+    for run in reversed(runs):
+        for message in reversed(run.messages):
+            if message.role == "assistant":
+                return recorded_native_settings(message) is not None
+    return False
+
+
 __all__ = [
     "configure_native_history",
+    "latest_answer_used_native_compaction",
     "native_history_route",
     "restore_native_history",
     "with_native_history",

@@ -460,7 +460,8 @@ Matrix sync callback
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
 | `history/request_size.py` | The one sizing rule of every model request: the latest answer's reported size when the request extends that answer's request, else the route's estimate; and the frame a reply's requests hold around its history |
 | `history/runtime.py` | Prepares a scope's history before a reply (replay plan and compaction check), runs live manual compaction, and coordinates compaction lifecycle reporting |
-| `history/compaction.py` | Scoped compaction: summarizing a scope's runs, or a running turn, into its summary rows |
+| `history/compaction.py` | Scoped compaction persistence, hook emission, and lifecycle orchestration for stored scopes and running turns |
+| `history/summarizer.py` | Pure compaction summarization engine: summary model loading, cache-warm fork attempt, lazy native-checkpoint scan, and XML chunking |
 | `token_counting/families.py` | The local token counter of each model: its own tiktoken encoding on routes serving OpenAI's models, else o200k_base scaled by a per-family margin; loads o200k_base in the background |
 | `token_counting/counts.py` | Every token count, from the route's local estimate, with a stand-in while the vocabulary loads, and verified text fitting |
 | `token_counting/requests.py` | How a route sizes and identifies a request from the parts its body builder renders: text, JSON values, and priced costs such as media allowances |

@@ -28,7 +28,9 @@ function formatPercent(value: number): string {
 
 function formatUsd(cost: number, estimated: boolean): string {
   const prefix = estimated ? "~$" : "$";
-  return cost > 0 && cost < 0.01 ? `${prefix}<0.01` : `${prefix}${cost.toFixed(2)}`;
+  return cost > 0 && cost < 0.01
+    ? `${prefix}<0.01`
+    : `${prefix}${cost.toFixed(2)}`;
 }
 
 function formatResetCountdown(resetsAt: string, nowMs: number): string | null {
@@ -46,7 +48,9 @@ function formatResetCountdown(resetsAt: string, nowMs: number): string | null {
   }
   const days = Math.floor(hours / 24);
   const remHours = hours % 24;
-  return remHours > 0 ? `Resets in ${days}d ${remHours}h` : `Resets in ${days}d`;
+  return remHours > 0
+    ? `Resets in ${days}d ${remHours}h`
+    : `Resets in ${days}d`;
 }
 
 function paceRemainingPercent(
@@ -56,7 +60,11 @@ function paceRemainingPercent(
   if (!window.window_duration_mins || !window.resets_at) return null;
   const totalMs = window.window_duration_mins * 60_000;
   const remainingMs = Date.parse(window.resets_at) - nowMs;
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0 || remainingMs >= totalMs) {
+  if (
+    !Number.isFinite(remainingMs) ||
+    remainingMs <= 0 ||
+    remainingMs >= totalMs
+  ) {
     return null;
   }
   return Math.max(0, Math.min(100, (remainingMs / totalMs) * 100));

@@ -1,5 +1,5 @@
 {
-  "description": "History compaction: a turn calls compact_context, so the next reply first sends the summary request, then replies with the summary in place of the compacted run.",
+  "description": "History compaction: manual compaction is scheduled after a turn, so the next reply first sends the summary request, then replies with the summary in place of the compacted run.",
   "input": {
     "config": {
       "agents": {
@@ -81,84 +81,7 @@
       "tools": [
         {
           "name": "compact_context",
-          "description": "Request compaction before the next reply.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": []
-          }
-        }
-      ],
-      "tool_choice": null,
-      "output_schema": null,
-      "deferred_tool_names": []
-    },
-    {
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "messages": [
-        {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```",
-          "role": "system"
-        },
-        {
-          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
-          "role": "system"
-        },
-        {
-          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
-          "role": "user"
-        },
-        {
-          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Please compact our conversation before we continue.]]></msg>",
-          "role": "user"
-        },
-        {
-          "provider_data": {
-            "mindroom_model": {
-              "id": "claude-sonnet-5-5",
-              "provider": "Anthropic"
-            }
-          },
-          "role": "assistant",
-          "tool_calls": [
-            {
-              "id": "call_compact",
-              "type": "function",
-              "function": {
-                "name": "compact_context",
-                "arguments": "{}"
-              }
-            }
-          ]
-        },
-        {
-          "content": "Compaction will run before the next reply in this conversation scope.",
-          "role": "tool",
-          "tool_call_error": false,
-          "tool_call_id": "call_compact",
-          "tool_name": "compact_context"
-        }
-      ],
-      "tools": [
-        {
-          "name": "compact_context",
-          "description": "Request compaction before the next reply.",
+          "description": "Compact conversation context now before the next model request.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -212,7 +135,7 @@
       "tools": [
         {
           "name": "compact_context",
-          "description": "Request compaction before the next reply.",
+          "description": "Compact conversation context now before the next model request.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -248,7 +171,7 @@
           "role": "system"
         },
         {
-          "content": "<new_conversation>\n<run index=\"0\" run_id=\"run-compact\" status=\"COMPLETED\">\n<run_metadata>\n{\"correlation_id\":\"correlation-1\",\"matrix_event_id\":\"$current:localhost\",\"matrix_seen_event_ids\":[\"$current:localhost\",\"$earlier:localhost\"],\"reply_to_event_id\":\"$current:localhost\",\"requester_id\":\"@user:localhost\",\"room_id\":\"!room:localhost\",\"thread_id\":\"$thread:localhost\"}\n</run_metadata>\n<message role=\"user\">\n&lt;msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"&gt;&lt;![CDATA[Our handbook moved to the new wiki last week.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"user\">\nCurrent message:\n&lt;msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"&gt;&lt;![CDATA[Please compact our conversation before we continue.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"assistant\">\n\n</message>\n<tool_calls>\n[{\"function\":{\"arguments\":\"{}\",\"name\":\"compact_context\"},\"id\":\"call_compact\",\"type\":\"function\"}]\n</tool_calls>\n<message role=\"tool\" tool_call_id=\"call_compact\" tool_name=\"compact_context\">\nCompaction will run before the next reply in this conversation scope.\n</message>\n<message role=\"assistant\">\nok\n</message>\n</run>\n</new_conversation>",
+          "content": "<new_conversation>\n<run index=\"0\" run_id=\"run-compact\" status=\"COMPLETED\">\n<run_metadata>\n{\"correlation_id\":\"correlation-1\",\"matrix_event_id\":\"$current:localhost\",\"matrix_seen_event_ids\":[\"$current:localhost\",\"$earlier:localhost\"],\"reply_to_event_id\":\"$current:localhost\",\"requester_id\":\"@user:localhost\",\"room_id\":\"!room:localhost\",\"thread_id\":\"$thread:localhost\"}\n</run_metadata>\n<message role=\"user\">\n&lt;msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"&gt;&lt;![CDATA[Our handbook moved to the new wiki last week.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"user\">\nCurrent message:\n&lt;msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"&gt;&lt;![CDATA[Please compact our conversation before we continue.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"assistant\">\nok\n</message>\n</run>\n</new_conversation>",
           "role": "user"
         }
       ],

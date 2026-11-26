@@ -15,7 +15,7 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from mindroom.agent_loop.run import Persist
     from mindroom.history.session_context import ScopeSessionContext
@@ -118,15 +118,23 @@ def without_terminal_record(kind: type[RunRecord | TeamRunRecord], name: str) ->
 def persist_into[R: AnyRunRecord](
     terminal: TerminalRecord[R] | None,
     storage: RunStorage | None,
+    *,
+    on_saved: Callable[[AnyRunRecord], Awaitable[None]] | None = None,
 ) -> Persist[AnyRunRecord]:
     """Return the persist callback of one run: keep its terminal record in ``terminal`` when given, then store it.
 
     Every record the run hands over is stored where ``storage`` stores, as a turn or only its usage as ``storage``
     says, which updates the session the run loaded, a team's member rows included; a run without a store stores
-    nothing.
+    nothing. ``on_saved``, when given, runs after each record whose turn row is written.
     """
     store_persist = (
-        persist_to(storage.store, storage.session, replays=storage.replays, usage_kind=storage.usage_kind)
+        persist_to(
+            storage.store,
+            storage.session,
+            replays=storage.replays,
+            usage_kind=storage.usage_kind,
+            on_saved=on_saved,
+        )
         if storage is not None and storage.store is not None
         else None
     )

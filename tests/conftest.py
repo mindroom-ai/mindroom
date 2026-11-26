@@ -134,12 +134,12 @@ from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -862,9 +862,8 @@ async def prepare_history_for_run_for_test(
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
     model = model or estimate_only_model()
     model_name = active_model_name or entity_model_name(config, agent_name)
-    resolved_inputs = resolve_entity_preparation_inputs(
+    resolved_inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=history_settings or config.resolve_scope(agent_name).history_settings,
         active_model_name=model_name,
         active_context_window=active_context_window,

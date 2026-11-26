@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.live_frames.transport import frame_fits
 from mindroom.workflow_runs.graph import (
+    MESSAGE_LINES,
     REPLACE,
     fit_snapshot,
     graph_delta,
@@ -99,10 +100,19 @@ def _fits(meta: dict[str, object]) -> Any:  # noqa: ANN401
     return fits
 
 
-def _fitted(nodes: Iterable[WorkflowNode], edges: Iterable[tuple[str, str, int]] = (), log: Iterable[str] = ()) -> Any:  # noqa: ANN401
+def _fitted(
+    nodes: Iterable[WorkflowNode],
+    edges: Iterable[tuple[str, str, int]] = (),
+    log: Iterable[str] = (),
+    messages: Iterable[dict[str, Any]] = (),
+    previews: dict[str, str] | None = None,
+) -> Any:  # noqa: ANN401
     nodes = list(nodes)
     meta = graph_meta(_RUN, nodes, _USAGE, large=False)
-    snapshot = fit_snapshot(graph_rows(nodes, {}, edges, log), fits=_fits(meta))
+    snapshot = fit_snapshot(
+        graph_rows(nodes, {}, edges, list(log), messages=list(messages), previews=previews),
+        fits=_fits(meta),
+    )
     assert _fits(meta)(snapshot)
     return meta, snapshot
 
@@ -249,6 +259,7 @@ def test_rows_come_in_the_order_a_person_can_act_on() -> None:
         "completed": 0,
         "failed": 0,
         "edges": 0,
+        "messages": 0,
         "groups": 0,
         "phases": 0,
         "log": 0,
@@ -385,6 +396,7 @@ def test_counts_only_form_fits_for_any_run() -> None:
         "groups": [],
         "nodes": [],
         "edges": [],
+        "messages": [],
         "omitted": {
             "queued": 0,
             "running": 0,
@@ -392,6 +404,7 @@ def test_counts_only_form_fits_for_any_run() -> None:
             "completed": 0,
             "failed": 0,
             "edges": 0,
+            "messages": 0,
             "groups": 10_000,
             "phases": 0,
             "log": 0,
@@ -424,6 +437,94 @@ def test_run_inside_a_run_is_a_group_under_the_call_that_started_it() -> None:
     assert graph.groups == [
         {"id": "n2", "kind": "workflow", "phase": None, "parent": "n1", "total": 7, "done": 2, "failed": 1},
     ]
+
+
+def _msg(index: int, text: str | None = None) -> dict[str, Any]:
+    return {
+        "seq": index + 1,
+        "from": "n1",
+        "from_name": "sender",
+        "to": "n2",
+        "to_name": "receiver",
+        "text": f"msg {index}" if text is None else text,
+        "sent_at": 1795341600 + index,
+    }
+
+
+def test_node_previews_apply_only_to_completed_work_nodes_and_are_redacted() -> None:
+    """Completed agent, turn and tool nodes carry redacted bounded previews; other states and kinds omit them."""
+    nodes = [
+        _node(1, kind="agent", state=WorkflowNodeState.COMPLETED),
+        _node(2, kind="turn", state=WorkflowNodeState.COMPLETED),
+        _node(3, kind="tool", state=WorkflowNodeState.COMPLETED),
+        _node(4, kind="agent", state=WorkflowNodeState.RUNNING),
+        _node(5, kind="state", state=WorkflowNodeState.COMPLETED),
+        _node(6, kind="agent", state=WorkflowNodeState.COMPLETED),
+    ]
+    previews = {
+        "@1": "Use api_key=sk-inventedinventedinvented1234 " + "x" * 300,
+        "@2": "turn summary",
+        "@3": "tool output",
+        "@4": "should not show while running",
+        "@5": "should not show for state",
+        "@6": "   ",
+    }
+    rows = {row["id"]: row for row in graph_rows(nodes, {}, [], [], previews=previews).nodes}
+
+    assert "sk-invented" not in rows["n1"]["preview"]
+    assert len(rows["n1"]["preview"]) <= 200
+    assert (rows["n2"]["preview"], rows["n3"]["preview"]) == ("turn summary", "tool output")
+    assert all("preview" not in rows[node_id] for node_id in ("n4", "n5", "n6"))
+
+
+def test_messages_keep_newest_under_tight_frame_cap_and_count_omitted() -> None:
+    """fit_snapshot counts both >MESSAGE_LINES window trimming and tight-frame truncation in omitted.messages."""
+    messages = [_msg(index, "文" * 180 + f" #{index}") for index in range(60)]
+    graph = graph_rows([], {}, [], [], messages=messages)
+    assert (graph.messages, graph.omitted_messages) == (messages[-MESSAGE_LINES:], 10)
+
+    # 52 eligible messages (50 shown + 2 omitted by window) reports omitted.messages == 2 when all 50 fit.
+    _, windowed = _fitted([], messages=[_msg(index) for index in range(MESSAGE_LINES + 2)])
+    assert (len(windowed["messages"]), windowed["omitted"]["messages"]) == (MESSAGE_LINES, 2)
+
+    nodes = _nodes(completed=10)
+    meta = graph_meta(_RUN, nodes, _USAGE, large=False)
+    full = graph_rows(nodes, {}, [], [], messages=messages[-MESSAGE_LINES:], omitted_messages=10)
+    # Tight cap that fits all nodes plus a subset of messages, leaving both window- and size-omitted messages counted.
+    tight_bytes = 6_000
+    snapshot = fit_snapshot(full, fits=lambda candidate: len(str(candidate).encode()) <= tight_bytes)
+
+    assert len(snapshot["nodes"]) == 10
+    assert 0 < len(snapshot["messages"]) < MESSAGE_LINES
+    assert snapshot["omitted"]["messages"] + len(snapshot["messages"]) == 60
+    assert snapshot["messages"] == full.messages[-len(snapshot["messages"]) :]
+    assert meta["counts"]["completed"] == 10
+
+
+def test_delta_tracks_messages_append_sliding_window_and_replace() -> None:
+    """Message deltas append new messages across normal growth and sliding windows, and REPLACE on omitted/edit changes."""
+    msgs = [_msg(index) for index in range(MESSAGE_LINES + 5)]
+    _, before = _fitted([], messages=msgs[:2])
+    _, after = _fitted([], messages=msgs[:4])
+    assert graph_delta(before, after) == {"messages_append": msgs[2:4]}
+    assert graph_delta(after, after) is None
+
+    # Sliding window at MESSAGE_LINES with unchanged omitted count appends only the newly arrived messages.
+    _, win_before = _fitted([], messages=msgs[:MESSAGE_LINES])
+    win_after = {**win_before, "messages": msgs[3 : MESSAGE_LINES + 3]}
+    assert graph_delta(win_before, win_after) == {"messages_append": msgs[MESSAGE_LINES : MESSAGE_LINES + 3]}
+    # Growing omitted.messages (52 -> 55) forces REPLACE so the client receives the updated omitted count.
+    _, omitted_52 = _fitted([], messages=msgs[: MESSAGE_LINES + 2])
+    _, omitted_55 = _fitted([], messages=msgs)
+    assert graph_delta(omitted_52, omitted_55) is REPLACE
+
+    # Removal, clearing, or editing an existing message forces REPLACE.
+    _, shorter = _fitted([], messages=msgs[:1])
+    _, cleared = _fitted([], messages=[])
+    _, edited = _fitted([], messages=[{**msgs[0], "text": "changed"}, msgs[1]])
+    assert graph_delta(before, shorter) is REPLACE
+    assert graph_delta(before, cleared) is REPLACE
+    assert graph_delta(before, edited) is REPLACE
 
 
 def _fields(run: WorkflowRun) -> dict[str, Any]:

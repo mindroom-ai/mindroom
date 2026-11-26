@@ -91,7 +91,7 @@ def is_summary_timeout(error: BaseException) -> bool:
 
 
 @dataclass(frozen=True)
-class SummaryRetryDecision:
+class _SummaryRetryDecision:
     """One policy-owned retry action for the compaction summary caller."""
 
     budget: int
@@ -126,7 +126,7 @@ class SummaryRetryPolicy:
         input_tokens: int,
         minimum_progress_input_tokens: int,
         error: Exception,
-    ) -> SummaryRetryDecision | None:
+    ) -> _SummaryRetryDecision | None:
         """Return the next retry action, or None when retries end.
 
         The decision kind is authoritative so callers cannot independently
@@ -148,9 +148,9 @@ class SummaryRetryPolicy:
                 ),
             )
             if smaller_budget < input_tokens:
-                return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
+                return _SummaryRetryDecision(budget=smaller_budget, kind="shrink")
         if _is_transient(error):
-            return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+            return _SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 
 

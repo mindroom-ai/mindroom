@@ -17,6 +17,7 @@ import pytest
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_summary_text_tokens,
@@ -29,7 +30,6 @@ from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -103,14 +103,16 @@ def _turn_tokens(prompt: str = "Current prompt") -> int:
     return estimate_only_model().request_tokens(request_frame(prompt).request())
 
 
-def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budget: int) -> ResolvedHistoryExecutionPlan:
+def _plan_with_history_budget(
+    config: Config,
+    _runtime_paths: RuntimePaths,
+    budget: int,
+) -> ResolvedHistoryExecutionPlan:
     """Return the test agent's plan with room for ``budget`` tokens of history beside the ``Current prompt`` turn."""
-    plan = resolve_entity_preparation_inputs(
+    plan = resolve_history_preparation_inputs(
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
-        runtime_paths=runtime_paths,
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     ).execution_plan
     return replace(plan, trigger_tokens=budget + _turn_tokens(), limit_tokens=budget + _turn_tokens())
 
@@ -209,7 +211,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(
             return_value="merged summary",
         ),
@@ -276,7 +278,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=_summary_after_notice),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -459,7 +461,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
     lifecycle = RecordingCompactionLifecycle()
 
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -538,7 +540,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(
             return_value="thread summary",
         ),
@@ -656,7 +658,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -751,7 +753,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     )
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -836,18 +838,16 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         trigger_threshold_tokens=trigger_budget,
     )
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
     summary_mock = AsyncMock(return_value=summary.text)
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
             sizer=request_sizer(estimate_only_model(), config, "default"),
@@ -925,18 +925,16 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         trigger_threshold_tokens=trigger_budget,
     )
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=execution_plan,
     )
     summary_mock = AsyncMock(return_value="short summary")
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+    with patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
@@ -1141,7 +1139,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1310,7 +1308,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
 
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -1369,7 +1367,7 @@ async def test_a_failed_reply_compaction_records_the_runs_its_stored_chunks_fold
 
     install_model_providers(monkeypatch, {"summary-model": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         recorder = ReplyCompactions()
@@ -1491,7 +1489,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
             side_effect=lambda _config, _paths, name, **_kwargs: summary_model(model_id=f"{name}-id"),
         ),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=summary_mock,
         ),
     ):
@@ -1558,8 +1556,8 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
 
     with (
         patch("mindroom.providers.registry.build_model_provider", side_effect=_load_model),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-        patch("mindroom.history.compaction.logger.warning") as warning_mock,
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.summarizer.logger.warning") as warning_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1643,7 +1641,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     )
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=summary_mock,
     ):
         first_prepared = await prepare_history_for_run_for_test(
@@ -1870,7 +1868,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         new=AsyncMock(side_effect=RuntimeError("summary failed")),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1933,7 +1931,7 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
     install_model_providers(monkeypatch, {"default": summary_model()})
     with (
         patch("mindroom.history.compaction.read_chunk_basis", new=basis_after_a_redaction_cuts_a_run),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
+        patch("mindroom.history.summarizer.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -2099,12 +2097,10 @@ async def _prepare_reply(
     ``request_frame(system=_SYSTEM_PROMPT)`` when None.
     """
     resolved_inputs = replace(
-        resolve_entity_preparation_inputs(
+        resolve_history_preparation_inputs(
             history_settings=history_settings,
             config=config,
-            runtime_paths=runtime_paths,
             active_model_name=entity_model_name(config, "test_agent"),
-            active_context_window=None,
         ),
         execution_plan=plan,
     )
@@ -2115,7 +2111,7 @@ async def _prepare_reply(
             return_value=summary_model(),
         ),
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(return_value="short summary"),
         ),
     ):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextvars import ContextVar
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +19,7 @@ from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
@@ -243,10 +243,9 @@ def _prepared_execution(
     *,
     unseen_event_ids: Sequence[str] = (),
     prepared_context_tokens: int | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
+) -> _PreparedExecutionContext:
+    return _PreparedExecutionContext(
         prepared_history=PreparedHistoryState(prepared_context_tokens=prepared_context_tokens, native_history=None),
-        replay_plan=None,
         unseen_event_ids=list(unseen_event_ids),
         turn=TurnMessages(prompt=Message(role="user", content=prompt), transient=tuple(transient)),
     )
@@ -338,7 +337,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         agent_finished.set()
         return build
 
-    async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
+    async def prepare_history(*_args: object, **kwargs: object) -> _PreparedExecutionContext:
         history_started.set()
         assert memory_finished.is_set()
         assert agent_finished.is_set()
@@ -507,7 +506,7 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_build(
     reusable_build = _build("caller context")
     create_agent_mock = MagicMock(side_effect=AssertionError("caller-owned build must not be rebuilt"))
 
-    async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
+    async def prepare_history(*_args: object, **kwargs: object) -> _PreparedExecutionContext:
         assert kwargs["build"] is reusable_build
         assert kwargs["resolved_runtime_model"].model_name == "default"
         transient_messages = kwargs["transient_context_messages"]
@@ -563,7 +562,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
             transient_turn_context="retrieved memory",
         )
 
-    async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
+    async def prepare_history(*_args: object, **kwargs: object) -> _PreparedExecutionContext:
         transient_messages = tuple(kwargs["transient_context_messages"])
         history_inputs.append(
             (

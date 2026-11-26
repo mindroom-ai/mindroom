@@ -73,6 +73,30 @@ def _serialized_size(content: Mapping[str, object]) -> int:
     return len(Api.to_json(dict(content)))
 
 
+def _encrypted_size_for_plaintext(plaintext: int) -> int:
+    ciphertext = (plaintext // 16 + 1) * 16 + _MEGOLM_OVERHEAD_BYTES
+    return (ciphertext * 4 + 2) // 3 + _ENVELOPE_BYTES
+
+
+def frame_plaintext_size(
+    client: nio.AsyncClient,
+    room_id: str,
+    frame: dict[str, object],
+    *,
+    event_type: str,
+) -> tuple[int, bool]:
+    """Return the serialized plaintext size of ``frame`` and whether the room encrypts it."""
+    room = client.rooms.get(room_id)
+    if room is None or not room.encrypted:
+        return _serialized_size(frame), False
+    return _serialized_size({"content": frame, "type": event_type, "room_id": room_id}), True
+
+
+def plaintext_size_fits(plaintext_size: int, *, encrypted: bool) -> bool:
+    """Return whether a serialized frame of ``plaintext_size`` bytes fits within the frame limit."""
+    return (_encrypted_size_for_plaintext(plaintext_size) if encrypted else plaintext_size) <= _MAX_FRAME_BYTES
+
+
 def frame_fits(client: nio.AsyncClient, room_id: str, frame: dict[str, object], *, event_type: str) -> bool:
     """Return whether the frame is within the size limit as it goes out to the room, encrypted in an encrypted room."""
     room = client.rooms.get(room_id)
@@ -87,9 +111,7 @@ def _encrypted_size(room_id: str, frame: dict[str, object], *, event_type: str) 
     nio encrypts the event as JSON with ASCII escapes, padded to whole 16-byte blocks, and sends it base64-encoded, so a
     character outside ASCII can take 8 bytes and one outside the BMP 16.
     """
-    plaintext = _serialized_size({"content": frame, "type": event_type, "room_id": room_id})
-    ciphertext = (plaintext // 16 + 1) * 16 + _MEGOLM_OVERHEAD_BYTES
-    return (ciphertext * 4 + 2) // 3 + _ENVELOPE_BYTES
+    return _encrypted_size_for_plaintext(_serialized_size({"content": frame, "type": event_type, "room_id": room_id}))
 
 
 async def send_live_frame(

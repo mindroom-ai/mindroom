@@ -408,6 +408,7 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
 
         ``HTMLParser`` would read all text after one as raw text, escaping the rest of the message.
         """
+        del elem, escapable
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()

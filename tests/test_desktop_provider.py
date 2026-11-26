@@ -141,10 +141,18 @@ class FakeAccessibilityBackend:
     element_bounds: DesktopRect | None = None
     calls: list[tuple[str, object]] = field(default_factory=list)
     keyboard_focus_checks_left: int | None = None
+    fallback_window_flags: list[tuple[str, bool]] = field(default_factory=list)
+    include_elements_calls: list[bool] = field(default_factory=list)
 
     def launch_app(self, app_id: str) -> None:
         """Record one allowlisted application launch."""
         self.calls.append(("launch_app", app_id))
+
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
+        """Record state capture and include_elements flag."""
+        self.calls.append(("get_app_state", app_id))
+        self.include_elements_calls.append(include_elements)
+        return AccessibilityState("state-1", app_id, "Editor", self.window, (), False)
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Record capture validation and return the current app window."""
@@ -152,9 +160,16 @@ class FakeAccessibilityBackend:
         state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
         return AccessibilityCapture(state, 42)
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+    def prepare_fallback(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> AccessibilityCapture:
         """Record validation and return the current app window and its process."""
         self.calls.append(("prepare_fallback", (app_id, state_id)))
+        self.fallback_window_flags.append(("fallback", allow_window_fallback))
         return AccessibilityCapture(AccessibilityState(state_id, app_id, "Editor", self.window, (), False), 42)
 
     def element_for_action(
@@ -180,9 +195,16 @@ class FakeAccessibilityBackend:
         )
         return element, 42
 
-    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+    def prepare_keyboard(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> Callable[[], None]:
         """Record validation and return a focus guard that fails once its allowed checks run out."""
         self.calls.append(("prepare_keyboard", (app_id, state_id)))
+        self.fallback_window_flags.append(("keyboard", allow_window_fallback))
 
         def guard() -> None:
             self.calls.append(("keyboard_focus", app_id))
@@ -858,4 +880,53 @@ def test_macos_drag_does_not_call_duplicate_prepare_fallback(monkeypatch: pytest
     assert [call for call in accessibility.calls if call[0] == "prepare_fallback"] == [
         ("prepare_fallback", ("com.example.Editor", "state-1")),
         ("prepare_fallback", ("com.example.Editor", "state-1")),
+    ]
+
+
+def test_provider_forwards_include_elements_and_allow_window_fallback() -> None:
+    """Screenshot-mode state reads and screenshot-backed fallback inputs thread flags to the accessibility backend."""
+    provider, _, accessibility = _provider()
+
+    provider.get_app_state("com.example.Editor", include_elements=False)
+    provider.click(
+        app_id="com.example.Editor",
+        state_id="state-1",
+        x=500,
+        y=500,
+        button="left",
+        allow_window_fallback=True,
+    )
+    provider.double_click(app_id="com.example.Editor", state_id="state-1", x=500, y=500, allow_window_fallback=True)
+    provider.hover(app_id="com.example.Editor", state_id="state-1", x=500, y=500, allow_window_fallback=True)
+    provider.scroll(
+        app_id="com.example.Editor",
+        state_id="state-1",
+        direction="down",
+        pages=1,
+        x=None,
+        y=None,
+        allow_window_fallback=True,
+    )
+    provider.drag(
+        app_id="com.example.Editor",
+        state_id="state-1",
+        start_x=100,
+        start_y=100,
+        end_x=400,
+        end_y=400,
+        allow_window_fallback=True,
+    )
+    provider.type_text(app_id="com.example.Editor", state_id="state-1", text="hi", allow_window_fallback=True)
+    provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["enter"], allow_window_fallback=True)
+
+    assert accessibility.include_elements_calls == [False]
+    assert accessibility.fallback_window_flags == [
+        ("fallback", True),
+        ("fallback", True),
+        ("fallback", True),
+        ("fallback", True),
+        ("fallback", True),
+        ("fallback", True),
+        ("keyboard", True),
+        ("keyboard", True),
     ]

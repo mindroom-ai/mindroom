@@ -369,7 +369,7 @@ def test_workflow_attempt_claims_a_grant_outside_its_launch_snapshot(runtime_pat
     store = ScriptRunStore(runtime_paths)
     store.create_run(replace(_new_run(), run_id="attempt-1", workflow_run_id="wf-" + "a" * 32))
     store.create_run(_new_run())
-    outside = ScriptToolGrant("memory", "add_memory")
+    outside = ScriptToolGrant("memory", "memory")
 
     claim = store.claim_call(run_id="attempt-1", call_id="call-1", grant=outside, arguments_digest="digest")
 

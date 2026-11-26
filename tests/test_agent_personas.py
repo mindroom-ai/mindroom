@@ -20,7 +20,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona, persona_tool_policy
+from mindroom.delegation.personas import _inline_persona, _PersonaError, caller_toolkit_names, persona_tool_policy
 from mindroom.delegation.state import SubagentPersona
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -123,7 +123,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        persona=inline_persona(prompt, tools, None, None),
+        persona=_inline_persona(prompt, tools, None, None),
         **options,
     )
 
@@ -191,7 +191,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
     )
     assert "Configured personality" in str(configured.prompt.role)
 
-    request = await _persona_request(runtime, monkeypatch, inline_persona(prompt, None, None, None), "task")
+    request = await _persona_request(runtime, monkeypatch, _inline_persona(prompt, None, None, None), "task")
 
     content = str(request.messages[0].content)
     assert content.startswith(f"{prompt}\n")
@@ -219,7 +219,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
     )
     compact_runs(storage, session, ["old-run"], "EARLIER-WORK")
 
-    request = await _persona_request(runtime, monkeypatch, inline_persona("P", None, None, None), "task")
+    request = await _persona_request(runtime, monkeypatch, _inline_persona("P", None, None, None), "task")
 
     history = [message for message in request.messages if message.role != "system"]
     assert system_text(request.messages).startswith("P\n")
@@ -271,7 +271,7 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
     """A named function the caller's configuration filters out stops construction."""
     runtime = _runtime(tmp_path, tools=[{"filesystem": {"include_tools": ["read_file"]}}])
 
-    with pytest.raises(PersonaError, match=r"'filesystem\.write_file' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'filesystem\.write_file' is not available to you"):
         _child(runtime, ["filesystem.read_file", "filesystem.write_file"])
 
 
@@ -301,7 +301,7 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
     def caller_filter(function: ToolFunction) -> bool:
         return function.name != "write_file" and function.toolkit != "calculator"
 
-    with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
+    with pytest.raises(_PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)
 
 
@@ -399,7 +399,7 @@ def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> N
         runtime.config,
         runtime.runtime_paths,
         None,
-        persona=inline_persona("P", ["filesystem"], None, ["docs"]),
+        persona=_inline_persona("P", ["filesystem"], None, ["docs"]),
         knowledge=_knowledge(),
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -480,7 +480,7 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
         runtime.config,
         runtime.runtime_paths,
         identity,
-        persona=inline_persona("P", None, skills, None),
+        persona=_inline_persona("P", None, skills, None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -524,7 +524,7 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         runtime.config,
         runtime.runtime_paths,
         identity,
-        persona=inline_persona("P", ["filesystem"], ["removed"], None),
+        persona=_inline_persona("P", ["filesystem"], ["removed"], None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -546,7 +546,7 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             runtime.config,
             runtime.runtime_paths,
             identity,
-            persona=inline_persona("P", ["filesystem"], ["scripted"], None),
+            persona=_inline_persona("P", ["filesystem"], ["scripted"], None),
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
             plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -569,7 +569,7 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         runtime.runtime_paths,
         identity,
         agent_mode="minimal",
-        persona=inline_persona("P", ["shell"], ["scripted"], None),
+        persona=_inline_persona("P", ["shell"], ["scripted"], None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -669,13 +669,13 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
 
-    with pytest.raises(PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
         agents.create_agent(
             "code",
             config,
             runtime_paths,
             None,
-            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
+            persona=_inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
             plugins=config_plugins(config, runtime_paths),
@@ -700,13 +700,13 @@ def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, mon
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
 
-    with pytest.raises(PersonaError, match=r"'sleep\.shared' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'sleep\.shared' is not available to you"):
         agents.create_agent(
             "code",
             config,
             runtime_paths,
             None,
-            persona=inline_persona("P", ["calculator", "sleep.shared"], None, None),
+            persona=_inline_persona("P", ["calculator", "sleep.shared"], None, None),
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
             plugins=config_plugins(config, runtime_paths),
@@ -726,7 +726,7 @@ def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
 
-    with pytest.raises(PersonaError, match="'calculator' is not available to you"):
+    with pytest.raises(_PersonaError, match="'calculator' is not available to you"):
         _child(runtime, ["filesystem", "calculator"])
 
 
@@ -747,7 +747,7 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
         raise AssertionError(msg)
 
     monkeypatch.setattr("mindroom.ai.build_memory_prompt_parts", recall)
-    request = await _persona_request(runtime, monkeypatch, inline_persona("P", None, None, None), "the task")
+    request = await _persona_request(runtime, monkeypatch, _inline_persona("P", None, None, None), "the task")
     assert "the task" in str(request.messages[-1].content)
 
 

@@ -96,7 +96,7 @@ def bind_response_owner(
 
         def check_authority() -> None:
             try:
-                check_prepared_catalog_authority(current.runtime_context)
+                check_prepared_catalog_authority(current.runtime_context, key=key)
             except PermissionError as exc:
                 if reload_ends_run:
                     owner.end_run_for_reload()

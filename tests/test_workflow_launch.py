@@ -368,14 +368,14 @@ def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> Non
 
     context = _owner_context(tmp_path, ["calculator"])
     assert offered(context, "calculator", "add")
-    assert not offered(context, "memory", "add_memory")
+    assert not offered(context, "memory", "memory")
     assert not offered(context, "calculator", "no_such_function")
 
     live = _owner_context(tmp_path, ["memory"])
     reloaded = replace(context, config_provider=lambda: live.config)
 
     assert not offered(reloaded, "calculator", "add")
-    assert offered(reloaded, "memory", "add_memory")
+    assert offered(reloaded, "memory", "memory")
     assert not offered(reloaded, "compact_context", "compact_context")
 
 

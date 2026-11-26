@@ -160,7 +160,7 @@ interactive
         assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
     def test_parse_and_format_interactive_accepts_inline_intro_before_fence(self) -> None:
-        """Parser should handle prose immediately before the opening fence."""
+        """Parser should separate inline prose before the opening fence with a blank line."""
         response_text = """Please choose: ```interactive
 {
     "question": "Which option?",
@@ -172,9 +172,9 @@ interactive
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
-        assert response.formatted_text.startswith("Please choose:")
-        assert "Which option?" in response.formatted_text
-        assert "1. ✅ Approve" in response.formatted_text
+        assert response.formatted_text == (
+            "Please choose:\n\nWhich option?\n\n1. ✅ Approve\n\nReact with an emoji or type the number to respond."
+        )
         assert response.interactive_metadata is not None
         assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
         assert response.interactive_metadata.options_as_list() == [
@@ -213,6 +213,130 @@ Whichever you pick, tell the other tool."""
         )
         assert response.interactive_metadata is not None
         assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
+
+    _SAMPLE_PAYLOAD = (
+        '{"question": "Which option?", "options": [{"emoji": "✅", "label": "Approve", "value": "approve"}]}'
+    )
+    _SAMPLE_RENDERED = "Which option?\n\n1. ✅ Approve\n\nReact with an emoji or type the number to respond."
+    _SAMPLE_HTML = (
+        "<p>Which option?</p>\n<ol>\n<li>✅ Approve</li>\n</ol>\n"
+        "<p>React with an emoji or type the number to respond.</p>\n"
+    )
+
+    @pytest.mark.parametrize(
+        ("prefix", "suffix", "expected_prefix", "expected_suffix", "html_prefix", "html_suffix"),
+        [
+            pytest.param("Choose one?", "", "Choose one?\n\n", "", "<p>Choose one?</p>\n", "", id="zero-newline"),
+            pytest.param(
+                "Choose one?\n",
+                "\nAfterward.",
+                "Choose one?\n\n",
+                "\n\nAfterward.",
+                "<p>Choose one?</p>\n",
+                "<p>Afterward.</p>\n",
+                id="single-newline",
+            ),
+            pytest.param(
+                "Choose one?\r\n",
+                "\r\nAfterward.",
+                "Choose one?\n\n",
+                "\n\nAfterward.",
+                "<p>Choose one?</p>\n",
+                "<p>Afterward.</p>\n",
+                id="crlf",
+            ),
+            pytest.param(
+                "Choose one.\n\n    ",
+                "",
+                "Choose one.\n\n",
+                "",
+                "<p>Choose one.</p>\n",
+                "",
+                id="indented-fence",
+            ),
+            pytest.param("    ", "", "", "", "", "", id="leading-indented-fence"),
+        ],
+    )
+    def test_parse_and_format_interactive_separates_surrounding_text_into_paragraphs(
+        self,
+        prefix: str,
+        suffix: str,
+        expected_prefix: str,
+        expected_suffix: str,
+        html_prefix: str,
+        html_suffix: str,
+    ) -> None:
+        """Rendered questions should stand as separate Markdown paragraphs regardless of fence spacing."""
+        nl = "\r\n" if "\r\n" in prefix else "\n"
+        block = f"```interactive{nl}{self._SAMPLE_PAYLOAD}{nl}```"
+
+        response = interactive.parse_and_format_interactive(f"{prefix}{block}{suffix}", extract_mapping=True)
+        html = markdown_to_html(response.formatted_text)
+
+        assert response.formatted_text == f"{expected_prefix}{self._SAMPLE_RENDERED}{expected_suffix}"
+        assert html == f"{html_prefix}{self._SAMPLE_HTML}{html_suffix}"
+        assert "<pre>" not in html
+        assert "<code>" not in html
+
+    def test_parse_and_format_interactive_preserves_following_block_indentation(self) -> None:
+        """Blank-line separation after a fence should keep meaningful indentation on the next line."""
+        block = f"```interactive\n{self._SAMPLE_PAYLOAD}\n```"
+
+        response = interactive.parse_and_format_interactive(f"{block}\n    indented_call()", extract_mapping=True)
+        html = markdown_to_html(response.formatted_text)
+
+        assert response.formatted_text == f"{self._SAMPLE_RENDERED}\n\n    indented_call()"
+        assert html == f"{self._SAMPLE_HTML}<pre><code>indented_call()\n</code></pre>\n"
+
+    @pytest.mark.parametrize(
+        ("template", "expected_text", "extra_html"),
+        [
+            pytest.param(
+                "{good}\n{second}",
+                "{rendered}\n\nNext step?\n\n1. 🔎 Verify",
+                "<p>Next step?</p>",
+                id="adjacent-valid-blocks",
+            ),
+            pytest.param(
+                "Before\n{bad}\n{good}\nAfter",
+                "Before\n\n{rendered}\n\nAfter",
+                "<p>After</p>",
+                id="invalid-before-valid",
+            ),
+            pytest.param(
+                "Before\n{good}\n{bad}\nAfter",
+                "Before\n\n{rendered}\n\nAfter",
+                "<p>After</p>",
+                id="invalid-after-valid",
+            ),
+            pytest.param(
+                "Before\n{good}\n{bad}   \n",
+                "Before\n\n{rendered}",
+                "<p>Before</p>",
+                id="invalid-after-valid-at-end",
+            ),
+        ],
+    )
+    def test_parse_and_format_interactive_separates_adjacent_and_invalid_blocks(
+        self,
+        template: str,
+        expected_text: str,
+        extra_html: str,
+    ) -> None:
+        """Adjacent valid blocks and stripped invalid blocks should keep blank-line paragraph separation."""
+        good = f"```interactive\n{self._SAMPLE_PAYLOAD}\n```"
+        second = '```interactive\n{"question": "Next step?", "options": [{"emoji": "🔎", "label": "Verify", "value": "verify"}]}\n```'
+        bad = "```interactive\n{bad}\n```"
+
+        response = interactive.parse_and_format_interactive(
+            template.format(good=good, second=second, bad=bad),
+            extract_mapping=True,
+        )
+        html = markdown_to_html(response.formatted_text)
+
+        assert response.formatted_text == expected_text.format(rendered=self._SAMPLE_RENDERED)
+        assert self._SAMPLE_HTML in html
+        assert extra_html in html
 
     def test_interactive_question_with_unloadable_image_renders_a_note(self) -> None:
         """An image with no uploaded file inside a question reaches formatted_body as a note."""

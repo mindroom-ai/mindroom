@@ -16,7 +16,7 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
 With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](knowledge.md#reranking), a reranker chooses the semantic matches instead.
-`search_memories` returns up to its own `limit` in every mode.
+`memory(action="search", ...)` returns up to its own `limit` in every mode.
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -226,14 +226,14 @@ On a route that keeps the system prompt unchanged while its cache is warm and se
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
 `MEMORY.md` is cut by the rule that cuts every [context file](configuration/agents.md#file-based-context-loading): `defaults.max_preload_file_chars` (default `30000`, minimum `1`) characters per file.
 A longer file inlines its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line), and withholds the rest; only a first line longer than the limit inlines its first characters.
-Lines `add_memory` appends past the cut never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
+Lines `memory(action="add", ...)` appends past the cut never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
 After a cut, a marker names the file, says the rest is left out of the prompt, and asks the agent to condense it without losing information (moving detail into files it can read or search on demand); it holds no counts, so it stays the same while the file grows.
 
 ### File layout
 
 Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in the storage directory:
 
-- `MEMORY.md`, where `add_memory` writes
+- `MEMORY.md`, where `memory(action="add", ...)` writes
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
 Team file memory lives once per team, in `team_memory/team_<sorted_members>/MEMORY.md` in the storage directory.
@@ -244,7 +244,7 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 
 ### Searching file memory
 
-`memory.search` controls how `search_memories` and per-turn retrieval search file memory, and `agents.<name>.memory_search` overrides it per agent, with omitted fields inherited.
+`memory.search` controls how `memory(action="search", ...)` and per-turn retrieval search file memory, and `agents.<name>.memory_search` overrides it per agent, with omitted fields inherited.
 
 | Field | Default | Description |
 |---|---|---|
@@ -254,7 +254,7 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
 | `rerank` | unset | In `semantic` mode, rerank the hits with the root [`reranker`](knowledge.md#reranking); unset reranks only when that reranker's `provider` is `openai_decisions` or `typesafe` |
 
-In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
+In `keyword` mode, `memory(action="search", ...)` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
 Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload limit, read the file directly or use semantic search with `include_entrypoint: true`.
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
@@ -264,7 +264,7 @@ Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduli
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker`](knowledge.md#reranking) is `openai_decisions` or `typesafe`, the two that improved recall in the benchmark below; `rerank: false` turns it off, globally or in `agents.<name>.memory_search`.
-With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `search_memories` call's larger `limit`, and the reranker orders them.
+With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `memory(action="search", ...)` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
@@ -283,7 +283,7 @@ Latency was measured on 200 turns of one set run one at a time, none of which fe
 A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
-`memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
+`memory.search.rerank: false` stops reranking in recall and `memory(action="search", ...)`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
 
 ```yaml
 agents:
@@ -296,7 +296,7 @@ agents:
 ```
 
 Once its semantic index is ready, an agent's file memory also appears as a read-only source in `search_knowledge_base`.
-That source is semantic-only, without keyword fallback, team memory, or memory IDs, so use `search_memories` when you need those.
+That source is semantic-only, without keyword fallback, team memory, or memory IDs, so use `memory(action="search", ...)` when you need those.
 
 ### Per-requester file memory
 
@@ -392,18 +392,18 @@ agents:
 ```
 
 ```python
-add_memory("The user prefers terse release notes.")
-search_memories("release notes", limit=3)   # default limit 5
-list_memories(limit=20)                     # default limit 50
-get_memory("abc123")
-update_memory("abc123", "The user prefers terse release notes with dates.")
-delete_memory("abc123")
+memory(action="add", content="The user prefers terse release notes.")
+memory(action="search", query="release notes", limit=3)   # default limit 5
+memory(action="list", limit=20)                           # default limit 50
+memory(action="get", memory_id="abc123")
+memory(action="update", memory_id="abc123", content="The user prefers terse release notes with dates.")
+memory(action="delete", memory_id="abc123")
 ```
 
 The tool reaches every agent and team scope visible to the agent, as described in [Memory Scopes](#memory-scopes).
-Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get_memory`, `update_memory`, and `delete_memory`.
-Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that these functions do not accept.
-After storing, `add_memory` lists up to three similar existing memories with their IDs, so the agent can rewrite an entry the new memory corrects; file memory finds them by keyword even in `semantic` mode, because semantic matches cannot be edited.
+Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get`, `update`, and `delete`.
+Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that those actions do not accept.
+After storing, `memory(action="add", ...)` lists up to three similar existing memories with their IDs, so the agent can rewrite an entry the new memory corrects; file memory finds them by keyword even in `semantic` mode, because semantic matches cannot be edited.
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 

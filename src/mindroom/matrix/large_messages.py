@@ -7,6 +7,8 @@ JSON and send a compact preview event with a pointer to that sidecar.
 from __future__ import annotations
 
 import json
+import re
+from html import unescape as html_unescape
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +50,7 @@ from mindroom.matrix.media import durable_session_closed, prepare_media_upload, 
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.state_failures import is_transient_homeserver_status, response_http_status
 from mindroom.matrix_identifiers import has_agent_username
-from mindroom.tool_system.events import has_placeholder_body, tool_markers_out_of_text
+from mindroom.tool_system.events import has_placeholder_body, html_block_spans, tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -323,7 +325,8 @@ def is_edit_message(content: dict[str, Any]) -> bool:
 
 def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     """Return whether content is an in-progress streaming payload."""
-    return content.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES
+    status = content.get(STREAM_STATUS_KEY)
+    return isinstance(status, str) and status in NONTERMINAL_STREAM_STATUSES
 
 
 def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
@@ -916,6 +919,111 @@ def _fit_large_message_preview(
     )
 
 
+_FINISHED_AI_RUN_STATUSES = frozenset({"completed", "cached"})
+_FINISHED_STREAM_STATUSES = frozenset({"complete", "completed", "done"})
+_INVISIBLE_PREVIEW_CHARS_RE = re.compile(r"[\u200b-\u200d\u2060\ufeff\ufe0f⏳]")
+_THEMATIC_BREAK_LINE_RE = re.compile(r"^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$")
+_HTML_MEDIA_TAG_RE = re.compile(r"<(?:img|video|audio)(?=[\s/>])", re.IGNORECASE)
+_HTML_TAG_STRIP_RE = re.compile(r"<[^>]*>")
+_FOOTNOTE_HREF_RE = re.compile(r"""(?<=\s)href\s*=\s*(["'])#(fn[^"'\s>]*)\1""", re.IGNORECASE)
+_FOOTNOTE_ID_RE = re.compile(r"""(?<=\s)id\s*=\s*(["'])(fn[^"'\s>]*)\1""", re.IGNORECASE)
+
+
+def _nonneg_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _is_finished_agent_reply(content: dict[str, Any], source_content: dict[str, Any]) -> bool:
+    """Return whether a reply carries terminal finished run and stream status metadata."""
+    ai_run = source_content.get(AI_RUN_METADATA_KEY)
+    ai_run = content.get(AI_RUN_METADATA_KEY) if ai_run is None else ai_run
+    run_status = ai_run.get("status") if isinstance(ai_run, dict) else None
+    if not isinstance(run_status, str) or run_status.strip().lower() not in _FINISHED_AI_RUN_STATUSES:
+        return False
+    stream_status = source_content.get(STREAM_STATUS_KEY)
+    stream_status = content.get(STREAM_STATUS_KEY) if stream_status is None else stream_status
+    if stream_status is None:
+        return True
+    if isinstance(stream_status, dict):
+        raw_status = stream_status.get("status")
+        stream_status = raw_status if raw_status is not None else stream_status.get("state")
+    return isinstance(stream_status, str) and stream_status.strip().lower() in _FINISHED_STREAM_STATUSES
+
+
+def _has_visible_preview_text(text: str) -> bool:
+    return any(
+        (cleaned := _INVISIBLE_PREVIEW_CHARS_RE.sub("", line).strip())
+        and _THEMATIC_BREAK_LINE_RE.fullmatch(cleaned) is None
+        for line in text.splitlines()
+    )
+
+
+def _has_visible_preview_html(fragment: str) -> bool:
+    return _HTML_MEDIA_TAG_RE.search(fragment) is not None or bool(
+        _INVISIBLE_PREVIEW_CHARS_RE.sub("", html_unescape(_HTML_TAG_STRIP_RE.sub("", fragment))).strip(),
+    )
+
+
+def _has_cross_half_footnotes(head_html: str, answer_html: str) -> bool:
+    if "#fn" not in head_html.lower() and "#fn" not in answer_html.lower():
+        return False
+    head_hrefs = {match.group(2) for match in _FOOTNOTE_HREF_RE.finditer(head_html)}
+    head_ids = {match.group(2) for match in _FOOTNOTE_ID_RE.finditer(head_html)}
+    answer_hrefs = {match.group(2) for match in _FOOTNOTE_HREF_RE.finditer(answer_html)}
+    answer_ids = {match.group(2) for match in _FOOTNOTE_ID_RE.finditer(answer_html)}
+    return bool((head_hrefs & (answer_ids - head_ids)) or (answer_hrefs & (head_ids - answer_ids)))
+
+
+def _last_placed_tool_position(events: list[object], *, require_html: bool) -> tuple[int, int] | None:
+    cut_line = cut_at = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        body_line, at = _nonneg_int(event.get("body_line")), _nonneg_int(event.get("at"))
+        if require_html and (body_line is None) != (at is None):
+            return None
+        if body_line is not None:
+            cut_line = max(cut_line, body_line)
+        if at is not None:
+            cut_at = max(cut_at, at)
+    return (cut_line, cut_at) if cut_line > 0 else None
+
+
+def _extract_finished_answer_preview(
+    preview_source: dict[str, Any],
+    preview_text: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Slice a finished v3 agent reply down to the post-tool-call answer when safe and non-empty."""
+    trace = preview_source.get(TOOL_TRACE_CONTENT_KEY)
+    events = trace.get("events") if isinstance(trace, dict) else None
+    if (
+        not isinstance(trace, dict)
+        or trace.get("version") != 3
+        or trace.get("placeholder_body")
+        or not isinstance(events, list)
+    ):
+        return None
+    formatted_body = preview_source.get("formatted_body")
+    cut = _last_placed_tool_position(events, require_html=isinstance(formatted_body, str))
+    full_body = preview_text.split("\n")
+    if cut is None or cut[0] >= len(full_body):
+        return None
+    cut_line, cut_at = cut
+    answer_body = "\n".join(full_body[cut_line:]).lstrip("\n")
+    if not _has_visible_preview_text(answer_body):
+        return None
+    updated_source = {**preview_source, "body": answer_body}
+    if isinstance(formatted_body, str):
+        spans = html_block_spans(formatted_body)
+        if not 0 < cut_at < len(spans):
+            return None
+        head_html, answer_html = formatted_body[: spans[cut_at][0]], formatted_body[spans[cut_at][0] :]
+        if _has_cross_half_footnotes(head_html, answer_html) or not _has_visible_preview_html(answer_html):
+            return None
+        updated_source["formatted_body"] = answer_html
+    return updated_source, answer_body
+
+
 def _large_message_preview(
     client: nio.AsyncClient,
     content: dict[str, Any],
@@ -927,12 +1035,18 @@ def _large_message_preview(
 
     An agent's preview shows its text without its tool markers, as its events that fit are sent. A reply of calls
     alone then shows a placeholder for the calls its sidecar holds. Without a sidecar nothing sent names them, so
-    the text sent in its place keeps their markers.
+    the text sent in its place keeps their markers. Terminal finished agent replies with pre-tool work start their
+    sidecar-backed preview at the post-tool answer while keeping the full text for sidecarless fallbacks.
     """
-    sent = tool_markers_out_of_text(content) if has_agent_username(client.user_id) else content
+    is_agent = has_agent_username(client.user_id)
+    sent = tool_markers_out_of_text(content) if is_agent else content
     preview_source = sent["m.new_content"] if is_edit and "m.new_content" in sent else sent
     preview_text = preview_source.get("body", "")
     fallback_text = source_content.get("body", "") if has_placeholder_body(preview_source) else preview_text
+    if is_agent and isinstance(preview_text, str) and _is_finished_agent_reply(content, source_content):
+        answer_preview = _extract_finished_answer_preview(preview_source, preview_text)
+        if answer_preview is not None:
+            preview_source, preview_text = answer_preview
     return preview_source, preview_text, fallback_text
 
 

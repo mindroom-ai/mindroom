@@ -9,7 +9,8 @@ from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolv
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,16 +24,19 @@ from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.calls import CallsConfig, LiveCallProfile
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.config.personal_agents import PersonalAgentInstance
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig, ModelPricing
+from mindroom.config.personal_agents import PersonalAgentInstance, PersonalAgentTemplateConfig
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
+from mindroom.tool_system.registry import ToolRegistry
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome
@@ -1022,6 +1026,54 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         ),
         False,
     ),
+    "approval_rule_script": (
+        lambda config: setattr(
+            config.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="act*", script="approval_other_agent_only.py")],
+        ),
+        False,
+    ),
+    "approval_rule_shell": (
+        lambda config: setattr(
+            config.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+        False,
+    ),
+    "approval_timeout_days": (lambda config: setattr(config.tool_approval, "timeout_days", 1.0), False),
+    "unrelated_approval_rules": (
+        lambda config: setattr(
+            config.tool_approval,
+            "rules",
+            [
+                ApprovalRuleConfig(match="google_drive_upload_file", script="approval_other_agent_only.py"),
+                ApprovalRuleConfig(match="create_sheet", script="approval_other_agent_only.py"),
+            ],
+        ),
+        True,
+    ),
+    "calls_profile_model": (lambda config: setattr(config.calls.profiles["live"], "model", "gpt-live-1.1"), True),
+    "other_personal_template_compaction": (
+        lambda config: setattr(
+            config.personal_agents["mind"].agent,
+            "compaction",
+            CompactionOverrideConfig(replay_window_tokens=32000),
+        ),
+        True,
+    ),
+    "thread_summary_model": (lambda config: setattr(config.defaults, "thread_summary_model", "spare"), True),
+    "room_thread_summary_model": (lambda config: config.room_thread_summary_models.__setitem__("lobby", "spare"), True),
+    "router_model": (lambda config: setattr(config.router, "model", "spare"), True),
+    "defaults_compaction": (
+        lambda config: setattr(config.defaults, "compaction", CompactionConfig(replay_window_tokens=32000)),
+        False,
+    ),
+    "external_trigger_policy": (
+        lambda config: setattr(config.external_trigger_policy, "enabled", not config.external_trigger_policy.enabled),
+        False,
+    ),
     "mcp_server": (
         lambda config: config.mcp_servers.__setitem__("demo", MCPServerConfig(transport="stdio", command="npx")),
         False,
@@ -1051,6 +1103,24 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
             "default": ModelConfig(provider="openai", id="default-id"),
             "spare": ModelConfig(provider="openai", id="spare-id"),
         },
+        calls=CallsConfig(
+            profiles={
+                "live": LiveCallProfile(
+                    backend="live",
+                    model="gpt-live-1",
+                    credentials_service="openai",
+                    voice="alloy",
+                ),
+            },
+        ),
+        personal_agents={
+            "mind": PersonalAgentTemplateConfig(
+                agent=AgentConfig(
+                    display_name="Mind",
+                    compaction=CompactionOverrideConfig(replay_window_tokens=16000),
+                ),
+            ),
+        },
     )
     current = config.model_copy(deep=True)
     apply_edit, still_permitted = _CONFIG_EDITS[edit]
@@ -1072,6 +1142,142 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
     else:
         with pytest.raises(PermissionError):
             await authorize
+
+
+@pytest.mark.asyncio
+async def test_per_call_approval_and_own_personal_template_stay_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alias targets and a personal agent's own template still fail closed; scheduler runner skips its own name."""
+
+    def action() -> str:
+        return "ok"
+
+    def run_scheduled_call() -> str:
+        return "ok"
+
+    catalog = await _catalog(tmp_path, [_function(action), _toolkit("scheduler", run_scheduled_call)])
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper", rooms=["lobby"])},
+        personal_agents={
+            "assistant": PersonalAgentTemplateConfig(agent=AgentConfig(display_name="Assistant")),
+            "other": PersonalAgentTemplateConfig(agent=AgentConfig(display_name="Other")),
+        },
+    )
+    config._personal_agent_instances = {"helper": _personal_instance("@alice:test")}
+    alias_meta = ToolMetadata(
+        name="actions",
+        file_access=ToolFileAccess.NONE,
+        display_name="Actions",
+        description="Actions",
+        category=ToolCategory.DEVELOPMENT,
+        approval_aliases={"action": ApprovalAlias(judged_as="judged_target", judge=lambda _args: [])},
+    )
+    default_tools = ToolRegistry({"actions": alias_meta})
+    published_tools = default_tools
+    monkeypatch.setattr(
+        approval_tools,
+        "config_plugins",
+        lambda *_args, **_kwargs: SimpleNamespace(tools=published_tools),
+    )
+    monkeypatch.setattr(
+        approval_tools,
+        "is_sender_allowed_for_entity_replies_in_room",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def bind_reload(
+        mutate: Callable[[Config], object],
+        *,
+        old_tools: ToolRegistry = default_tools,
+        current_tools: ToolRegistry = default_tools,
+    ) -> ToolRuntimeContext:
+        nonlocal published_tools
+        published_tools = current_tools
+        current = config.model_copy(deep=True)
+        mutate(current)
+        runtime = replace(
+            catalog.runtime_context,
+            config=config,
+            plugins=cast("Any", SimpleNamespace(tools=old_tools)),
+            config_provider=lambda: current,
+        )
+        catalog.runtime_context = runtime
+        return runtime
+
+    # A rule matching the alias's judged_as target refuses.
+    runtime = bind_reload(
+        lambda cfg: setattr(cfg.tool_approval, "rules", [ApprovalRuleConfig(match="judged_*", script="gate.py")]),
+    )
+    action_binding = await catalog.bind(ToolKey("actions", "action"))
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
+
+    # An alias published only in the reloaded plugin registry + rule on its judged_as target refuses.
+    new_alias_meta = replace(
+        alias_meta,
+        approval_aliases={"action": ApprovalAlias(judged_as="upload_file", judge=lambda _args: [])},
+    )
+    runtime = bind_reload(
+        lambda cfg: setattr(
+            cfg.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="upload_file", action="require_approval")],
+        ),
+        old_tools=ToolRegistry({}),
+        current_tools=ToolRegistry({"actions": new_alias_meta}),
+    )
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
+
+    # A republished alias with a new judged_as target refuses even when both targets' policies are equal.
+    runtime = bind_reload(
+        lambda cfg: setattr(
+            cfg.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="judged_target", action="require_approval")],
+        ),
+        current_tools=ToolRegistry({"actions": new_alias_meta}),
+    )
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
+
+    # scheduler.run_scheduled_call ignores rules matching its own name, consistent with _approval_may_gate.
+    runtime = bind_reload(
+        lambda cfg: setattr(
+            cfg.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="run_scheduled_call", action="require_approval")],
+        ),
+    )
+    sched_binding = await catalog.bind(ToolKey("scheduler", "run_scheduled_call"))
+    await approval_tools.authorize_prepared_tool_call(
+        sched_binding,
+        expected_worker_target=runtime.resolve_worker_target(),
+    )
+
+    # Editing another personal template survives; editing this agent's own template refuses.
+    runtime = bind_reload(lambda cfg: setattr(cfg.personal_agents["other"], "workspace_template", None))
+    await approval_tools.authorize_prepared_tool_call(
+        action_binding,
+        expected_worker_target=runtime.resolve_worker_target(),
+    )
+    runtime = bind_reload(lambda cfg: setattr(cfg.personal_agents["assistant"], "workspace_template", None))
+    with pytest.raises(PermissionError):
+        await approval_tools.authorize_prepared_tool_call(
+            action_binding,
+            expected_worker_target=runtime.resolve_worker_target(),
+        )
 
 
 @pytest.mark.asyncio

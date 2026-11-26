@@ -31,6 +31,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.state import DelegationState
+from mindroom.history.types import HistoryScope
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus
@@ -863,10 +864,14 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     await catalog.prepare(
         [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
     )
-    binding = await catalog.bind(ToolKey("memory", "add_memory"))
+    binding = await catalog.bind(ToolKey("memory", "memory"))
     events = [
         event
-        async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
+        async for event in execute_agent_tool_call(
+            binding,
+            "memory-write",
+            {"action": "add", "content": "Canonical hidden memory"},
+        )
     ]
     assert events[-1].call.result == "Memorized: Canonical hidden memory"
     memories = await search_agent_memories("Canonical hidden", "helper", config, paths, limit=5)
@@ -876,7 +881,8 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     compact_binding = await catalog.bind(ToolKey("compact_context", "compact_context"))
     events = [event async for event in execute_agent_tool_call(compact_binding, "compact", {})]
     assert events[-1].kind == "completed"
-    assert "before the next reply" in events[-1].call.result
+    assert "before the next model request in this scope" in events[-1].call.result
+    assert HistoryScope(kind="agent", scope_id="helper") in catalog.run.compaction_requests
     assert catalog.run.session_state is original
     assert catalog.run.session_state["sentinel"] == "kept"
     await catalog.close()

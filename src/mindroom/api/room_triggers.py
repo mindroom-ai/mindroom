@@ -13,9 +13,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 
 from mindroom.api.app_state import notify_reactive_event_loop
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
+from mindroom.api.room_reads import read_in_room
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.matrix.state import resolve_room_id
-from mindroom.plugin_http import ClientUser, client_rooms, read_in_room, require_room_member
+from mindroom.plugin_http import ClientUser, client_rooms, require_room_member
 from mindroom.reactive_triggers.management import (
     TriggerRecord,
     delete_trigger_sync,

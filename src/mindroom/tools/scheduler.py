@@ -24,12 +24,9 @@ if TYPE_CHECKING:
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/scheduling/#scheduler",
     function_names=(
-        "cancel_schedule",
-        "edit_schedule",
-        "list_schedules",
         "run_scheduled_call",
-        "schedule",
         "schedule_tool_call",
+        "scheduler",
     ),
 )
 def scheduler_tools() -> type[SchedulerTools]:

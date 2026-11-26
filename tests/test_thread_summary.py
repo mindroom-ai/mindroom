@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     FORK_CONTENT_KEY,
+    SUPPRESS_PUSH_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     resolve_runtime_paths,
@@ -36,6 +37,7 @@ from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -43,16 +45,16 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS, THREAD_SUMMARY_KEEP_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.schema import strict_response_schema
-from mindroom.thread_summary import automatic
+from mindroom.thread_summary import automatic, schedule
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _CLIP_SEPARATOR,
     _CLIP_TAIL_CHARS,
+    _GENERATED_TITLE_MAX_LENGTH,
     _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_EDGE_COUNT,
     _TRUNCATION_MIDDLE_COUNT,
-    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _conversation_text,
     _ThreadEnrichment,
@@ -482,7 +484,7 @@ def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) 
 
 def test_thread_summary_model_accepts_a_long_answer_to_reject() -> None:
     """An overlong answer parses, so the title check can send it back instead of a parse error losing it."""
-    assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
+    assert _GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
     assert _ThreadSummary(title="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
 
 
@@ -514,7 +516,7 @@ def test_title_error_checks_six_words_and_80_characters(title: str, error: str |
         ("🧪 ISSUE-148 cache refetch live test now", True),
         ("🧪 ISSUE-148 cache refetch live test (forked)", True),
         ("🧵 Review of PR #548 session persistence hooks", False),
-        ("x" * (GENERATED_TITLE_MAX_LENGTH + 1), False),
+        ("x" * (_GENERATED_TITLE_MAX_LENGTH + 1), False),
     ],
 )
 def test_only_a_title_within_the_short_rule_may_be_kept(title: str, keepable: bool) -> None:
@@ -856,6 +858,36 @@ class TestShouldQueueThreadSummary:
 
         assert should_queue_thread_summary(_ROOM, _THREAD, _mock_config(), due, message_count_hint=1)
 
+    def test_failure_cooldown_suppresses_summary_queue_until_expiry_without_blocking_vocabulary(
+        self,
+        tmp_path: Path,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Failure cooldown suppresses summary queueing (including hint=None) while still letting due vocabulary run."""
+        now = [100.0]
+        monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        config = _mock_config()
+
+        thread_summary_baselines.record_failure_cooldown(_ROOM, _THREAD)
+        # Recording count 0 (as automatic.py does for untitled threads) must not clear the cooldown.
+        thread_summary_baselines.record(_ROOM, _THREAD, 0)
+        assert thread_summary_baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=5)
+        assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=None)
+
+        # Daily vocabulary upkeep still queues during failure cooldown for both numeric and None hints.
+        due_num, due_none = _runtime_paths(tmp_path / "due-num"), _runtime_paths(tmp_path / "due-none")
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, due_num, message_count_hint=5)
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, due_none, message_count_hint=None)
+
+        # After cooldown expires, summary queueing resumes and short-circuits vocabulary claiming.
+        now[0] += schedule._UNTITLED_FAILURE_COOLDOWN_SECONDS
+        fresh_vocab = _runtime_paths(tmp_path / "fresh-vocab")
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, fresh_vocab, message_count_hint=None)
+        assert claim_vocabulary_check(_ROOM, config, fresh_vocab, now=datetime.now(UTC))
+
 
 @pytest.mark.asyncio
 class TestMaybeGenerateThreadSummary:
@@ -1001,7 +1033,7 @@ class TestMaybeGenerateThreadSummary:
         assert sent["summary"] == fork_title
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
-        assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
+        assert len(model.requests) == (parent_title is None or len(parent_title) > _GENERATED_TITLE_MAX_LENGTH)
         # Only a title a model writes reads the room's title settings, both at once.
         state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
         assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
@@ -2148,8 +2180,8 @@ class TestMaybeGenerateThreadSummary:
         (request,) = model.requests
         assert "- bug (2)" in _prompt(request)
 
-    async def test_model_resolution_failure_records_count(self) -> None:
-        """Room override lookup failures should not retry until the next threshold."""
+    async def test_model_resolution_failure_cools_down_untitled_thread(self) -> None:
+        """Room override lookup failures on untitled threads enter cooldown without advancing the baseline."""
         config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
         model = self._summarizer(model_name="haiku")
         self._history(_make_thread_history(5))
@@ -2162,7 +2194,8 @@ class TestMaybeGenerateThreadSummary:
 
         assert not model.requests
         self.client.room_send.assert_not_awaited()
-        assert self._count() == 5
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_room_specific_model_generates_and_records_metadata(self) -> None:
         """Room-specific summary model overrides should drive generation and event metadata."""
@@ -2374,21 +2407,81 @@ class TestMaybeGenerateThreadSummary:
         assert self.room_state.tags(_THREAD) == ["bug"]
         assert self._count() == 2
 
-    async def test_generation_exception_records_count(self) -> None:
-        """A failing model call records the count to prevent retry storms."""
+    @staticmethod
+    async def _unavailable() -> None:
+        msg = "LLM unavailable"
+        raise RuntimeError(msg)
 
-        async def unavailable() -> None:
-            msg = "LLM unavailable"
-            raise RuntimeError(msg)
-
-        self._summarizer(Await(unavailable))
+    async def test_untitled_generation_exception_cools_down_and_retries_after_expiry(self) -> None:
+        """An untitled thread hitting a generation exception cools down instead of advancing baseline, then retries."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        model = self._summarizer(Await(self._unavailable), _title("Recovered title"))
         self._history(_make_thread_history(5))
+        config = _mock_config()
+
+        await self._maybe_generate(config)
+        self.client.room_send.assert_not_awaited()
+        assert self._count() == 0
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        # During cooldown, automatic passes return before reading history or calling the model.
+        assert self.conversation_reader.read_strict.await_count == 1
+        now[0] = 130.0
+        await self._maybe_generate(config)
+        assert self.conversation_reader.read_strict.await_count == 1
+        assert len(model.requests) == 1
+
+        # Once cooldown expires, the next pass retries, titles the thread, and clears cooldown.
+        now[0] = 160.0
+        await self._maybe_generate(config)
+        assert len(model.requests) == 2
+        assert _sent_summaries(self.client)[0]["summary"] == "Recovered title"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+        assert (_ROOM, _THREAD) not in self.baselines._retry_after
+
+    async def test_retitle_bypasses_failure_cooldown_and_clears_it_on_success(self) -> None:
+        """An explicit retitle bypasses an active untitled failure cooldown and clears it when it succeeds."""
+        now = [100.0]
+        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
+        model = self._summarizer(Await(self._unavailable), _title("Retitled promptly"))
+        self._history(_make_thread_history(5))
+        config = _mock_config()
+
+        await self._maybe_generate(config)
+        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+        now[0] = 110.0
+        await self._maybe_generate(config, retitle=True)
+        assert len(model.requests) == 2
+        assert _sent_summaries(self.client)[0]["summary"] == "Retitled promptly"
+        assert self._count() == 5
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize(
+        ("existing_count", "thread_size"),
+        [(5, 15), (0, 5)],
+        ids=["durable-title", "provisional-title"],
+    )
+    async def test_titled_generation_exception_records_count_without_cooldown(
+        self,
+        existing_count: int,
+        thread_size: int,
+    ) -> None:
+        """An already-titled thread hitting a generation exception advances its baseline without failure cooldown."""
+        self._summarizer(Await(self._unavailable))
+        self._history(
+            [
+                *_make_thread_history(thread_size),
+                _make_summary_notice_message(_THREAD, message_count=existing_count, summary="Existing title"),
+            ],
+        )
 
         await self._maybe_generate(_mock_config())
-
         self.client.room_send.assert_not_awaited()
-        # Count is recorded to prevent retry storms
-        assert self._count() == 5
+        assert self._count() == thread_size
+        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
     async def test_send_failure_still_records_count(self) -> None:
         """When the summary send fails, count is still recorded to prevent cost amplification."""
@@ -2525,6 +2618,7 @@ class TestSendSummaryEvent:
         content = call_kwargs["content"]
         assert content["msgtype"] == "m.notice"
         assert content["body"] == "Discussed deployment plan"
+        assert content[SUPPRESS_PUSH_KEY] is True
 
         relates_to = content["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
@@ -2609,6 +2703,28 @@ class TestSendSummaryEvent:
         relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
         assert relates_to["event_id"] == "$root1"
         assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+
+    async def test_event_content_suppresses_push_and_hoists_for_encryption(self) -> None:
+        """Thread summary notices suppress push and expose that marker outside encryption."""
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
+
+        result = await send_thread_summary_notice(
+            client,
+            room_id=_ROOM,
+            thread_id="$root1",
+            summary="Provisional title",
+            message_count=0,
+            model_name="haiku",
+            conversation_reader=conversation_reader,
+        )
+
+        assert result == "$s1"
+        content = client.room_send.call_args.kwargs["content"]
+        assert content[SUPPRESS_PUSH_KEY] is True
+        assert encryption_visible_metadata(content) == {SUPPRESS_PUSH_KEY: True}
 
 
 @pytest.mark.asyncio

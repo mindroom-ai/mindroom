@@ -35,7 +35,7 @@ QUESTION_WAITS_MS = 7 * 24 * 60 * 60 * 1000
 _JOB_FIELDS = ("job_id", "kind", "tool", "status", "started_at")
 
 
-def classify_thread_workflow(status: Mapping[str, Any], now: int) -> dict[str, object]:  # noqa: PLR0911
+def _classify_thread_workflow(status: Mapping[str, Any], now: int) -> dict[str, object]:  # noqa: PLR0911
     """Group a thread by the case file's status keys (absent: false, 0 or unknown), with `why` or known `back_at`."""
     if status.get("pending_approval") or (status.get("has_background_approval") and not status.get("is_resolved")):
         return {"workflow": "needs_you", "why": "approval"}
@@ -162,7 +162,7 @@ def thread_workflow(
         "pending_approval": approval_ts is not None and approval_ts > cutoff,
         "pending_question": question_ts is not None and question_ts > now - QUESTION_WAITS_MS,
     }
-    return classify_thread_workflow(status, now)
+    return _classify_thread_workflow(status, now)
 
 
 def latest_reply_question_ts(

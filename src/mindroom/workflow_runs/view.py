@@ -26,6 +26,7 @@ from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import (
     AGENT_KINDS,
     LOG_LINES,
+    MESSAGE_LINES,
     Graph,
     fit_snapshot,
     graph_meta,
@@ -39,7 +40,7 @@ from mindroom.workflow_runs.models import (
     UNSETTLED_NODE_STATES,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.peers import message_edges
+from mindroom.workflow_runs.peers import message_edges, visible_messages_with_omitted
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ _ERROR_CHARS = 200
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
 
 
-def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
+def _card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
     """Return what a run's card says: who and what the run is, where it stands, its counts and what it used.
 
     A run that ended without completing says why in one line, the last of its error: a traceback names its error
@@ -86,7 +87,7 @@ def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> d
     }
 
 
-def card_text(content: dict[str, Any]) -> str:
+def _card_text(content: dict[str, Any]) -> str:
     """Return the card as plain text, for a client that does not draw it."""
     counts = content["counts"]
     title = f'Workflow "{content["title"]}"' if content["title"] else "Workflow"
@@ -106,7 +107,7 @@ def _fitted_card(
     final: bool,
 ) -> dict[str, Any]:
     """Return the card's content within what one edit event holds; the card of an ended run carries its graph."""
-    content = card_content(run, meta, graph.phases)
+    content = _card_content(run, meta, graph.phases)
     if not final:
         return content if fits(content) else {**content, "phases": []}
 
@@ -276,7 +277,11 @@ class RunViews:
         if run.attempt == 0:
             return None
         nodes = store.nodes(run_id, light=True)
-        summary = store.usage_summary(run_id, attempt=run.attempt)
+        summary = store.usage_summary(
+            run_id,
+            attempt=run.attempt,
+            current_generations={node.key: node.generation for node in nodes},
+        )
         used = summary.by_node
         usage = run_usage(store, run_id, root_summary=summary)
         open_agents = sum(node.kind in AGENT_KINDS and node.state in UNSETTLED_NODE_STATES for node in nodes)
@@ -287,12 +292,16 @@ class RunViews:
             )
             for child in store.child_runs(run_id)
         }
+        messages, omitted_messages = visible_messages_with_omitted(store, run_id, nodes, limit=MESSAGE_LINES)
         graph = graph_rows(
             nodes,
             used,
             message_edges(store, run_id, nodes),
-            store.log(run_id, LOG_LINES),
+            store.log(run_id, LOG_LINES, attempt=run.attempt),
             inside=inside,
+            messages=messages,
+            omitted_messages=omitted_messages,
+            previews=store.node_previews(run_id),
         )
         return run, nodes, usage, graph
 
@@ -310,7 +319,7 @@ class RunViews:
             return True
 
         def message(content: dict[str, Any]) -> dict[str, Any]:
-            return notice(run, card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
+            return notice(run, _card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
 
         def fits(content: dict[str, Any]) -> bool:
             return notice_fits(client, run, message(content), run.card_event_id)

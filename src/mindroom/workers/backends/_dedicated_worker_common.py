@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -19,7 +18,6 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_relative_path,
     normalize_worker_key_part,
     pinned_worker_kind,
     private_instance_scope_root_path,
@@ -31,6 +29,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.sandbox_mounts import resolve_sandbox_mount_target
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -45,10 +44,8 @@ __all__ = [
     "SharedDirectoryMount",
     "agent_names_addressed_by_worker_key",
     "build_backend_config_signature",
-    "normalize_sandbox_mount_dir",
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
-    "resolve_sandbox_mount_target",
     "resolve_state_scope_worker_key",
     "retire_pinned_worker",
     "stable_json_digest",
@@ -213,41 +210,6 @@ def _scoped_workspaces(
         msg = f"Unsupported worker key for scoped storage mounts: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
     return workspaces
-
-
-def normalize_sandbox_mount_dir(mount_dir: str) -> str:
-    """Validate and normalize one workspace-relative sandbox ``mount_dir``."""
-    if "\x00" in mount_dir:
-        msg = "mount_dir must not contain NUL bytes."
-        raise ValueError(msg)
-    relative = agent_workspace_relative_path(mount_dir)
-    if not relative.parts:
-        msg = "mount_dir must name a subdirectory inside the agent workspace, not the workspace root."
-        raise ValueError(msg)
-    if any(part.startswith(".") for part in relative.parts):
-        msg = "mount_dir cannot target hidden or dot-prefixed directories such as .mindroom, .config, or .git."
-        raise ValueError(msg)
-    return relative.as_posix()
-
-
-def resolve_sandbox_mount_target(
-    *,
-    storage_root: Path,
-    workspaces: tuple[Path, ...],
-    mount_dir: str,
-    validate: bool = True,
-) -> tuple[Path, int | None]:
-    """Resolve one sandbox ``mount_dir`` relative to ``storage_root`` and optionally pin its inode."""
-    if len(workspaces) != 1:
-        msg = "Sandbox mount_dir requires a single agent workspace."
-        raise ValueError(msg)
-    normalized = normalize_sandbox_mount_dir(mount_dir)
-    workspace_rel = workspaces[0].relative_to(storage_root)
-    target_rel = workspace_rel / normalized
-    if not validate:
-        return target_rel, None
-    with open_directory_within_root(storage_root, target_rel, create=False) as fd:
-        return target_rel, os.fstat(fd).st_ino
 
 
 def _plan_sandbox_workspace_mounts(

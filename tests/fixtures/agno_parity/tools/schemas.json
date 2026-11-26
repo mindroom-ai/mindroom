@@ -4609,7 +4609,7 @@
     "functions": [
       {
         "name": "compact_context",
-        "description": "Request compaction before the next reply.",
+        "description": "Compact conversation context now before the next model request.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17557,16 +17557,24 @@
     "guidance": null,
     "functions": [
       {
-        "name": "add_memory",
-        "description": "Persist a fact or note for future conversations. To correct an existing entry, use update_memory instead.",
+        "name": "memory",
+        "description": "Store, search, list, fetch, update, or delete long-term facts and notes across conversations.\n- `add`: persist `content` (lists similar existing memories so you can refine with `update` instead of duplicating).\n- `search`: search by `query` (optional `limit`, default 5). File memory uses configured Markdown paths (default: memory/**/*.md) and falls back to keyword search over MEMORY.md and memory/**/*.md. Persisted and `file:*` IDs work with `get`, `update`, or `delete`; `semantic:*` IDs are read-only locators.\n- `list`: list stored memories (optional `limit`, default 50).\n- `get` / `delete`: fetch or delete one entry by `memory_id`.\n- `update`: replace an entry's `content` by `memory_id`.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "add",
+                "search",
+                "list",
+                "get",
+                "update",
+                "delete"
+              ],
+              "description": "Operation to perform."
+            },
             "content": {
-              "type": "string",
-              "description": "Fact or note to store."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -17575,31 +17583,40 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_memories",
-        "description": "Search stored facts, notes, or context.\nFile memory uses configured Markdown paths (default: memory/**/*.md) and falls back to keyword search over MEMORY.md and memory/**/*.md. Persisted and file:* IDs work with get_memory, update_memory, or delete_memory; semantic:* IDs are read-only locators.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              "description": "Fact or note to store (`add`) or replacement text (`update`)."
+            },
             "query": {
-              "type": "string",
-              "description": "Search query."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search query (`search`)."
+            },
+            "memory_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Memory ID from `search`/`list` (`get`, `update`, `delete`)."
             },
             "limit": {
-              "type": "integer",
-              "description": "Max results (default 5)."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Max results (`search` default 5; `list` default 50)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17615,134 +17632,7 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_memories",
-        "description": "List stored memories.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "limit": {
-              "type": "integer",
-              "description": "Max memories to return (default 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_memory",
-        "description": "Fetch one memory by ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "memory_id": {
-              "type": "string",
-              "description": "Memory ID from search/list (`[id=...]`)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "memory_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_memory",
-        "description": "Replace a stored memory's content by ID (use for corrections/refinements).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "memory_id": {
-              "type": "string",
-              "description": "Memory ID from search/list."
-            },
-            "new_content": {
-              "type": "string",
-              "description": "Replacement content."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "memory_id",
-            "new_content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_memory",
-        "description": "Delete one memory by ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "memory_id": {
-              "type": "string",
-              "description": "Memory ID from search/list."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "memory_id"
+            "action"
           ]
         },
         "strict": false,
@@ -23337,18 +23227,53 @@
     "guidance": null,
     "functions": [
       {
-        "name": "schedule",
-        "description": "Schedule a one-time (`execute_at`/`delay_seconds`) or recurring (`cron`) task in this room/thread or a fresh thread (`new_thread=True`).\nSupports `@agent_name`/`@team_name` mentions, silent monitors (`silent=True`), and per-run `model` overrides. Pass exactly one of `execute_at`, `delay_seconds`, or `cron`.",
+        "name": "scheduler",
+        "description": "Create, edit, list, or cancel one-time or recurring cron tasks in this room/thread.\n- `create`: needs `message`, `new_thread`, and one timing field (`execute_at`/`delay_seconds`/`cron`). Supports `@agent`/`@team`, fresh threads, silent monitors (`NO_REPLY`), and per-run `model`.\n- `edit`: patch by `task_id` (omitted unchanged; no one-time <-> cron switch; <=1 timing field; `new_thread` immutable; empty `model` resets; `clear_history_limit=True` restores unlimited history).\n- `list` / `cancel`: list pending tasks or cancel by `task_id` (no other params).",
         "parameters": {
           "type": "object",
           "properties": {
-            "message": {
+            "action": {
               "type": "string",
-              "description": "Trigger message posted on fire (non-empty); include `@agent_name`/`@team_name` to target responders."
+              "enum": [
+                "create",
+                "edit",
+                "list",
+                "cancel"
+              ],
+              "description": "Operation to run."
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Task ID from `list` (`edit`/`cancel`)."
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Trigger text (`create` required); include `@agent`/`@team` to mention responders."
             },
             "new_thread": {
-              "type": "boolean",
-              "description": "`False` = current room/thread; `True` = new thread per fire (room-level root + fresh session). With `silent=True`, trigger stays hidden and findings/failures post as a room-level root."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`create` required: `False` = current room/thread, `True` = fresh thread per fire (with `silent=True`, findings/failures post as a room-level root)."
             },
             "execute_at": {
               "anyOf": [
@@ -23359,7 +23284,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Future ISO 8601 datetime with time (e.g. \"2026-11-25T09:00:00-08:00\", \"...Z\", or naive in `timezone`; pass offset during DST)."
+              "description": "Future ISO 8601 datetime with time (or naive in `timezone`; pass offset during DST)."
             },
             "delay_seconds": {
               "anyOf": [
@@ -23370,7 +23295,7 @@
                   "type": "null"
                 }
               ],
-              "description": "One-time delay in seconds (>= 1; e.g. 900 = 15m)."
+              "description": "One-time delay in seconds (>= 1)."
             },
             "cron": {
               "anyOf": [
@@ -23381,7 +23306,7 @@
                   "type": "null"
                 }
               ],
-              "description": "5-field cron (`min hour day month weekday`, e.g. \"0 9 * * 1-5\") in `timezone` (DST-safe)."
+              "description": "5-field cron (`min hour day month weekday`) in `timezone`."
             },
             "description": {
               "anyOf": [
@@ -23392,7 +23317,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Short listing label (defaults to trimmed `message`)."
+              "description": "Short label (defaults to trimmed `message`)."
             },
             "timezone": {
               "anyOf": [
@@ -23403,7 +23328,7 @@
                   "type": "null"
                 }
               ],
-              "description": "IANA timezone (e.g. \"America/Los_Angeles\"); defaults to agent timezone."
+              "description": "IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`)."
             },
             "history_limit": {
               "anyOf": [
@@ -23414,11 +23339,22 @@
                   "type": "null"
                 }
               ],
-              "description": "Max recent thread messages per fire (`0` = none, best for polling; unset = unlimited)."
+              "description": "Max thread messages per fire (`0` = none; unset = unlimited)."
+            },
+            "clear_history_limit": {
+              "type": "boolean",
+              "description": "`edit` only: set `True` to remove the history limit (unlimited)."
             },
             "silent": {
-              "type": "boolean",
-              "description": "Keep trigger hidden and suppress empty, whitespace-only, or `NO_REPLY`-ending finals; findings, failures, and direct tool messages stay visible. Defaults to `False`."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`)."
             },
             "model": {
               "anyOf": [
@@ -23429,7 +23365,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Per-run model alias (including team members, e.g. \"cheap\" or \"sol@high\"); unset = default. Does not change conversation model."
+              "description": "Per-run model alias or `name@level` (pass an empty string on `edit` to reset to default; conversation model unchanged)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23445,8 +23381,7 @@
             }
           },
           "required": [
-            "message",
-            "new_thread"
+            "action"
           ]
         },
         "strict": false,
@@ -23519,196 +23454,6 @@
                 }
               ],
               "description": "Replacement JSON object string (only when any arguments were approved)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "edit_schedule",
-        "description": "Patch a pending schedule (omitted fields unchanged; cannot switch one-time <-> cron; pass at most one timing field).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "Task ID from `list_schedules`."
-            },
-            "message": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New trigger message."
-            },
-            "description": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New listing label."
-            },
-            "execute_at": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New one-time ISO 8601 datetime with time."
-            },
-            "delay_seconds": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New one-time delay in seconds (>= 1)."
-            },
-            "cron": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New 5-field cron in `timezone`."
-            },
-            "timezone": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New IANA timezone (legacy UTC cron also requires `cron` in the target timezone)."
-            },
-            "history_limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New max thread messages (`0` = none; cannot combine with `clear_history_limit=True`)."
-            },
-            "clear_history_limit": {
-              "type": "boolean",
-              "description": "Set `True` to remove the history limit (unlimited)."
-            },
-            "silent": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Update quiet delivery mode."
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Per-run model alias or `name@level`; `\"\"` restores default."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_schedules",
-        "description": "List all pending scheduled tasks in the current room/thread.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_schedule",
-        "description": "Cancel a scheduled task.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "Task ID from `list_schedules`."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23973,263 +23718,31 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_web",
-        "description": "Use this function to search the web.",
+        "name": "searxng_search",
+        "description": "Search via SearxNG (general web by default, or a specialized category).",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
               "type": "string",
-              "description": "(str) The query to search the web with."
+              "description": "Search query string."
             },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+            "category": {
+              "type": "string",
+              "enum": [
+                "images",
+                "it",
+                "map",
+                "music",
+                "news",
+                "science",
+                "videos"
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "image_search",
-        "description": "Use this function to search for images.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search images with."
+              "description": "Optional vertical; omit for general web search."
             },
             "max_results": {
               "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "it_search",
-        "description": "Use this function to search for IT related information.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search for IT related information."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "map_search",
-        "description": "Use this function to search maps",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search maps with."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "music_search",
-        "description": "Use this function to search for information related to music.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search music with."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "news_search",
-        "description": "Use this function to search for news.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search news with."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "science_search",
-        "description": "Use this function to search for information related to science.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search science with."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "video_search",
-        "description": "Use this function to search for videos.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search videos with."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(int) The maximum number of results to return. Defaults to 5."
+              "description": "Maximum results to return (overridden when `fixed_max_results` is configured)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27712,16 +27225,24 @@
     "guidance": null,
     "functions": [
       {
-        "name": "plan",
-        "description": "Append a visible multi-step work plan to this thread.",
+        "name": "todo",
+        "description": "Manage this thread's visible work plan (tasks, priorities, dependencies, assignees, and reusable templates).\n- `plan`: batch-create from newline-separated `tasks` (optional `[low|medium|high|critical]` prefix).\n- `add`: add one task (`title`; optional `priority`, `depends_on`, `assigned_agent`).\n- `list`: list actionable (priority-ordered) and blocked tasks (`show_all=True` adds done/cancelled).\n- `update`: update `todo_id` (marking `done`/`cancelled` reports newly unblocked tasks).\n- `apply_template` / `list_templates`: expand (`template_name`, `params`, `dry_run`) or list built-in/workspace templates.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "plan",
+                "add",
+                "list",
+                "update",
+                "apply_template",
+                "list_templates"
+              ],
+              "description": "Operation to perform."
+            },
             "tasks": {
-              "type": "string",
-              "description": "One task per line (numbering/bullets stripped; optional leading `[low|medium|high|critical] ` priority prefix)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27730,111 +27251,51 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "tasks"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_todo",
-        "description": "Add one task to this thread's visible work plan, with optional priority, dependencies, and assignee.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "title": {
-              "type": "string",
-              "description": "Non-empty task title."
+              "description": "Newline-separated lines (`plan`; optional `[low|medium|high|critical]` prefix per line)."
             },
-            "depends_on": {
-              "type": "string",
-              "description": "Comma-separated prerequisite todo IDs (blocks until those are done/cancelled)."
-            },
-            "priority": {
-              "type": "string",
-              "description": "`low`, `medium` (default), `high`, or `critical`."
-            },
-            "assigned_agent": {
-              "type": "string",
-              "description": "Configured agent name (defaults to caller)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_todos",
-        "description": "List this thread's work plan grouped by actionable (priority-ordered) and blocked items.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "show_all": {
-              "type": "boolean",
-              "description": "Also include done and cancelled items."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_todo",
-        "description": "Update an existing todo item (marking done/cancelled reports newly unblocked tasks).",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "todo_id": {
-              "type": "string",
-              "description": "Target todo ID."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target ID (`update`)."
             },
             "title": {
-              "type": "string",
-              "description": "New title (empty keeps current)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Task title (`add` required; `update` empty keeps current)."
             },
             "priority": {
-              "type": "string",
-              "description": "`low`, `medium`, `high`, or `critical` (empty keeps current)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`low`, `medium` (`add` default), `high`, or `critical`."
             },
             "status": {
-              "type": "string",
-              "description": "`open`, `done`, or `cancelled` (empty keeps current)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`open`, `done`, or `cancelled` (`update`)."
             },
             "depends_on": {
               "anyOf": [
@@ -27845,13 +27306,9 @@
                   "type": "null"
                 }
               ],
-              "description": "Comma-separated prerequisite IDs replacing current (`\"\"` clears; null keeps current; cycle-checked)."
+              "description": "Comma-separated prerequisite IDs (`add`/`update`; cycle-checked; `update`: null keeps current, empty string clears)."
             },
             "assigned_agent": {
-              "type": "string",
-              "description": "Configured agent name (empty keeps current; whitespace clears)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27860,51 +27317,53 @@
                   "type": "null"
                 }
               ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "todo_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "apply_template",
-        "description": "Expand a reusable built-in or workspace template (with dependencies) into this thread's work plan.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Template name from `list_templates`."
+              "description": "Agent name (`add` defaults to caller; `update`: null/empty keeps current, single space \" \" clears)."
+            },
+            "show_all": {
+              "type": "boolean",
+              "description": "Include done/cancelled (`list`)."
+            },
+            "template_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Template name (`apply_template`)."
             },
             "params": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "anyOf": [
-                  {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
                     "type": "string"
                   },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "boolean"
+                      }
+                    ]
                   }
-                ]
-              },
-              "description": "Template parameter key-value map."
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Template parameter map (`apply_template`)."
             },
             "dry_run": {
               "type": "boolean",
-              "description": "Preview expanded tasks without modifying the plan."
+              "description": "Preview without saving (`apply_template`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27920,34 +27379,8 @@
             }
           },
           "required": [
-            "name",
-            "params"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_templates",
-        "description": "List available built-in and workspace todo templates with descriptions and parameter schemas when available.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,

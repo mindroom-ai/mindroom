@@ -15,8 +15,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history.policy import _compaction_input_budget, resolve_history_execution_plan
-from mindroom.history.runtime import resolve_entity_preparation_inputs
+from mindroom.history.policy import (
+    _compaction_input_budget,
+    _resolve_history_execution_plan,
+    resolve_history_preparation_inputs,
+)
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.openai.chat import ChatAdapter
@@ -148,7 +151,7 @@ def _temperature(model: ModelProvider) -> float | None:
 def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
     model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
-    return resolve_history_execution_plan(
+    return _resolve_history_execution_plan(
         config=config,
         history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
@@ -168,12 +171,10 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
     assert old is not None
     old_agent, old_member, old_team, old_router = _materialize(runtime)
     assert old_agent.spec.model.identity.id == "default-model"
-    before = resolve_entity_preparation_inputs(
+    before = resolve_history_preparation_inputs(
         history_settings=old_agent.history_settings,
         config=old,
-        runtime_paths=runtime.runtime_paths,
         active_model_name=entity_model_name(old, "general"),
-        active_context_window=None,
     ).execution_plan
     assert before.replay_window_tokens == 4000
     assert not before.text_compaction_available
@@ -197,12 +198,10 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         assert model.identity.id == expected_id
         assert _temperature(model) == (0.1 if context_only else 0.7)
     assert team.spec.leader.model.identity.id == ("other-model" if context_only else "updated-team-model")
-    after = resolve_entity_preparation_inputs(
+    after = resolve_history_preparation_inputs(
         history_settings=agent.history_settings,
         config=runtime.config,
-        runtime_paths=runtime.runtime_paths,
         active_model_name=entity_model_name(runtime.config, "general"),
-        active_context_window=None,
     ).execution_plan
     assert after.replay_window_tokens == 64000
     assert after.summary_input_budget_tokens == _compaction_input_budget(

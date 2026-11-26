@@ -7,7 +7,7 @@ memory extraction that happens after every response.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.embeddings.errors import classified_embedder_error, is_embedder_auth_failure_detail
 from mindroom.failure_text import failure_text
@@ -111,6 +111,55 @@ def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> s
     return detail
 
 
+_ALLOWED_MEMORY_PARAMS: dict[str, frozenset[str]] = {
+    "add": frozenset({"content"}),
+    "search": frozenset({"query", "limit"}),
+    "list": frozenset({"limit"}),
+    "get": frozenset({"memory_id"}),
+    "update": frozenset({"memory_id", "content"}),
+    "delete": frozenset({"memory_id"}),
+}
+
+
+def _validate_memory_params(
+    action: str,
+    *,
+    content: str | None,
+    query: str | None,
+    memory_id: str | None,
+    limit: int | None,
+) -> str | None:
+    """Validate required and allowed parameters for ``action``."""
+    allowed = _ALLOWED_MEMORY_PARAMS.get(action)
+    if allowed is None:
+        return f"Error: unsupported memory action {action!r}. Expected one of: add, search, list, get, update, delete."
+    provided = {
+        name: value is not None
+        for name, value in (
+            ("content", content),
+            ("query", query),
+            ("memory_id", memory_id),
+            ("limit", limit),
+        )
+    }
+    unexpected = [name for name, is_set in provided.items() if is_set and name not in allowed]
+    if unexpected:
+        names = ", ".join(f"`{name}`" for name in unexpected)
+        return f"Error: parameter(s) {names} cannot be used with action={action!r}."
+    required = {
+        "add": (("content", content),),
+        "search": (("query", query),),
+        "list": (),
+        "get": (("memory_id", memory_id),),
+        "update": (("memory_id", memory_id), ("content", content)),
+        "delete": (("memory_id", memory_id),),
+    }[action]
+    for name, value in required:
+        if value is None or not value.strip():
+            return f"Error: `{name}` is required for action={action!r}."
+    return None
+
+
 class MemoryTools(Toolkit):
     """Tools that let an agent explicitly store and search its own memories."""
 
@@ -128,26 +177,63 @@ class MemoryTools(Toolkit):
 
         super().__init__(
             name="memory",
-            tools=[
-                self.add_memory,
-                self.search_memories,
-                self.list_memories,
-                self.get_memory,
-                self.update_memory,
-                self.delete_memory,
-            ],
+            tools=[self.memory],
         )
 
-    async def add_memory(self, content: str) -> str:
-        """Persist a fact or note for future conversations. To correct an existing entry, use update_memory instead.
+    async def memory(  # noqa: PLR0911 - action dispatch across six memory operations
+        self,
+        action: Literal["add", "search", "list", "get", "update", "delete"],
+        content: str | None = None,
+        query: str | None = None,
+        memory_id: str | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Store, search, list, fetch, update, or delete long-term facts and notes across conversations.
+
+        - `add`: persist `content` (lists similar existing memories so you can refine with `update` instead of duplicating).
+        - `search`: search by `query` (optional `limit`, default 5). File memory uses configured Markdown paths (default: memory/**/*.md) and falls back to keyword search over MEMORY.md and memory/**/*.md. Persisted and `file:*` IDs work with `get`, `update`, or `delete`; `semantic:*` IDs are read-only locators.
+        - `list`: list stored memories (optional `limit`, default 50).
+        - `get` / `delete`: fetch or delete one entry by `memory_id`.
+        - `update`: replace an entry's `content` by `memory_id`.
 
         Args:
-            content: Fact or note to store.
+            action: Operation to perform.
+            content: Fact or note to store (`add`) or replacement text (`update`).
+            query: Search query (`search`).
+            memory_id: Memory ID from `search`/`list` (`get`, `update`, `delete`).
+            limit: Max results (`search` default 5; `list` default 50).
 
         Returns:
-            Confirmation message, followed by similar existing memories when there are any.
+            Formatted result or error message.
 
         """
+        if err := _validate_memory_params(
+            action,
+            content=content,
+            query=query,
+            memory_id=memory_id,
+            limit=limit,
+        ):
+            return err
+        if action == "add":
+            assert content is not None
+            return await self._add_memory(content)
+        if action == "search":
+            assert query is not None
+            return await self._search_memories(query, limit=5 if limit is None else limit)
+        if action == "list":
+            return await self._list_memories(limit=50 if limit is None else limit)
+        if action == "get":
+            assert memory_id is not None
+            return await self._get_memory(memory_id)
+        if action == "update":
+            assert memory_id is not None
+            assert content is not None
+            return await self._update_memory(memory_id, content)
+        assert memory_id is not None
+        return await self._delete_memory(memory_id)
+
+    async def _add_memory(self, content: str) -> str:
         # Look up before storing, so the new entry cannot list itself as similar.
         similar = await self._similar_memories(content)
         try:
@@ -168,7 +254,7 @@ class MemoryTools(Toolkit):
         for i, mem in enumerate(similar, 1):
             lines.append(f"{i}. [id={mem.get('id', '?')}] {mem.get('memory', '')}")
         lines.append(
-            "If the new memory corrects one of these, rewrite that entry with update_memory, "
+            'If the new memory corrects one of these, rewrite that entry with memory(action="update", ...), '
             "keeping its other details, so no stored memory contradicts the correction.",
         )
         return "\n".join(lines)
@@ -190,19 +276,7 @@ class MemoryTools(Toolkit):
             return []
         return outcome.results
 
-    async def search_memories(self, query: str, limit: int = 5) -> str:
-        """Search stored facts, notes, or context.
-
-        File memory uses configured Markdown paths (default: memory/**/*.md) and falls back to keyword search over MEMORY.md and memory/**/*.md. Persisted and file:* IDs work with get_memory, update_memory, or delete_memory; semantic:* IDs are read-only locators.
-
-        Args:
-            query: Search query.
-            limit: Max results (default 5).
-
-        Returns:
-            Formatted list of matching memories and their IDs, or a message if none found.
-
-        """
+    async def _search_memories(self, query: str, limit: int = 5) -> str:
         try:
             outcome = await search_agent_memories(
                 query,
@@ -221,16 +295,7 @@ class MemoryTools(Toolkit):
             detail = _memory_tool_failure(e, action="search", agent=self._agent_name)
             return f"Failed to search memories: {detail}"
 
-    async def list_memories(self, limit: int = 50) -> str:
-        """List stored memories.
-
-        Args:
-            limit: Max memories to return (default 50).
-
-        Returns:
-            Formatted list of all memories, or a message if none exist.
-
-        """
+    async def _list_memories(self, limit: int = 50) -> str:
         try:
             results = await list_all_agent_memories(
                 self._agent_name,
@@ -251,16 +316,7 @@ class MemoryTools(Toolkit):
             detail = _memory_tool_failure(e, action="list", agent=self._agent_name)
             return f"Failed to list memories: {detail}"
 
-    async def get_memory(self, memory_id: str) -> str:
-        """Fetch one memory by ID.
-
-        Args:
-            memory_id: Memory ID from search/list (`[id=...]`).
-
-        Returns:
-            The memory content, or an error message if not found.
-
-        """
+    async def _get_memory(self, memory_id: str) -> str:
         try:
             result = await get_agent_memory(
                 memory_id,
@@ -276,17 +332,7 @@ class MemoryTools(Toolkit):
             detail = _memory_tool_failure(e, action="get", agent=self._agent_name, memory_id=memory_id)
             return f"Failed to get memory: {detail}"
 
-    async def update_memory(self, memory_id: str, new_content: str) -> str:
-        """Replace a stored memory's content by ID (use for corrections/refinements).
-
-        Args:
-            memory_id: Memory ID from search/list.
-            new_content: Replacement content.
-
-        Returns:
-            Confirmation message.
-
-        """
+    async def _update_memory(self, memory_id: str, new_content: str) -> str:
         try:
             await update_agent_memory(
                 memory_id,
@@ -302,16 +348,7 @@ class MemoryTools(Toolkit):
         else:
             return f"Updated memory [id={memory_id}]: {new_content}"
 
-    async def delete_memory(self, memory_id: str) -> str:
-        """Delete one memory by ID.
-
-        Args:
-            memory_id: Memory ID from search/list.
-
-        Returns:
-            Confirmation message.
-
-        """
+    async def _delete_memory(self, memory_id: str) -> str:
         try:
             await delete_agent_memory(
                 memory_id,

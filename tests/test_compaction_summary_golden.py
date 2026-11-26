@@ -1,6 +1,6 @@
 """The compaction summary request is the ``compaction_summary`` prompt golden's, byte for byte, from production code.
 
-The golden's first turn calls ``compact_context`` and stores its run; the next reply compacts that run before it
+The golden's first turn stores its run and manual compaction is scheduled; the next reply compacts that run before it
 answers, with one summary request. Here the run the first turn stores is seeded from the golden's own
 requests, and the runtime's pre-reply compaction (summarizer loading through the provider registry, the summary input,
 and the summary call) sends the summary request to the recorder the prompt goldens were captured with.
@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.resolution import entity_model_name
-from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.policy import resolve_history_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.history.types import HistoryScope
@@ -43,16 +44,16 @@ _FIRST_TURN_METADATA = {
 
 
 def _first_turn_run(golden: dict[str, object]) -> RunRecord:
-    """Return the run the first turn stores: its request after the tool result, without the prompt, then its answer."""
+    """Return the run the first turn stores: its user messages without the system prompt, then its answer."""
     requests = golden["requests"]
     assert isinstance(requests, list)
-    after_tool = [Message.from_dict(message) for message in requests[1]["messages"] if message["role"] != "system"]
+    first_messages = [Message.from_dict(message) for message in requests[0]["messages"] if message["role"] != "system"]
     return RunRecord(
         run_id="run-compact",
         agent_id="assistant",
         session_id="!room:localhost:$thread:localhost",
         status=RunStatus.completed,
-        messages=[*after_tool, Message(role="assistant", content="ok")],
+        messages=[*first_messages, Message(role="assistant", content="ok")],
         metadata=dict(_FIRST_TURN_METADATA),
     )
 
@@ -73,12 +74,10 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     session.metadata = with_force_compaction(session.metadata)
     storage = create_session_storage(turn.agent_name, turn.config, turn.runtime_paths, execution_identity=None)
     seed_session(storage, session)
-    inputs = resolve_entity_preparation_inputs(
+    inputs = resolve_history_preparation_inputs(
         config=turn.config,
-        runtime_paths=turn.runtime_paths,
         history_settings=turn.config.resolve_scope(turn.agent_name).history_settings,
         active_model_name=entity_model_name(turn.config, turn.agent_name),
-        active_context_window=None,
     )
     recorder = Recorder(responder=scenario.responder)
 

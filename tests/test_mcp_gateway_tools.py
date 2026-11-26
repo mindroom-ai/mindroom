@@ -163,7 +163,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("matrix_message", "matrix_message"),
         ("matrix_room", "matrix_room"),
         ("report_publishing", "publish_report"),
-        ("scheduler", "list_schedules"),
+        ("scheduler", "scheduler"),
         ("thread_model", "list_models"),
         ("thread_summary", "set_thread_summary"),
         ("triggers", "triggers"),

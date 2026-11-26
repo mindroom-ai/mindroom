@@ -17,11 +17,11 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.history.compaction import _compaction_fallback_is_distinct
 from mindroom.history.policy import (
+    _context_budget_after_reserve,
+    _resolve_history_execution_plan,
     classify_compaction_decision,
-    context_budget_after_reserve,
-    resolve_history_execution_plan,
+    resolve_history_preparation_inputs,
 )
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
@@ -33,13 +33,13 @@ from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import _compaction_fallback_is_distinct
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
@@ -250,7 +250,7 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
         context_window=1_000_000,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -389,7 +389,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
     assert resolved.timeout_seconds == 75.0
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -440,7 +440,7 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
         _runtime_paths(tmp_path),
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -712,7 +712,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_fi
 def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Path) -> None:
     config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -748,7 +748,7 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
         runtime_paths,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -791,7 +791,7 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         _runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.history.compaction.logger.warning") as warning_mock:
+    with patch("mindroom.history.summarizer.logger.warning") as warning_mock:
         assert (
             _compaction_fallback_is_distinct(
                 config,
@@ -876,7 +876,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         runtime_paths,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -975,7 +975,7 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
         context_window=4_096,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1006,7 +1006,7 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
         context_window=context_window_tokens,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1032,7 +1032,7 @@ def test_context_budget_after_reserve_preserves_replay_budget_bounds(
     reserve_tokens: int,
     expected: int,
 ) -> None:
-    assert context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
+    assert _context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
@@ -1047,7 +1047,7 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
         context_window=1_000,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1078,7 +1078,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         context_window=active_context_window,
     )
 
-    execution_plan = resolve_history_execution_plan(
+    execution_plan = _resolve_history_execution_plan(
         config=config,
         history_settings=_agent_settings(config),
         active_model_name="default",
@@ -1350,12 +1350,10 @@ async def _prepare_then_finalize_with_a_larger_prompt(
     scope_context: ScopeSessionContext,
 ) -> PreparedHistoryState:
     """Prepare under a short system prompt, then plan replay for a final request whose prompt nearly fills the limit."""
-    resolved_inputs = resolve_entity_preparation_inputs(
+    resolved_inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=_agent_settings(config),
         active_model_name="default",
-        active_context_window=None,
     )
     limit = resolved_inputs.execution_plan.limit_tokens
     assert limit == 64_000 - 16_384
@@ -1412,7 +1410,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     install_model_providers(monkeypatch, {"default": summary_model()})
     with (
         patch(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             new=AsyncMock(
                 return_value="merged summary",
             ),
