@@ -1,20 +1,355 @@
-"""BrightData tool configuration."""
+"""Bright Data web scraping, screenshot, SERP, and structured dataset toolkit."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import time
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
+from uuid import uuid4
 
+from mindroom.llm.media import Image
+from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from agno.tools.brightdata import BrightDataTools
+    from collections.abc import Callable
+    from types import ModuleType
+
+logger = get_logger(__name__)
+
+_DATASETS: dict[str, str] = {
+    "amazon_product": "gd_l7q7dkf244hwjntr0",
+    "amazon_product_reviews": "gd_le8e811kzy4ggddlq",
+    "amazon_product_search": "gd_lwdb4vjm1ehb499uxs",
+    "walmart_product": "gd_l95fol7l1ru6rlo116",
+    "walmart_seller": "gd_m7ke48w81ocyu4hhz0",
+    "ebay_product": "gd_ltr9mjt81n0zzdk1fb",
+    "homedepot_products": "gd_lmusivh019i7g97q2n",
+    "zara_products": "gd_lct4vafw1tgx27d4o0",
+    "etsy_products": "gd_ltppk0jdv1jqz25mz",
+    "bestbuy_products": "gd_ltre1jqe1jfr7cccf",
+    "linkedin_person_profile": "gd_l1viktl72bvl7bjuj0",
+    "linkedin_company_profile": "gd_l1vikfnt1wgvvqz95w",
+    "linkedin_job_listings": "gd_lpfll7v5hcqtkxl6l",
+    "linkedin_posts": "gd_lyy3tktm25m4avu764",
+    "linkedin_people_search": "gd_m8d03he47z8nwb5xc",
+    "crunchbase_company": "gd_l1vijqt9jfj7olije",
+    "zoominfo_company_profile": "gd_m0ci4a4ivx3j5l6nx",
+    "instagram_profiles": "gd_l1vikfch901nx3by4",
+    "instagram_posts": "gd_lk5ns7kz21pck8jpis",
+    "instagram_reels": "gd_lyclm20il4r5helnj",
+    "instagram_comments": "gd_ltppn085pokosxh13",
+    "facebook_posts": "gd_lyclm1571iy3mv57zw",
+    "facebook_marketplace_listings": "gd_lvt9iwuh6fbcwmx1a",
+    "facebook_company_reviews": "gd_m0dtqpiu1mbcyc2g86",
+    "facebook_events": "gd_m14sd0to1jz48ppm51",
+    "tiktok_profiles": "gd_l1villgoiiidt09ci",
+    "tiktok_posts": "gd_lu702nij2f790tmv9h",
+    "tiktok_shop": "gd_m45m1u911dsa4274pi",
+    "tiktok_comments": "gd_lkf2st302ap89utw5k",
+    "google_maps_reviews": "gd_luzfs1dn2oa0teb81",
+    "google_shopping": "gd_ltppk50q18kdw67omz",
+    "google_play_store": "gd_lsk382l8xei8vzm4u",
+    "apple_app_store": "gd_lsk9ki3u2iishmwrui",
+    "reuter_news": "gd_lyptx9h74wtlvpnfu",
+    "github_repository_file": "gd_lyrexgxc24b3d4imjt",
+    "yahoo_finance_business": "gd_lmrpz3vxmz972ghd7",
+    "x_posts": "gd_lwxkxvnf1cynvib9co",
+    "zillow_properties_listing": "gd_lfqkr8wm13ixtbd8f5",
+    "booking_hotel_listings": "gd_m5mbdl081229ln6t4a",
+    "youtube_profiles": "gd_lk538t2k2p1k3oos71",
+    "youtube_comments": "gd_lk9q0ew71spt1mxywf",
+    "reddit_posts": "gd_lvz8ah06191smkebj4",
+    "youtube_videos": "gd_m5mbdl081229ln6t4a",
+}
+
+
+def _require_requests() -> ModuleType:
+    """Import and return ``requests``, raising a helpful ImportError when absent."""
+    try:
+        import requests
+    except ImportError as exc:
+        msg = "`requests` not installed."
+        raise ImportError(msg) from exc
+    return requests
+
+
+class BrightDataTools(Toolkit):
+    """Web scraping, screenshots, search engines, and structured data feeds via Bright Data."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        enable_scrape_markdown: bool = True,
+        enable_screenshot: bool = True,
+        enable_search_engine: bool = True,
+        enable_web_data_feed: bool = True,
+        all: bool = False,  # noqa: A002
+        serp_zone: str = "serp_api",
+        web_unlocker_zone: str = "web_unlocker1",
+        verbose: bool = False,
+        timeout: int = 600,
+    ) -> None:
+        _require_requests()
+        self.api_key = api_key
+        if not self.api_key:
+            logger.error("brightdata_api_key_missing")
+            msg = (
+                "No Bright Data API key provided. Please provide an api_key or set the "
+                "BRIGHT_DATA_API_KEY environment variable."
+            )
+            raise ValueError(msg)
+
+        self.verbose = verbose
+        self.timeout = timeout
+        self.endpoint = "https://api.brightdata.com/request"
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        self.web_unlocker_zone = web_unlocker_zone
+        self.serp_zone = serp_zone
+
+        tools: list[Callable[..., Any]] = []
+        if all or enable_scrape_markdown:
+            tools.append(self.scrape_as_markdown)
+        if all or enable_screenshot:
+            tools.append(self.get_screenshot)
+        if all or enable_search_engine:
+            tools.append(self.search_engine)
+        if all or enable_web_data_feed:
+            tools.append(self.web_data_feed)
+
+        super().__init__(name="brightdata_tools", tools=tools)
+
+    def _make_request(self, payload: dict[str, Any]) -> str:
+        requests = _require_requests()
+        if self.verbose:
+            logger.info("brightdata_request", url=payload["url"])
+        response = requests.post(
+            self.endpoint,
+            headers=self.headers,
+            data=json.dumps(payload),
+            timeout=self.timeout,
+        )
+        if response.status_code != 200:
+            msg = f"Failed to scrape: {response.status_code} - {response.text}"
+            raise RuntimeError(msg)
+        return response.text
+
+    def scrape_as_markdown(self, url: str) -> str:
+        """Scrape a webpage and return content in Markdown format.
+
+        Args:
+            url: URL to scrape.
+
+        Returns:
+            Scraped content as Markdown.
+
+        """
+        if not self.api_key:
+            return "Please provide a Bright Data API key"
+        if not url:
+            return "Please provide a URL to scrape"
+        try:
+            logger.info("brightdata_scrape_markdown", url=url)
+            payload = {
+                "url": url,
+                "zone": self.web_unlocker_zone,
+                "format": "raw",
+                "data_format": "markdown",
+            }
+            return self._make_request(payload)
+        except Exception as exc:
+            return f"Error scraping URL {url}: {exc}"
+
+    def get_screenshot(self, url: str) -> ToolValue:
+        """Capture a screenshot of a webpage.
+
+        Args:
+            url: URL to screenshot.
+
+        Returns:
+            ToolValue containing the screenshot image or an error message.
+
+        """
+        if not self.api_key:
+            return ToolValue(content="Please provide a Bright Data API key")
+        if not url:
+            return ToolValue(content="Please provide a URL to screenshot")
+        try:
+            requests = _require_requests()
+            logger.info("brightdata_screenshot", url=url)
+            payload = {
+                "url": url,
+                "zone": self.web_unlocker_zone,
+                "format": "raw",
+                "data_format": "screenshot",
+            }
+            response = requests.post(
+                self.endpoint,
+                headers=self.headers,
+                data=json.dumps(payload),
+                timeout=self.timeout,
+            )
+            if response.status_code != 200:
+                return ToolValue(
+                    content=f"Error taking screenshot of {url}: Error {response.status_code}: {response.text}",
+                )
+
+            media_id = str(uuid4())
+            image_artifact = Image(
+                id=media_id,
+                content=response.content,
+                mime_type="image/png",
+                original_prompt=f"Screenshot of {url}",
+            )
+            logger.debug("brightdata_screenshot_captured", media_id=media_id)
+            return ToolValue(
+                content=f"Screenshot captured and added as artifact with ID: {media_id}",
+                images=(image_artifact,),
+            )
+        except Exception as exc:
+            return ToolValue(content=f"Error taking screenshot of {url}: {exc}")
+
+    def search_engine(
+        self,
+        query: str,
+        engine: str = "google",
+        num_results: int = 10,
+        language: str | None = None,
+        country_code: str | None = None,
+    ) -> str:
+        """Search using Google, Bing, or Yandex and return results in Markdown.
+
+        Args:
+            query: Search query.
+            engine: Search engine - 'google', 'bing', or 'yandex'.
+            num_results: Number of results to return.
+            language: Two-letter language code.
+            country_code: Two-letter country code.
+
+        Returns:
+            Search results as Markdown.
+
+        """
+        if not self.api_key:
+            return "Please provide a Bright Data API key"
+        if not query:
+            return "Please provide a query to search for"
+
+        encoded_query = quote(query)
+        base_urls = {
+            "google": f"https://www.google.com/search?q={encoded_query}",
+            "bing": f"https://www.bing.com/search?q={encoded_query}",
+            "yandex": f"https://yandex.com/search/?text={encoded_query}",
+        }
+        if engine not in base_urls:
+            return f"Unsupported search engine: {engine}. Use 'google', 'bing', or 'yandex'"
+
+        search_url = base_urls[engine]
+        if engine == "google":
+            params: list[str] = []
+            if language:
+                params.append(f"hl={language}")
+            if country_code:
+                params.append(f"gl={country_code}")
+            if num_results:
+                params.append(f"num={num_results}")
+            if params:
+                search_url += "&" + "&".join(params)
+
+        try:
+            logger.info("brightdata_search_engine", engine=engine, query=query)
+            payload = {
+                "url": search_url,
+                "zone": self.serp_zone,
+                "format": "raw",
+                "data_format": "markdown",
+            }
+            return self._make_request(payload)
+        except Exception as exc:
+            return f"Error searching for query {query}: {exc}"
+
+    def web_data_feed(
+        self,
+        source_type: str,
+        url: str,
+        num_of_reviews: int | None = None,
+    ) -> str:
+        """Retrieve structured web data from various sources like LinkedIn, Amazon, Instagram, etc.
+
+        Args:
+            source_type: Type of data source (e.g., 'linkedin_person_profile', 'amazon_product').
+            url: URL of the web resource to retrieve data from.
+            num_of_reviews: Number of reviews to retrieve.
+
+        Returns:
+            Structured data from the requested source as JSON.
+
+        """
+        if not self.api_key:
+            return "Please provide a Bright Data API key"
+        if not url:
+            return "Please provide a URL to retrieve data from"
+        if source_type not in _DATASETS:
+            valid_sources = ", ".join(_DATASETS.keys())
+            return f"Invalid source_type: {source_type}. Valid options are: {valid_sources}"
+
+        try:
+            requests = _require_requests()
+            logger.info("brightdata_web_data_feed", source_type=source_type, url=url)
+            request_data: dict[str, Any] = {"url": url}
+            if source_type == "facebook_company_reviews" and num_of_reviews is not None:
+                request_data["num_of_reviews"] = str(num_of_reviews)
+
+            trigger_response = requests.post(
+                "https://api.brightdata.com/datasets/v3/trigger",
+                params={"dataset_id": _DATASETS[source_type], "include_errors": "true"},
+                headers=self.headers,
+                json=[request_data],
+                timeout=self.timeout,
+            )
+            trigger_data = trigger_response.json()
+            snapshot_id = trigger_data.get("snapshot_id")
+            if not snapshot_id:
+                return "No snapshot ID returned from trigger request"
+
+            return self._poll_snapshot(snapshot_id, source_type)
+        except Exception as exc:
+            return f"Error retrieving {source_type} data from {url}: {exc}"
+
+    def _poll_snapshot(self, snapshot_id: str, source_type: str) -> str:
+        requests = _require_requests()
+        attempts = 0
+        max_attempts = self.timeout
+        while attempts < max_attempts:
+            try:
+                snapshot_response = requests.get(
+                    f"https://api.brightdata.com/datasets/v3/snapshot/{snapshot_id}",
+                    params={"format": "json"},
+                    headers=self.headers,
+                    timeout=30,
+                )
+                snapshot_data = snapshot_response.json()
+                if isinstance(snapshot_data, dict) and snapshot_data.get("status") == "running":
+                    attempts += 1
+                    time.sleep(1)
+                    continue
+                return json.dumps(snapshot_data)
+            except Exception:
+                attempts += 1
+                time.sleep(1)
+        return f"Timeout after {max_attempts} seconds waiting for {source_type} data"
 
 
 @register_tool_with_metadata(
     name="brightdata",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("get_screenshot",),
     display_name="BrightData",
     description="Web scraping, search engine queries, screenshots, and structured data extraction",
     category=ToolCategory.RESEARCH,
@@ -103,6 +438,5 @@ if TYPE_CHECKING:
 )
 def brightdata_tools() -> type[BrightDataTools]:
     """Return BrightData tools for web scraping and data extraction."""
-    from agno.tools.brightdata import BrightDataTools
-
+    _require_requests()
     return BrightDataTools

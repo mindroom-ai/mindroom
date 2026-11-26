@@ -19,14 +19,13 @@ from mindroom.tool_system.registry import builtin_tool_registry
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools import Toolkit
-    from agno.tools.firecrawl import FirecrawlTools
-
     from mindroom.custom_tools.searxng import SearxngTools
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tools.exa import ExaTools
+    from mindroom.tools.firecrawl import FirecrawlTools
 
 
-def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> Toolkit:
+def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> AnyToolkit:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
