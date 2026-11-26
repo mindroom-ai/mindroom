@@ -10070,6 +10070,7 @@ visibility = [
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
     "mindroom.contacts.parties",
+    "mindroom.tool_system.catalog",
     "mindroom.contacts.turns",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.publication",
