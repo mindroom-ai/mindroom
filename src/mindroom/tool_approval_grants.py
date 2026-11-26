@@ -73,7 +73,15 @@ class ApprovalGrantScope:
     invoking_agent: str
 
 
-_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler"})
+_ACTION_SCOPED_TOOL_ARGS: dict[str, str] = {
+    "triggers": "action",
+    "memory": "action",
+    "todo": "action",
+    "scheduler": "action",
+    "unsplash": "action",
+    "generate_file": "format",
+    "create_chart": "chart_type",
+}
 
 
 def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]) -> ApprovalOperation | None:
@@ -85,11 +93,11 @@ def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
-    if tool_name in _ACTION_SCOPED_TOOLS:
-        action = arguments.get("action")
-        if not isinstance(action, str) or not action.strip():
+    if (dispatch_arg := _ACTION_SCOPED_TOOL_ARGS.get(tool_name)) is not None:
+        dispatch_value = arguments.get(dispatch_arg)
+        if not isinstance(dispatch_value, str) or not dispatch_value.strip():
             return None
-        return ApprovalOperation(approval_binding(config), tool_name, tool_name, action.strip())
+        return ApprovalOperation(approval_binding(config), tool_name, tool_name, dispatch_value.strip())
     return ApprovalOperation(approval_binding(config), tool_name)
 
 

@@ -981,38 +981,51 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "actions"),
+    ("tool_name", "arg_name", "values"),
     [
-        ("triggers", ("list", "delete", "rotate_key")),
-        ("memory", ("list", "search", "delete")),
-        ("todo", ("list", "add", "update")),
-        ("scheduler", ("list", "create", "cancel")),
+        ("triggers", "action", ("list", "delete", "rotate_key")),
+        ("memory", "action", ("list", "search", "delete")),
+        ("todo", "action", ("list", "add", "update")),
+        ("scheduler", "action", ("list", "create", "cancel")),
+        ("unsplash", "action", ("search", "get", "download")),
+        ("generate_file", "format", ("txt", "pdf", "code")),
+        ("create_chart", "chart_type", ("bar", "line", "scatter")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
     tool_name: str,
-    actions: tuple[str, str, str],
+    arg_name: str,
+    values: tuple[str, str, str],
 ) -> None:
-    """Timed grants for unified action-dispatched tools must be scoped per action."""
+    """Timed grants for unified action-dispatched tools must be scoped per dispatch value."""
     config = Config()
-    ops = [grant_operation(config, tool_name, {"action": action}) for action in actions]
+    ops = [grant_operation(config, tool_name, {arg_name: value}) for value in values]
     assert all(op is not None for op in ops)
-    assert ops[0] == grant_operation(config, tool_name, {"action": f" {actions[0]} "})
+    assert ops[0] == grant_operation(config, tool_name, {arg_name: f" {values[0]} "})
     assert len(set(ops)) == 3
     assert len({op.key for op in ops if op is not None}) == 3
     assert grant_operation(config, tool_name, {}) is None
-    assert grant_operation(config, tool_name, {"action": ""}) is None
-    assert grant_operation(config, tool_name, {"action": "   "}) is None
-    assert grant_operation(config, tool_name, {"action": 123}) is None
+    assert grant_operation(config, tool_name, {arg_name: ""}) is None
+    assert grant_operation(config, tool_name, {arg_name: "   "}) is None
+    assert grant_operation(config, tool_name, {arg_name: 123}) is None
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "action"),
-    [("triggers", "list"), ("memory", "list"), ("todo", "list"), ("scheduler", "list")],
+    ("tool_name", "arg_name", "value"),
+    [
+        ("triggers", "action", "list"),
+        ("memory", "action", "list"),
+        ("todo", "action", "list"),
+        ("scheduler", "action", "list"),
+        ("unsplash", "action", "search"),
+        ("generate_file", "format", "txt"),
+        ("create_chart", "chart_type", "bar"),
+    ],
 )
 def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
     tool_name: str,
-    action: str,
+    arg_name: str,
+    value: str,
 ) -> None:
     """Action-dispatched tools cannot offer any-arguments scheduled approvals that could switch actions."""
     from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
@@ -1022,7 +1035,7 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
         scheduled_call_offers_any_arguments(
             config,
             tool_name,
-            {"action": action},
+            {arg_name: value},
             requester_id="@alice:example.org",
             approver_id="@alice:example.org",
             authored_confirmation=False,
@@ -1040,6 +1053,13 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
         ("scheduler", "schedule", "scheduler"),
         ("searxng", "image_search", "searxng_search"),
         ("searxng", "search_web", "searxng_search"),
+        ("file_generation", "generate_json_file", "generate_file"),
+        ("file_generation", "generate_code_file", "generate_file"),
+        ("visualization", "create_bar_chart", "create_chart"),
+        ("visualization", "create_histogram", "create_chart"),
+        ("lumalabs", "image_to_video", "generate_video"),
+        ("unsplash", "search_photos", "unsplash"),
+        ("unsplash", "download_photo", "unsplash"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(

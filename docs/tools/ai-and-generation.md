@@ -188,10 +188,10 @@ Audio attachments are always labeled MP3 (`audio/mpeg`), even when `output_forma
 
 ## `lumalabs`
 
-`lumalabs` provides `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-`image_to_video()` animates between one or two remote image URLs; local file paths are not accepted.
-Both functions wait for the video until it finishes or `max_wait_time` passes.
-Keep `wait_for_completion: true`, because `false` makes both functions return `Async generation unsupported` without a job handle.
+`lumalabs` provides `generate_video(prompt, start_image_url=None, end_image_url=None, loop=False, aspect_ratio="16:9", keyframes=None)`.
+Pass `start_image_url` (and optionally `end_image_url`) or `keyframes` to animate between remote image URLs; local file paths are not accepted.
+`generate_video()` waits for the video until it finishes or `max_wait_time` passes.
+Keep `wait_for_completion: true`, because `false` returns `Async generation unsupported` without a job handle.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -200,9 +200,9 @@ Keep `wait_for_completion: true`, because `false` makes both functions return `A
 | `wait_for_completion` | `boolean` | `true` | Wait for the finished video. |
 | `poll_interval` | `number` | `3` | Seconds between status checks. |
 | `max_wait_time` | `number` | `300` | Seconds to wait before timing out. |
-| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
-| `enable_image_to_video` | `boolean` | `true` | Enable `image_to_video()`. |
-| `all` | `boolean` | `false` | Enable both functions. |
+| `enable_generate_video` | `boolean` | `true` | Enable text-to-video calls in `generate_video()`. |
+| `enable_image_to_video` | `boolean` | `true` | Enable image/keyframe calls in `generate_video()`. |
+| `all` | `boolean` | `false` | Enable both text-to-video and image-to-video modes. |
 
 ## `modelslabs`
 
