@@ -16,20 +16,19 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.tools.agno_compat_groq import MindRoomGroqTools
+    from mindroom.custom_tools.groq_media import GroqTools
 
 
 @register_tool_with_metadata(
     name="groq",
     file_access=ToolFileAccess.AGENT,
-    worker_inert_agent_functions=("generate_speech",),
     display_name="Groq",
     description="Fast AI inference for audio transcription, translation, and text-to-speech",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="TbBrain",
-    icon_color="text-orange-500",  # Groq brand orange
+    icon_color="text-orange-500",
     config_fields=[
         ConfigField(
             name="api_key",
@@ -100,8 +99,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#groq",
     function_names=("generate_speech", "transcribe_audio", "translate_audio"),
 )
-def groq_tools() -> type[MindRoomGroqTools]:
+def groq_tools() -> type[GroqTools]:
     """Return Groq audio tools whose local audio sources follow the agent's file_access."""
-    from mindroom.tools.agno_compat_groq import MindRoomGroqTools
+    from mindroom.custom_tools.groq_media import GroqTools
 
-    return MindRoomGroqTools
+    return GroqTools

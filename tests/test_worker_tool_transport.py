@@ -14,13 +14,13 @@ import httpx
 import pytest
 import yaml
 from agno.run import RunContext
-from agno.tools import openai as agno_openai
 
 from mindroom.agents import create_agent
 from mindroom.api import sandbox_runner, sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools import openai_media
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
@@ -37,7 +37,6 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.tools import agno_compat_openai
 from mindroom.voice.openai_realtime_speech import pcm_to_wav
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
 from tests.api.sandbox_runner_support import execute_call
@@ -553,8 +552,8 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         ),
         audio=SimpleNamespace(speech=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(content=content))),
     )
-    monkeypatch.setattr(agno_openai, "OpenAIClient", lambda **_kwargs: provider)
-    monkeypatch.setattr(agno_compat_openai, "synthesize_realtime_speech", AsyncMock(return_value=content))
+    monkeypatch.setattr(openai_media, "OpenAIClient", lambda **_kwargs: provider)
+    monkeypatch.setattr(openai_media, "synthesize_realtime_speech", AsyncMock(return_value=content))
     agent = _create_routing_agent(
         tmp_path / "primary",
         {
@@ -581,11 +580,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
     assert not response.is_error
     assert len(worker_requests) == 1
     assert _MODEL_KEY not in json.dumps(worker_requests)
-    if media_kind == "audio":
-        # A Realtime model's speech takes no agent.
-        assert "agent" not in worker_requests[0]["kwargs"]
-    if media_kind == "speech_endpoint_audio":
-        assert worker_requests[0]["kwargs"]["agent"] is None
+    assert "agent" not in worker_requests[0]["kwargs"]
     media = response.images if media_kind == "image" else response.audios
     assert len(media) == 1
     assert media[0].content == (pcm_to_wav(content) if media_kind == "audio" else content)

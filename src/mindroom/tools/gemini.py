@@ -9,13 +9,12 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
+    from mindroom.custom_tools.gemini_media import GeminiTools
 
 
 @register_tool_with_metadata(
     name="gemini",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("generate_image", "generate_video"),
     display_name="Gemini",
     description="Google AI API services for generating images and videos using Gemini models",
     category=ToolCategory.DEVELOPMENT,
@@ -95,8 +94,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#gemini",
     function_names=("generate_image", "generate_video"),
 )
-def gemini_tools() -> type[MindRoomGeminiTools]:
+def gemini_tools() -> type[GeminiTools]:
     """Return Gemini tools for image and video generation."""
-    from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
+    from mindroom.custom_tools.gemini_media import GeminiTools
 
-    return MindRoomGeminiTools
+    return GeminiTools

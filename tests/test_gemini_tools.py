@@ -1,15 +1,15 @@
-"""Tests for the MindRoom Gemini media toolkit."""
+"""Tests for the native Gemini media toolkit."""
 
 import base64
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import agno.tools.models.gemini as agno_gemini
 import httpx
 from google.genai import types
 
-from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
-from mindroom.tool_system.agno_toolkits import ToolCallActor
+from mindroom.custom_tools import gemini_media
+from mindroom.custom_tools.gemini_media import GeminiTools
+from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_tool_helpers import toolkit_offers
 
 
@@ -27,16 +27,16 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
     )
     generate_content = Mock(return_value=response)
     client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
-    monkeypatch.setattr(agno_gemini, "Client", lambda **_kwargs: client)
-    toolkit = MindRoomGeminiTools(
+    monkeypatch.setattr(gemini_media, "Client", lambda **_kwargs: client)
+    toolkit = GeminiTools(
         api_key="test-key",
         image_generation_model="gemini-3.1-flash-image",
         enable_generate_video=False,
     )
 
-    result = toolkit.generate_image(ToolCallActor(session_state={}), "A geometric Matrix room")
+    result = toolkit.generate_image("A geometric Matrix room")
 
-    assert result.images is not None
+    assert isinstance(result, ToolValue)
     assert len(result.images) == 1
     assert result.images[0].content == b"image-bytes"
     kwargs = generate_content.call_args.kwargs
@@ -46,19 +46,16 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
 
 
 def test_generate_image_offers_the_model_its_prompt(monkeypatch) -> None:  # noqa: ANN001
-    """The schema asks for the prompt and the docstring describes it, though `Agent` is imported for type checking only."""
-    monkeypatch.setattr(agno_gemini, "Client", lambda **_kwargs: SimpleNamespace())
-    toolkit = MindRoomGeminiTools(api_key="test-key", enable_generate_video=False)
+    """The schema asks only for the prompt with no injected framework parameter."""
+    monkeypatch.setattr(gemini_media, "Client", lambda **_kwargs: SimpleNamespace())
+    toolkit = GeminiTools(api_key="test-key", enable_generate_video=False)
 
     function = toolkit_offers(toolkit, "generate_image")
 
     assert function.description == "Generate an image through the Gemini content-generation API."
-    assert function.parameters == {
-        "type": "object",
-        "properties": {"prompt": {"type": "string"}},
-        "required": ["prompt"],
-    }
-    assert function.injected_params == {"agent": "actor"}
+    assert set(function.parameters["properties"]) == {"prompt"}
+    assert function.parameters["required"] == ["prompt"]
+    assert function.injected_params == {}
 
 
 def test_generate_image_keeps_the_gemini_api_on_v1beta(monkeypatch) -> None:  # noqa: ANN001
@@ -70,17 +67,17 @@ def test_generate_image_keeps_the_gemini_api_on_v1beta(monkeypatch) -> None:  # 
         part = {"inlineData": {"data": base64.b64encode(b"image-bytes").decode(), "mimeType": "image/png"}}
         return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [part]}}]})
 
-    real_client = agno_gemini.Client
+    real_client = gemini_media.Client
     http_client = httpx.Client(transport=httpx.MockTransport(respond))
     monkeypatch.setattr(
-        agno_gemini,
+        gemini_media,
         "Client",
         lambda **kwargs: real_client(**kwargs, http_options=types.HttpOptions(httpx_client=http_client)),
     )
-    toolkit = MindRoomGeminiTools(api_key="test-key", enable_generate_video=False)
+    toolkit = GeminiTools(api_key="test-key", enable_generate_video=False)
 
-    result = toolkit.generate_image(ToolCallActor(session_state={}), "A geometric Matrix room")
+    result = toolkit.generate_image("A geometric Matrix room")
 
-    assert result.images is not None
+    assert len(result.images) == 1
     assert result.images[0].content == b"image-bytes"
     assert [request.url.path for request in sent] == [f"/v1beta/models/{toolkit.image_model}:generateContent"]

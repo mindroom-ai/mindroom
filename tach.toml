@@ -9966,19 +9966,23 @@ expose = ["MindRoomAgentQLTools"]
 [[modules]]
 path = "mindroom.tools.replicate"
 depends_on = [
+    "mindroom.custom_tools.replicate",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
-    "mindroom.custom_tools.agno_compat_replicate",
 ]
 
 [[modules]]
-path = "mindroom.custom_tools.agno_compat_replicate"
-depends_on = []
+path = "mindroom.custom_tools.replicate"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+]
 visibility = ["mindroom.tools.replicate"]
 
 [[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_replicate"]
-expose = ["MindRoomReplicateTools"]
+from = ["mindroom.custom_tools.replicate"]
+expose = ["ReplicateTools"]
 
 [[modules]]
 path = "mindroom.custom_tools.agno_compat_github_errors"
@@ -10770,29 +10774,47 @@ expose = ["MoviePyVideoTools"]
 
 [[modules]]
 path = "mindroom.tools.openai"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_openai"]
+depends_on = [
+    "mindroom.custom_tools.openai_media",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
 
 [[modules]]
-path = "mindroom.tools.agno_compat_openai"
-depends_on = ["mindroom.file_access"]
+path = "mindroom.custom_tools.openai_media"
+depends_on = [
+    "mindroom.file_access",
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+]
 visibility = ["mindroom.tools.openai"]
 
 [[interfaces]]
-from = ["mindroom.tools.agno_compat_openai"]
-expose = ["MindRoomOpenAITools"]
+from = ["mindroom.custom_tools.openai_media"]
+expose = ["OpenAITools"]
 
 [[modules]]
 path = "mindroom.tools.groq"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_groq"]
+depends_on = [
+    "mindroom.custom_tools.groq_media",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
 
 [[modules]]
-path = "mindroom.tools.agno_compat_groq"
-depends_on = ["mindroom.file_access"]
+path = "mindroom.custom_tools.groq_media"
+depends_on = [
+    "mindroom.file_access",
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+]
 visibility = ["mindroom.tools.groq"]
 
 [[interfaces]]
-from = ["mindroom.tools.agno_compat_groq"]
-expose = ["MindRoomGroqTools"]
+from = ["mindroom.custom_tools.groq_media"]
+expose = ["GroqTools"]
 
 [[modules]]
 path = "mindroom.tools.airflow"

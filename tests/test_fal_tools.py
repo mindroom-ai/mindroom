@@ -1,4 +1,4 @@
-"""Tests for the MindRoom Fal media adapter."""
+"""Tests for the native Fal media toolkit."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,9 +6,9 @@ from unittest.mock import Mock
 import fal_client
 import pytest
 
-from mindroom.custom_tools.fal import MindRoomFalTools
+from mindroom.custom_tools.fal import FalTools
 from mindroom.model_defaults import FAL_VIDEO
-from mindroom.tool_system.agno_toolkits import ToolCallActor
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tools.fal import fal_tools
 from tests.agent_tool_helpers import toolkit_offers
 
@@ -74,10 +74,11 @@ def test_generate_media_uses_configured_key_and_returns_images(
     subscribe = Mock(return_value=response)
     sync_client = Mock(return_value=SimpleNamespace(subscribe=subscribe))
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
-    toolkit = MindRoomFalTools(api_key="configured-key", model="fal-ai/flux-2")
+    toolkit = FalTools(api_key="configured-key", model="fal-ai/flux-2")
 
-    result = toolkit.generate_media(ToolCallActor(session_state={}), prompt="A geometric Matrix room")
+    result = toolkit.generate_media(prompt="A geometric Matrix room")
 
+    assert isinstance(result, ToolValue)
     sync_client.assert_called_once_with(key="configured-key")
     subscribe.assert_called_once_with(
         "fal-ai/flux-2",
@@ -86,7 +87,6 @@ def test_generate_media_uses_configured_key_and_returns_images(
         on_queue_update=toolkit.on_queue_update,
     )
     assert result.content == expected_content
-    assert result.images is not None
     assert [image.url for image in result.images] == expected_urls
 
 
@@ -141,13 +141,13 @@ def test_generate_media_uses_default_model_and_returns_videos(
     expected_urls: list[str],
     expected_content: str,
 ) -> None:
-    """The default Hunyuan model should retain singular and plural video outputs."""
+    """The default video model should retain singular and plural video outputs."""
     subscribe = Mock(return_value=response)
     sync_client = Mock(return_value=SimpleNamespace(subscribe=subscribe))
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
-    toolkit = MindRoomFalTools(api_key="configured-key", model=FAL_VIDEO)
+    toolkit = FalTools(api_key="configured-key", model=FAL_VIDEO)
 
-    result = toolkit.generate_media(ToolCallActor(session_state={}), prompt="A camera circles a forest")
+    result = toolkit.generate_media(prompt="A camera circles a forest")
 
     sync_client.assert_called_once_with(key="configured-key")
     subscribe.assert_called_once_with(
@@ -157,13 +157,12 @@ def test_generate_media_uses_default_model_and_returns_videos(
         on_queue_update=toolkit.on_queue_update,
     )
     assert result.content == expected_content
-    assert result.videos is not None
     assert [video.url for video in result.videos] == expected_urls
 
 
 def test_image_to_image_registration_exposes_edit_arguments() -> None:
-    """Registered schema should expose model inputs and hide Agno's injected agent."""
-    toolkit = MindRoomFalTools(
+    """Registered schema should expose only model inputs."""
+    toolkit = FalTools(
         api_key="configured-key",
         enable_generate_media=False,
         enable_image_to_image=True,
@@ -201,7 +200,7 @@ def test_image_to_image_uses_flux_2_edit_and_returns_attachment(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
 
     toolkit_class = fal_tools()
-    assert toolkit_class is MindRoomFalTools
+    assert toolkit_class is FalTools
     toolkit = toolkit_class(
         api_key="configured-key",
         enable_generate_media=False,
@@ -209,7 +208,6 @@ def test_image_to_image_uses_flux_2_edit_and_returns_attachment(
     )
 
     result = toolkit.image_to_image(
-        ToolCallActor(session_state={}),
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )
@@ -225,7 +223,6 @@ def test_image_to_image_uses_flux_2_edit_and_returns_attachment(
         on_queue_update=toolkit.on_queue_update,
     )
     assert result.content == f"Image generated successfully at {edited_image_url}"
-    assert result.images is not None
     assert len(result.images) == 1
     assert result.images[0].url == edited_image_url
 
@@ -234,13 +231,13 @@ def test_image_to_image_rejects_missing_image_url(monkeypatch: pytest.MonkeyPatc
     """A missing input image should fail before constructing a provider client."""
     sync_client = Mock()
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
-    toolkit = MindRoomFalTools(api_key="configured-key", enable_generate_media=False)
+    toolkit = FalTools(api_key="configured-key", enable_generate_media=False)
 
-    result = toolkit.image_to_image(ToolCallActor(session_state={}), prompt="Add a blue sky")
+    result = toolkit.image_to_image(prompt="Add a blue sky")
 
     sync_client.assert_not_called()
     assert result.content == "Error: image_url is required for image editing."
-    assert result.images is None
+    assert not result.images
 
 
 def test_image_to_image_returns_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,13 +248,12 @@ def test_image_to_image_returns_provider_error(monkeypatch: pytest.MonkeyPatch) 
         "SyncClient",
         Mock(return_value=SimpleNamespace(subscribe=subscribe)),
     )
-    toolkit = MindRoomFalTools(api_key="configured-key", enable_generate_media=False)
+    toolkit = FalTools(api_key="configured-key", enable_generate_media=False)
 
     result = toolkit.image_to_image(
-        ToolCallActor(session_state={}),
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )
 
     assert result.content == "Error: provider unavailable"
-    assert result.images is None
+    assert not result.images

@@ -9,20 +9,19 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.custom_tools.fal import MindRoomFalTools
+    from mindroom.custom_tools.fal import FalTools
 
 
 @register_tool_with_metadata(
     name="fal",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("generate_media", "image_to_image"),
     display_name="Fal",
     description="AI model serving platform for media generation (images and videos)",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.REQUIRES_CONFIG,  # requires FAL_KEY API key
-    setup_type=SetupType.API_KEY,  # uses API key authentication
-    icon="FaRobot",  # AI/robot icon for AI model serving
-    icon_color="text-purple-600",  # Purple for AI/ML services
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaRobot",
+    icon_color="text-purple-600",
     config_fields=[
         ConfigField(
             name="api_key",
@@ -63,10 +62,10 @@ if TYPE_CHECKING:
     ],
     dependencies=["fal-client"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#fal",
-    function_names=("generate_media", "image_to_image", "on_queue_update"),
+    function_names=("generate_media", "image_to_image"),
 )
-def fal_tools() -> type[MindRoomFalTools]:
+def fal_tools() -> type[FalTools]:
     """Return Fal tools for AI model serving and media generation."""
-    from mindroom.custom_tools.fal import MindRoomFalTools
+    from mindroom.custom_tools.fal import FalTools
 
-    return MindRoomFalTools
+    return FalTools
