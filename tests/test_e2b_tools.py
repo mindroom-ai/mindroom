@@ -1,4 +1,4 @@
-"""Tests for E2B local file transfers confined to the agent workspace."""
+"""Tests for native E2B toolkit with workspace-confined transfers and streaming output caps."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import e2b_code_interpreter
 import httpx
 import pytest
 from e2b import ConnectionConfig
@@ -21,13 +22,13 @@ import mindroom.custom_tools.e2b as e2b_module
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.path_confinement import MAX_READ_BYTES
-from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolValue
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
     from e2b.sandbox.commands.command_handle import CommandResult
@@ -47,16 +48,10 @@ _CHART = {
     "y_tick_labels": ["10", "20"],
 }
 
-
 _ENVD_URL = "https://49983-sandbox.e2b.test"
 _JUPYTER_URL = "https://49999-sandbox.e2b.test"
 _ENVD_TOKEN = "envd-token"  # noqa: S105
 _CHUNK = 1 << 20
-
-
-def _actor() -> ToolCallActor:
-    """Return a fresh stand-in for the calling agent the loop injects; no E2B tool reads it."""
-    return ToolCallActor(session_state={})
 
 
 @dataclass
@@ -68,15 +63,20 @@ class _WriteInfo:
 class _FakeFiles:
     stored: dict[str, bytes] = field(default_factory=dict)
     sparse: dict[str, int] = field(default_factory=dict)
-    reads: list[str] = field(default_factory=list)
+    reads: Sequence[str] = field(default_factory=list)
     served: int = 0
 
     def write(self, path: str, data: bytes) -> _WriteInfo:
         self.stored[path] = data
         return _WriteInfo(path=f"/home/user/{path}")
 
+    def list(self, _path: str) -> Sequence[object]:
+        return [
+            type("_Entry", (), {"name": name, "type": "file", "size": len(data)})()
+            for name, data in self.stored.items()
+        ]
+
     def chunks(self, path: str) -> Iterator[bytes]:
-        """Serve a stored file whole, or a sparse file lazily in zero-filled chunks."""
         if path in self.stored:
             self.served += len(self.stored[path])
             yield self.stored[path]
@@ -88,11 +88,20 @@ class _FakeFiles:
 
 
 @dataclass
-class _FakeCommands:
-    """Run commands through the SDK's own handle, which keeps every output chunk until the command ends."""
+class _FakeBackgroundHandle:
+    pid: int
+    killed: bool = False
 
+    def kill(self) -> bool:
+        self.killed = True
+        return True
+
+
+@dataclass
+class _FakeCommands:
     stdout_bytes: int = 0
     served: int = 0
+    bg_handles: list[_FakeBackgroundHandle] = field(default_factory=list)
 
     def run(
         self,
@@ -101,8 +110,11 @@ class _FakeCommands:
         background: bool,
         on_stdout: Callable[[str], None] | None = None,
         on_stderr: Callable[[str], None] | None = None,
-    ) -> CommandResult:
-        assert not background
+    ) -> CommandResult | _FakeBackgroundHandle:
+        if background:
+            handle = _FakeBackgroundHandle(pid=100 + len(self.bg_handles))
+            self.bg_handles.append(handle)
+            return handle
         handle = CommandHandle(pid=1, handle_kill=lambda: True, events=self._events())
         return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr)
 
@@ -118,9 +130,12 @@ class _FakeCommands:
 
 @dataclass
 class _FakeSandbox:
+    sandbox_id: str = "sbx-123"
     files: _FakeFiles = field(default_factory=_FakeFiles)
     commands: _FakeCommands = field(default_factory=_FakeCommands)
     envd_api_url: str = _ENVD_URL
+    timeout_set: int | None = None
+    killed: bool = False
     connection_config: ConnectionConfig = field(
         default_factory=lambda: ConnectionConfig(api_key="test", extra_sandbox_headers={"X-Access-Token": _ENVD_TOKEN}),
     )
@@ -132,10 +147,15 @@ class _FakeSandbox:
     def get_host(self, port: int) -> str:
         return f"{port}-sandbox.e2b.test"
 
+    def set_timeout(self, timeout: int) -> None:
+        self.timeout_set = timeout
+
+    def kill(self) -> bool:
+        self.killed = True
+        return True
+
 
 def _serve_files(files: _FakeFiles) -> Callable[..., object]:
-    """Answer the envd file route the way the sandbox does, streaming bodies without buffering them."""
-
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.copy_with(query=None) == f"{_ENVD_URL}/files"
         assert request.headers["X-Access-Token"] == _ENVD_TOKEN
@@ -150,8 +170,6 @@ def _serve_files(files: _FakeFiles) -> Callable[..., object]:
 
 
 def _mock_stream(handle: Callable[[httpx.Request], httpx.Response]) -> Callable[..., object]:
-    """Stand in for ``httpx.stream`` with responses from ``handle``."""
-
     @contextmanager
     def stream(method: str, url: str, *, proxy: object, **kwargs: object) -> Iterator[httpx.Response]:
         assert proxy is None
@@ -184,7 +202,7 @@ def outside(tmp_path: Path) -> Path:
 @pytest.fixture
 def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path | None], MindRoomE2BTools]:
     """Build toolkits backed by an in-memory sandbox."""
-    monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
+    monkeypatch.setattr(e2b_code_interpreter, "Sandbox", _FakeSandbox)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
@@ -202,7 +220,8 @@ def _files(tool: MindRoomE2BTools) -> _FakeFiles:
     return tool.sandbox.files
 
 
-def _error(result: str) -> str:
+def _error(result: str | ToolValue) -> str:
+    assert isinstance(result, str)
     payload = json.loads(result)
     assert payload["status"] == "error"
     return payload["message"]
@@ -220,8 +239,15 @@ def _local_path(requested: str, outside: Path) -> str:
     return str(outside / "secret.env") if requested == "absolute" else requested
 
 
+def test_e2b_rejects_ambient_only_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MindRoomE2BTools fails closed without an explicit scoped key even if E2B_API_KEY is in host env."""
+    monkeypatch.setenv("E2B_API_KEY", "ambient-e2b-key")
+    with pytest.raises(ValueError, match="E2B API key is required"):
+        MindRoomE2BTools()
+
+
 def test_registry_injects_workspace_into_model_entrypoints(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001  # installs the fake sandbox
+    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001
     tmp_path: Path,
     workspace: Path,
     outside: Path,
@@ -238,12 +264,11 @@ def test_registry_injects_workspace_into_model_entrypoints(
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    upload = tool.functions["upload_file"].entrypoint
     assert isinstance(tool, MindRoomE2BTools)
-    assert upload is not None
+    e2b_files = tool.functions["e2b_files"]
 
-    assert upload("report.csv") == "/home/user/report.csv"
-    assert "Error uploading file" in _error(upload(str(outside / "secret.env")))
+    assert e2b_files("upload", file_path="report.csv") == "/home/user/report.csv"
+    assert "Error uploading file" in _error(e2b_files("upload", file_path=str(outside / "secret.env")))
     assert _files(tool).stored == {"report.csv": b"a,b\n"}
 
 
@@ -256,7 +281,10 @@ def test_upload_reads_workspace_relative_file(
     (workspace / "data" / "report.csv").write_bytes(b"a,b\n")
     tool = make_tool(workspace)
 
-    assert tool.upload_file("data/report.csv", "workspace/report.csv") == "/home/user/workspace/report.csv"
+    assert (
+        tool.e2b_files("upload", file_path="data/report.csv", sandbox_path="workspace/report.csv")
+        == "/home/user/workspace/report.csv"
+    )
     assert _files(tool).stored == {"workspace/report.csv": b"a,b\n"}
 
 
@@ -270,7 +298,7 @@ def test_upload_follows_links_that_stay_inside_workspace(
     (workspace / "knowledge").symlink_to(workspace / "docs")
     tool = make_tool(workspace)
 
-    assert tool.upload_file("knowledge/notes.md") == "/home/user/notes.md"
+    assert tool.e2b_files("upload", file_path="knowledge/notes.md") == "/home/user/notes.md"
     assert _files(tool).stored == {"notes.md": b"notes"}
 
 
@@ -288,7 +316,9 @@ def test_upload_rejects_paths_outside_workspace(
     _plant_escape_links(workspace, outside)
     tool = make_tool(workspace)
 
-    assert "Error uploading file" in _error(tool.upload_file(_local_path(requested, outside), "/tmp/x"))  # noqa: S108
+    assert "Error uploading file" in _error(
+        tool.e2b_files("upload", file_path=_local_path(requested, outside), sandbox_path="/tmp/x"),  # noqa: S108
+    )
     assert _files(tool).stored == {}
 
 
@@ -303,7 +333,7 @@ def test_upload_rejects_non_regular_files(
     os.mkfifo(workspace / "pipe")
     tool = make_tool(workspace)
 
-    assert "regular file" in _error(tool.upload_file(name))
+    assert "regular file" in _error(tool.e2b_files("upload", file_path=name))
     assert _files(tool).stored == {}
 
 
@@ -316,7 +346,7 @@ def test_upload_refuses_oversized_file_before_reading(
         file.truncate(MAX_READ_BYTES + 1)
     tool = make_tool(workspace)
 
-    assert "size limit" in _error(tool.upload_file("huge.bin"))
+    assert "size limit" in _error(tool.e2b_files("upload", file_path="huge.bin"))
     assert _files(tool).stored == {}
 
 
@@ -339,7 +369,7 @@ def test_upload_rejects_file_swapped_to_link_after_resolution(
 
     monkeypatch.setattr(e2b_module, "resolve_agent_file", resolve_then_swap)
 
-    assert "Error uploading file" in _error(tool.upload_file("report.csv"))
+    assert "Error uploading file" in _error(tool.e2b_files("upload", file_path="report.csv"))
     assert _files(tool).stored == {}
 
 
@@ -348,8 +378,8 @@ def test_transfers_require_workspace(make_tool: Callable[[Path | None], MindRoom
     tool = make_tool(None)
     _files(tool).stored["/tmp/x"] = b"payload"  # noqa: S108
 
-    assert "requires an agent workspace" in _error(tool.upload_file("report.csv"))
-    assert "require an agent workspace" in _error(tool.download_file_from_sandbox("/tmp/x"))  # noqa: S108
+    assert "requires an agent workspace" in _error(tool.e2b_files("upload", file_path="report.csv"))
+    assert "require an agent workspace" in _error(tool.e2b_files("download", sandbox_path="/tmp/x"))  # noqa: S108
     assert _files(tool).reads == []
 
 
@@ -364,8 +394,11 @@ def test_download_writes_inside_workspace(
     tool = make_tool(workspace)
     _files(tool).stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
 
-    assert tool.download_file_from_sandbox("/tmp/out/result.csv") == "result.csv"  # noqa: S108
-    assert tool.download_file_from_sandbox("/tmp/out/result.csv", "exports/final.csv") == "exports/final.csv"  # noqa: S108
+    assert tool.e2b_files("download", sandbox_path="/tmp/out/result.csv") == "result.csv"  # noqa: S108
+    assert (
+        tool.e2b_files("download", sandbox_path="/tmp/out/result.csv", local_path="exports/final.csv")  # noqa: S108
+        == "exports/final.csv"
+    )
     assert (workspace / "result.csv").read_bytes() == b"x,y\n"
     assert (workspace / "exports" / "final.csv").read_bytes() == b"x,y\n"
     assert not (tmp_path / "result.csv").exists()
@@ -379,7 +412,7 @@ def test_download_streams_file_in_chunks(
     tool = make_tool(workspace)
     _files(tool).sparse["/tmp/data.bin"] = 3 * _CHUNK + 5  # noqa: S108
 
-    assert tool.download_file_from_sandbox("/tmp/data.bin") == "data.bin"  # noqa: S108
+    assert tool.e2b_files("download", sandbox_path="/tmp/data.bin") == "data.bin"  # noqa: S108
     assert (workspace / "data.bin").stat().st_size == 3 * _CHUNK + 5
 
 
@@ -392,7 +425,7 @@ def test_download_refuses_oversized_file_while_streaming(
     tool = make_tool(workspace)
     _files(tool).sparse["/tmp/huge.bin"] = 8 << 30  # noqa: S108
 
-    message = _error(tool.download_file_from_sandbox("/tmp/huge.bin", "result.bin"))  # noqa: S108
+    message = _error(tool.e2b_files("download", sandbox_path="/tmp/huge.bin", local_path="result.bin"))  # noqa: S108
 
     assert "64 MiB transfer limit" in message
     assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
@@ -407,31 +440,25 @@ def test_download_reports_missing_sandbox_file(
     """A missing sandbox file is a tool error carrying the sandbox's message, and nothing is written."""
     tool = make_tool(workspace)
 
-    assert "path '/tmp/missing.csv' does not exist" in _error(tool.download_file_from_sandbox("/tmp/missing.csv"))  # noqa: S108
+    assert "path '/tmp/missing.csv' does not exist" in _error(
+        tool.e2b_files("download", sandbox_path="/tmp/missing.csv"),  # noqa: S108
+    )
     assert list(workspace.iterdir()) == []
 
 
-def test_read_file_content_returns_text(
+def test_read_file_returns_text_and_refuses_oversized(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
 ) -> None:
-    """File reads return the decoded sandbox file."""
+    """File reads decode text and refuse huge sandbox files while streaming."""
     tool = make_tool(workspace)
     _files(tool).stored["/tmp/notes.txt"] = "caf\u00e9\n".encode()  # noqa: S108
-
-    assert tool.read_file_content("/tmp/notes.txt") == "caf\u00e9\n"  # noqa: S108
-    assert tool.read_file_content("/tmp/notes.txt", encoding="latin-1") == "caf\u00c3\u00a9\n"  # noqa: S108
-
-
-def test_read_file_content_refuses_oversized_file_while_streaming(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],
-    workspace: Path,
-) -> None:
-    """A huge sandbox file read is refused once it passes the limit instead of being buffered whole."""
-    tool = make_tool(workspace)
     _files(tool).sparse["/tmp/huge.log"] = 8 << 30  # noqa: S108
 
-    assert "64 MiB transfer limit" in _error(tool.read_file_content("/tmp/huge.log"))  # noqa: S108
+    assert tool.e2b_inspect("read_file", path="/tmp/notes.txt") == "caf\u00e9\n"  # noqa: S108
+    assert tool.e2b_inspect("read_file", path="/tmp/notes.txt", encoding="latin-1") == "caf\u00c3\u00a9\n"  # noqa: S108
+    _files(tool).served = 0
+    assert "64 MiB transfer limit" in _error(tool.e2b_inspect("read_file", path="/tmp/huge.log"))  # noqa: S108
     assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
 
 
@@ -445,11 +472,11 @@ def test_run_command_refuses_output_past_the_limit_while_streaming(
     commands = tool.sandbox.commands
     commands.stdout_bytes = 5
 
-    assert json.loads(tool.run_command("printf xxxxx")) == ["STDOUT:\nxxxxx"]
+    assert json.loads(tool.e2b_run("command", command="printf xxxxx")) == ["STDOUT:\nxxxxx"]
 
     commands.stdout_bytes = MAX_READ_BYTES + 4 * _CHUNK
     commands.served = 0
-    assert "64 MiB transfer limit" in _error(tool.run_command("yes"))
+    assert "64 MiB transfer limit" in _error(tool.e2b_run("command", command="yes"))
     assert commands.served <= MAX_READ_BYTES + _CHUNK
 
 
@@ -458,7 +485,7 @@ def test_run_python_code_refuses_output_past_the_limit_while_streaming(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cell's output is refused once it passes the limit, even as the one line the SDK would read whole."""
+    """A cell's output is refused once it passes the limit, preserving last_execution."""
     tool = make_tool(workspace)
     served = 0
 
@@ -480,13 +507,13 @@ def test_run_python_code_refuses_output_past_the_limit_while_streaming(
 
     monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
 
-    assert json.loads(tool.run_python_code("small()")) == [
+    assert json.loads(tool.e2b_run("python", code="small()")) == [
         "Logs:\nLogs(stdout: ['hi\\n'], stderr: [])",
         "Result 1: 2",
     ]
     previous = tool.last_execution
 
-    assert "64 MiB transfer limit" in _error(tool.run_python_code("huge()"))
+    assert "64 MiB transfer limit" in _error(tool.e2b_run("python", code="huge()"))
     assert served <= MAX_READ_BYTES + _CHUNK
     assert tool.last_execution is previous
 
@@ -513,7 +540,7 @@ def test_run_python_code_reports_timeouts_like_the_sdk(
 
     monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
 
-    assert message in _error(tool.run_python_code("train()"))
+    assert message in _error(tool.e2b_run("python", code="train()"))
 
 
 @pytest.mark.parametrize(
@@ -542,7 +569,9 @@ def test_download_rejects_paths_outside_workspace(
     _files(tool).stored["/tmp/evil.py"] = b"import os"  # noqa: S108
     path = _local_path(requested, outside)
 
-    assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", path))  # noqa: S108
+    assert "Error downloading file" in _error(
+        tool.e2b_files("download", sandbox_path="/tmp/evil.py", local_path=path),  # noqa: S108
+    )
     assert _files(tool).reads == []
     assert (outside / "secret.env").read_text(encoding="utf-8") == "TOKEN=secret"
     assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
@@ -568,7 +597,9 @@ def test_download_rejects_parent_swapped_to_link_after_resolution(
 
     monkeypatch.setattr(e2b_module, "resolve_path_within_root", resolve_then_swap)
 
-    assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", "plugins/x.py"))  # noqa: S108
+    assert "Error downloading file" in _error(
+        tool.e2b_files("download", sandbox_path="/tmp/evil.py", local_path="plugins/x.py"),  # noqa: S108
+    )
     assert not (outside / "x.py").exists()
 
 
@@ -586,82 +617,67 @@ def test_download_refuses_workspace_replaced_by_link(
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
-    assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/out/result.csv", local_path))  # noqa: S108
+    assert "Error downloading file" in _error(
+        tool.e2b_files("download", sandbox_path="/tmp/out/result.csv", local_path=local_path),  # noqa: S108
+    )
     assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
 
 
-def test_png_output_path_saves_inside_workspace(
+def test_png_and_chart_artifacts_return_native_tool_value_and_stay_in_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
     outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """PNG results save inside the workspace and keep their image when saving elsewhere is refused."""
+    """PNG and chart results return MindRoom ToolValue media and save only inside the workspace."""
+    monkeypatch.chdir(tmp_path)
     tool = make_tool(workspace)
-    tool.last_execution = Execution(results=[Result(png=base64.b64encode(_PNG_BYTES).decode())])
-
+    tool.last_execution = Execution(results=[Result(chart=_CHART, png=base64.b64encode(_PNG_BYTES).decode())])
     _plant_escape_links(workspace, outside)
 
-    saved = tool.download_png_result(_actor(), 0, "charts/plot.png")
-    rejected = tool.download_png_result(_actor(), 0, "linked/plot.png")
-
+    saved = tool.e2b_files("download_png", result_index=0, local_path="charts/plot.png")
+    rejected = tool.e2b_files("download_png", result_index=0, local_path="linked/plot.png")
+    assert isinstance(saved, ToolValue)
+    assert isinstance(rejected, ToolValue)
     assert saved.content.endswith("and saved to charts/plot.png")
-    assert saved.images
+    assert saved.images[0].content == _PNG_BYTES
     assert (workspace / "charts" / "plot.png").read_bytes() == _PNG_BYTES
     assert "saving it failed" in rejected.content
     assert rejected.images
     assert not (outside / "plot.png").exists()
 
-
-def test_chart_data_saves_inside_workspace(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],
-    workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Chart data defaults to the workspace, never the process working directory."""
-    monkeypatch.chdir(tmp_path)
-    tool = make_tool(workspace)
-    tool.last_execution = Execution(results=[Result(chart=_CHART, png=base64.b64encode(_PNG_BYTES).decode())])
-
-    result = tool.download_chart_data(_actor())
-
-    assert result.content.splitlines()[:4] == [
+    chart_res = tool.e2b_files("download_chart", result_index=0)
+    assert isinstance(chart_res, ToolValue)
+    assert chart_res.content.splitlines()[:4] == [
         "Interactive line chart data saved to chart-data-0.json",
         "Title: Growth",
         "X-axis: Day",
         "Y-axis: Users",
     ]
-    assert result.images
+    assert chart_res.images
     assert json.loads((workspace / "chart-data-0.json").read_text(encoding="utf-8"))["title"] == "Growth"
     assert not (tmp_path / "chart-data-0.json").exists()
 
-
-@pytest.mark.parametrize("requested", ["absolute", "linked/config.yaml", "dangling.py"])
-def test_chart_data_rejects_paths_outside_workspace(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],
-    workspace: Path,
-    outside: Path,
-    requested: str,
-) -> None:
-    """Chart data never writes outside the workspace."""
-    _plant_escape_links(workspace, outside)
-    tool = make_tool(workspace)
-    tool.last_execution = Execution(results=[Result(chart=_CHART)])
-
-    result = tool.download_chart_data(_actor(), 0, _local_path(requested, outside), add_as_artifact=False)
-
-    assert result.content.startswith("Error extracting chart data")
-    assert (outside / "secret.env").read_text(encoding="utf-8") == "TOKEN=secret"
-    assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
+    bad_index = tool.e2b_files("download_chart", result_index=-5)
+    assert isinstance(bad_index, ToolValue)
+    assert bad_index.content.startswith("Error extracting chart data")
 
 
-def test_chart_data_reports_invalid_index(
+def test_background_commands_inspect_and_lifecycle(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
 ) -> None:
-    """An out-of-range negative index is a tool error, not an escaped exception."""
+    """Background commands track PIDs cleanly, and inspect/lifecycle actions work natively."""
     tool = make_tool(workspace)
-    tool.last_execution = Execution(results=[Result(chart=_CHART)])
+    started = json.loads(tool.e2b_run("background_command", command="sleep 10"))
+    pid = started["pid"]
+    assert "terminated successfully" in tool.e2b_run("kill_background", pid=pid)
+    assert "Unknown background command" in _error(tool.e2b_run("kill_background", pid=pid))
 
-    assert tool.download_chart_data(_actor(), -5).content.startswith("Error extracting chart data")
-    assert list(workspace.iterdir()) == []
+    assert tool.e2b_inspect("status") == "sbx-123"
+    assert tool.e2b_inspect("public_url", port=8000) == "http://8000-sandbox.e2b.test"
+    assert tool.e2b_lifecycle("set_timeout", timeout=120) == "120"
+    assert isinstance(tool.sandbox, _FakeSandbox)
+    assert tool.sandbox.timeout_set == 120
+    assert json.loads(tool.e2b_lifecycle("shutdown"))["status"] == "success"

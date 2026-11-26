@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -85,3 +86,17 @@ def require_enabled_action(action: str, enabled: Iterable[str]) -> str | None:
     if action not in allowed:
         return f"Action {action!r} is disabled. Enabled actions: {', '.join(allowed)}"
     return None
+
+
+_PYTHON_LITERAL_FIXES = (
+    (re.compile(r"\btrue\b"), "True"),
+    (re.compile(r"\bfalse\b"), "False"),
+    (re.compile(r"\bnone\b"), "None"),
+)
+
+
+def prepare_python_code(code: str) -> str:
+    """Fix lowercase JSON-style boolean/null literals common in model-generated Python."""
+    for pattern, replacement in _PYTHON_LITERAL_FIXES:
+        code = pattern.sub(replacement, code)
+    return code

@@ -102,7 +102,7 @@ class _PostgresTools(Toolkit):
             if not getattr(connection, "closed", False):
                 connection.close()
 
-    def _execute_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
+    def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
         try:
             with self._connection_scope() as connection:
                 try:
@@ -193,13 +193,13 @@ class _PostgresTools(Toolkit):
         """
         try:
             if action == "show_tables":
-                return self._execute_query(
+                return self._run_db_query(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;",
                     (self.table_schema,),
                 )
             if action == "describe_table":
                 table_name = require_non_empty(table, "table")
-                return self._execute_query(
+                return self._run_db_query(
                     "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
                     "WHERE table_schema = %s AND table_name = %s;",
                     (self.table_schema, table_name),
@@ -208,14 +208,14 @@ class _PostgresTools(Toolkit):
                 return self._summarize_table(require_non_empty(table, "table"))
             if action == "inspect_query":
                 stmt = first_sql_statement(require_non_empty(query, "query"))
-                return self._execute_query(f"EXPLAIN {stmt}")
+                return self._run_db_query(f"EXPLAIN {stmt}")
         except Exception as exc:
             return f"Error in postgres_inspect ({action}): {exc}"
         return f"Unsupported action: {action}"
 
     def run_query(self, query: str) -> str:
         """Run a read-only SQL query against PostgreSQL and return CSV-formatted rows."""
-        return self._execute_query(query)
+        return self._run_db_query(query)
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a PostgreSQL table as a local CSV file at `path`."""

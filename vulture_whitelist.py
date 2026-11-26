@@ -384,11 +384,6 @@ _.exchange_refresh_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_ga
 _.revoke_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 
 _.image_to_image  # FalTools registers this override as an image-editing tool (src/mindroom/custom_tools/fal.py)
-_.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
-_.upload_file  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
-_.read_file_content  # E2BTools registers this override as a sandbox file-read tool (src/mindroom/custom_tools/e2b.py)
-_.run_python_code  # E2BTools registers this override as a code-execution tool (src/mindroom/custom_tools/e2b.py)
-_.download_chart_data  # E2BTools registers this override as a chart-export tool (src/mindroom/custom_tools/e2b.py)
 _.transcribe_audio  # OpenAITools and GroqTools register these file_access overrides (src/mindroom/tools/agno_compat_openai.py, src/mindroom/tools/agno_compat_groq.py)
 _.translate_audio  # GroqTools registers this file_access override (src/mindroom/tools/agno_compat_groq.py)
 _.extract_audio  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
@@ -504,3 +499,6 @@ _.validate_optional_text  # Pydantic field validator (src/mindroom/reactive_trig
 _.validate_trigger_id  # Pydantic field validator (src/mindroom/reactive_triggers/models.py)
 _.validate_rule_uid  # Pydantic field validator (src/mindroom/reactive_triggers/models.py)
 _.validate_origin_target  # Pydantic model validator (src/mindroom/reactive_triggers/models.py)
+_._organization_id  # Daytona SDK client attribute pinned to scoped organization_id (src/mindroom/tools/daytona.py)
+_.rest_client  # Daytona ApiClient REST pool rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
+_._toolbox_api_client  # Daytona SDK toolbox client rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
