@@ -1891,3 +1891,102 @@ def test_google_drive_upload_refuses_file_swapped_for_link_after_check(
 
     assert "error" in result
     assert service.files_resource.create_kwargs is None
+
+
+def test_google_drive_explicit_scopes_enforce_read_and_write_operations(tmp_path: Path) -> None:
+    write_capable_creds = _valid_credentials()
+
+    with pytest.raises(ValueError, match="read scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            write=False,
+            scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+
+    with pytest.raises(ValueError, match="read scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            tool_output_workspace_root=tmp_path,
+            list_files=False,
+            search_files=False,
+            read_file=False,
+            download_file=True,
+            write=False,
+            scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+
+    with pytest.raises(ValueError, match="write scope"):
+        GoogleDriveTools(
+            runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            write=True,
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        )
+
+    read_only_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        tool_output_workspace_root=tmp_path,
+        write=False,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    assert set(read_only_tool.functions) == {
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
+        "google_drive_download_file",
+    }
+
+    write_only_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        list_files=False,
+        search_files=False,
+        read_file=False,
+        download_file=False,
+        write=True,
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    assert set(write_only_tool.functions) == {
+        "google_drive_upload_file",
+        "google_drive_update_file",
+        "google_drive_create_folder",
+        "google_drive_move_file",
+        "google_drive_trash_file",
+    }
+
+    full_drive_tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        tool_output_workspace_root=tmp_path,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    assert "google_drive_list_files" in full_drive_tool.functions
+    assert "google_drive_upload_file" in full_drive_tool.functions
+
+
+def test_google_drive_explicit_none_toggles_disable_operations(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_drive",
+        _runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"write": None, "download_file": None},
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(tool, GoogleDriveTools)
+    assert set(tool.functions) == {
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
+    }

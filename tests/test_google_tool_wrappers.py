@@ -2804,6 +2804,7 @@ _GOOGLE_IDENTITY_SCOPES = frozenset(
             lambda rp, cm: GoogleDriveTools(
                 runtime_paths=rp,
                 credentials_manager=cm,
+                write=False,
                 scopes=["https://www.googleapis.com/auth/drive.readonly"],
             ),
             ("https://www.googleapis.com/auth/drive.readonly",),

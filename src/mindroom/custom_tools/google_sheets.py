@@ -10,7 +10,7 @@ from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, google_http_error_result
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
@@ -25,22 +25,23 @@ logger = get_logger(__name__)
 _SERVICE_NAME = "Google Sheets"
 _SHEETS_READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 _SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+_UNSET = object()
 
 
 def _resolve_toggle(
     field_name: str,
     init_arg: str,
-    field_value: bool | None,
-    init_value: bool | None,
+    field_value: object,
+    init_value: object,
 ) -> bool:
-    """Resolve a dashboard toggle and its constructor alias, defaulting to enabled."""
-    if field_value is not None and init_value is not None:
+    """Resolve a dashboard toggle and its constructor alias, treating explicit None as falsy."""
+    if field_value is not _UNSET and init_value is not _UNSET:
         msg = f"Google Sheets received both {field_name!r} and {init_arg!r}"
         raise ValueError(msg)
-    if field_value is not None:
-        return field_value
-    if init_value is not None:
-        return init_value
+    if field_value is not _UNSET:
+        return bool(field_value)
+    if init_value is not _UNSET:
+        return bool(init_value)
     return True
 
 
@@ -87,39 +88,46 @@ class GoogleSheetsTools(GoogleApiToolkit):
         scopes: Sequence[str] | None = None,
         spreadsheet_id: str | None = None,
         spreadsheet_range: str | None = None,
-        read: bool | None = None,
-        create: bool | None = None,
-        update: bool | None = None,
-        read_sheet: bool | None = None,
-        create_sheet: bool | None = None,
-        update_sheet: bool | None = None,
-        create_duplicate_sheet: bool = False,
-        all: bool = False,  # noqa: A002
+        read: object = _UNSET,
+        create: object = _UNSET,
+        update: object = _UNSET,
+        read_sheet: object = _UNSET,
+        create_sheet: object = _UNSET,
+        update_sheet: object = _UNSET,
+        create_duplicate_sheet: object = _UNSET,
+        all: bool | None = False,  # noqa: A002
+        include_tools: Sequence[str] | None = None,
+        exclude_tools: Sequence[str] | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self.spreadsheet_id = spreadsheet_id
         self.spreadsheet_range = spreadsheet_range
 
+        enable_all = bool(all)
         enable_read = _resolve_toggle("read", "read_sheet", read, read_sheet)
         enable_create = _resolve_toggle("create", "create_sheet", create, create_sheet)
         enable_update = _resolve_toggle("update", "update_sheet", update, update_sheet)
-        self.scopes = _resolve_sheets_scopes(
-            scopes,
-            has_read_tools=all or enable_read,
-            has_write_tools=all or enable_create or enable_update or create_duplicate_sheet,
-        )
+        enable_duplicate = False if create_duplicate_sheet is _UNSET else bool(create_duplicate_sheet)
 
         tools: list[Callable[..., str]] = []
-        if all or enable_read:
+        if enable_all or enable_read:
             tools.append(self.read_sheet)
-        if all or enable_create:
+        if enable_all or enable_create:
             tools.append(self.create_sheet)
-        if all or enable_update:
+        if enable_all or enable_update:
             tools.append(self.update_sheet)
-        if all or create_duplicate_sheet:
+        if enable_all or enable_duplicate:
             tools.append(self.create_duplicate_sheet)
-        if all or enable_update:
+        if enable_all or enable_update:
             tools.append(self.batch_update_sheet)
+        tools = filter_google_tools(tools, include_tools, exclude_tools)
+
+        registered_names = {getattr(tool, "__name__", "") for tool in tools}
+        self.scopes = _resolve_sheets_scopes(
+            scopes,
+            has_read_tools="read_sheet" in registered_names,
+            has_write_tools=bool(registered_names - {"read_sheet"}),
+        )
 
         super().__init__(
             name="google_sheets",

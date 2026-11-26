@@ -22,7 +22,7 @@ from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
@@ -37,7 +37,7 @@ from mindroom.tool_system.agno_toolkits import rename_toolkit_functions, toolkit
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Collection, Iterator, Sequence
     from typing import BinaryIO
 
     from mindroom.config.models import FileAccess
@@ -66,6 +66,20 @@ _MODEL_FUNCTION_NAME_ALIASES = {
     "trash_file": "google_drive_trash_file",
 }
 _WRITE_FUNCTION_NAMES = ("upload_file", "update_file", "create_folder", "move_file", "trash_file")
+_DRIVE_READ_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/drive.readonly",
+        GOOGLE_DRIVE_WRITE_SCOPE,
+    },
+)
+_DRIVE_WRITE_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/drive.file",
+        GOOGLE_DRIVE_WRITE_SCOPE,
+    },
+)
+_DRIVE_READ_TOOLS = frozenset({"list_files", "search_files", "read_file", "download_file"})
+_DRIVE_WRITE_TOOLS = frozenset(_WRITE_FUNCTION_NAMES)
 _WRITE_RESULT_FIELDS = "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink"
 _DEFAULT_MAX_READ_SIZE = 10 * 1024 * 1024
 # Downloads land on the primary's storage volume, so one file must not fill it.
@@ -121,6 +135,24 @@ _DRIVE_QUERY_INSTRUCTIONS = textwrap.dedent(f"""\
     - Inform the user that results may be incomplete due to shared drive limitations
     - Do NOT retry the same query — the limitation is server-side
     - For complete results, the user must reconfigure with `corpora="user"` or `corpora="drive"`""")
+
+
+def _validate_drive_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
+    """Ensure explicit scopes cover every registered Drive operation."""
+    registered = set(registered_names)
+    scope_set = set(scopes)
+    if registered & _DRIVE_READ_TOOLS and not (_DRIVE_READ_SCOPES & scope_set):
+        msg = (
+            "A Google Drive read scope (https://www.googleapis.com/auth/drive.readonly or "
+            "https://www.googleapis.com/auth/drive) is required for read operations"
+        )
+        raise ValueError(msg)
+    if registered & _DRIVE_WRITE_TOOLS and not (_DRIVE_WRITE_SCOPES & scope_set):
+        msg = (
+            "A Google Drive write scope (https://www.googleapis.com/auth/drive.file or "
+            "https://www.googleapis.com/auth/drive) is required for write operations"
+        )
+        raise ValueError(msg)
 
 
 def _size_limit_finite_error(field_name: str, value: object) -> TypeError | ValueError:
@@ -248,11 +280,11 @@ class GoogleDriveTools(GoogleApiToolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
         scopes: Sequence[str] | None = None,
-        list_files: bool = True,
-        search_files: bool = True,
-        read_file: bool = True,
+        list_files: bool | None = True,
+        search_files: bool | None = True,
+        read_file: bool | None = True,
         download_file: object = True,
-        write: bool = True,
+        write: bool | None = True,
         max_read_size: object = _DEFAULT_MAX_READ_SIZE,
         max_download_size: object = _DEFAULT_MAX_DOWNLOAD_SIZE,
         quota_project_id: object = None,
@@ -262,6 +294,8 @@ class GoogleDriveTools(GoogleApiToolkit):
         include_items_from_all_drives: bool = True,
         drive_id: str | None = None,
         max_results: int = 20,
+        include_tools: Sequence[str] | None = None,
+        exclude_tools: Sequence[str] | None = None,
         instructions: str | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
@@ -308,6 +342,7 @@ class GoogleDriveTools(GoogleApiToolkit):
             tools.append(self.download_file)
         if write:
             tools.extend([self.upload_file, self.update_file, self.create_folder, self.move_file, self.trash_file])
+        tools = filter_google_tools(tools, include_tools, exclude_tools)
 
         super().__init__(
             name="google_drive",
@@ -320,6 +355,7 @@ class GoogleDriveTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
+        _validate_drive_scopes(self.functions, self.scopes)
         self._wrap_write_scope_entrypoints()
         rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
         self._download_entrypoint = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])

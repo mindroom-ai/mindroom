@@ -17,7 +17,7 @@ from mindroom.oauth.google import google_service_scopes
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable
+    from collections.abc import Callable, Collection, Iterable, Sequence
 
     from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
@@ -107,6 +107,22 @@ def visible_google_function_map(
                 mapping[base] = name
                 break
     return mapping
+
+
+def filter_google_tools(
+    tools: Sequence[Callable[..., str]],
+    include_tools: Sequence[str] | None = None,
+    exclude_tools: Sequence[str] | None = None,
+) -> list[Callable[..., str]]:
+    """Filter Google toolkit methods by optional include and exclude name lists."""
+    selected = list(tools)
+    if include_tools is not None:
+        included = set(include_tools)
+        selected = [tool for tool in selected if getattr(tool, "__name__", "") in included]
+    if exclude_tools is not None:
+        excluded = set(exclude_tools)
+        selected = [tool for tool in selected if getattr(tool, "__name__", "") not in excluded]
+    return selected
 
 
 class _ThreadLocalGoogleServiceMixin:

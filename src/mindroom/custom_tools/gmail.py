@@ -19,13 +19,13 @@ from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, visible_google_function_map
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, visible_google_function_map
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable, Collection, Sequence
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
@@ -65,6 +65,14 @@ _GMAIL_DRAFT_SCOPES = frozenset(
         "https://www.googleapis.com/auth/gmail.modify",
     },
 )
+_GMAIL_DRAFT_READ_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.readonly",
+    },
+)
 _GMAIL_MODIFY_SCOPES = frozenset(
     {
         "https://mail.google.com/",
@@ -73,6 +81,7 @@ _GMAIL_MODIFY_SCOPES = frozenset(
 )
 _GMAIL_SEND_TOOLS = frozenset({"send_email", "send_email_reply"})
 _GMAIL_DRAFT_TOOLS = frozenset({"create_draft_email", "send_draft", "update_draft"})
+_GMAIL_DRAFT_READ_TOOLS = frozenset({"get_draft", "list_drafts"})
 _GMAIL_READ_TOOLS = frozenset(
     {
         "get_latest_emails",
@@ -88,8 +97,6 @@ _GMAIL_READ_TOOLS = frozenset(
         "get_thread",
         "search_threads",
         "list_labels",
-        "get_draft",
-        "list_drafts",
         "download_attachment",
     },
 )
@@ -306,26 +313,15 @@ def _build_mime_message(
     return email_data
 
 
-def _filter_tools(
-    tools: list[tuple[str, Callable[..., str]]],
-    include_tools: list[str] | None,
-    exclude_tools: list[str] | None,
-) -> list[Callable[..., str]]:
-    if include_tools is not None:
-        included = set(include_tools)
-        tools = [(name, fn) for name, fn in tools if name in included]
-    if exclude_tools is not None:
-        excluded = set(exclude_tools)
-        tools = [(name, fn) for name, fn in tools if name not in excluded]
-    return [fn for _name, fn in tools]
-
-
 def _validate_gmail_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
     """Ensure explicit scopes cover every registered Gmail operation."""
     registered = set(registered_names)
     scope_set = set(scopes)
     if registered & _GMAIL_DRAFT_TOOLS and not (_GMAIL_DRAFT_SCOPES & scope_set):
         msg = "A Gmail compose or modify scope is required for draft operations"
+        raise ValueError(msg)
+    if registered & _GMAIL_DRAFT_READ_TOOLS and not (_GMAIL_DRAFT_READ_SCOPES & scope_set):
+        msg = "A Gmail read, compose, or modify scope is required for draft reading operations"
         raise ValueError(msg)
     if registered & _GMAIL_SEND_TOOLS and not (_GMAIL_SEND_SCOPES & scope_set):
         msg = "A Gmail send, compose, or modify scope is required for email sending operations"
@@ -362,53 +358,53 @@ class GmailTools(GoogleApiToolkit):
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
-        scopes: list[str] | None = None,
+        scopes: Sequence[str] | None = None,
         include_html: bool = False,
         max_body_length: int | None = None,
         attachment_dir: str | None = None,
         max_results: int = 20,
         max_batch_size: int = 10,
-        include_tools: list[str] | None = None,
-        exclude_tools: list[str] | None = None,
+        include_tools: Sequence[str] | None = None,
+        exclude_tools: Sequence[str] | None = None,
         instructions: str | None = None,
         # Reading
-        get_latest_emails: bool = True,
-        get_emails_from_user: bool = True,
-        get_unread_emails: bool = True,
-        get_starred_emails: bool = True,
-        get_emails_by_context: bool = True,
-        get_emails_by_date: bool = True,
-        get_emails_by_thread: bool = True,
-        search_emails: bool = True,
+        get_latest_emails: bool | None = True,
+        get_emails_from_user: bool | None = True,
+        get_unread_emails: bool | None = True,
+        get_starred_emails: bool | None = True,
+        get_emails_by_context: bool | None = True,
+        get_emails_by_date: bool | None = True,
+        get_emails_by_thread: bool | None = True,
+        search_emails: bool | None = True,
         # Management
-        mark_email_as_read: bool = True,
-        mark_email_as_unread: bool = True,
-        star_email: bool = True,
-        unstar_email: bool = True,
-        archive_email: bool = False,
+        mark_email_as_read: bool | None = True,
+        mark_email_as_unread: bool | None = True,
+        star_email: bool | None = True,
+        unstar_email: bool | None = True,
+        archive_email: bool | None = False,
         # Composing
-        create_draft_email: bool = True,
-        send_email: bool = True,
-        send_email_reply: bool = True,
+        create_draft_email: bool | None = True,
+        send_email: bool | None = True,
+        send_email_reply: bool | None = True,
         # Labels
-        list_custom_labels: bool = True,
-        apply_label: bool = True,
-        remove_label: bool = True,
-        delete_custom_label: bool = True,
+        list_custom_labels: bool | None = True,
+        apply_label: bool | None = True,
+        remove_label: bool | None = True,
+        delete_custom_label: bool | None = True,
         # Threads, drafts, messages
-        get_message: bool = True,
-        get_thread: bool = True,
-        search_threads: bool = True,
-        modify_thread_labels: bool = False,
-        trash_thread: bool = False,
-        get_draft: bool = True,
-        list_drafts: bool = True,
-        send_draft: bool = False,
-        update_draft: bool = True,
-        list_labels: bool = False,
-        modify_message_labels: bool = False,
-        trash_message: bool = False,
-        download_attachment: bool = False,
+        get_message: bool | None = True,
+        get_thread: bool | None = True,
+        search_threads: bool | None = True,
+        modify_thread_labels: bool | None = False,
+        trash_thread: bool | None = False,
+        get_draft: bool | None = True,
+        list_drafts: bool | None = True,
+        send_draft: bool | None = False,
+        update_draft: bool | None = True,
+        list_labels: bool | None = False,
+        modify_message_labels: bool | None = False,
+        trash_message: bool | None = False,
+        download_attachment: bool | None = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
@@ -422,50 +418,48 @@ class GmailTools(GoogleApiToolkit):
         self.max_batch_size = max(min(max_batch_size, 100), 1)
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
-        toggles: tuple[tuple[bool, str, Callable[..., str]], ...] = (
-            (get_latest_emails, "get_latest_emails", self.get_latest_emails),
-            (get_emails_from_user, "get_emails_from_user", self.get_emails_from_user),
-            (get_unread_emails, "get_unread_emails", self.get_unread_emails),
-            (get_starred_emails, "get_starred_emails", self.get_starred_emails),
-            (get_emails_by_context, "get_emails_by_context", self.get_emails_by_context),
-            (get_emails_by_date, "get_emails_by_date", self.get_emails_by_date),
-            (get_emails_by_thread, "get_emails_by_thread", self.get_emails_by_thread),
-            (search_emails, "search_emails", self.search_emails),
-            (mark_email_as_read, "mark_email_as_read", self.mark_email_as_read),
-            (mark_email_as_unread, "mark_email_as_unread", self.mark_email_as_unread),
-            (star_email, "star_email", self.star_email),
-            (unstar_email, "unstar_email", self.unstar_email),
-            (archive_email, "archive_email", self.archive_email),
-            (create_draft_email, "create_draft_email", self.create_draft_email),
-            (send_email, "send_email", self.send_email),
-            (send_email_reply, "send_email_reply", self.send_email_reply),
-            (list_custom_labels, "list_custom_labels", self.list_custom_labels),
-            (apply_label, "apply_label", self.apply_label),
-            (remove_label, "remove_label", self.remove_label),
-            (delete_custom_label, "delete_custom_label", self.delete_custom_label),
-            (get_message, "get_message", self.get_message),
-            (get_thread, "get_thread", self.get_thread),
-            (search_threads, "search_threads", self.search_threads),
-            (modify_thread_labels, "modify_thread_labels", self.modify_thread_labels),
-            (trash_thread, "trash_thread", self.trash_thread),
-            (get_draft, "get_draft", self.get_draft),
-            (list_drafts, "list_drafts", self.list_drafts),
-            (send_draft, "send_draft", self.send_draft),
-            (update_draft, "update_draft", self.update_draft),
-            (list_labels, "list_labels", self.list_labels),
-            (modify_message_labels, "modify_message_labels", self.modify_message_labels),
-            (trash_message, "trash_message", self.trash_message),
-            (download_attachment, "download_attachment", self.download_attachment),
+        toggles: tuple[tuple[bool | None, Callable[..., str]], ...] = (
+            (get_latest_emails, self.get_latest_emails),
+            (get_emails_from_user, self.get_emails_from_user),
+            (get_unread_emails, self.get_unread_emails),
+            (get_starred_emails, self.get_starred_emails),
+            (get_emails_by_context, self.get_emails_by_context),
+            (get_emails_by_date, self.get_emails_by_date),
+            (get_emails_by_thread, self.get_emails_by_thread),
+            (search_emails, self.search_emails),
+            (mark_email_as_read, self.mark_email_as_read),
+            (mark_email_as_unread, self.mark_email_as_unread),
+            (star_email, self.star_email),
+            (unstar_email, self.unstar_email),
+            (archive_email, self.archive_email),
+            (create_draft_email, self.create_draft_email),
+            (send_email, self.send_email),
+            (send_email_reply, self.send_email_reply),
+            (list_custom_labels, self.list_custom_labels),
+            (apply_label, self.apply_label),
+            (remove_label, self.remove_label),
+            (delete_custom_label, self.delete_custom_label),
+            (get_message, self.get_message),
+            (get_thread, self.get_thread),
+            (search_threads, self.search_threads),
+            (modify_thread_labels, self.modify_thread_labels),
+            (trash_thread, self.trash_thread),
+            (get_draft, self.get_draft),
+            (list_drafts, self.list_drafts),
+            (send_draft, self.send_draft),
+            (update_draft, self.update_draft),
+            (list_labels, self.list_labels),
+            (modify_message_labels, self.modify_message_labels),
+            (trash_message, self.trash_message),
+            (download_attachment, self.download_attachment),
         )
-        named_tools: list[tuple[str, Callable[..., str]]] = [
-            (name, method) for enabled, name, method in toggles if enabled
-        ]
+        selected: list[Callable[..., str]] = [method for enabled, method in toggles if enabled]
         if _GMAIL_PROFILE_SCOPES.intersection(self.scopes) and _GMAIL_SEND_SCOPES.intersection(self.scopes):
-            named_tools.append(("send_email_to_self", self.send_email_to_self))
+            selected.append(self.send_email_to_self)
         else:
             logger.warning("gmail_send_email_to_self_disabled_missing_scope")
 
-        tools = _filter_tools(named_tools, include_tools, exclude_tools)
+        tools = filter_google_tools(selected, include_tools, exclude_tools)
 
         super().__init__(
             name="gmail",

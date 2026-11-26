@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, visible_google_function_map
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, visible_google_function_map
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
 
@@ -40,6 +40,7 @@ _CALENDAR_FUNCTION_NAMES = (
     "move_event",
     "respond_to_event",
 )
+_UNSET = object()
 _VALID_RESPONSES = frozenset({"accepted", "declined", "tentative"})
 _CALENDAR_WRITE_SCOPES = frozenset(
     {
@@ -47,14 +48,28 @@ _CALENDAR_WRITE_SCOPES = frozenset(
         "https://www.googleapis.com/auth/calendar.events",
     },
 )
-_CALENDAR_READ_SCOPES = frozenset(
+_CALENDAR_EVENT_READ_SCOPES = frozenset(
     {
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/calendar.events.readonly",
+    },
+)
+_CALENDAR_LIST_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.calendarlist",
         "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    },
+)
+_CALENDAR_FREEBUSY_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
     },
 )
 _CALENDAR_WRITE_TOOLS = frozenset(
@@ -67,18 +82,18 @@ _CALENDAR_WRITE_TOOLS = frozenset(
         "respond_to_event",
     },
 )
-_CALENDAR_READ_TOOLS = frozenset(
+_CALENDAR_EVENT_READ_TOOLS = frozenset(
     {
         "list_events",
         "get_event",
         "fetch_all_events",
         "find_available_slots",
-        "list_calendars",
-        "check_availability",
         "get_event_attendees",
         "search_events",
     },
 )
+_CALENDAR_LIST_TOOLS = frozenset({"list_calendars"})
+_CALENDAR_FREEBUSY_TOOLS = frozenset({"check_availability"})
 
 
 def _validate_calendar_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
@@ -91,8 +106,14 @@ def _validate_calendar_scopes(registered_names: Collection[str], scopes: Collect
             "https://www.googleapis.com/auth/calendar.events) is required for write operations"
         )
         raise ValueError(msg)
-    if registered & _CALENDAR_READ_TOOLS and not (_CALENDAR_READ_SCOPES & scope_set):
-        msg = "A Google Calendar read scope is required for read operations"
+    if registered & _CALENDAR_EVENT_READ_TOOLS and not (_CALENDAR_EVENT_READ_SCOPES & scope_set):
+        msg = "A Google Calendar event read scope is required for event read operations"
+        raise ValueError(msg)
+    if registered & _CALENDAR_LIST_TOOLS and not (_CALENDAR_LIST_SCOPES & scope_set):
+        msg = "A Google Calendar list scope is required for list_calendars"
+        raise ValueError(msg)
+    if registered & _CALENDAR_FREEBUSY_TOOLS and not (_CALENDAR_FREEBUSY_SCOPES & scope_set):
+        msg = "A Google Calendar free/busy scope is required for check_availability"
         raise ValueError(msg)
 
 
@@ -263,21 +284,23 @@ class GoogleCalendarTools(GoogleApiToolkit):
         calendar_id: str = "primary",
         max_results: int = 20,
         expand_recurring: bool = True,
-        allow_update: bool = True,
-        list_events: bool = True,
-        get_event: bool = True,
-        fetch_all_events: bool = True,
-        find_available_slots: bool = True,
-        list_calendars: bool = True,
-        check_availability: bool = True,
-        get_event_attendees: bool = True,
-        search_events: bool = True,
-        create_event: bool | None = None,
-        update_event: bool | None = None,
-        delete_event: bool | None = None,
-        quick_add_event: bool | None = None,
-        move_event: bool | None = None,
-        respond_to_event: bool | None = None,
+        allow_update: bool | None = True,
+        list_events: bool | None = True,
+        get_event: bool | None = True,
+        fetch_all_events: bool | None = True,
+        find_available_slots: bool | None = True,
+        list_calendars: bool | None = True,
+        check_availability: bool | None = True,
+        get_event_attendees: bool | None = True,
+        search_events: bool | None = True,
+        create_event: object = _UNSET,
+        update_event: object = _UNSET,
+        delete_event: object = _UNSET,
+        quick_add_event: object = _UNSET,
+        move_event: object = _UNSET,
+        respond_to_event: object = _UNSET,
+        include_tools: Sequence[str] | None = None,
+        exclude_tools: Sequence[str] | None = None,
         instructions: str | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
@@ -288,7 +311,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
         self._custom_instructions = instructions
 
         writes_allowed = allow_update is True
-        read_toggles: tuple[tuple[bool, Callable[..., str]], ...] = (
+        read_toggles: tuple[tuple[bool | None, Callable[..., str]], ...] = (
             (list_events, self.list_events),
             (get_event, self.get_event),
             (fetch_all_events, self.fetch_all_events),
@@ -298,7 +321,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             (get_event_attendees, self.get_event_attendees),
             (search_events, self.search_events),
         )
-        write_toggles: tuple[tuple[bool | None, Callable[..., str]], ...] = (
+        write_toggles: tuple[tuple[object, Callable[..., str]], ...] = (
             (create_event, self.create_event),
             (update_event, self.update_event),
             (delete_event, self.delete_event),
@@ -307,7 +330,8 @@ class GoogleCalendarTools(GoogleApiToolkit):
             (respond_to_event, self.respond_to_event),
         )
         tools: list[Callable[..., str]] = [method for enabled, method in read_toggles if enabled]
-        tools.extend(method for flag, method in write_toggles if writes_allowed and (flag is None or flag))
+        tools.extend(method for flag, method in write_toggles if writes_allowed and (flag is _UNSET or bool(flag)))
+        tools = filter_google_tools(tools, include_tools, exclude_tools)
 
         super().__init__(
             name="google_calendar",

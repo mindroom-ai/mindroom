@@ -1155,8 +1155,18 @@ def test_gmail_readonly_scopes_reject_write_operations_even_with_write_creds(
         ),
         (
             ["https://www.googleapis.com/auth/gmail.compose"],
-            ["create_draft_email", "send_email"],
-            {"create_draft_email", "send_email"},
+            ["create_draft_email", "send_email", "get_draft", "list_drafts"],
+            {"create_draft_email", "send_email", "get_draft", "list_drafts"},
+        ),
+        (
+            ["https://www.googleapis.com/auth/gmail.compose"],
+            ["get_draft", "list_drafts"],
+            {"get_draft", "list_drafts"},
+        ),
+        (
+            ["https://www.googleapis.com/auth/gmail.readonly"],
+            ["get_draft", "list_drafts"],
+            {"get_draft", "list_drafts"},
         ),
         (
             ["https://www.googleapis.com/auth/gmail.modify"],
@@ -1181,3 +1191,56 @@ def test_gmail_granular_write_scopes_allow_matching_operations(
     )
 
     assert set(gmail_tools.functions) == expected_functions
+
+
+def test_gmail_compose_and_send_scopes_reject_unauthorized_reads(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Draft-compose scope must not authorize mailbox reads, and send-only scope must not read drafts."""
+    write_capable_creds = GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("https://mail.google.com/",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
+
+    with pytest.raises(ValueError, match="email reading operations"):
+        GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            creds=write_capable_creds,
+            include_tools=["get_latest_emails"],
+            scopes=["https://www.googleapis.com/auth/gmail.compose"],
+        )
+
+    with pytest.raises(ValueError, match="draft reading operations"):
+        GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            creds=write_capable_creds,
+            include_tools=["get_draft"],
+            scopes=["https://www.googleapis.com/auth/gmail.send"],
+        )
+
+
+def test_gmail_explicit_none_toggles_disable_operations(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Explicit None toggles disable Gmail functions instead of enabling them."""
+    gmail_tools = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=mock_credentials_manager,
+        send_email=None,
+        send_email_reply=None,
+        create_draft_email=None,
+    )
+
+    assert "send_email" not in gmail_tools.functions
+    assert "send_email_reply" not in gmail_tools.functions
+    assert "create_draft_email" not in gmail_tools.functions
+    assert "get_latest_emails" in gmail_tools.functions

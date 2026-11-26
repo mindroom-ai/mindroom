@@ -418,3 +418,69 @@ def test_google_sheets_readonly_scopes_reject_write_operations_even_with_write_c
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     assert "update_sheet" in writable_tool.functions
+
+
+def test_google_sheets_explicit_none_toggles_disable_operations(tmp_path: Path) -> None:
+    direct_read_only = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        create=None,
+        update=None,
+    )
+    assert set(direct_read_only.functions) == {"read_sheet"}
+    assert direct_read_only.scopes == ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+    direct_alias_read_only = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        create_sheet=None,
+        update_sheet=None,
+    )
+    assert set(direct_alias_read_only.functions) == {"read_sheet"}
+
+    direct_all_disabled = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        read=None,
+        create=None,
+        update=None,
+        create_duplicate_sheet=None,
+    )
+    assert direct_all_disabled.functions == {}
+    assert direct_all_disabled.scopes == []
+
+    with pytest.raises(ValueError, match="received both 'create' and 'create_sheet'"):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            create=None,
+            create_sheet=None,
+        )
+
+    override_tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"create": None, "update": None},
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(override_tool, GoogleSheetsTools)
+    assert set(override_tool.functions) == {"read_sheet"}
+
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_sheets",
+        {"create": None, "update": None, "_source": "ui"},
+    )
+    saved_config_tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(saved_config_tool, GoogleSheetsTools)
+    assert set(saved_config_tool.functions) == {"read_sheet"}
