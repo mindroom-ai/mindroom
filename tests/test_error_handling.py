@@ -23,6 +23,7 @@ from mindroom.llm.errors import (
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     QUOTA_EXHAUSTED,
+    SAFEGUARD_REFUSAL,
     STREAM_STALLED,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
@@ -489,6 +490,38 @@ def test_log_reply_error_returns_unprefixed_plain_text_and_logs_structured_field
     assert entry["agent"] == "mindroom_dev"
     assert entry["error_code"] == STREAM_STALLED
     assert entry["status_code"] == 504
+
+
+def test_log_reply_error_logs_safeguard_refusal_at_warning_and_other_errors_at_error() -> None:
+    """log_reply_error logs ModelSafeguardRefusal at warning with all structured fields and other errors at error."""
+    refusal = ModelSafeguardRefusal(provider="OpenRouter", usage=MessageMetrics(), provider_code="content_filter")
+    unavailable = ProviderUnavailable("gateway error", provider="OpenRouter", status_code=503)
+
+    with capture_logs() as logs:
+        log_reply_error(refusal, "mindroom_dev", model_label="Neon")
+        log_reply_error(unavailable, "mindroom_dev", model_label="Neon")
+
+    refusal_entry, unavailable_entry = [log for log in logs if log["event"] == "agent_error"]
+    assert refusal_entry == {
+        "event": "agent_error",
+        "log_level": "warning",
+        "agent": "mindroom_dev",
+        "error_type": "ModelSafeguardRefusal",
+        "error": repr(refusal),
+        "error_code": SAFEGUARD_REFUSAL,
+        "status_code": None,
+        "provider": "OpenRouter",
+    }
+    assert unavailable_entry == {
+        "event": "agent_error",
+        "log_level": "error",
+        "agent": "mindroom_dev",
+        "error_type": "ProviderUnavailable",
+        "error": repr(unavailable),
+        "error_code": None,
+        "status_code": 503,
+        "provider": "OpenRouter",
+    }
 
 
 def test_model_error_labels_prefers_display_name_over_id() -> None:
