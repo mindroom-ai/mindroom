@@ -1162,6 +1162,8 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("visualization", "create_histogram", "create_chart"),
         ("unsplash", "search_photos", "unsplash"),
         ("unsplash", "download_photo", "unsplash"),
+        ("e2b", "list_files", "e2b_inspect"),
+        ("daytona", "list_files", "daytona_inspect"),
         ("email", "email_user", "smtp_send_email"),
         ("twilio", "get_call_details", "twilio_read"),
         ("discord", "get_channel_messages", "discord_read"),
