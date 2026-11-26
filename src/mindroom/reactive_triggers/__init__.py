@@ -24,12 +24,15 @@ from mindroom.reactive_triggers.external_sources import (
     verify_and_normalize_hmac_webhook,
 )
 from mindroom.reactive_triggers.github_pr import (
+    WebhookPRMatch,
+    check_github_pr_source_access,
+    find_covering_github_webhook_source,
+    match_github_webhook_to_pr_rule,
+)
+from mindroom.reactive_triggers.github_pr_poller import (
     GitHubPRPoller,
     GitHubPRWatchError,
     SeededPRState,
-    WebhookPRMatch,
-    find_covering_github_webhook_source,
-    match_github_webhook_to_pr_rule,
     seed_github_pr_watch,
 )
 from mindroom.reactive_triggers.matching import (
@@ -116,6 +119,7 @@ __all__ = (
     "build_reactive_trigger_body",
     "build_reactive_trigger_transaction_id",
     "check_external_event_source_access",
+    "check_github_pr_source_access",
     "check_reactive_source_access",
     "check_reactive_target_access",
     "dispatch_reactive_trigger",

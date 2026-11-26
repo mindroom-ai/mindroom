@@ -705,7 +705,7 @@ class ReactiveTriggerStore:
             record = _record_from_row(row)
             if not isinstance(record.source, GitHubPRSourceSpec) or record.source.webhook_source_id is not None:
                 continue
-            checkpoint = _github_pr_checkpoint_from_joined_row(row)
+            checkpoint = None if row["cp_trigger_id"] is None else _github_pr_checkpoint_from_row(row, prefix="cp_")
             results.append((record, checkpoint))
         return results
 
@@ -850,7 +850,10 @@ class ReactiveTriggerStore:
                 """,
                 (reason, now, firing_id),
             )
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                _disable_rule_if_pr_closed(conn, firing_id=firing_id, now=now)
+                return True
+            return False
 
     def can_claim_now(
         self,
@@ -953,6 +956,7 @@ class ReactiveTriggerStore:
                     """,
                     (triage_reason, blocked_reason, current_time, firing_id),
                 )
+                _disable_rule_if_pr_closed(conn, firing_id=firing_id, now=current_time)
                 return blocked_reason
 
             conn.execute(
@@ -969,55 +973,42 @@ class ReactiveTriggerStore:
                 """,
                 (triage_reason, current_time, current_time, firing_id),
             )
-            record = _record_from_row(trigger)
-            is_terminal_pr_close = False
-            if isinstance(record.source, GitHubPRSourceSpec) and record.source.auto_disable_on_close:
-                try:
-                    event_payload = json.loads(str(firing["event_json"]))
-                    event_data = event_payload.get("data") if isinstance(event_payload, dict) else None
-                    is_terminal_pr_close = isinstance(event_data, dict) and event_data.get("terminal") is True
-                except (ValueError, TypeError):
-                    is_terminal_pr_close = False
-
             if bool(trigger["once"]):
-                new_enabled = 0
-                new_disabled_reason: DisabledReason | None = "once_consumed"
-            elif is_terminal_pr_close:
-                new_enabled = 0
-                new_disabled_reason = "pr_closed"
+                updated_record = _record_from_row(trigger).model_copy(
+                    update={
+                        "fire_count": int(trigger["fire_count"]) + 1,
+                        "last_fired_at": current_time,
+                        "enabled": False,
+                        "disabled_reason": "once_consumed",
+                        "updated_at": current_time,
+                    },
+                )
+                conn.execute(
+                    """
+                    UPDATE reactive_triggers
+                    SET fire_count = fire_count + 1,
+                        last_fired_at = ?,
+                        enabled = 0,
+                        disabled_reason = 'once_consumed',
+                        spec_json = ?,
+                        updated_at = ?
+                    WHERE trigger_id = ?
+                    """,
+                    (current_time, updated_record.model_dump_json(), current_time, trigger_id),
+                )
             else:
-                new_enabled = int(trigger["enabled"])
-                new_disabled_reason = trigger["disabled_reason"]
-
-            updated_record = record.model_copy(
-                update={
-                    "fire_count": int(trigger["fire_count"]) + 1,
-                    "last_fired_at": current_time,
-                    "enabled": bool(new_enabled),
-                    "disabled_reason": new_disabled_reason,
-                    "updated_at": current_time,
-                },
-            )
-            conn.execute(
-                """
-                UPDATE reactive_triggers
-                SET fire_count = fire_count + 1,
-                    last_fired_at = ?,
-                    enabled = ?,
-                    disabled_reason = ?,
-                    spec_json = ?,
-                    updated_at = ?
-                WHERE trigger_id = ?
-                """,
-                (
-                    current_time,
-                    new_enabled,
-                    new_disabled_reason,
-                    updated_record.model_dump_json(),
-                    current_time,
-                    trigger_id,
-                ),
-            )
+                conn.execute(
+                    """
+                    UPDATE reactive_triggers
+                    SET fire_count = fire_count + 1,
+                        last_fired_at = ?,
+                        updated_at = ?
+                    WHERE trigger_id = ?
+                    """,
+                    (current_time, current_time, trigger_id),
+                )
+                if str(trigger["source_type"]) == "github_pr":
+                    _disable_rule_if_pr_closed(conn, firing_id=firing_id, now=current_time)
             return "claimed"
 
     def _retry_firing(
@@ -1141,7 +1132,10 @@ class ReactiveTriggerStore:
                 """,
                 (reason, current_time, firing_id),
             )
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                _disable_rule_if_pr_closed(conn, firing_id=firing_id, now=current_time)
+                return True
+            return False
 
     def list_due_firings(self, *, now: float | None = None, limit: int = 50) -> list[FiringRecord]:
         """Return due pending and claimed firings ordered by id ASC, isolating corrupt rows."""
@@ -1403,34 +1397,72 @@ def _upsert_github_pr_checkpoint(
     )
 
 
-def _github_pr_checkpoint_from_row(row: sqlite3.Row) -> GitHubPRCheckpoint:
-    raw_state = json.loads(str(row["state_json"]))
+def _github_pr_checkpoint_from_row(row: sqlite3.Row, *, prefix: str = "") -> GitHubPRCheckpoint:
+    raw_state = json.loads(str(row[f"{prefix}state_json"]))
     state = raw_state if isinstance(raw_state, dict) else {}
     return GitHubPRCheckpoint(
-        head_sha=row["head_sha"],
-        pr_state=row["pr_state"],
-        seeded=bool(row["seeded"]),
-        next_poll_at=float(row["next_poll_at"]),
-        consecutive_errors=int(row["consecutive_errors"]),
+        head_sha=row[f"{prefix}head_sha"],
+        pr_state=row[f"{prefix}pr_state"],
+        seeded=bool(row[f"{prefix}seeded"]),
+        next_poll_at=float(row[f"{prefix}next_poll_at"]),
+        consecutive_errors=int(row[f"{prefix}consecutive_errors"]),
         state=state,
-        updated_at=float(row["updated_at"]),
+        updated_at=float(row[f"{prefix}updated_at"]),
     )
 
 
-def _github_pr_checkpoint_from_joined_row(row: sqlite3.Row) -> GitHubPRCheckpoint | None:
-    if row["cp_trigger_id"] is None:
-        return None
-    raw_state = json.loads(str(row["cp_state_json"]))
-    state = raw_state if isinstance(raw_state, dict) else {}
-    return GitHubPRCheckpoint(
-        head_sha=row["cp_head_sha"],
-        pr_state=row["cp_pr_state"],
-        seeded=bool(row["cp_seeded"]),
-        next_poll_at=float(row["cp_next_poll_at"]),
-        consecutive_errors=int(row["cp_consecutive_errors"]),
-        state=state,
-        updated_at=float(row["cp_updated_at"]),
+def _is_terminal_pr_close_event(event_json: str) -> bool:
+    try:
+        event_payload = json.loads(event_json)
+    except (ValueError, TypeError):
+        return False
+    event_data = event_payload.get("data") if isinstance(event_payload, dict) else None
+    return isinstance(event_data, dict) and event_data.get("terminal") is True
+
+
+def _disable_rule_if_pr_closed(conn: sqlite3.Connection, *, firing_id: int, now: float) -> bool:
+    """Atomically disable an enabled github_pr trigger with 'pr_closed' for a terminal firing."""
+    firing = conn.execute(
+        "SELECT trigger_id, rule_uid, event_json FROM trigger_firings WHERE id = ?",
+        (firing_id,),
+    ).fetchone()
+    if firing is None:
+        return False
+    trigger = conn.execute(
+        """
+        SELECT * FROM reactive_triggers
+        WHERE trigger_id = ? AND rule_uid = ? AND enabled = 1 AND source_type = 'github_pr'
+        """,
+        (str(firing["trigger_id"]), str(firing["rule_uid"])),
+    ).fetchone()
+    if trigger is None:
+        return False
+    record = _record_from_row(trigger)
+    if not (
+        isinstance(record.source, GitHubPRSourceSpec)
+        and record.source.auto_disable_on_close
+        and _is_terminal_pr_close_event(str(firing["event_json"]))
+    ):
+        return False
+    disabled_record = record.model_copy(
+        update={
+            "enabled": False,
+            "disabled_reason": "pr_closed",
+            "updated_at": now,
+        },
     )
+    conn.execute(
+        """
+        UPDATE reactive_triggers
+        SET enabled = 0,
+            disabled_reason = 'pr_closed',
+            spec_json = ?,
+            updated_at = ?
+        WHERE trigger_id = ? AND rule_uid = ? AND enabled = 1
+        """,
+        (disabled_record.model_dump_json(), now, record.trigger_id, record.rule_uid),
+    )
+    return True
 
 
 def _insert_pending_firing(

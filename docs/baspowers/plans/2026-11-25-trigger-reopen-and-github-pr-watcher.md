@@ -18,7 +18,7 @@
 - Backwards-compatible Pydantic models (`extra="forbid"`): every new field has a safe default so existing `reactive_triggers.db` and `triggers.json` records load cleanly.
 - SQLite schema migration `1 -> 2` in `ReactiveTriggerStore._initialize_database()` preserves existing rows while still rejecting unknown/newer versions.
 - Strict module boundaries (`uv run --with tach tach check --dependencies --interfaces`), slim config imports (`tests/test_config_architecture_boundaries.py`, `tests/test_import_graph.py`), and regenerated `src/mindroom/tools_metadata.json` + `frontend/src/test/fixtures/config-schema.json`.
-- Hardcoded `https://api.github.com` only, no process `GITHUB_TOKEN`, no cross-user credential sharing, no `pull-request-plugin` changes, and no `*_AP_*` names anywhere.
+- Hardcoded `https://api.github.com` only, no process `GITHUB_TOKEN`, no cross-user credential sharing, no `pull-request-plugin` changes, and no private work-key variable names anywhere.
 - Every commit includes `--trailer "Assisted-by: MindRoom DevAgent:<model_id> <https://github.com/mindroom-ai/mindroom>"`.
 
 ## Review Focus

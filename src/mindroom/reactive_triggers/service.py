@@ -28,7 +28,7 @@ from mindroom.reactive_triggers.dispatch import (
     check_room_source_owner_authorization,
     dispatch_reactive_trigger,
 )
-from mindroom.reactive_triggers.github_pr import GitHubPRPoller
+from mindroom.reactive_triggers.github_pr_poller import GitHubPRPoller
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
 from mindroom.reactive_triggers.models import (
     FiringRecord,

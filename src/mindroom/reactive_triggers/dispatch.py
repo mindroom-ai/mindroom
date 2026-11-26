@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
-from mindroom.config.external_trigger_policy import GitHubEventSourceConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
@@ -18,10 +17,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
-from mindroom.reactive_triggers.external_sources import (
-    check_external_event_source_access,
-    is_source_subscriber_allowed,
-)
+from mindroom.reactive_triggers.external_sources import check_external_event_source_access
+from mindroom.reactive_triggers.github_pr import check_github_pr_source_access
 from mindroom.reactive_triggers.matching import REACTIVE_TRIGGER_DEDUPE_KEY, REACTIVE_TRIGGER_ID_KEY
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
@@ -151,12 +148,14 @@ async def check_reactive_source_access(
         return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
     if isinstance(source, GitHubPRSourceSpec):
-        return _check_github_pr_source_access(
+        reason = check_github_pr_source_access(
             owner_user_id=rule.owner_user_id,
-            source=source,
+            source_spec=source,
+            event=event,
             config=config,
             runtime_paths=runtime_paths,
         )
+        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
         return await _check_room_source_access(
@@ -169,28 +168,6 @@ async def check_reactive_source_access(
             memberships=memberships,
             known_room_states=known_room_states,
         )
-    return None
-
-
-def _check_github_pr_source_access(
-    *,
-    owner_user_id: str,
-    source: GitHubPRSourceSpec,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> DispatchResult | None:
-    if source.webhook_source_id is None:
-        if not config.external_trigger_policy.github_pr_polling_enabled:
-            return DispatchResult(status="skipped", reason="github_pr_polling_disabled")
-        return None
-    gh_source = config.external_trigger_policy.event_sources.get(source.webhook_source_id)
-    if not isinstance(gh_source, GitHubEventSourceConfig):
-        return DispatchResult(status="skipped", reason="source_removed")
-    if not is_source_subscriber_allowed(gh_source, owner_user_id, config, runtime_paths):
-        return DispatchResult(status="skipped", reason="source_subscriber_revoked")
-    repo_lower = source.repo.lower()
-    if not any(allowed.lower() == repo_lower for allowed in gh_source.allowed_repos):
-        return DispatchResult(status="skipped", reason="source_grant_revoked")
     return None
 
 
