@@ -369,7 +369,8 @@ class _ExaTools(Toolkit):
             if self.show_results:
                 logger.info("exa_research_run_created", run_id=run_id)
 
-            terminal_run = self.exa.agent.runs.poll_until_finished(run_id)
+            poll_kwargs = {"timeout_ms": int(self.timeout * 1000)} if self.timeout is not None else {}
+            terminal_run = self.exa.agent.runs.poll_until_finished(run_id, **poll_kwargs)
             result = self._serialize_research_run(terminal_run)
             if self.show_results and "error" not in result:
                 logger.info("exa_research_completed", run_id=run_id)

@@ -242,7 +242,7 @@ Function names derive from the Actor ID, so check the agent's tool list for the 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `apify_api_token` | `password` | `null` | Falls back to `APIFY_API_TOKEN`. |
-| `actors` | `text` | `null` | One Actor ID, such as `apify/rag-web-browser`; a comma-separated list is treated as a single ID. |
+| `actors` | `text` | `null` | One Actor ID or comma-separated list of Actor IDs, such as `apify/rag-web-browser,compass/crawler-google-places`. |
 
 ```yaml
 agents:

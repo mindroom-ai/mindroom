@@ -5,9 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import jsonschema
 import requests
 
-from mindroom.tool_system.authoring import passthrough_parameters
+from mindroom.tool_system.authoring import authored_description, passthrough_parameters
 from mindroom.tools import apify as apify_module
 
 if TYPE_CHECKING:
@@ -124,7 +125,8 @@ def test_apify_schema_preserves_start_urls_editors_and_declared_nested_schemas()
     assert props["startUrls"]["type"] == "array"
     assert props["startUrls"]["items"]["type"] == "object"
     assert props["startUrls"]["items"]["properties"]["url"]["type"] == "string"
-    assert props["startUrls"]["items"]["required"] == ["url"]
+    assert props["startUrls"]["items"]["properties"]["requestsFromUrl"]["type"] == "string"
+    assert "required" not in props["startUrls"]["items"]
     assert props["startUrls"]["default"] == [{"url": "https://apify.com"}]
     assert "editor" not in props["startUrls"]
     assert "prefill" not in props["startUrls"]
@@ -282,3 +284,71 @@ def test_apify_falls_back_to_authenticated_default_build_client(monkeypatch: pyt
     assert actor_client.default_build_calls == 1
     assert default_build_client.get_calls == 1
     assert "apify_actor_org_actor" in toolkit.functions
+
+
+def test_apify_request_list_sources_schema_accepts_url_and_requests_from_url() -> None:
+    """Apify requestListSources items must accept both single-URL and Crawlee bulk-import requestsFromUrl forms."""
+    schema = apify_module._actor_input_to_json_schema(
+        {
+            "properties": {
+                "startUrls": {
+                    "type": "array",
+                    "description": "URLs to crawl",
+                    "editor": "requestListSources",
+                },
+            },
+            "required": ["startUrls"],
+        },
+    )
+
+    jsonschema.validate({"startUrls": [{"url": "https://example.org"}]}, schema)
+    jsonschema.validate({"startUrls": [{"requestsFromUrl": "https://example.org/urls.txt"}]}, schema)
+
+
+def test_apify_tool_description_does_not_duplicate_parameter_descriptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registered Apify tools must pass actor_description directly without duplicating parameter docs."""
+    param_description = "Unique parameter guidance that belongs only in parameters_schema"
+    build_data = {
+        "id": "build-desc-1",
+        "actorDefinition": {
+            "description": "Concise Actor summary.",
+            "input": {
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": param_description,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+    build_client = _FakeBuildClient(build_data)
+    actor_client = _FakeActorClient(
+        {
+            "id": "act-desc-1",
+            "defaultRunOptions": {"build": "latest"},
+            "taggedBuilds": {"latest": {"buildId": "build-desc-1"}},
+        },
+    )
+
+    def fake_client_cls(token: str) -> _FakeApifyClient:
+        return _FakeApifyClient(
+            token,
+            actors={"apify/rag-web-browser": actor_client},
+            builds={"build-desc-1": build_client},
+        )
+
+    monkeypatch.setattr(apify_module, "_require_apify", lambda: fake_client_cls)
+    apify_key = "apify-auth-value"
+
+    toolkit = apify_module.apify_tools()(actors="apify/rag-web-browser", apify_api_token=apify_key)
+    fn = toolkit.functions["apify_actor_apify_rag-web-browser"]
+    description = authored_description(fn)
+    params = passthrough_parameters(fn)
+
+    assert description == "Concise Actor summary."
+    assert param_description not in description
+    assert "Args:" not in description
+    assert params is not None
+    assert params["properties"]["query"]["description"] == param_description

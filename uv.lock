@@ -4499,7 +4499,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'duckdb'" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'" },
     { name = "elevenlabs", marker = "extra == 'eleven-labs'" },
-    { name = "exa-py", marker = "extra == 'exa'" },
+    { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.29.0" },
     { name = "fal-client", marker = "extra == 'fal'" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = ">=3" },

@@ -20,14 +20,14 @@ class _FakeAgentRuns:
         self._created_run = created_run
         self._terminal_run = terminal_run
         self.create_calls: list[dict[str, Any]] = []
-        self.poll_calls: list[str] = []
+        self.poll_calls: list[tuple[str, int | None]] = []
 
     def create(self, **kwargs: Any) -> AgentRun:  # noqa: ANN401
         self.create_calls.append(kwargs)
         return self._created_run
 
-    def poll_until_finished(self, run_id: str) -> AgentRun:
-        self.poll_calls.append(run_id)
+    def poll_until_finished(self, run_id: str, *, timeout_ms: int | None = None) -> AgentRun:
+        self.poll_calls.append((run_id, timeout_ms))
         return self._terminal_run
 
 
@@ -94,7 +94,7 @@ def test_exa_configures_sdk_timeout_and_runs_research_via_agent_runs(monkeypatch
             "output_schema": output_schema,
         },
     ]
-    assert fake_runs.poll_calls == ["run_123"]
+    assert fake_runs.poll_calls == [("run_123", 45_000)]
     assert parsed == {
         "id": "run_123",
         "status": "completed",
@@ -146,8 +146,8 @@ def test_exa_research_handles_text_output_failed_and_timeout(monkeypatch: pytest
     assert json.loads(tool.research("Explain Exa")) == {"error": "Upstream budget exceeded"}
 
     class _TimeoutRuns(_FakeAgentRuns):
-        def poll_until_finished(self, run_id: str) -> AgentRun:
-            del run_id
+        def poll_until_finished(self, run_id: str, *, timeout_ms: int | None = None) -> AgentRun:
+            del run_id, timeout_ms
             msg = "timed out"
             raise ExaTimeoutError(msg)
 

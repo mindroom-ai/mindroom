@@ -781,7 +781,7 @@ A request moves to the next model when its provider reports a reached quota, cre
 It never moves on an invalid request, a conversation larger than the context window, a safeguard refusal, or a reply the user stopped, since another model would fail the same way.
 A request switches models only before it has streamed any text or tool call, so nothing is written or run twice; a failure after that ends the reply as it would without fallbacks.
 A fallback that has `fallbacks` of its own tries them right after itself, and when every model fails the reply reports the last model's error.
-When a provider says when its limit resets, as Codex and Claude subscriptions do, MindRoom tries that model last until then.
+When a provider says when its limit resets, as Codex and Claude subscriptions do, MindRoom tries that model last until then; an uncommitted unavailability failure without a reset time also moves that model last for 2 minutes.
 A reply at `name@level` runs each fallback at that level when the fallback lists it, and at the fallback's default level otherwise.
 A fallback whose `context_window` is too small for the conversation is skipped, so give fallbacks at least the first model's window.
 A finished reply answered by a fallback shows the answering model, names the model it stood in for as `fallback_from` in its run metadata, and counts usage and cost under the model that billed them.

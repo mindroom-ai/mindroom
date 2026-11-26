@@ -126,8 +126,12 @@ def _array_items_schema(raw: dict[str, Any]) -> dict[str, Any]:
             "description": "Request list source",
             "properties": {
                 "url": {"title": "URL", "type": "string", "description": "URL of the request list source"},
+                "requestsFromUrl": {
+                    "title": "Requests from URL",
+                    "type": "string",
+                    "description": "URL of a text file containing a list of URLs to crawl",
+                },
             },
-            "required": ["url"],
         }
     if editor == "keyValue":
         return {
@@ -298,18 +302,8 @@ class _ApifyTools(Toolkit):
                 return
 
             parameters_schema = _actor_input_to_json_schema(actor_input)
-            properties = parameters_schema["properties"]
-            required = parameters_schema["required"]
 
-            docstring = f"{actor_description}\n\nArgs:\n"
-            for param_name, param_info in properties.items():
-                param_type = param_info.get("type", "any")
-                param_desc = param_info.get("description", "No description available")
-                required_marker = "(required)" if param_name in required else "(optional)"
-                docstring += f"    {param_name} ({param_type}): {required_marker} {param_desc}\n"
-            docstring += "\nReturns:\n    str: JSON string containing the Actor's output dataset\n"
-
-            @passthrough_tool(name=tool_name, description=docstring, parameters=parameters_schema)
+            @passthrough_tool(name=tool_name, description=actor_description, parameters=parameters_schema)
             def actor_function(**kwargs: Any) -> str:  # noqa: ANN401
                 try:
                     return self._run_actor(actor_id, kwargs)
