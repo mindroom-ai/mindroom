@@ -13,6 +13,7 @@ from daytona_api_client import Configuration
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -55,7 +56,7 @@ def test_docker_inspect_container_resource_and_include_tools() -> None:
     inspect_only = docker_cls(include_tools=["docker_inspect"])
     assert set(inspect_only.functions) == {"docker_inspect"}
     with pytest.raises(ValueError, match="not present in the toolkit"):
-        docker_cls(include_tools=["list_containers"])
+        docker_cls(include_tools=["not_a_real_docker_tool"])
 
     c1 = _FakeDockerContainer("cid-1", "web", image=None)  # dangling/deleted image
     net_events: list[str] = []
@@ -217,3 +218,127 @@ def test_wave6_batch4_action_scoped_grants_and_fail_closed_migration(tmp_path: P
                 },
                 runtime_paths,
             )
+
+
+def test_docker_legacy_include_tools_narrows_schema_and_runtime_dispatch() -> None:
+    """Legacy Docker function names in include_tools narrow both the offered action enum and runtime dispatch."""
+    docker_cls = cast("Any", builtin_tool_registry().factory("docker")())
+    c1 = _FakeDockerContainer("cid-stop", "web")
+    fake_client = SimpleNamespace(
+        containers=SimpleNamespace(
+            get=lambda _cid: c1,
+            run=lambda **_kw: (_ for _ in ()).throw(AssertionError("run must not be called")),
+        ),
+    )
+
+    stop_only = docker_cls(include_tools=["stop_container"])
+    stop_only._client = fake_client
+    assert set(stop_only.functions) == {"docker_container"}
+
+    adapted = adapt_toolkit(stop_only)
+    assert [fn.name for fn in adapted.functions] == ["docker_container"]
+    assert adapted.functions[0].parameters["properties"]["action"]["enum"] == ["stop"]
+
+    assert "stopped successfully" in stop_only.docker_container("stop", container_id="web", timeout=3)
+    assert c1.events == ["stop:3"]
+    for blocked in ("remove", "exec", "run", "start"):
+        msg = stop_only.docker_container(blocked, container_id="web", image="alpine", command="id")
+        assert "disabled" in msg
+    assert c1.events == ["stop:3"]
+
+    mixed = docker_cls(include_tools=["docker_inspect", "stop_container"])
+    assert set(mixed.functions) == {"docker_inspect", "docker_container"}
+
+
+def test_docker_client_isolates_ambient_docker_config_for_pull_and_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker client pinning prevents docker-py pull/build from reloading ambient DOCKER_CONFIG credentials."""
+    import docker.auth  # noqa: PLC0415
+    from docker.api.build import BuildApiMixin  # noqa: PLC0415
+
+    import mindroom.tools.docker as docker_module  # noqa: PLC0415
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "auths": {"https://index.docker.io/v1/": {"auth": "dXNlcjpzZWNyZXQ="}},
+                "proxies": {"default": {"httpProxy": "http://ambient-proxy:8080"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+
+    fake_api = SimpleNamespace(credstore_env=None, _auth_configs=None, _proxy_configs=None, _general_configs=None)
+    fake_client = SimpleNamespace(api=fake_api)
+    docker_module._isolate_docker_client(fake_client)
+
+    assert docker.auth.get_config_header(fake_api, "docker.io") is None
+    headers: dict[str, str] = {}
+    BuildApiMixin._set_auth_headers(fake_api, headers)
+    assert headers == {}
+    assert fake_api._proxy_configs.get_environment() == {}
+
+    build_kwargs: list[dict[str, object]] = []
+    docker_cls = cast("Any", builtin_tool_registry().factory("docker")())
+    tool = docker_cls()
+    tool._client = SimpleNamespace(
+        images=SimpleNamespace(
+            build=lambda **kw: (build_kwargs.append(dict(kw)) or SimpleNamespace(id="b1"), []),
+        ),
+    )
+    assert "b1" in tool.docker_resource("build_image", path=".", tag="app:test")
+    assert build_kwargs[0]["use_config_proxy"] is False
+
+
+def test_daytona_rejects_ambient_target_and_org_before_sdk_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient DAYTONA_TARGET / DAYTONA_ORGANIZATION_ID fail closed before Daytona(config) constructs services."""
+    import daytona  # noqa: PLC0415
+
+    daytona_cls = cast("Any", builtin_tool_registry().factory("daytona")())
+    constructed: list[object] = []
+
+    def spy_daytona(config: object) -> object:
+        constructed.append(config)
+        return SimpleNamespace(_api_client=None, _http_client=None)
+
+    monkeypatch.setattr(daytona, "Daytona", spy_daytona)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DAYTONA_TARGET", raising=False)
+    monkeypatch.delenv("DAYTONA_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("DAYTONA_JWT_TOKEN", raising=False)
+
+    monkeypatch.setenv("DAYTONA_TARGET", "ambient-eu")
+    with pytest.raises(ValueError, match="DAYTONA_TARGET"):
+        daytona_cls(api_key="dt-scoped")._get_client()
+    assert constructed == []
+    monkeypatch.delenv("DAYTONA_TARGET")
+
+    monkeypatch.setenv("DAYTONA_ORGANIZATION_ID", "ambient-org")
+    with pytest.raises(ValueError, match="DAYTONA_ORGANIZATION_ID"):
+        daytona_cls(api_key="dt-scoped")._get_client()
+    assert constructed == []
+    monkeypatch.delenv("DAYTONA_ORGANIZATION_ID")
+
+    # Dotenv files in CWD are also blocked before Daytona() runs.
+    (tmp_path / ".env").write_text("DAYTONA_TARGET=dotenv-region\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="DAYTONA_TARGET"):
+        daytona_cls(api_key="dt-scoped")._get_client()
+    assert constructed == []
+
+    # Explicit scoped values succeed and pass explicit target/org/polling/otel settings.
+    monkeypatch.setenv("DAYTONA_TARGET", "ambient-eu")
+    monkeypatch.setenv("DAYTONA_ORGANIZATION_ID", "ambient-org")
+    tool = daytona_cls(api_key="dt-scoped", sandbox_target="us", organization_id="scoped-org")
+    tool._get_client()
+    assert len(constructed) == 1
+    cfg = constructed[0]
+    assert getattr(cfg, "target", None) == "us"
+    assert getattr(cfg, "organization_id", None) == "scoped-org"
+    assert getattr(cfg, "use_deprecated_polling", None) is False
+    assert getattr(cfg, "otel_enabled", None) is False

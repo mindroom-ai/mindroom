@@ -681,3 +681,49 @@ def test_background_commands_inspect_and_lifecycle(
     assert isinstance(tool.sandbox, _FakeSandbox)
     assert tool.sandbox.timeout_set == 120
     assert json.loads(tool.e2b_lifecycle("shutdown"))["status"] == "success"
+
+
+def test_e2b_pins_domain_and_fails_closed_on_ambient_e2b_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E2B pins domain='e2b.app' on create/list despite ambient E2B_DOMAIN and fails closed on E2B_DEBUG=true."""
+    create_calls: list[dict[str, object]] = []
+    list_calls: list[dict[str, object]] = []
+
+    class _RecordingPaginator:
+        def next_items(self) -> list[object]:
+            return []
+
+    class _RecordingSandbox(_FakeSandbox):
+        @classmethod
+        def create(cls, **kwargs: object) -> _RecordingSandbox:
+            create_calls.append(dict(kwargs))
+            return cls()
+
+        @staticmethod
+        def list(**kwargs: object) -> _RecordingPaginator:
+            list_calls.append(dict(kwargs))
+            return _RecordingPaginator()
+
+    monkeypatch.setattr(e2b_code_interpreter, "Sandbox", _RecordingSandbox)
+    monkeypatch.setenv("E2B_DOMAIN", "evil.example")
+    monkeypatch.setenv("E2B_DEBUG", "false")
+
+    tool = MindRoomE2BTools(api_key="scoped-e2b-key", timeout=120)
+    assert isinstance(tool.sandbox, _RecordingSandbox)
+    assert create_calls == [{"api_key": "scoped-e2b-key", "timeout": 120, "domain": "e2b.app", "debug": False}]
+    assert json.loads(tool.e2b_inspect("list_sandboxes")) == {"status": "success", "sandboxes": []}
+    assert list_calls == [{"api_key": "scoped-e2b-key", "domain": "e2b.app", "debug": False}]
+    real_cfg = ConnectionConfig(api_key="scoped-e2b-key", domain="e2b.app", debug=False)
+    assert real_cfg.api_url == "https://api.e2b.app"
+
+    # Ambient E2B_DEBUG=true fails closed before Sandbox.create or Sandbox.list runs.
+    monkeypatch.setenv("E2B_DEBUG", "true")
+    create_calls.clear()
+    list_calls.clear()
+    fresh = MindRoomE2BTools(api_key="scoped-e2b-key")
+    with pytest.raises(ValueError, match="E2B_DEBUG"):
+        _ = fresh.sandbox
+    assert create_calls == []
+    list_err = json.loads(fresh.e2b_inspect("list_sandboxes"))
+    assert list_err["status"] == "error"
+    assert "E2B_DEBUG" in list_err["message"]
+    assert list_calls == []

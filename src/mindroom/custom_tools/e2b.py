@@ -34,6 +34,7 @@ _E2BRunAction = Literal["python", "command", "stream_command", "background_comma
 _E2BInspectAction = Literal["list_files", "read_file", "watch_directory", "status", "list_sandboxes", "public_url"]
 _E2BFilesAction = Literal["write", "upload", "download", "download_png", "download_chart"]
 _E2BLifecycleAction = Literal["set_timeout", "shutdown"]
+_DEFAULT_E2B_DOMAIN = "e2b.app"
 
 
 def _write_within_root(root: Path, relative: Path, chunks: Iterable[bytes]) -> None:
@@ -110,6 +111,15 @@ def _run_code_within_read_limit(sandbox: Any, code: str) -> Any:  # noqa: ANN401
     return execution
 
 
+def _reject_ambient_e2b_debug() -> None:
+    """Fail closed when ambient ``E2B_DEBUG=true`` would force E2B SDK routing to localhost."""
+    from e2b.connection_config import ConnectionConfig  # noqa: PLC0415
+
+    if ConnectionConfig._debug():
+        msg = "Ambient E2B_DEBUG=true is set; refusing to redirect E2B traffic to http://localhost:3000."
+        raise ValueError(msg)
+
+
 def _error_json(message: str) -> str:
     return json.dumps({"status": "error", "message": message})
 
@@ -130,22 +140,15 @@ class MindRoomE2BTools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        if not isinstance(api_key, str) or not api_key.strip():
-            msg = "E2B API key is required."
-            raise ValueError(msg)
-        self.api_key = api_key.strip()
+        self.api_key = require_non_empty(api_key, "E2B API key")
         self.timeout = timeout
         self._workspace_root = tool_output_workspace_root
         self._file_access: FileAccess = file_access
         self._sandbox: Any | None = None
         self.last_execution: Any | None = None
-        self.downloaded_files: dict[int, str] = {}
         self._background_commands: dict[int, Any] = {}
 
-        super().__init__(
-            name="e2b_tools",
-            tools=[self.e2b_run, self.e2b_inspect, self.e2b_files, self.e2b_lifecycle],
-        )
+        super().__init__(name="e2b_tools", tools=[self.e2b_run, self.e2b_inspect, self.e2b_files, self.e2b_lifecycle])
 
     @property
     def sandbox(self) -> Any:  # noqa: ANN401 - optional e2b_code_interpreter.Sandbox
@@ -153,7 +156,13 @@ class MindRoomE2BTools(Toolkit):
         if self._sandbox is None:
             from e2b_code_interpreter import Sandbox  # noqa: PLC0415
 
-            self._sandbox = Sandbox.create(api_key=self.api_key, timeout=self.timeout)
+            _reject_ambient_e2b_debug()
+            self._sandbox = Sandbox.create(
+                api_key=self.api_key,
+                timeout=self.timeout,
+                domain=_DEFAULT_E2B_DOMAIN,
+                debug=False,
+            )
         return self._sandbox
 
     @sandbox.setter
@@ -192,8 +201,7 @@ class MindRoomE2BTools(Toolkit):
             elif result.chart:
                 chart_type = result.chart.to_dict().get("type", "unknown")
                 results.append(
-                    f"Result {number}: Generated interactive {chart_type} chart "
-                    "(use e2b_files action='download_chart' to save)",
+                    f"Result {number}: Generated interactive {chart_type} chart (use e2b_files action='download_chart' to save)",
                 )
             else:
                 results.append(f"Result {number}: Output available")
@@ -224,11 +232,11 @@ class MindRoomE2BTools(Toolkit):
             return _error_json(f"Error executing command: {exc}")
         if collect_stream:
             return json.dumps(streamed) if streamed else "Command completed with no output."
-        output: list[str] = []
-        if getattr(result, "stdout", None):
-            output.append(f"STDOUT:\n{result.stdout}")
-        if getattr(result, "stderr", None):
-            output.append(f"STDERR:\n{result.stderr}")
+        output = [
+            f"{label}:\n{value}"
+            for label, attr in (("STDOUT", "stdout"), ("STDERR", "stderr"))
+            if (value := getattr(result, attr, None))
+        ]
         return json.dumps(output) if output else "Command executed successfully with no output."
 
     def e2b_run(  # noqa: PLR0911
@@ -277,72 +285,7 @@ class MindRoomE2BTools(Toolkit):
             return _error_json(f"Error in e2b_run ({action}): {exc}")
         return _error_json(f"Unsupported action: {action}")
 
-    def _inspect_dispatch(  # noqa: C901, PLR0911
-        self,
-        action: _E2BInspectAction,
-        *,
-        path: str,
-        encoding: str,
-        duration_seconds: int,
-        port: int | None,
-    ) -> str:
-        if action == "list_files":
-            files = self.sandbox.files.list(path)
-            if not files:
-                return f"No files found in {path}"
-            lines = [f"Contents of {path}:"]
-            for entry in files:
-                entry_type = str(getattr(entry, "type", "")).lower()
-                label = "Directory" if entry_type in {"dir", "directory", "filetype.dir"} else "File"
-                size = f"{entry.size} bytes" if getattr(entry, "size", None) is not None else "Unknown size"
-                lines.append(f"- {entry.name} ({label}, {size})")
-            return "\n".join(lines) + "\n"
-        if action == "read_file":
-            with _sandbox_file_chunks(self.sandbox, require_non_empty(path, "path")) as chunks:
-                content = b"".join(chunks)
-            return content.decode(encoding, errors="replace")
-        if action == "watch_directory":
-            target = require_non_empty(path, "path")
-            watcher = self.sandbox.files.watch_dir(target)
-            changes: list[str] = []
-            try:
-                deadline = time.monotonic() + max(0, duration_seconds)
-                while time.monotonic() < deadline:
-                    changes.extend(f"{event.type} - {event.name}" for event in watcher.get_new_events())
-                    time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-            finally:
-                watcher.stop()
-            msg = (
-                f"Changes detected in {target} over {duration_seconds} seconds:\n" + "\n".join(changes)
-                if changes
-                else f"No changes detected in {target} over {duration_seconds} seconds"
-            )
-            return json.dumps({"status": "success", "message": msg})
-        if action == "status":
-            sandbox_id = getattr(self.sandbox, "sandbox_id", None) or getattr(self.sandbox, "id", "Unknown")
-            return str(sandbox_id)
-        if action == "list_sandboxes":
-            from e2b_code_interpreter import Sandbox  # noqa: PLC0415
-
-            paginator = Sandbox.list(api_key=self.api_key)
-            running = paginator.next_items()
-            info = [
-                {
-                    "sandbox_id": getattr(item, "sandbox_id", "Unknown"),
-                    "started_at": str(getattr(item, "started_at", "Unknown")),
-                    "template_id": getattr(item, "template_id", "Unknown"),
-                    "metadata": getattr(item, "metadata", {}),
-                }
-                for item in running
-            ]
-            return json.dumps({"status": "success", "sandboxes": info}, indent=2)
-        if action == "public_url":
-            if port is None:
-                return _error_json("port is required for public_url")
-            return f"http://{self.sandbox.get_host(port)}"
-        return _error_json(f"Unsupported action: {action}")
-
-    def e2b_inspect(
+    def e2b_inspect(  # noqa: C901, PLR0911
         self,
         action: _E2BInspectAction,
         path: str = "/",
@@ -360,36 +303,82 @@ class MindRoomE2BTools(Toolkit):
         - `public_url`: return public HTTP URL for sandbox `port`.
         """
         try:
-            result = self._inspect_dispatch(
-                action,
-                path=path,
-                encoding=encoding,
-                duration_seconds=duration_seconds,
-                port=port,
-            )
+            if action == "list_files":
+                files = self.sandbox.files.list(path)
+                if not files:
+                    return f"No files found in {path}"
+                lines = [f"Contents of {path}:"]
+                for entry in files:
+                    entry_type = str(getattr(entry, "type", "")).lower()
+                    label = "Directory" if entry_type in {"dir", "directory", "filetype.dir"} else "File"
+                    size = f"{entry.size} bytes" if getattr(entry, "size", None) is not None else "Unknown size"
+                    lines.append(f"- {entry.name} ({label}, {size})")
+                return "\n".join(lines) + "\n"
+            if action == "read_file":
+                with _sandbox_file_chunks(self.sandbox, require_non_empty(path, "path")) as chunks:
+                    return b"".join(chunks).decode(encoding, errors="replace")
+            if action == "watch_directory":
+                target = require_non_empty(path, "path")
+                watcher = self.sandbox.files.watch_dir(target)
+                changes: list[str] = []
+                try:
+                    deadline = time.monotonic() + max(0, duration_seconds)
+                    while time.monotonic() < deadline:
+                        changes.extend(f"{event.type} - {event.name}" for event in watcher.get_new_events())
+                        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                finally:
+                    watcher.stop()
+                summary = "\n".join(changes)
+                msg = (
+                    f"Changes detected in {target} over {duration_seconds} seconds:\n{summary}"
+                    if changes
+                    else f"No changes detected in {target} over {duration_seconds} seconds"
+                )
+                return json.dumps({"status": "success", "message": msg})
+            if action == "status":
+                return str(getattr(self.sandbox, "sandbox_id", None) or getattr(self.sandbox, "id", "Unknown"))
+            if action == "list_sandboxes":
+                from e2b_code_interpreter import Sandbox  # noqa: PLC0415
+
+                _reject_ambient_e2b_debug()
+                running = Sandbox.list(api_key=self.api_key, domain=_DEFAULT_E2B_DOMAIN, debug=False).next_items()
+                info = [
+                    {
+                        "sandbox_id": getattr(item, "sandbox_id", "Unknown"),
+                        "started_at": str(getattr(item, "started_at", "Unknown")),
+                        "template_id": getattr(item, "template_id", "Unknown"),
+                        "metadata": getattr(item, "metadata", {}),
+                    }
+                    for item in running
+                ]
+                return json.dumps({"status": "success", "sandboxes": info}, indent=2)
+            if action == "public_url":
+                return (
+                    _error_json("port is required for public_url")
+                    if port is None
+                    else f"http://{self.sandbox.get_host(port)}"
+                )
         except Exception as exc:
             return _error_json(f"Error in e2b_inspect ({action}): {exc}")
-        return result
+        return _error_json(f"Unsupported action: {action}")
 
-    def _download_png(self, result_index: int, output_path: str | None) -> ToolValue:
+    def _execution_result(self, result_index: int) -> tuple[Any | None, str | None]:
         if self.last_execution is None:
-            return ToolValue(content="No code has been executed yet")
+            return None, "No code has been executed yet"
         results = self.last_execution.results
         if result_index < 0 or result_index >= len(results):
-            return ToolValue(
-                content=f"Result index {result_index} is out of range. Only {len(results)} results available.",
-            )
-        png_b64 = results[result_index].png
-        if not png_b64:
+            return None, f"Result index {result_index} is out of range. Only {len(results)} results available."
+        return results[result_index], None
+
+    def _download_png(self, result_index: int, output_path: str | None) -> ToolValue:
+        result, error = self._execution_result(result_index)
+        if error is not None or result is None:
+            return ToolValue(content=error or "No code has been executed yet")
+        if not result.png:
             return ToolValue(content=f"Result at index {result_index} is not a PNG image")
-        png_bytes = base64.b64decode(png_b64)
+        png_bytes = base64.b64decode(result.png)
         image_id = str(uuid4())
-        image = Image(
-            id=image_id,
-            content=png_bytes,
-            mime_type="image/png",
-            original_prompt=f"Generated from code execution result {result_index}",
-        )
+        image = Image(id=image_id, content=png_bytes, mime_type="image/png", original_prompt=f"Result {result_index}")
         base_msg = f"Image added as artifact with ID {image_id}"
         if not output_path:
             return ToolValue(content=base_msg, images=(image,))
@@ -398,20 +387,14 @@ class MindRoomE2BTools(Toolkit):
             _write_within_root(root, relative, [png_bytes])
         except Exception as exc:
             return ToolValue(content=f"{base_msg}, but saving it failed: {exc}", images=(image,))
-        self.downloaded_files[result_index] = output_path
         return ToolValue(content=f"{base_msg} and saved to {output_path}", images=(image,))
 
     def _download_chart(self, result_index: int, output_path: str | None, *, add_as_artifact: bool) -> ToolValue:
-        if self.last_execution is None:
-            return ToolValue(content="No code has been executed yet")
-        results = self.last_execution.results
+        result, error = self._execution_result(result_index)
+        if error is not None or result is None:
+            prefix = "" if self.last_execution is None else "Error extracting chart data: "
+            return ToolValue(content=f"{prefix}{error or 'No code has been executed yet'}")
         target_path = output_path or f"chart-data-{result_index}.json"
-        if result_index < 0 or result_index >= len(results):
-            return ToolValue(
-                content=f"Error extracting chart data: Result index {result_index} is out of range "
-                f"(only {len(results)} results available).",
-            )
-        result = results[result_index]
         if result.chart is None:
             return ToolValue(content=f"Result at index {result_index} does not contain interactive chart data")
         try:
@@ -432,7 +415,7 @@ class MindRoomE2BTools(Toolkit):
         image_value = self._download_png(result_index, None)
         return ToolValue(content=f"{summary}\nChart image: {image_value.content}", images=image_value.images)
 
-    def e2b_files(  # noqa: C901, PLR0911
+    def e2b_files(  # noqa: PLR0911
         self,
         action: _E2BFilesAction,
         file_path: str | None = None,
@@ -451,17 +434,17 @@ class MindRoomE2BTools(Toolkit):
         - `download_png`: attach PNG result at `result_index` as image media and optionally save to `local_path`.
         - `download_chart`: save interactive chart JSON at `result_index` to `local_path` (optionally with PNG artifact).
         """
-        if action == "write":
-            try:
+        if action == "download_png":
+            return self._download_png(result_index, local_path)
+        if action == "download_chart":
+            return self._download_chart(result_index, local_path, add_as_artifact=add_as_artifact)
+        try:
+            if action == "write":
                 dest = require_non_empty(sandbox_path or file_path, "sandbox_path")
                 if content is None:
                     return _error_json("Error writing file: content is required")
-                written = self.sandbox.files.write(dest, content.encode("utf-8"))
-                return str(written.path)
-            except Exception as exc:
-                return _error_json(f"Error writing file: {exc}")
-        if action == "upload":
-            try:
+                return str(self.sandbox.files.write(dest, content.encode("utf-8")).path)
+            if action == "upload":
                 src = require_non_empty(file_path, "file_path")
                 authorized = resolve_agent_file(
                     src,
@@ -470,25 +453,17 @@ class MindRoomE2BTools(Toolkit):
                     field_name="E2B upload",
                 )
                 payload = read_regular_file_within_root(authorized.root, authorized.relative)
-                written = self.sandbox.files.write(sandbox_path or Path(src).name, payload)
-                return str(written.path)
-            except Exception as exc:
-                return _error_json(f"Error uploading file: {exc}")
-        if action == "download":
-            try:
+                return str(self.sandbox.files.write(sandbox_path or Path(src).name, payload).path)
+            if action == "download":
                 src = require_non_empty(sandbox_path, "sandbox_path")
                 dest = local_path or Path(src).name
                 root, relative = self._workspace_location(dest)
                 with _sandbox_file_chunks(self.sandbox, src) as chunks:
                     _write_within_root(root, relative, chunks)
-            except Exception as exc:
-                return _error_json(f"Error downloading file: {exc}")
-            else:
                 return dest
-        if action == "download_png":
-            return self._download_png(result_index, local_path)
-        if action == "download_chart":
-            return self._download_chart(result_index, local_path, add_as_artifact=add_as_artifact)
+        except Exception as exc:
+            verb = {"write": "writing", "upload": "uploading", "download": "downloading"}.get(action, action)
+            return _error_json(f"Error {verb} file: {exc}")
         return _error_json(f"Unsupported action: {action}")
 
     def e2b_lifecycle(

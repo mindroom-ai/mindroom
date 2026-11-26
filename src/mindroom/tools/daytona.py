@@ -108,20 +108,39 @@ class _DaytonaTools(Toolkit):
             tools=[self.daytona_run, self.daytona_inspect, self.daytona_files],
         )
 
+    def _reject_ambient_daytona_env(self) -> None:
+        """Fail closed before Daytona() starts if ambient env/.env values would leak into unset fields."""
+        from daytona._utils.env import DaytonaEnvReader
+
+        env_reader = DaytonaEnvReader()
+        leaked: list[str] = []
+        if self.sandbox_target is None and env_reader.get("DAYTONA_TARGET"):
+            leaked.append("DAYTONA_TARGET")
+        if self.organization_id is None and env_reader.get("DAYTONA_ORGANIZATION_ID"):
+            leaked.append("DAYTONA_ORGANIZATION_ID")
+        if self.sandbox_target is None and env_reader.get("DAYTONA_JWT_TOKEN"):
+            leaked.append("DAYTONA_JWT_TOKEN")
+        if leaked:
+            msg = (
+                f"Ambient {', '.join(leaked)} detected while corresponding Daytona tool config is unset; "
+                "configure the field explicitly or unset the ambient variable."
+            )
+            raise ValueError(msg)
+
     def _get_client(self) -> Any:  # noqa: ANN401 - optional daytona.Daytona client
         if self._client is None:
             from daytona import Daytona, DaytonaConfig
 
+            self._reject_ambient_daytona_env()
             config = DaytonaConfig(
                 api_key=self.api_key,
                 api_url=self.api_url or _DEFAULT_API_URL,
                 target=self.sandbox_target,
                 organization_id=self.organization_id,
+                use_deprecated_polling=False,
+                otel_enabled=False,
             )
             client = Daytona(config)
-            # Pin scoped target/organization so host DAYTONA_* env vars never leak into an unset field.
-            client._target = self.sandbox_target
-            client._organization_id = self.organization_id
             if not self.verify_ssl:
                 self._disable_client_tls_verification(client)
             self._client = client

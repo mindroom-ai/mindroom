@@ -205,10 +205,10 @@ async def _upload_to_e2b(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
+    monkeypatch.setattr("e2b_code_interpreter.Sandbox", _FakeSandbox)
     tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
     assert isinstance(tool.sandbox, _FakeSandbox)
-    tool.upload_file(raw_path, "upload.bin")
+    tool.e2b_files("upload", file_path=raw_path, sandbox_path="upload.bin")
     return tool.sandbox.files.stored.get("upload.bin") == _PNG
 
 
@@ -394,7 +394,7 @@ _PROBES = (
     _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, file_access_module),
     _ToolProbe("slack", "slack_upload", _upload_to_slack, file_access_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
-    _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
+    _ToolProbe("e2b", "e2b_files", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),
     _ToolProbe("groq", "transcribe_audio", _transcribe_with_groq, groq_module),
     _ToolProbe("moviepy_video_tools", "extract_audio", _extract_audio_with_moviepy, moviepy_module),
