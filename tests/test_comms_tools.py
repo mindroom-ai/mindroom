@@ -300,3 +300,35 @@ def test_x_acknowledges_post_and_direct_message() -> None:
         assert json.loads(tools.x_write("send_dm", text="Ready", recipient="42"))["dm_id"] == "8"
     api.return_value.get_me.assert_not_called()
     api.return_value.create_direct_message.assert_called_once_with(participant_id="42", text="Ready")
+
+
+def test_x_sends_dm_by_username_without_app_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Username lookup and sending both work with OAuth user credentials alone."""
+    pytest.importorskip("tweepy")
+    monkeypatch.delenv("X_BEARER_TOKEN", raising=False)
+    with patch("tweepy.Client") as api:
+        api.return_value.get_user.return_value = SimpleNamespace(data=SimpleNamespace(id=42))
+        api.return_value.create_direct_message.return_value = SimpleNamespace(data={"dm_event_id": "8"})
+        tools = x_tools()(
+            consumer_key=_CREDENTIAL,
+            consumer_secret=_CREDENTIAL,
+            access_token=_CREDENTIAL,
+            access_token_secret=_CREDENTIAL,
+        )
+        result = json.loads(tools.x_write("send_dm", text="Ready", recipient="example"))
+    assert api.call_args.kwargs["bearer_token"] is None
+    api.return_value.get_user.assert_called_once_with(username="example", user_auth=True)
+    api.return_value.create_direct_message.assert_called_once_with(participant_id=42, text="Ready")
+    assert result["dm_id"] == "8"
+
+
+def test_x_home_timeline_requests_author_ids() -> None:
+    """Ask X for the author IDs that the timeline includes in its result."""
+    pytest.importorskip("tweepy")
+    with patch("tweepy.Client") as api:
+        api.return_value.get_home_timeline.return_value = SimpleNamespace(
+            data=[SimpleNamespace(id=5, text="Ready", created_at=None, author_id=42)],
+        )
+        result = json.loads(x_tools()().x_read("get_home_timeline"))
+    api.return_value.get_home_timeline.assert_called_once_with(max_results=10, tweet_fields=["created_at", "author_id"])
+    assert result["home_timeline"][0]["author_id"] == 42

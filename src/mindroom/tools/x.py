@@ -105,7 +105,7 @@ class _XTools(Toolkit):
             recipient_id: Any = target
             recipient_username: str | None = None
         else:
-            user = self.client.get_user(username=target)
+            user = self.client.get_user(username=target, user_auth=True)
             if not user.data:
                 return {"error": f"User '{target}' not found. Please check the username or user ID."}
             recipient_id = user.data.id
@@ -160,7 +160,7 @@ class _XTools(Toolkit):
             elif action == "get_home_timeline":
                 tweets = self.client.get_home_timeline(
                     max_results=max_results,
-                    tweet_fields=["created_at", "public_metrics"],
+                    tweet_fields=["created_at", "author_id"],
                 )
                 timeline = [
                     {
