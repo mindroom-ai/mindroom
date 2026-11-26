@@ -746,7 +746,7 @@ class _TeamTurn:
             provider=provider,
         )
         text = f"[{self.ctx.entity_label}] {info.plain_text}" if self.ctx.entity_label else info.plain_text
-        return text, info.to_wire()
+        return text, info.to_wire(fallback=text)
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
@@ -841,7 +841,7 @@ async def team_response_stream(
             runtime_paths=spec.orchestrator.runtime_paths,
             model_label=model_label,
             provider=provider,
-        ).to_wire()
+        ).to_wire(fallback=turn.text.strip() or None)
         publish_error_run_metadata(sinks, error_info=error_info)
         yield turn
         return

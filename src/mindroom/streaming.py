@@ -723,6 +723,7 @@ class StreamingResponse:
     _separate_next_text: bool = field(default=False, init=False, repr=False)
     # Set when the stream yields a handled FailedReply, so final ai_run reports status="error" and error details.
     _failed_reply_error: Exception | None = field(default=None, init=False, repr=False)
+    _failed_reply_text: str | None = field(default=None, init=False, repr=False)
 
     @property
     def _saw_failed_reply(self) -> bool:
@@ -1373,7 +1374,7 @@ class StreamingResponse:
             runtime_paths=self.runtime_paths,
             model_label=model_label,
             provider=provider,
-        ).to_wire()
+        ).to_wire(fallback=self._failed_reply_text)
 
     def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
         """Attach ``io.mindroom.ai_run`` metadata: provisional on a progress write, terminal on the final one.
@@ -1949,6 +1950,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     continue
             elif isinstance(chunk, FailedReply):
                 streaming._failed_reply_error = chunk.error
+                streaming._failed_reply_text = chunk.text.strip() or None
                 text_chunk = chunk.text
             elif isinstance(chunk, RunFinished):
                 if chunk.record.content is not None:

@@ -115,6 +115,7 @@ async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_str
         "provider": "Synthetic",
         "retryable": True,
         "action": "retry",
+        "fallback": EMPTY_RESPONSE_NOTICE,
     }
     assert result.text == EMPTY_RESPONSE_NOTICE
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]

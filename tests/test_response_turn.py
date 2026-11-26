@@ -1269,6 +1269,7 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
                 "title": "Reply failed",
                 "summary": "friendly error",
                 "retryable": False,
+                "fallback": "friendly error",
             },
         },
     }

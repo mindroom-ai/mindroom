@@ -956,7 +956,7 @@ async def _settle_failure(
                 runtime_paths=runtime_paths,
                 model_label=model_label,
                 provider=provider,
-            ).to_wire()
+            ).to_wire(fallback=failure.reply.text.strip() or None)
         publish_error_run_metadata(sinks, error_info=error_info)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if sinks.on_failed is not None:

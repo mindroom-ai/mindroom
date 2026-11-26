@@ -78,14 +78,19 @@ class _ReplyErrorInfo:
     retryable: bool = False
     action: _ReplyErrorAction | None = None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self, *, fallback: str | None = None) -> dict[str, Any]:
         """Return the wire object published at ``io.mindroom.ai_run["error"]``."""
+        resolved_fallback = (self.plain_text if fallback is None else fallback).strip()
         optional = (
             ("detail", self.detail),
             ("code", self.code),
             ("status_code", self.status_code),
             ("provider", self.provider),
             ("action", self.action),
+            (
+                "fallback",
+                resolved_fallback if resolved_fallback and len(resolved_fallback) <= _MAX_ERROR_DETAIL_CHARS else None,
+            ),
         )
         return {
             "kind": self.kind,
@@ -174,6 +179,22 @@ def _truncate_error_text(text: str, max_chars: int) -> str:
     return f"{text[: max_chars - 1].rstrip()}…"
 
 
+def with_error_fallback(
+    error_info: Mapping[str, Any] | None,
+    fallback: str | None,
+) -> dict[str, Any] | None:
+    """Return ``error_info`` with ``fallback`` set to the exact rendered text, or omitted when empty or oversized."""
+    if error_info is None:
+        return None
+    updated = dict(error_info)
+    stripped = fallback.strip() if fallback is not None else ""
+    if stripped and len(stripped) <= _MAX_ERROR_DETAIL_CHARS:
+        updated["fallback"] = stripped
+    else:
+        updated.pop("fallback", None)
+    return updated
+
+
 def empty_response_error_info(
     *,
     summary: str,
@@ -190,7 +211,7 @@ def empty_response_error_info(
         provider=resolved_provider,
         retryable=True,
         action="retry",
-    ).to_wire()
+    ).to_wire(fallback=summary)
 
 
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error: str) -> str:

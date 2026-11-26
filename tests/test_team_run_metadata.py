@@ -188,7 +188,7 @@ async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_
 
     text = await team.respond(run_metadata_collector=collector)
 
-    assert "team start failed" in text
+    assert text == "[Team (GeneralAgent)] ⚠️ team start failed"
     assert collector == {
         AI_RUN_METADATA_KEY: {
             "version": 1,
@@ -199,6 +199,7 @@ async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_
                 "summary": "team start failed",
                 "retryable": False,
                 "provider": "Synthetic",
+                "fallback": "[Team (GeneralAgent)] ⚠️ team start failed",
             },
         },
     }
