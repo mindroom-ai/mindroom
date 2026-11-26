@@ -9843,16 +9843,24 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tools.modelslabs"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_modelslabs"]
+depends_on = [
+    "mindroom.custom_tools.modelslabs",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
 
 [[modules]]
-path = "mindroom.tools.agno_compat_modelslabs"
-depends_on = []
+path = "mindroom.custom_tools.modelslabs"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+]
 visibility = ["mindroom.tools.modelslabs"]
 
 [[interfaces]]
-from = ["mindroom.tools.agno_compat_modelslabs"]
-expose = ["ModelsLabCompletionTools"]
+from = ["mindroom.custom_tools.modelslabs"]
+expose = ["ModelsLabTools"]
 
 [[modules]]
 path = "mindroom.tools.trafilatura"

@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.unsplash import UnsplashTools
+    from mindroom.custom_tools.unsplash import UnsplashTools
 
 
 @register_tool_with_metadata(
@@ -77,10 +77,10 @@ if TYPE_CHECKING:
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#unsplash",
     helper_text="Get a free API key from [Unsplash Developers](https://unsplash.com/developers)",
-    function_names=("download_photo", "get_photo", "get_random_photo", "search_photos"),
+    function_names=("unsplash",),
 )
 def unsplash_tools() -> type[UnsplashTools]:
     """Return Unsplash tools for image search."""
-    from agno.tools.unsplash import UnsplashTools
+    from mindroom.custom_tools.unsplash import UnsplashTools
 
     return UnsplashTools

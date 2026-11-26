@@ -8,13 +8,12 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.giphy import GiphyTools
+    from mindroom.custom_tools.giphy import GiphyTools
 
 
 @register_tool_with_metadata(
     name="giphy",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("search_gifs",),
     display_name="Giphy",
     description="GIF search and integration",
     category=ToolCategory.DEVELOPMENT,
@@ -59,6 +58,6 @@ if TYPE_CHECKING:
 )
 def giphy_tools() -> type[GiphyTools]:
     """Return Giphy tools for GIF search and integration."""
-    from agno.tools.giphy import GiphyTools
+    from mindroom.custom_tools.giphy import GiphyTools
 
     return GiphyTools
