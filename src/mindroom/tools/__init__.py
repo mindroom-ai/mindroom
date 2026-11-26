@@ -247,17 +247,12 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     ],
     docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#homeassistant",
     function_names=(
-        "activate_scene",
-        "call_service",
-        "get_entity_state",
-        "list_entities",
-        "set_brightness",
-        "set_color",
-        "set_temperature",
-        "toggle",
-        "trigger_automation",
-        "turn_off",
-        "turn_on",
+        "homeassistant_read",
+        "homeassistant_control",
+    ),
+    action_scoped_grants=(
+        "homeassistant_read",
+        "homeassistant_control",
     ),
 )
 def _homeassistant_tools() -> type[Toolkit]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from google.api_core.exceptions import GoogleAPICallError
@@ -17,7 +18,7 @@ from mindroom.oauth.google import google_service_scopes
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -123,6 +125,36 @@ def filter_google_tools(
         excluded = set(exclude_tools)
         selected = [tool for tool in selected if getattr(tool, "__name__", "") not in excluded]
     return selected
+
+
+def matches_google_function(function_name: str, base_name: str) -> bool:
+    """Return whether ``function_name`` is ``base_name`` or a workspace-prefixed variant."""
+    return function_name == base_name or function_name.endswith(f"_{base_name}")
+
+
+def restrict_google_actions(
+    function: ToolFunction,
+    allowed: Sequence[str],
+    fields: Mapping[str, str] | None = None,
+    *,
+    common: tuple[str, ...] = (),
+) -> ToolFunction:
+    """Narrow an action-dispatched Google tool's schema and bullets to ``allowed`` actions."""
+    allowed_list = list(allowed)
+    properties = dict(function.parameters["properties"])
+    properties["action"] = {**properties["action"], "enum": allowed_list}
+    if fields is not None:
+        keep = {"action", *common, *(field for action in allowed_list for field in fields[action].split())}
+        properties = {name: value for name, value in properties.items() if name in keep}
+    description = "\n".join(
+        line
+        for line in (function.description or "").splitlines()
+        if not line.startswith("- `") or any(f"`{action}`" in line.partition(":")[0] for action in allowed_list)
+    )
+    parameters = {**function.parameters, "properties": properties}
+    if "required" in parameters:
+        parameters["required"] = [name for name in parameters["required"] if name in properties]
+    return replace(function, description=description, parameters=parameters)
 
 
 class _ThreadLocalGoogleServiceMixin:

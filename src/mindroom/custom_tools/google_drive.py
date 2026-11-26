@@ -22,7 +22,12 @@ from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools
+from mindroom.custom_tools.google_service import (
+    GoogleApiToolkit,
+    filter_google_tools,
+    matches_google_function,
+    restrict_google_actions,
+)
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
@@ -33,7 +38,7 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
 )
-from mindroom.tool_system.agno_toolkits import rename_toolkit_functions, toolkit_function_names
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 
 if TYPE_CHECKING:
@@ -42,6 +47,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -54,18 +60,16 @@ _DRAWING_MIME_TYPE = f"{_WORKSPACE_PREFIX}drawing"
 _SCRIPT_MIME_TYPE = f"{_WORKSPACE_PREFIX}script"
 _FOLDER_MIME_TYPE = f"{_WORKSPACE_PREFIX}folder"
 
-_MODEL_FUNCTION_NAME_ALIASES = {
-    "list_files": "google_drive_list_files",
-    "search_files": "google_drive_search_files",
-    "read_file": "google_drive_read_file",
-    "download_file": "google_drive_download_file",
-    "upload_file": "google_drive_upload_file",
-    "update_file": "google_drive_update_file",
-    "create_folder": "google_drive_create_folder",
-    "move_file": "google_drive_move_file",
-    "trash_file": "google_drive_trash_file",
+_ReadAction = Literal["list", "search", "read", "download"]
+_WriteAction = Literal["upload", "update", "create_folder", "move", "trash"]
+_ALL_READ_ACTIONS: tuple[str, ...] = ("list", "search", "read", "download")
+_READ_ACTION_FIELDS: dict[str, str] = {
+    "list": "query max_results page_token",
+    "search": "query max_results page_token",
+    "read": "file_id",
+    "download": "file_id export_format",
 }
-_WRITE_FUNCTION_NAMES = ("upload_file", "update_file", "create_folder", "move_file", "trash_file")
+
 _DRIVE_READ_SCOPES = frozenset(
     {
         "https://www.googleapis.com/auth/drive.readonly",
@@ -78,8 +82,6 @@ _DRIVE_WRITE_SCOPES = frozenset(
         GOOGLE_DRIVE_WRITE_SCOPE,
     },
 )
-_DRIVE_READ_TOOLS = frozenset({"list_files", "search_files", "read_file", "download_file"})
-_DRIVE_WRITE_TOOLS = frozenset(_WRITE_FUNCTION_NAMES)
 _WRITE_RESULT_FIELDS = "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink"
 _DEFAULT_MAX_READ_SIZE = 10 * 1024 * 1024
 # Downloads land on the primary's storage volume, so one file must not fill it.
@@ -112,42 +114,23 @@ _BINARY_MIME_TYPES = frozenset(
 )
 
 _DRIVE_QUERY_INSTRUCTIONS = textwrap.dedent(f"""\
-    You have access to Google Drive tools for searching, reading, uploading, and downloading files.
-
     ## Drive Query Syntax
-    Use these operators in search and list query parameters:
-    - `name contains 'report'` — files with "report" in the name
-    - `name = 'Budget 2025.xlsx'` — exact name match
-    - `mimeType = '{_DOCUMENT_MIME_TYPE}'` — Google Docs only
-    - `mimeType = '{_SPREADSHEET_MIME_TYPE}'` — Google Sheets only
-    - `mimeType = 'application/pdf'` — PDF files only
-    - `mimeType = '{_FOLDER_MIME_TYPE}'` — folders only
-    - `modifiedTime > '2025-01-01T00:00:00'` — modified after date
-    - `'<folder_id>' in parents` — files inside a specific folder
-    - `sharedWithMe` — files shared with the user
-    - `starred` — starred files
-    - Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`
-    - Trashed files are filtered automatically. Do not add trashed clauses.
+    Operators for `query`: `name contains 'report'`, `name = 'Budget.xlsx'`, `mimeType = '{_DOCUMENT_MIME_TYPE}'` (or `spreadsheet`, `folder`, `'application/pdf'`), `modifiedTime > '2025-01-01T00:00:00'`, `'<folder_id>' in parents`, `sharedWithMe`, `starred`, combined with `and` / `or`. Trashed files are excluded automatically.
 
-    ## Handling Incomplete Results
-    If search returns `incompleteSearch: true`, some shared drives could not be searched.
-    This is a server-side limitation of the `allDrives` corpus, not a problem with your query.
-    - Inform the user that results may be incomplete due to shared drive limitations
-    - Do NOT retry the same query — the limitation is server-side
-    - For complete results, the user must reconfigure with `corpora="user"` or `corpora="drive"`""")
+    If search returns `incompleteSearch: true`, some shared drives could not be searched by `allDrives`; inform the user without retrying.""")
 
 
 def _validate_drive_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
     """Ensure explicit scopes cover every registered Drive operation."""
     registered = set(registered_names)
     scope_set = set(scopes)
-    if registered & _DRIVE_READ_TOOLS and not (_DRIVE_READ_SCOPES & scope_set):
+    if "google_drive_read" in registered and not (_DRIVE_READ_SCOPES & scope_set):
         msg = (
             "A Google Drive read scope (https://www.googleapis.com/auth/drive.readonly or "
             "https://www.googleapis.com/auth/drive) is required for read operations"
         )
         raise ValueError(msg)
-    if registered & _DRIVE_WRITE_TOOLS and not (_DRIVE_WRITE_SCOPES & scope_set):
+    if "google_drive_write" in registered and not (_DRIVE_WRITE_SCOPES & scope_set):
         msg = (
             "A Google Drive write scope (https://www.googleapis.com/auth/drive.file or "
             "https://www.googleapis.com/auth/drive) is required for write operations"
@@ -331,17 +314,22 @@ class GoogleDriveTools(GoogleApiToolkit):
         self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
 
-        tools: list[Callable[..., str]] = []
+        read_actions: list[str] = []
         if list_files:
-            tools.append(self.list_files)
+            read_actions.append("list")
         if search_files:
-            tools.append(self.search_files)
+            read_actions.append("search")
         if read_file:
-            tools.append(self.read_file)
+            read_actions.append("read")
         if download_enabled:
-            tools.append(self.download_file)
+            read_actions.append("download")
+        self._read_actions: tuple[str, ...] = tuple(read_actions)
+
+        tools: list[Callable[..., str]] = []
+        if self._read_actions:
+            tools.append(self.google_drive_read)
         if write:
-            tools.extend([self.upload_file, self.update_file, self.create_folder, self.move_file, self.trash_file])
+            tools.append(self.google_drive_write)
         tools = filter_google_tools(tools, include_tools, exclude_tools)
 
         super().__init__(
@@ -357,12 +345,19 @@ class GoogleDriveTools(GoogleApiToolkit):
         )
         _validate_drive_scopes(self.functions, self.scopes)
         self._wrap_write_scope_entrypoints()
-        rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
-        self._download_entrypoint = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])
+        self._read_entrypoint = self.functions.get("google_drive_read")
 
     def _service_account_scopes(self) -> tuple[str, ...]:
         """Return Drive service-account scopes, defaulting to the Drive API scope."""
         return tuple(self.scopes)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``google_drive_read``'s action enum and parameters to enabled read actions."""
+        if matches_google_function(function.name, "google_drive_read") and len(self._read_actions) < len(
+            _ALL_READ_ACTIONS,
+        ):
+            return restrict_google_actions(function, self._read_actions, _READ_ACTION_FIELDS)
+        return function
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""
@@ -406,7 +401,7 @@ class GoogleDriveTools(GoogleApiToolkit):
 
     def _wrap_write_scope_entrypoints(self) -> None:
         """Require full Drive scope only for registered write functions."""
-        for function_name in _WRITE_FUNCTION_NAMES:
+        for function_name in ("google_drive_write",):
             entrypoint = self.functions.get(function_name)
             if entrypoint is None:
                 continue
@@ -460,7 +455,7 @@ class GoogleDriveTools(GoogleApiToolkit):
         )
 
     def _download_refusal(self, metadata: dict[str, Any], export_format: str | None = None) -> str | None:
-        """Return the error `download_file` gives from a file's metadata, before requesting its content, or None."""
+        """Return the error download gives from a file's metadata, before requesting its content, or None."""
         if not isinstance(metadata.get("name"), str):
             return "Google Drive file metadata is missing a filename"
         file_size = int(metadata.get("size", 0))
@@ -478,23 +473,23 @@ class GoogleDriveTools(GoogleApiToolkit):
             return f"Unsupported Workspace file type for download: {mime_type}"
         return None
 
-    def _offered_download_name(self) -> str | None:
-        """Return the active model-facing download function name when offered, even after workspace renaming."""
-        if self._download_entrypoint is None:
+    def _offered_download_call(self) -> str | None:
+        """Return the active model-facing download invocation when offered, even after workspace renaming."""
+        if "download" not in self._read_actions or self._read_entrypoint is None:
             return None
         offered = set(toolkit_function_names(self))
         for name, function in self.functions.items():
-            if function is self._download_entrypoint and name in offered:
-                return name
+            if function is self._read_entrypoint and name in offered:
+                return f"{name}(action='download')"
         return None
 
     def _read_refusal(self, error: str, metadata: dict[str, Any]) -> str:
-        """Refuse a read; name the download function while offered, or quote why it would refuse the file too."""
-        if download_name := self._offered_download_name():
+        """Refuse a read; advise download while offered, or quote why download would refuse the file too."""
+        if download_call := self._offered_download_call():
             if download_refusal := self._download_refusal(metadata):
-                error += f" {download_name} would refuse it too: {download_refusal}"
+                error += f" {download_call} would refuse it too: {download_refusal}"
             else:
-                error += f" Use {download_name} instead."
+                error += f" Use {download_call} instead."
         return json.dumps({"error": error, "file": metadata})
 
     def _search_files(
@@ -503,11 +498,9 @@ class GoogleDriveTools(GoogleApiToolkit):
         max_results: int = 10,
         page_token: str | None = None,
     ) -> str:
-        if max_results < 1:
-            return json.dumps({"error": "max_results must be greater than 0"})
         try:
             service = self._google_api_service()
-            effective_max = min(max_results, self.max_results)
+            effective_max = min(max_results, self.max_results, 100)
             if self.include_trashed:
                 effective_query = query or ""
             elif query:
@@ -547,197 +540,7 @@ class GoogleDriveTools(GoogleApiToolkit):
             logger.warning("google_drive_search_failed", error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    def list_files(
-        self,
-        query: str | None = None,
-        page_size: int = 10,
-        page_token: str | None = None,
-    ) -> str:
-        """List recent files and folders from Google Drive.
-
-        Args:
-            query: Optional Drive query to filter results.
-            page_size: Number of files to return (default 10).
-            page_token: Token from a previous response to fetch the next page.
-
-        Returns:
-            JSON string containing file metadata or error message.
-
-        """
-        return self._search_files(query=query, max_results=page_size, page_token=page_token)
-
-    def search_files(
-        self,
-        query: str | None = None,
-        max_results: int = 10,
-        page_token: str | None = None,
-    ) -> str:
-        """Search Google Drive using a query expression.
-
-        Searches in file name, type, folder, owner, and modification date.
-
-        Args:
-            query: Drive query expression (see instructions for syntax).
-            max_results: Number of files to return (default 10).
-            page_token: Token from a previous response to fetch the next page.
-
-        Returns:
-            JSON string containing matching files and metadata or error message.
-
-        """
-        return self._search_files(query=query, max_results=max_results, page_token=page_token)
-
-    def upload_file(
-        self,
-        local_path: str,
-        folder_id: str | None = None,
-        name: str | None = None,
-        mime_type: str | None = None,
-        convert_to: Literal["document", "spreadsheet", "presentation"] | None = None,
-    ) -> str:
-        """Upload one local file, resolving relative paths from the agent workspace.
-
-        With convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:
-        "document" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs
-        supports, such as headings, tables, lists, links, and the images a Word file embeds; "spreadsheet" a
-        Google Sheet from Excel or CSV; "presentation" Google Slides from PowerPoint.
-        The converted file takes the local file's name without its extension unless name is given.
-        """
-        try:
-            authorized = self._resolve_upload_file(local_path)
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
-        body: dict[str, object] = {"name": name or authorized.name}
-        if folder_id:
-            body["parents"] = [folder_id]
-        if convert_to:
-            body["name"] = name or Path(authorized.name).stem
-            body["mimeType"] = f"{_WORKSPACE_PREFIX}{convert_to}"
-        try:
-            service = self._google_api_service()
-            with _open_upload_media(authorized, resolved_mime_type) as media_body:
-                uploaded_file = (
-                    service.files()
-                    .create(
-                        body=body,
-                        media_body=media_body,
-                        fields=_WRITE_RESULT_FIELDS,
-                        supportsAllDrives=True,
-                    )
-                    .execute()
-                )
-            return json.dumps(uploaded_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            logger.warning("google_drive_upload_failed", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
-        """Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.
-
-        A Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's
-        convert_to converts it, so formatting that is not in the local file is lost and comments on the replaced
-        content lose their place.
-        To change part of such a file, use the Google Docs or Google Sheets tool instead.
-        """
-        try:
-            authorized = self._resolve_upload_file(local_path)
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)})
-
-        try:
-            resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
-            service = self._google_api_service()
-            with _open_upload_media(authorized, resolved_mime_type) as media_body:
-                updated_file = (
-                    service.files()
-                    .update(
-                        fileId=file_id,
-                        media_body=media_body,
-                        fields=_WRITE_RESULT_FIELDS,
-                        supportsAllDrives=True,
-                    )
-                    .execute()
-                )
-            return json.dumps(updated_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            logger.warning("google_drive_update_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    def create_folder(self, name: str, parent_id: str | None = None) -> str:
-        """Create a Google Drive folder, optionally under one parent folder."""
-        if not name.strip():
-            return json.dumps({"error": "Google Drive folder name must not be empty"})
-        body: dict[str, object] = {"name": name, "mimeType": _FOLDER_MIME_TYPE}
-        if parent_id:
-            body["parents"] = [parent_id]
-        try:
-            service = self._google_api_service()
-            folder = service.files().create(body=body, fields=_WRITE_RESULT_FIELDS, supportsAllDrives=True).execute()
-            return json.dumps(folder)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            logger.warning("google_drive_create_folder_failed", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    def move_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
-        """Move one Drive file to a new parent and optionally rename it."""
-        if not new_parent_id.strip():
-            return json.dumps({"error": "Google Drive new_parent_id must not be empty"})
-        if name is not None and not name.strip():
-            return json.dumps({"error": "Google Drive file name must not be empty"})
-        try:
-            service = self._google_api_service()
-            metadata = self._get_file_metadata(service, file_id, "parents")
-            current_parents = [parent for parent in metadata.get("parents", []) if isinstance(parent, str) and parent]
-            update_kwargs: dict[str, object] = {
-                "fileId": file_id,
-                "body": {"name": name} if name is not None else {},
-                "fields": _WRITE_RESULT_FIELDS,
-                "supportsAllDrives": True,
-            }
-            if new_parent_id not in current_parents:
-                update_kwargs["addParents"] = new_parent_id
-            removed_parents = [parent for parent in current_parents if parent != new_parent_id]
-            if removed_parents:
-                update_kwargs["removeParents"] = ",".join(removed_parents)
-            moved_file = service.files().update(**update_kwargs).execute()
-            return json.dumps(moved_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            logger.warning("google_drive_move_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    def trash_file(self, file_id: str) -> str:
-        """Move one Drive file to trash without permanently deleting it."""
-        try:
-            service = self._google_api_service()
-            trashed_file = (
-                service.files()
-                .update(
-                    fileId=file_id,
-                    body={"trashed": True},
-                    fields=_WRITE_RESULT_FIELDS,
-                    supportsAllDrives=True,
-                )
-                .execute()
-            )
-            return json.dumps(trashed_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
-        except Exception as exc:
-            logger.warning("google_drive_trash_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    def read_file(self, file_id: str) -> str:
-        """Read a Drive file and return its text content, including files in Shared Drives."""
+    def _read_file(self, file_id: str) -> str:
         try:
             service = self._google_api_service()
             metadata = self._get_file_metadata(service, file_id, self.READ_METADATA_FIELDS)
@@ -786,19 +589,7 @@ class GoogleDriveTools(GoogleApiToolkit):
             logger.warning("google_drive_read_failed", file_id=file_id, error_type=type(exc).__name__)
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    def download_file(self, file_id: str, export_format: str | None = None) -> str:
-        """Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.
-
-        Returns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own
-        google-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,
-        while downloading the same file again under the same name replaces its earlier copy. Google Workspace
-        files are exported to a native format such as .docx or .xlsx.
-
-        Args:
-            file_id: The Drive file ID.
-            export_format: MIME type to export a Google Workspace file to instead, such as application/pdf.
-
-        """
+    def _download_file(self, file_id: str, export_format: str | None = None) -> str:
         try:
             if self._workspace_root is None:
                 return json.dumps({"error": "Google Drive downloads require an agent workspace"})
@@ -849,3 +640,209 @@ class GoogleDriveTools(GoogleApiToolkit):
             logger.warning("google_drive_download_failed", file_id=file_id, error_type=type(exc).__name__)
             error = f"Unexpected error: {type(exc).__name__}: {exc}"
         return json.dumps({"error": error})
+
+    def _upload_file(
+        self,
+        local_path: str | None,
+        parent_id: str | None = None,
+        name: str | None = None,
+        mime_type: str | None = None,
+        convert_to: Literal["document", "spreadsheet", "presentation"] | None = None,
+    ) -> str:
+        if not (local_path and local_path.strip()):
+            return json.dumps({"error": "Google Drive local_path must not be empty"})
+        try:
+            authorized = self._resolve_upload_file(local_path)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
+        body: dict[str, object] = {"name": name or authorized.name}
+        if parent_id:
+            body["parents"] = [parent_id]
+        if convert_to:
+            body["name"] = name or Path(authorized.name).stem
+            body["mimeType"] = f"{_WORKSPACE_PREFIX}{convert_to}"
+        try:
+            service = self._google_api_service()
+            with _open_upload_media(authorized, resolved_mime_type) as media_body:
+                uploaded_file = (
+                    service.files()
+                    .create(
+                        body=body,
+                        media_body=media_body,
+                        fields=_WRITE_RESULT_FIELDS,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+            return json.dumps(uploaded_file)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_upload_failed", error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def _update_file(
+        self,
+        file_id: str | None,
+        local_path: str | None,
+        mime_type: str | None = None,
+    ) -> str:
+        if not (file_id and file_id.strip()):
+            return json.dumps({"error": "Google Drive file_id must not be empty"})
+        if not (local_path and local_path.strip()):
+            return json.dumps({"error": "Google Drive local_path must not be empty"})
+        try:
+            authorized = self._resolve_upload_file(local_path)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        try:
+            resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
+            service = self._google_api_service()
+            with _open_upload_media(authorized, resolved_mime_type) as media_body:
+                updated_file = (
+                    service.files()
+                    .update(
+                        fileId=file_id,
+                        media_body=media_body,
+                        fields=_WRITE_RESULT_FIELDS,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+            return json.dumps(updated_file)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_update_failed", file_id=file_id, error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def _create_folder(self, name: str | None, parent_id: str | None = None) -> str:
+        if not (name and name.strip()):
+            return json.dumps({"error": "Google Drive folder name must not be empty"})
+        body: dict[str, object] = {"name": name, "mimeType": _FOLDER_MIME_TYPE}
+        if parent_id:
+            body["parents"] = [parent_id]
+        try:
+            service = self._google_api_service()
+            folder = service.files().create(body=body, fields=_WRITE_RESULT_FIELDS, supportsAllDrives=True).execute()
+            return json.dumps(folder)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_create_folder_failed", error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def _move_file(self, file_id: str | None, parent_id: str | None, name: str | None = None) -> str:
+        if not (file_id and file_id.strip()):
+            return json.dumps({"error": "Google Drive file_id must not be empty"})
+        if not (parent_id and parent_id.strip()):
+            return json.dumps({"error": "Google Drive parent_id must not be empty"})
+        if name is not None and not name.strip():
+            return json.dumps({"error": "Google Drive file name must not be empty"})
+        try:
+            service = self._google_api_service()
+            metadata = self._get_file_metadata(service, file_id, "parents")
+            current_parents = [parent for parent in metadata.get("parents", []) if isinstance(parent, str) and parent]
+            update_kwargs: dict[str, object] = {
+                "fileId": file_id,
+                "body": {"name": name} if name is not None else {},
+                "fields": _WRITE_RESULT_FIELDS,
+                "supportsAllDrives": True,
+            }
+            if parent_id not in current_parents:
+                update_kwargs["addParents"] = parent_id
+            removed_parents = [parent for parent in current_parents if parent != parent_id]
+            if removed_parents:
+                update_kwargs["removeParents"] = ",".join(removed_parents)
+            moved_file = service.files().update(**update_kwargs).execute()
+            return json.dumps(moved_file)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_move_failed", file_id=file_id, error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def _trash_file(self, file_id: str | None) -> str:
+        if not (file_id and file_id.strip()):
+            return json.dumps({"error": "Google Drive file_id must not be empty"})
+        try:
+            service = self._google_api_service()
+            trashed_file = (
+                service.files()
+                .update(
+                    fileId=file_id,
+                    body={"trashed": True},
+                    fields=_WRITE_RESULT_FIELDS,
+                    supportsAllDrives=True,
+                )
+                .execute()
+            )
+            return json.dumps(trashed_file)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            logger.warning("google_drive_trash_failed", file_id=file_id, error_type=type(exc).__name__)
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    def google_drive_read(
+        self,
+        action: _ReadAction,
+        query: str | None = None,
+        file_id: str | None = None,
+        max_results: int = 10,
+        page_token: str | None = None,
+        export_format: str | None = None,
+    ) -> str:
+        """List, search, read text from, or download Google Drive files.
+
+        - `list`: list recent files (optional `query`, `max_results`, `page_token`)
+        - `search`: search metadata using Drive `query` (`max_results`, `page_token`)
+        - `read`: read Workspace or plain-text `file_id` as text
+        - `download`: save `file_id` into workspace `google-drive-downloads/<file_id>/` (optional `export_format` MIME type for Workspace files)
+        """
+        if action not in self._read_actions:
+            return json.dumps({"error": f"Google Drive action {action!r} is disabled."})
+        if action in ("list", "search"):
+            return self._search_files(query=query, max_results=max_results, page_token=page_token)
+        if action in ("read", "download"):
+            if not (file_id and file_id.strip()):
+                return json.dumps({"error": "Google Drive file_id must not be empty"})
+            if action == "read":
+                return self._read_file(file_id)
+            return self._download_file(file_id, export_format=export_format)
+        return json.dumps({"error": f"Unsupported Google Drive read action {action!r}."})
+
+    def google_drive_write(
+        self,
+        action: _WriteAction,
+        file_id: str | None = None,
+        local_path: str | None = None,
+        name: str | None = None,
+        parent_id: str | None = None,
+        mime_type: str | None = None,
+        convert_to: Literal["document", "spreadsheet", "presentation"] | None = None,
+    ) -> str:
+        """Upload, update, organize, or trash Google Drive files and folders.
+
+        - `upload`: upload `local_path` (optional `parent_id`, `name`, `mime_type`, `convert_to` Workspace type)
+        - `update`: replace contents of `file_id` from `local_path` (optional `mime_type`; replaces whole Workspace file)
+        - `create_folder`: create folder `name` (optional `parent_id`)
+        - `move`: move `file_id` to `parent_id` (optional rename `name`)
+        - `trash`: move `file_id` to trash (soft-delete only)
+        """
+        if action == "upload":
+            return self._upload_file(
+                local_path, parent_id=parent_id, name=name, mime_type=mime_type, convert_to=convert_to
+            )
+        if action == "update":
+            return self._update_file(file_id, local_path, mime_type=mime_type)
+        if action == "create_folder":
+            return self._create_folder(name, parent_id=parent_id)
+        if action == "move":
+            return self._move_file(file_id, parent_id, name=name)
+        if action == "trash":
+            return self._trash_file(file_id)
+        return json.dumps({"error": f"Unsupported Google Drive write action {action!r}."})

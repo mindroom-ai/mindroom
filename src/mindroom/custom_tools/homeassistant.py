@@ -1,11 +1,10 @@
-"""Home Assistant tools for MindRoom agents.
+"""Home Assistant tools for MindRoom agents."""
 
-This module provides tools for interacting with Home Assistant,
-allowing agents to control devices, query states, and execute automations.
-"""
+from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -20,9 +19,33 @@ from mindroom.tool_system.worker_routing import (
     worker_scope_allows_shared_only_integrations,
 )
 
+_ReadAction = Literal["list_entities", "get_state"]
+_ControlAction = Literal[
+    "turn_on",
+    "turn_off",
+    "toggle",
+    "set_brightness",
+    "set_color",
+    "set_temperature",
+    "activate_scene",
+    "trigger_automation",
+    "call_service",
+]
+_POWER_ACTIONS = frozenset({"turn_on", "turn_off", "toggle"})
+
+
+def _require_non_empty(value: str | None) -> str | None:
+    if not value or not value.strip():
+        return None
+    return value.strip()
+
+
+def _error_json(message: str) -> str:
+    return json.dumps({"error": message})
+
 
 class HomeAssistantTools(Toolkit):
-    """Tools for interacting with Home Assistant."""
+    """Tools for monitoring and controlling Home Assistant."""
 
     def __init__(
         self,
@@ -48,22 +71,9 @@ class HomeAssistantTools(Toolkit):
         self._creds_manager = credentials_manager
         self._worker_target = worker_target
 
-        # Initialize the toolkit with all available methods
         super().__init__(
             name="homeassistant",
-            tools=[
-                self.get_entity_state,
-                self.list_entities,
-                self.turn_on,
-                self.turn_off,
-                self.toggle,
-                self.set_brightness,
-                self.set_color,
-                self.set_temperature,
-                self.activate_scene,
-                self.trigger_automation,
-                self.call_service,
-            ],
+            tools=[self.homeassistant_read, self.homeassistant_control],
         )
 
     def _load_config(self) -> dict[str, Any] | None:
@@ -88,7 +98,7 @@ class HomeAssistantTools(Toolkit):
         method: str,
         endpoint: str,
         json_data: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:  # noqa: ANN401
         """Make an API request to Home Assistant."""
         config = self._load_config()
         if not config:
@@ -139,251 +149,158 @@ class HomeAssistantTools(Toolkit):
         except Exception as e:
             return {"error": f"Unexpected error: {e!s}"}
 
-    async def get_entity_state(self, entity_id: str) -> str:
-        """Get the current state of a Home Assistant entity.
+    async def homeassistant_read(
+        self,
+        action: _ReadAction,
+        entity_id: str | None = None,
+        domain: str = "",
+    ) -> str:
+        """Read Home Assistant entity states.
 
-        Args:
-            entity_id: The entity ID (e.g., 'light.living_room', 'switch.bedroom_fan')
-
-        Returns:
-            JSON string with entity state information
-
+        - `list_entities`: list up to 50 entities (optional `domain` prefix, e.g. `light`, `sensor`)
+        - `get_state`: full state and attributes for `entity_id`
         """
-        result = await self._api_request("GET", f"/api/states/{entity_id}")
+        if action == "get_state":
+            target = _require_non_empty(entity_id)
+            if target is None:
+                return _error_json("entity_id is required for get_state")
+            result = await self._api_request("GET", f"/api/states/{quote(target, safe='')}")
+            if isinstance(result, dict) and "error" in result:
+                return json.dumps(result)
+            return json.dumps(
+                {
+                    "entity_id": result.get("entity_id"),
+                    "state": result.get("state"),
+                    "attributes": result.get("attributes", {}),
+                    "last_changed": result.get("last_changed"),
+                },
+            )
 
-        if "error" in result:
-            return json.dumps(result)
+        if action == "list_entities":
+            result = await self._api_request("GET", "/api/states")
+            if isinstance(result, dict) and "error" in result:
+                return json.dumps(result)
+            entities = result
+            if domain and isinstance(entities, list):
+                entities = [e for e in entities if e["entity_id"].startswith(f"{domain}.")]
+            entity_list: list[Any] = entities[:50] if isinstance(entities, list) else []
+            simplified: list[dict[str, Any]] = [
+                {
+                    "entity_id": e["entity_id"],
+                    "state": e["state"],
+                    "friendly_name": e.get("attributes", {}).get("friendly_name", e["entity_id"]),
+                }
+                for e in entity_list
+            ]
+            return json.dumps(simplified)
 
-        return json.dumps(
-            {
-                "entity_id": result.get("entity_id"),
-                "state": result.get("state"),
-                "attributes": result.get("attributes", {}),
-                "last_changed": result.get("last_changed"),
-            },
-        )
+        return _error_json(f"Unsupported Home Assistant read action: {action}")
 
-    async def list_entities(self, domain: str = "") -> str:
-        """List all entities in Home Assistant, optionally filtered by domain.
+    async def _call_service(
+        self,
+        domain: str | None,
+        service: str | None,
+        entity_id: str | None,
+        data: dict[str, Any] | str | None,
+    ) -> str:
+        clean_domain = _require_non_empty(domain)
+        clean_service = _require_non_empty(service)
+        if clean_domain is None or clean_service is None:
+            return _error_json("domain and service are required for call_service")
 
-        Args:
-            domain: Optional domain to filter by (e.g., 'light', 'switch', 'sensor')
+        service_data: dict[str, Any] = {}
+        if entity_id and entity_id.strip():
+            service_data["entity_id"] = entity_id.strip()
 
-        Returns:
-            JSON string with list of entities
-
-        """
-        result = await self._api_request("GET", "/api/states")
-
-        if isinstance(result, dict) and "error" in result:
-            return json.dumps(result)
-
-        entities = result
-
-        # Filter by domain if specified
-        if domain and isinstance(entities, list):
-            entities = [e for e in entities if e["entity_id"].startswith(f"{domain}.")]
-
-        # Simplify the response
-        entity_list: list[Any] = entities[:50] if isinstance(entities, list) else []
-        simplified: list[dict[str, Any]] = [
-            {
-                "entity_id": e["entity_id"],
-                "state": e["state"],
-                "friendly_name": e.get("attributes", {}).get("friendly_name", e["entity_id"]),
-            }
-            for e in entity_list  # Limit to 50 entities to avoid huge responses
-        ]
-
-        return json.dumps(simplified)
-
-    async def turn_on(self, entity_id: str) -> str:
-        """Turn on a device (light, switch, etc.).
-
-        Args:
-            entity_id: The entity ID to turn on (e.g., 'light.living_room')
-
-        Returns:
-            JSON string with result
-
-        """
-        domain = entity_id.split(".", maxsplit=1)[0]
-        result = await self._api_request(
-            "POST",
-            f"/api/services/{domain}/turn_on",
-            {"entity_id": entity_id},
-        )
-        return json.dumps(result)
-
-    async def turn_off(self, entity_id: str) -> str:
-        """Turn off a device (light, switch, etc.).
-
-        Args:
-            entity_id: The entity ID to turn off (e.g., 'light.living_room')
-
-        Returns:
-            JSON string with result
-
-        """
-        domain = entity_id.split(".", maxsplit=1)[0]
-        result = await self._api_request(
-            "POST",
-            f"/api/services/{domain}/turn_off",
-            {"entity_id": entity_id},
-        )
-        return json.dumps(result)
-
-    async def toggle(self, entity_id: str) -> str:
-        """Toggle a device (if on, turn off; if off, turn on).
-
-        Args:
-            entity_id: The entity ID to toggle (e.g., 'switch.bedroom_fan')
-
-        Returns:
-            JSON string with result
-
-        """
-        domain = entity_id.split(".", maxsplit=1)[0]
-        result = await self._api_request(
-            "POST",
-            f"/api/services/{domain}/toggle",
-            {"entity_id": entity_id},
-        )
-        return json.dumps(result)
-
-    async def set_brightness(self, entity_id: str, brightness: int) -> str:
-        """Set the brightness of a light.
-
-        Args:
-            entity_id: The light entity ID (e.g., 'light.living_room')
-            brightness: Brightness level (0-255, where 255 is 100%)
-
-        Returns:
-            JSON string with result
-
-        """
-        if not 0 <= brightness <= 255:
-            return json.dumps({"error": "Brightness must be between 0 and 255"})
-
-        result = await self._api_request(
-            "POST",
-            "/api/services/light/turn_on",
-            {
-                "entity_id": entity_id,
-                "brightness": brightness,
-            },
-        )
-        return json.dumps(result)
-
-    async def set_color(self, entity_id: str, red: int, green: int, blue: int) -> str:
-        """Set the color of a light using RGB values.
-
-        Args:
-            entity_id: The light entity ID (e.g., 'light.living_room')
-            red: Red value (0-255)
-            green: Green value (0-255)
-            blue: Blue value (0-255)
-
-        Returns:
-            JSON string with result
-
-        """
-        if not all(0 <= v <= 255 for v in [red, green, blue]):
-            return json.dumps({"error": "RGB values must be between 0 and 255"})
-
-        result = await self._api_request(
-            "POST",
-            "/api/services/light/turn_on",
-            {
-                "entity_id": entity_id,
-                "rgb_color": [red, green, blue],
-            },
-        )
-        return json.dumps(result)
-
-    async def set_temperature(self, entity_id: str, temperature: float) -> str:
-        """Set the temperature of a climate device.
-
-        Args:
-            entity_id: The climate entity ID (e.g., 'climate.thermostat')
-            temperature: Target temperature in the unit configured in Home Assistant
-
-        Returns:
-            JSON string with result
-
-        """
-        result = await self._api_request(
-            "POST",
-            "/api/services/climate/set_temperature",
-            {
-                "entity_id": entity_id,
-                "temperature": temperature,
-            },
-        )
-        return json.dumps(result)
-
-    async def activate_scene(self, scene_id: str) -> str:
-        """Activate a Home Assistant scene.
-
-        Args:
-            scene_id: The scene entity ID (e.g., 'scene.movie_time')
-
-        Returns:
-            JSON string with result
-
-        """
-        result = await self._api_request(
-            "POST",
-            "/api/services/scene/turn_on",
-            {"entity_id": scene_id},
-        )
-        return json.dumps(result)
-
-    async def trigger_automation(self, automation_id: str) -> str:
-        """Trigger a Home Assistant automation.
-
-        Args:
-            automation_id: The automation entity ID (e.g., 'automation.morning_routine')
-
-        Returns:
-            JSON string with result
-
-        """
-        result = await self._api_request(
-            "POST",
-            "/api/services/automation/trigger",
-            {"entity_id": automation_id},
-        )
-        return json.dumps(result)
-
-    async def call_service(self, domain: str, service: str, entity_id: str = "", data: str = "") -> str:
-        """Call a generic Home Assistant service.
-
-        Args:
-            domain: The service domain (e.g., 'light', 'switch', 'notify')
-            service: The service name (e.g., 'turn_on', 'toggle', 'send_message')
-            entity_id: The entity ID(s) to apply the service to (optional)
-            data: Additional service data as JSON string (optional)
-
-        Returns:
-            JSON string with result
-
-        """
-        service_data = {}
-
-        if entity_id:
-            service_data["entity_id"] = entity_id
-
-        if data:
+        if isinstance(data, dict):
+            service_data.update(data)
+        elif isinstance(data, str) and data:
             try:
                 additional_data = json.loads(data)
-                service_data.update(additional_data)
             except json.JSONDecodeError:
-                return json.dumps({"error": "Invalid JSON in data parameter"})
+                return _error_json("Invalid JSON in data parameter")
+            if not isinstance(additional_data, dict):
+                return _error_json("data parameter must decode to a JSON object")
+            service_data.update(additional_data)
 
         result = await self._api_request(
             "POST",
-            f"/api/services/{domain}/{service}",
+            f"/api/services/{quote(clean_domain, safe='')}/{quote(clean_service, safe='')}",
             service_data,
         )
         return json.dumps(result)
+
+    @staticmethod
+    def _build_entity_service_call(  # noqa: PLR0911
+        action: _ControlAction,
+        target: str,
+        *,
+        brightness: int | None,
+        rgb_color: list[int] | None,
+        temperature: float | None,
+    ) -> tuple[str, dict[str, Any]] | str:
+        if action in _POWER_ACTIONS:
+            entity_domain = target.split(".", maxsplit=1)[0]
+            return f"/api/services/{quote(entity_domain, safe='')}/{action}", {"entity_id": target}
+        if action == "set_brightness":
+            if brightness is None or isinstance(brightness, bool) or not 0 <= brightness <= 255:
+                return _error_json("Brightness must be between 0 and 255")
+            return "/api/services/light/turn_on", {"entity_id": target, "brightness": brightness}
+        if action == "set_color":
+            valid_rgb = (
+                rgb_color is not None
+                and len(rgb_color) == 3
+                and all(not isinstance(v, bool) and isinstance(v, int) and 0 <= v <= 255 for v in rgb_color)
+            )
+            if not valid_rgb or rgb_color is None:
+                return _error_json("RGB values must be three integers between 0 and 255")
+            return "/api/services/light/turn_on", {"entity_id": target, "rgb_color": list(rgb_color)}
+        if action == "set_temperature":
+            if temperature is None or isinstance(temperature, bool):
+                return _error_json("temperature is required for set_temperature")
+            return "/api/services/climate/set_temperature", {"entity_id": target, "temperature": temperature}
+        if action == "activate_scene":
+            return "/api/services/scene/turn_on", {"entity_id": target}
+        if action == "trigger_automation":
+            return "/api/services/automation/trigger", {"entity_id": target}
+        return _error_json(f"Unsupported Home Assistant control action: {action}")
+
+    async def homeassistant_control(
+        self,
+        action: _ControlAction,
+        entity_id: str | None = None,
+        brightness: int | None = None,
+        rgb_color: list[int] | None = None,
+        temperature: float | None = None,
+        domain: str | None = None,
+        service: str | None = None,
+        data: dict[str, Any] | str | None = None,
+    ) -> str:
+        """Control Home Assistant devices, scenes, automations, and services.
+
+        - `turn_on`: turn on `entity_id`
+        - `turn_off`: turn off `entity_id`
+        - `toggle`: toggle `entity_id`
+        - `set_brightness`: set light `entity_id` to `brightness` (0-255)
+        - `set_color`: set light `entity_id` to `rgb_color` (`[r, g, b]`, each 0-255)
+        - `set_temperature`: set climate `entity_id` to `temperature`
+        - `activate_scene`: activate scene `entity_id`
+        - `trigger_automation`: trigger automation `entity_id`
+        - `call_service`: call `domain`/`service` with optional `entity_id` and `data` (dict or JSON string)
+        """
+        if action == "call_service":
+            return await self._call_service(domain, service, entity_id, data)
+        target = _require_non_empty(entity_id)
+        if target is None:
+            return _error_json(f"entity_id is required for {action}")
+        built = self._build_entity_service_call(
+            action,
+            target,
+            brightness=brightness,
+            rgb_color=rgb_color,
+            temperature=temperature,
+        )
+        if isinstance(built, str):
+            return built
+        endpoint, payload = built
+        return json.dumps(await self._api_request("POST", endpoint, payload))
