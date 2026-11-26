@@ -1,16 +1,28 @@
 """Tests for the native Fal media toolkit."""
 
+from __future__ import annotations
+
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import fal_client
 import pytest
 
+import mindroom.tools  # noqa: F401
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.fal import FalTools
 from mindroom.model_defaults import FAL_VIDEO
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.tools.fal import fal_tools
 from tests.agent_tool_helpers import toolkit_offers
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -276,3 +288,91 @@ def test_fal_missing_or_blank_api_key_fails_closed_without_sdk_fallback(
     sync_client.assert_not_called()
     assert media_result.content == "Error: FAL_API_KEY not set."
     assert edit_result.content == "Error: FAL_API_KEY not set."
+
+
+def test_fal_env_fallback_priority_and_scoped_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAL_KEY resolves when FAL_API_KEY is unset, FAL_API_KEY wins over FAL_KEY, and scoped-denied fails closed."""
+    monkeypatch.setenv("FAL_KEY", "ambient-fal-key")
+    sync_client = Mock(side_effect=AssertionError("SyncClient must not be constructed for denied scoped agents"))
+    monkeypatch.setattr(fal_client, "SyncClient", sync_client)
+
+    (tmp_path / "config.yaml").write_text("agents: {}\n")
+    tools = builtin_tool_registry()
+    credentials = CredentialsManager(tmp_path / "credentials")
+
+    fal_key_only_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "FAL_KEY": "fal-standard-key"},
+    )
+    unscoped_fal_key = get_tool_by_name(
+        "fal",
+        fal_key_only_paths,
+        tools=tools,
+        credentials_manager=credentials,
+        runs_in_worker=False,
+        worker_target=None,
+    )
+    assert isinstance(unscoped_fal_key, FalTools)
+    assert unscoped_fal_key.api_key == "fal-standard-key"
+
+    both_keys_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NO_AUTO_INSTALL_TOOLS": "1",
+            "FAL_API_KEY": "fal-api-key",
+            "FAL_KEY": "fal-standard-key",
+        },
+    )
+    unscoped_both = get_tool_by_name(
+        "fal",
+        both_keys_paths,
+        tools=tools,
+        credentials_manager=credentials,
+        runs_in_worker=False,
+        worker_target=None,
+    )
+    assert isinstance(unscoped_both, FalTools)
+    assert unscoped_both.api_key == "fal-api-key"
+
+    credentials.save_credentials("fal", {"api_key": "shared-stored-key"})
+    scoped_runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+    )
+    scoped_target = resolve_worker_target(
+        "user",
+        "alpha",
+        ToolExecutionIdentity("matrix", "alpha", "@alice:example.test", None, None, None, None, tenant_id="t"),
+    )
+    scoped_denied = get_tool_by_name(
+        "fal",
+        scoped_runtime_paths,
+        tools=tools,
+        credentials_manager=credentials,
+        runs_in_worker=False,
+        worker_target=scoped_target,
+        allowed_shared_services=frozenset(),
+    )
+    assert isinstance(scoped_denied, FalTools)
+    assert scoped_denied.api_key is None
+    denied_result = scoped_denied.generate_media("A sunset")
+    assert denied_result.content == "Error: FAL_API_KEY not set."
+    sync_client.assert_not_called()
+
+    scoped_granted = get_tool_by_name(
+        "fal",
+        scoped_runtime_paths,
+        tools=tools,
+        credentials_manager=credentials,
+        runs_in_worker=False,
+        worker_target=scoped_target,
+        allowed_shared_services=frozenset({"fal"}),
+    )
+    assert isinstance(scoped_granted, FalTools)
+    assert scoped_granted.api_key == "shared-stored-key"

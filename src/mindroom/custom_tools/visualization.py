@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -28,6 +29,15 @@ _CHART_META: dict[str, tuple[str, str, str, str]] = {
 }
 
 
+def _coerce_series_value(value: Any) -> float:  # noqa: ANN401
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if math.isfinite(number):
+            return number
+    msg = f"Series values must be finite numbers, got {value!r}"
+    raise ValueError(msg)
+
+
 def _normalize_series_data(data: Any) -> dict[str, float]:  # noqa: ANN401
     """Normalize dict, list of dicts, or list of numbers into label -> float pairs."""
     if data is None:
@@ -37,7 +47,7 @@ def _normalize_series_data(data: Any) -> dict[str, float]:  # noqa: ANN401
         with suppress(json.JSONDecodeError):
             data = json.loads(data)
     if isinstance(data, dict):
-        result = {str(key): float(value) if isinstance(value, (int, float)) else 0.0 for key, value in data.items()}
+        result = {str(key): _coerce_series_value(value) for key, value in data.items()}
         if result:
             return result
     elif isinstance(data, list) and data:
@@ -46,15 +56,11 @@ def _normalize_series_data(data: Any) -> dict[str, float]:  # noqa: ANN401
             for item in data:
                 if isinstance(item, dict) and len(item) >= 2:
                     keys = list(item.keys())
-                    raw_value = item[keys[1]]
-                    result[str(item[keys[0]])] = float(raw_value) if isinstance(raw_value, (int, float)) else 0.0
+                    result[str(item[keys[0]])] = _coerce_series_value(item[keys[1]])
             if result:
                 return result
         else:
-            return {
-                f"Item {idx + 1}": float(value) if isinstance(value, (int, float)) else 0.0
-                for idx, value in enumerate(data)
-            }
+            return {f"Item {idx + 1}": _coerce_series_value(value) for idx, value in enumerate(data)}
     msg = "data must be a non-empty dict, list, or JSON string"
     raise ValueError(msg)
 

@@ -219,3 +219,39 @@ def test_visualization_rejects_invalid_chart_type_with_json_error(tmp_path: Path
         "status": "error",
     }
     assert not (workspace / "charts").exists()
+
+
+@pytest.mark.parametrize("chart_type", ["bar", "line", "pie"])
+@pytest.mark.parametrize(
+    "invalid_data",
+    [
+        {"Mon": [5, 8], "Tue": [12, 3]},
+        {"Mon": True, "Tue": 2},
+        {"Mon": "five", "Tue": 2},
+        {"Mon": float("nan"), "Tue": 2},
+        {"Mon": float("inf")},
+        [{"day": "Mon", "values": [5, 8]}],
+        [{"day": "Mon", "values": False}],
+        [[5, 8], [12, 3]],
+        [True, 2],
+        ["bad", 2],
+    ],
+)
+def test_visualization_rejects_non_numeric_series_values_without_overwriting_existing_chart(
+    tmp_path: Path,
+    chart_type: Literal["bar", "line", "pie"],
+    invalid_data: Any,  # noqa: ANN401
+) -> None:
+    """Array-valued mappings, booleans, non-numeric values, and non-finite floats fail before touching disk."""
+    workspace = tmp_path / "workspace"
+    charts_dir = workspace / "charts"
+    charts_dir.mkdir(parents=True)
+    existing = charts_dir / "existing.png"
+    existing.write_bytes(b"original-chart-bytes")
+    toolkit = visualization_tools()(tool_output_workspace_root=workspace)
+
+    result = json.loads(toolkit.create_chart(chart_type, data=invalid_data, filename="existing.png"))
+
+    assert result["status"] == "error"
+    assert "finite numbers" in result["error"]
+    assert existing.read_bytes() == b"original-chart-bytes"

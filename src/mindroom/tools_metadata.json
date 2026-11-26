@@ -3402,7 +3402,8 @@
           "default": null,
           "description": null,
           "env": [
-            "FAL_API_KEY"
+            "FAL_API_KEY",
+            "FAL_KEY"
           ],
           "label": "API Key",
           "name": "api_key",

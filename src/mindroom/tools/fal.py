@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
-            env=("FAL_API_KEY",),
+            env=("FAL_API_KEY", "FAL_KEY"),
             label="API Key",
             type="password",
             required=False,

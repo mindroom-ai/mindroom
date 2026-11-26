@@ -145,7 +145,7 @@ It works only with models that accept a single `prompt` field and return files w
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Falls back to `FAL_API_KEY`. |
+| `api_key` | `password` | `null` | Falls back to `FAL_API_KEY` or `FAL_KEY`. |
 | `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `generate_media()`. |
 | `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `false` | Enable `image_to_image()`. |
