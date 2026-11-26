@@ -5,6 +5,7 @@ import inspect
 import json
 import tempfile
 from collections.abc import Callable
+from datetime import datetime
 from email import policy
 from email.parser import BytesParser
 from functools import partial
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config
@@ -1108,3 +1110,74 @@ def test_gmail_list_warning_logs_do_not_leak_sender_or_search_query(
         assert sensitive_sender not in serialized
         assert sensitive_context not in serialized
         assert sensitive_query not in serialized
+
+
+def test_gmail_readonly_scopes_reject_write_operations_even_with_write_creds(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Explicit gmail.readonly scopes must reject registered write tools even with write-capable credentials."""
+    write_capable_creds = GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("https://mail.google.com/",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
+
+    with pytest.raises(ValueError, match="scope"):
+        GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            creds=write_capable_creds,
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+
+    read_only_tool = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=mock_credentials_manager,
+        creds=write_capable_creds,
+        include_tools=["get_latest_emails"],
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+    )
+    assert set(read_only_tool.functions) == {"get_latest_emails"}
+
+
+@pytest.mark.parametrize(
+    ("scopes", "include_tools", "expected_functions"),
+    [
+        (
+            ["https://www.googleapis.com/auth/gmail.send"],
+            ["send_email", "send_email_reply"],
+            {"send_email", "send_email_reply"},
+        ),
+        (
+            ["https://www.googleapis.com/auth/gmail.compose"],
+            ["create_draft_email", "send_email"],
+            {"create_draft_email", "send_email"},
+        ),
+        (
+            ["https://www.googleapis.com/auth/gmail.modify"],
+            ["get_latest_emails", "send_email", "create_draft_email", "mark_email_as_read"],
+            {"get_latest_emails", "send_email", "create_draft_email", "mark_email_as_read"},
+        ),
+    ],
+)
+def test_gmail_granular_write_scopes_allow_matching_operations(
+    scopes: list[str],
+    include_tools: list[str],
+    expected_functions: set[str],
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Granular Gmail write scopes keep working for the operations they authorize."""
+    gmail_tools = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=mock_credentials_manager,
+        include_tools=include_tools,
+        scopes=scopes,
+    )
+
+    assert set(gmail_tools.functions) == expected_functions

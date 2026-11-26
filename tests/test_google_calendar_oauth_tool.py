@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -208,3 +210,54 @@ def test_google_calendar_allow_update_false_overrides_explicit_write_flags(tmp_p
         assert write_tool not in tool.functions
     assert "list_events" in tool.functions
     assert "get_event" in tool.functions
+
+
+@pytest.mark.parametrize(
+    "readonly_scope",
+    [
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+    ],
+)
+def test_google_calendar_readonly_scopes_reject_write_operations_even_with_write_creds(
+    tmp_path: Path,
+    readonly_scope: str,
+) -> None:
+    write_capable_creds = GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("https://www.googleapis.com/auth/calendar",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
+
+    with pytest.raises(ValueError, match="write operations"):
+        GoogleCalendarTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            scopes=[readonly_scope],
+        )
+
+    read_only_tool = GoogleCalendarTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        allow_update=False,
+        scopes=[readonly_scope],
+    )
+    assert "delete_event" not in read_only_tool.functions
+    assert "list_events" in read_only_tool.functions
+
+
+def test_google_calendar_granular_events_write_scope_allows_writes(tmp_path: Path) -> None:
+    tool = GoogleCalendarTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        scopes=["https://www.googleapis.com/auth/calendar.events"],
+    )
+
+    assert "create_event" in tool.functions
+    assert "delete_event" in tool.functions

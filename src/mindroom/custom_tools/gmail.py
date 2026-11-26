@@ -51,6 +51,64 @@ _GMAIL_SEND_SCOPES = frozenset(
         "https://www.googleapis.com/auth/gmail.send",
     },
 )
+_GMAIL_READ_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.modify",
+    },
+)
+_GMAIL_DRAFT_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+    },
+)
+_GMAIL_MODIFY_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.modify",
+    },
+)
+_GMAIL_SEND_TOOLS = frozenset({"send_email", "send_email_reply"})
+_GMAIL_DRAFT_TOOLS = frozenset({"create_draft_email", "send_draft", "update_draft"})
+_GMAIL_READ_TOOLS = frozenset(
+    {
+        "get_latest_emails",
+        "get_emails_from_user",
+        "get_unread_emails",
+        "get_starred_emails",
+        "get_emails_by_context",
+        "get_emails_by_date",
+        "get_emails_by_thread",
+        "search_emails",
+        "list_custom_labels",
+        "get_message",
+        "get_thread",
+        "search_threads",
+        "list_labels",
+        "get_draft",
+        "list_drafts",
+        "download_attachment",
+    },
+)
+_GMAIL_MODIFY_TOOLS = frozenset(
+    {
+        "mark_email_as_read",
+        "mark_email_as_unread",
+        "star_email",
+        "unstar_email",
+        "archive_email",
+        "apply_label",
+        "remove_label",
+        "delete_custom_label",
+        "modify_message_labels",
+        "modify_thread_labels",
+        "trash_message",
+        "trash_thread",
+    },
+)
 # Bounds raw attachment bytes held in memory across a single message.
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
@@ -262,6 +320,24 @@ def _filter_tools(
     return [fn for _name, fn in tools]
 
 
+def _validate_gmail_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
+    """Ensure explicit scopes cover every registered Gmail operation."""
+    registered = set(registered_names)
+    scope_set = set(scopes)
+    if registered & _GMAIL_DRAFT_TOOLS and not (_GMAIL_DRAFT_SCOPES & scope_set):
+        msg = "A Gmail compose or modify scope is required for draft operations"
+        raise ValueError(msg)
+    if registered & _GMAIL_SEND_TOOLS and not (_GMAIL_SEND_SCOPES & scope_set):
+        msg = "A Gmail send, compose, or modify scope is required for email sending operations"
+        raise ValueError(msg)
+    if registered & _GMAIL_READ_TOOLS and not (_GMAIL_READ_SCOPES & scope_set):
+        msg = "A Gmail read or modify scope is required for email reading operations"
+        raise ValueError(msg)
+    if registered & _GMAIL_MODIFY_TOOLS and not (_GMAIL_MODIFY_SCOPES & scope_set):
+        msg = "The scope https://www.googleapis.com/auth/gmail.modify is required for email modification operations"
+        raise ValueError(msg)
+
+
 class GmailTools(GoogleApiToolkit):
     """Read, search, organize, draft, and send emails with MindRoom-scoped OAuth credentials."""
 
@@ -400,6 +476,7 @@ class GmailTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
+        _validate_gmail_scopes(self.functions, self.scopes)
 
     def _service_account_scopes(self) -> tuple[str, ...]:
         """Return Gmail service-account scopes, honoring explicit constructor scopes."""

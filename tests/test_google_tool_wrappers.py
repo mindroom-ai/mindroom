@@ -2824,6 +2824,7 @@ _GOOGLE_IDENTITY_SCOPES = frozenset(
             lambda rp, cm: GmailTools(
                 runtime_paths=rp,
                 credentials_manager=cm,
+                include_tools=["get_latest_emails"],
                 scopes=["https://www.googleapis.com/auth/gmail.readonly"],
             ),
             ("https://www.googleapis.com/auth/gmail.readonly",),

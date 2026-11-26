@@ -41,6 +41,59 @@ _CALENDAR_FUNCTION_NAMES = (
     "respond_to_event",
 )
 _VALID_RESPONSES = frozenset({"accepted", "declined", "tentative"})
+_CALENDAR_WRITE_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events",
+    },
+)
+_CALENDAR_READ_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+    },
+)
+_CALENDAR_WRITE_TOOLS = frozenset(
+    {
+        "create_event",
+        "update_event",
+        "delete_event",
+        "quick_add_event",
+        "move_event",
+        "respond_to_event",
+    },
+)
+_CALENDAR_READ_TOOLS = frozenset(
+    {
+        "list_events",
+        "get_event",
+        "fetch_all_events",
+        "find_available_slots",
+        "list_calendars",
+        "check_availability",
+        "get_event_attendees",
+        "search_events",
+    },
+)
+
+
+def _validate_calendar_scopes(registered_names: Collection[str], scopes: Collection[str]) -> None:
+    """Ensure explicit scopes cover every registered Calendar operation."""
+    registered = set(registered_names)
+    scope_set = set(scopes)
+    if registered & _CALENDAR_WRITE_TOOLS and not (_CALENDAR_WRITE_SCOPES & scope_set):
+        msg = (
+            "A Google Calendar write scope (https://www.googleapis.com/auth/calendar or "
+            "https://www.googleapis.com/auth/calendar.events) is required for write operations"
+        )
+        raise ValueError(msg)
+    if registered & _CALENDAR_READ_TOOLS and not (_CALENDAR_READ_SCOPES & scope_set):
+        msg = "A Google Calendar read scope is required for read operations"
+        raise ValueError(msg)
 
 
 def _calendar_tips(visible: dict[str, str]) -> list[str]:
@@ -265,6 +318,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
+        _validate_calendar_scopes(self.functions, self.scopes)
 
     def _service_account_scopes(self) -> tuple[str, ...]:
         """Return Calendar service-account scopes, honoring explicit constructor scopes."""

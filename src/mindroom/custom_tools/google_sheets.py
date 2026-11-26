@@ -44,6 +44,31 @@ def _resolve_toggle(
     return True
 
 
+def _resolve_sheets_scopes(
+    scopes: Sequence[str] | None,
+    *,
+    has_read_tools: bool,
+    has_write_tools: bool,
+) -> list[str]:
+    """Resolve and validate Google Sheets scopes for the enabled operations."""
+    if scopes is None:
+        resolved: list[str] = []
+        if has_read_tools:
+            resolved.append(_SHEETS_READ_SCOPE)
+        if has_write_tools:
+            resolved.append(_SHEETS_WRITE_SCOPE)
+        return list(dict.fromkeys(resolved))
+
+    resolved = list(scopes)
+    if has_write_tools and _SHEETS_WRITE_SCOPE not in resolved:
+        msg = f"The scope {_SHEETS_WRITE_SCOPE} is required for write operations"
+        raise ValueError(msg)
+    if has_read_tools and _SHEETS_READ_SCOPE not in resolved and _SHEETS_WRITE_SCOPE not in resolved:
+        msg = f"Either {_SHEETS_READ_SCOPE} or {_SHEETS_WRITE_SCOPE} is required for read operations"
+        raise ValueError(msg)
+    return resolved
+
+
 class GoogleSheetsTools(GoogleApiToolkit):
     """Read, create, update, and format Google Sheets with MindRoom-scoped OAuth credentials."""
 
@@ -78,15 +103,11 @@ class GoogleSheetsTools(GoogleApiToolkit):
         enable_read = _resolve_toggle("read", "read_sheet", read, read_sheet)
         enable_create = _resolve_toggle("create", "create_sheet", create, create_sheet)
         enable_update = _resolve_toggle("update", "update_sheet", update, update_sheet)
-        if scopes is None:
-            resolved_scopes: list[str] = []
-            if all or enable_read:
-                resolved_scopes.append(_SHEETS_READ_SCOPE)
-            if all or enable_create or enable_update or create_duplicate_sheet:
-                resolved_scopes.append(_SHEETS_WRITE_SCOPE)
-            self.scopes = list(dict.fromkeys(resolved_scopes))
-        else:
-            self.scopes = list(scopes)
+        self.scopes = _resolve_sheets_scopes(
+            scopes,
+            has_read_tools=all or enable_read,
+            has_write_tools=all or enable_create or enable_update or create_duplicate_sheet,
+        )
 
         tools: list[Callable[..., str]] = []
         if all or enable_read:

@@ -380,3 +380,41 @@ def test_google_sheets_update_sheet_requires_explicit_args_even_with_read_defaul
 
     assert "must be provided" in result
     assert service.spreadsheets_resource.values_resource.update_kwargs is None
+
+
+def test_google_sheets_readonly_scopes_reject_write_operations_even_with_write_creds(tmp_path: Path) -> None:
+    write_capable_creds = GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("https://www.googleapis.com/auth/spreadsheets",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
+
+    with pytest.raises(ValueError, match=r"https://www\.googleapis\.com/auth/spreadsheets"):
+        GoogleSheetsTools(
+            runtime_paths=_runtime_paths(tmp_path),
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=write_capable_creds,
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        )
+
+    read_only_tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        create=False,
+        update=False,
+    )
+    assert set(read_only_tool.functions) == {"read_sheet"}
+
+    writable_tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=write_capable_creds,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    assert "update_sheet" in writable_tool.functions
