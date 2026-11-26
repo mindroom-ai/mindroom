@@ -181,3 +181,26 @@ def test_unbreakable_token_and_edge_cases() -> None:
 
     with pytest.raises(ValueError, match="positive"):
         split_memory_entries("hello", 0)
+
+
+def test_word_straddling_tight_cap_is_not_sliced() -> None:
+    """When both spaces around a word exceed the tight right-side cap, whitespace fallback preserves the whole word."""
+    entry = "note " * 239 + "Magnesium" + " done" * 239
+    assert len(entry) == 2_399
+
+    pieces = split_memory_entries(entry, 1_200)
+
+    assert len(pieces) == 3
+    assert any("Magnesium" in piece for piece in pieces)
+    assert all(300 <= len(piece) <= 1_200 for piece in pieces)
+    assert " ".join(pieces) == entry
+
+
+def test_large_entry_splits_in_linear_time() -> None:
+    """Splitting a very large entry avoids quadratic suffix copying and stays well-bounded."""
+    entry = "- [id=m_20261126090000_big] " + "word " * 120_000
+    pieces = split_memory_entries(entry, 1_200)
+
+    assert len(pieces) == 501
+    assert all(300 <= len(piece) <= 1_200 for piece in pieces)
+    assert " ".join(pieces).split() == entry.split()

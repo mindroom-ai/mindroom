@@ -13,7 +13,7 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
-Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+In standard mode, before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt (in minimal mode, agents read memory files or call the `memory` tool on demand instead).
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
 With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](knowledge.md#reranking), a reranker chooses the semantic matches instead.
 `memory(action="search", ...)` returns up to its own `limit` in every mode.
