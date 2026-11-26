@@ -51,7 +51,7 @@ def strip_inline_media_from_content(content: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def filter_inline_media_for_html(source: Mapping[str, Any], formatted_body: str) -> dict[str, dict[str, Any]] | None:
+def _filter_inline_media_for_html(source: Mapping[str, Any], formatted_body: str) -> dict[str, dict[str, Any]] | None:
     """Filter ``source``'s inline media map down to entries referenced by ``formatted_body``."""
     existing = source.get(INLINE_MEDIA_CONTENT_KEY)
     if not isinstance(existing, Mapping) or not existing:
@@ -70,7 +70,7 @@ def copy_referenced_inline_media(source: Mapping[str, Any] | None, target: dict[
     if source is None:
         return
     formatted_body = target.get("formatted_body")
-    if isinstance(formatted_body, str) and (inline_media := filter_inline_media_for_html(source, formatted_body)):
+    if isinstance(formatted_body, str) and (inline_media := _filter_inline_media_for_html(source, formatted_body)):
         target[INLINE_MEDIA_CONTENT_KEY] = inline_media
 
 
@@ -88,7 +88,7 @@ def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted
     formatted_body = visible.get("formatted_body")
     uris = _img_mxc_uris(formatted_body)
     inline_media: dict[str, dict[str, Any]] = (
-        filter_inline_media_for_html(visible, formatted_body) or {} if isinstance(formatted_body, str) and uris else {}
+        _filter_inline_media_for_html(visible, formatted_body) or {} if isinstance(formatted_body, str) and uris else {}
     )
     if uris:
         with _LOCK:
