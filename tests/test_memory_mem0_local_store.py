@@ -336,7 +336,7 @@ async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_re
     runtime_paths = runtime_paths_for(config)
     tools = MemoryTools("general", config, runtime_paths)
 
-    result = await tools.add_memory("Remember my notes.")
+    result = await tools.memory(action="add", content="Remember my notes.")
 
     assert result.startswith("Failed to store memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
     assert rejected_key not in result

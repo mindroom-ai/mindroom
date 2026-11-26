@@ -82,6 +82,7 @@ __all__ = [
     "BackgroundJob",
     "BackgroundOutcome",
     "EncodedResultPayload",
+    "FollowUpKey",
     "JobAccessError",
     "JobClaim",
     "JobGrant",
@@ -113,6 +114,7 @@ type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
 type _Continues = Callable[[BackgroundJob], bool]
 # A job's current access: proven allowed, proven denied, or still resolving, such as while room membership loads.
 type JobGrant = Literal["allowed", "denied", "pending"]
+type FollowUpKey = tuple[str, str, str | None, str, bool]
 
 
 class JobAccessError(ValueError):
@@ -329,14 +331,6 @@ def _approval_end_reason(entry: _Entry, job: BackgroundJob) -> str | None:
     return None
 
 
-def _apply_published(entry: _Entry, job: BackgroundJob) -> None:
-    entry.job, entry.saved, entry.unsaved_payload = job, True, None
-    if job.status in TERMINAL_STATUSES:
-        # A durable terminal outcome ends execution; drop what only running work needed.
-        entry.cancel, entry.task = None, None
-    entry.notify_changed()
-
-
 # People see a job by the start of its ID; `!cancel_job` accepts any prefix that names one job.
 _SHORT_JOB_ID_LENGTH = 8
 
@@ -455,6 +449,28 @@ def _returned_inline(entry: _Entry) -> bool:
 def _conversation_key(owner: ToolExecutionIdentity) -> tuple[str, str | None, str | None, str | None]:
     """A job's recipient, room, resolved thread, and requester."""
     return (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id)
+
+
+def _ended_room_key(job: BackgroundJob | None) -> tuple[str, str] | None:
+    if job is None or job.status not in TERMINAL_STATUSES or job.owner.room_id is None:
+        return None
+    return (job.owner.recipient, job.owner.room_id)
+
+
+def _follow_up_candidate_key(job: BackgroundJob | None) -> FollowUpKey | None:
+    if (
+        job is None
+        or job.status not in TERMINAL_STATUSES
+        or job.depth != 0
+        or job.consumed
+        or is_workflow_node_job(job)
+    ):
+        return None
+    owner = job.owner
+    if owner.room_id is None or owner.requester_id is None:
+        return None
+    silent = job.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    return (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id, silent)
 
 
 def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> None:
@@ -600,6 +616,12 @@ class ToolJobRuntime:
         # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
         # Jobs are keyed by their recipient, room, thread, and requester.
         self._by_conversation: dict[tuple[str, str | None, str | None, str | None], dict[str, _Entry]] = {}
+        self._live: dict[str, _Entry] = {}
+        self._claimed: set[str] = set()
+        self._follow_up_candidates: dict[FollowUpKey, dict[str, _Entry]] = {}
+        self._follow_up_revisions: dict[FollowUpKey, int] = {}
+        self._candidate_revision = 0
+        self._ended_room_counts: dict[tuple[str, str], int] = {}
         self._lock = asyncio.Lock()
         self._admissions: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._closed = False
@@ -629,22 +651,111 @@ class ToolJobRuntime:
         """Return whether the journal holds the job as it is here; false while an outcome that failed to save waits."""
         return self._entries[job_id].saved
 
+    def live_jobs(self) -> tuple[BackgroundJob, ...]:
+        """Return every non-terminal job this runtime retains, unfiltered by access."""
+        return tuple(entry.job for entry in self._live.values() if entry.job.status not in TERMINAL_STATUSES)
+
+    def ended_rooms(self) -> frozenset[tuple[str, str]]:
+        """Return every ``(recipient, room_id)`` pair that currently retains at least one terminal job."""
+        return frozenset(self._ended_room_counts)
+
+    def follow_up_candidate_revisions(self) -> dict[FollowUpKey, int]:
+        """Return the current revision for every conversation with unconsumed depth-0 terminal candidates."""
+        return dict(self._follow_up_revisions)
+
+    def follow_up_candidate_jobs(self, key: FollowUpKey) -> tuple[BackgroundJob, ...]:
+        """Return one conversation's unconsumed depth-0 terminal candidates."""
+        return tuple(entry.job for entry in self._follow_up_candidates.get(key, {}).values())
+
+    def is_follow_up_candidate(self, job_id: str) -> bool:
+        """Return whether *job_id* is still retained as an unconsumed depth-0 terminal candidate."""
+        return (entry := self._entries.get(job_id)) is not None and _follow_up_candidate_key(entry.job) is not None
+
     def awaited_job_ids(self) -> frozenset[str]:
         """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""
-        return frozenset(job_id for job_id, entry in self._entries.items() if entry.claim is not None)
+        return frozenset(self._claimed)
+
+    def _bump_candidate_revision(self, key: FollowUpKey) -> None:
+        self._candidate_revision += 1
+        self._follow_up_revisions[key] = self._candidate_revision
+
+    def _sync_follow_up_candidate(self, entry: _Entry, prev: BackgroundJob | None, job: BackgroundJob | None) -> None:
+        old, new = _follow_up_candidate_key(prev), _follow_up_candidate_key(job)
+        if old == new:
+            if new and prev and job and (prev.status != job.status or prev.source_event_id != job.source_event_id):
+                self._bump_candidate_revision(new)
+            return
+        if old and (bucket := self._follow_up_candidates.get(old)) and bucket.pop(entry.job.job_id, None):
+            if bucket:
+                self._bump_candidate_revision(old)
+            else:
+                del self._follow_up_candidates[old], self._follow_up_revisions[old]
+        if new:
+            self._follow_up_candidates.setdefault(new, {})[entry.job.job_id] = entry
+            self._bump_candidate_revision(new)
+
+    def _sync_indexes(self, entry: _Entry, previous: BackgroundJob | None = None, *, removed: bool = False) -> None:
+        job, job_id = (None if removed else entry.job), entry.job.job_id
+        if job is None or job.status in TERMINAL_STATUSES:
+            self._live.pop(job_id, None)
+        else:
+            self._live[job_id] = entry
+        old_room, new_room = _ended_room_key(previous), _ended_room_key(job)
+        if old_room != new_room:
+            if old_room is not None:
+                if (remaining := self._ended_room_counts.get(old_room, 0) - 1) > 0:
+                    self._ended_room_counts[old_room] = remaining
+                else:
+                    self._ended_room_counts.pop(old_room, None)
+            if new_room is not None:
+                self._ended_room_counts[new_room] = self._ended_room_counts.get(new_room, 0) + 1
+        self._sync_follow_up_candidate(entry, previous, job)
+
+    def _apply_published(
+        self,
+        entry: _Entry,
+        job: BackgroundJob,
+        *,
+        saved: bool = True,
+        payload: EncodedResultPayload | None = None,
+    ) -> None:
+        previous = entry.job
+        entry.job, entry.saved, entry.unsaved_payload = job, saved, payload
+        if saved and job.status in TERMINAL_STATUSES:
+            # A durable terminal outcome ends execution; drop what only running work needed.
+            entry.cancel, entry.task = None, None
+        if job.job_id in self._entries:
+            self._sync_indexes(entry, previous)
+        entry.notify_changed()
+
+    def _claim_for(self, entry: _Entry, claim: JobClaim | None) -> JobClaim | None:
+        claimed = entry.claim_for(claim)
+        if entry.claim is not None and self._entries.get(entry.job.job_id) is entry:
+            self._claimed.add(entry.job.job_id)
+        return claimed
+
+    def _clear_claim(self, entry: _Entry) -> None:
+        entry.claim = None
+        self._claimed.discard(entry.job.job_id)
 
     def _add_entry(self, entry: _Entry) -> None:
         """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job
         self._entries[job.job_id] = entry
         self._by_conversation.setdefault(_conversation_key(job.owner), {})[job.job_id] = entry
+        self._sync_indexes(entry)
+        if entry.claim is not None:
+            self._claimed.add(job.job_id)
 
     def _remove_entry(self, job_id: str) -> None:
-        key = _conversation_key(self._entries.pop(job_id).job.owner)
+        entry = self._entries.pop(job_id)
+        key = _conversation_key(entry.job.owner)
         group = self._by_conversation[key]
         del group[job_id]
         if not group:
             del self._by_conversation[key]
+        self._claimed.discard(job_id)
+        self._sync_indexes(entry, entry.job, removed=True)
 
     def _owns(self, job: BackgroundJob, owner: ToolExecutionIdentity, depth: int) -> bool:
         """Whether a caller owns a job: it made the call, or it is the agent or team that answers in its conversation.
@@ -729,7 +840,7 @@ class ToolJobRuntime:
                     payload_json,
                     approval_end_reason=_approval_end_reason(entry, job),
                 )
-            _apply_published(entry, job)
+            self._apply_published(entry, job)
             self.changed.set()
 
         # A cancelled caller cannot separate a landed write from its in-memory publication.
@@ -754,8 +865,7 @@ class ToolJobRuntime:
         try:
             await self._publish(entry, job, outcome.result_payload)
         except Exception:
-            entry.job, entry.saved, entry.unsaved_payload = job, False, outcome.result_payload
-            entry.notify_changed()
+            self._apply_published(entry, job, saved=False, payload=outcome.result_payload)
             self.changed.set()
             raise
 
@@ -835,7 +945,7 @@ class ToolJobRuntime:
 
     def awaiting_continuation(self) -> tuple[BackgroundJob, ...]:
         """Return the jobs a restart stopped that wait for `continue_stopped`, which continues or settles each."""
-        return tuple(entry.job for entry in self._entries.values() if self._awaits_continuation(entry))
+        return tuple(entry.job for entry in self._live.values() if self._awaits_continuation(entry))
 
     def stopped_by_restart(self, key: ConversationKey) -> tuple[BackgroundJob, ...]:
         """Return one conversation's jobs that a restart stopped and that go on: they were continued, or wait to be.
@@ -978,7 +1088,7 @@ class ToolJobRuntime:
                 entry = _Entry(job, cancel=cancel)
                 await run_coroutine_until_complete(self._admit(entry, operation, span_stopped))
             snapshot = await self._snapshot(entry)
-            return snapshot, entry.claim_for(None) if readable else None
+            return snapshot, self._claim_for(entry, None) if readable else None
 
     async def _admit(self, entry: _Entry, operation: _Operation, span_stopped: Callable[[], bool] | None) -> None:
         """Publish accepted ownership, then launch it unless its reply span was stopped; callers finish this first."""
@@ -1172,9 +1282,9 @@ class ToolJobRuntime:
             job_id = entry.job.job_id
             if not readable and claim is not None and entry.claim == claim:
                 # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
-                entry.claim = None
+                self._clear_claim(entry)
                 self.changed.set()
-            claim = entry.claim_for(claim) if readable else None
+            claim = self._claim_for(entry, claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
         # A newer human message in the waiting reply's own conversation releases the wait unless the mid-turn judge
@@ -1192,7 +1302,7 @@ class ToolJobRuntime:
                         return _JobWait(await self._snapshot(entry))
                     if entry.job.status in TERMINAL_STATUSES:
                         # A released claim can be taken again unless another waiter has claimed the outcome since.
-                        claim = entry.claim_for(claim)
+                        claim = self._claim_for(entry, claim)
                         snapshot = await self._snapshot(entry)
                         retained = claim is not None
                         return _JobWait(snapshot, claim)
@@ -1237,7 +1347,7 @@ class ToolJobRuntime:
                 for job_id, claim in waits:
                     entry = self._entries.get(job_id)
                     if entry is not None and claim is not None and entry.claim == claim:
-                        entry.claim = None
+                        self._clear_claim(entry)
                         released = True
                 if released:
                     self.changed.set()
@@ -1290,8 +1400,8 @@ class ToolJobRuntime:
                     updates = await asyncio.to_thread(_encode_updates, batch)
                     await self._store.save_many(updates)
                     for item in batch:
-                        _apply_published(item.entry, item.job)
-                        item.entry.claim = None
+                        self._apply_published(item.entry, item.job)
+                        self._clear_claim(item.entry)
                     self.changed.set()
 
                 # A cancelled caller cannot separate a landed write from its in-memory publication.
@@ -1321,7 +1431,7 @@ class ToolJobRuntime:
             self._ensure_open(accepting=True)
             revoked = [
                 entry
-                for entry in self._entries.values()
+                for entry in self._live.values()
                 if entry.job.status not in TERMINAL_STATUSES and self._grant(entry.job) == "denied"
             ]
             for entry in revoked:
@@ -1417,7 +1527,7 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    async def ended_jobs(self, key: ConversationKey) -> tuple[BackgroundJob, ...]:
+    async def ended_jobs(self, key: ConversationKey, *, include_cancelled: bool = True) -> tuple[BackgroundJob, ...]:
         """Return one conversation's ended top-level jobs that nobody acknowledged or reads now, oldest first.
 
         A job stays out while a waiter claims it, while its requester's access is unresolved or gone, and once its
@@ -1429,17 +1539,15 @@ class ToolJobRuntime:
             ended = [
                 await self._snapshot(entry)
                 for entry in list(
-                    self._by_conversation.get(
-                        (key.recipient, key.room_id, key.thread_id, key.requester_id),
+                    self._follow_up_candidates.get(
+                        (key.recipient, key.room_id, key.thread_id, key.requester_id, key.silent),
                         {},
                     ).values(),
                 )
                 if entry.job.status in TERMINAL_STATUSES
-                and entry.job.depth == 0
                 and not entry.job.consumed
                 and entry.claim is None
-                and not is_workflow_node_job(entry.job)
-                and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == key.silent
+                and (include_cancelled or entry.job.status != "cancelled")
                 and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))

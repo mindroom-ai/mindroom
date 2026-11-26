@@ -24,6 +24,7 @@ from mindroom.agent_cli.session import (
 )
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
@@ -186,6 +187,54 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
     assert "turn stopped" not in receipt["outcome"]
     assert [call.tool_name for call in owner.control_calls] == ([CONFIG_RELOAD_CALL] if reload_ends_run else [])
     catalog.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("rule_match", "should_refuse"),
+    [
+        ("google_drive_*", False),
+        ("add", True),
+    ],
+    ids=["unrelated_rule_survives", "matching_rule_refuses_before_bind"],
+)
+async def test_a_reload_adding_approval_rules_checks_only_the_called_tool_before_binding(
+    tmp_path: Path,
+    rule_match: str,
+    should_refuse: bool,
+) -> None:
+    runtime = _runtime_context(tmp_path)
+    current = runtime.config.model_copy(deep=True)
+    current.tool_approval.rules = [ApprovalRuleConfig(match=rule_match, script="approval_other_agent_only.py")]
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current,
+    )
+    catalog = _catalog(runtime)
+    catalog.bind = AsyncMock(side_effect=ValueError("reached bind"))
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=True)
+        async with owner._window("bash"):
+            receipt = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="calculator",
+                    function="add",
+                ),
+            )
+            receipt = await settled_receipt(owner, receipt["call_id"])
+
+    if should_refuse:
+        assert "This MindRoom call did not run: the configuration was reloaded" in receipt["outcome"]
+        assert [call.tool_name for call in owner.control_calls] == [CONFIG_RELOAD_CALL]
+        catalog.bind.assert_not_awaited()
+    else:
+        assert owner.control_calls == []
+        catalog.bind.assert_awaited_once()
 
 
 @pytest.mark.asyncio

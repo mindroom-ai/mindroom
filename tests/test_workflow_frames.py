@@ -81,7 +81,7 @@ async def test_frame_has_exactly_the_pinned_shape() -> None:
     assert list(frame) == ["v", "run", "sid", "seq", "meta", "snapshot"]
     assert (frame["v"], frame["run"], frame["seq"]) == (1, _RUN.run_id, 0)
     assert frame["meta"] == graph_meta(_RUN, nodes, _USAGE, large=False)
-    assert list(frame["snapshot"]) == ["phases", "groups", "nodes", "edges", "omitted", "log"]
+    assert list(frame["snapshot"]) == ["phases", "groups", "nodes", "edges", "messages", "omitted", "log"]
     assert [node["id"] for node in frame["snapshot"]["nodes"]] == ["n1"]
 
 

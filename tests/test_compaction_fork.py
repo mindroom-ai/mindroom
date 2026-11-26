@@ -22,15 +22,16 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history.compaction import Summarizer, SummaryModel, compact_scope_history, summarize_runs
+from mindroom.history.compaction import compact_scope_history
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.policy import resolve_history_execution_plan
+from mindroom.history.policy import _resolve_history_execution_plan as resolve_history_execution_plan
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer
+from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import compact_scope_now, prepare_scope_history
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction
+from mindroom.history.summarizer import Summarizer, SummaryModel, summarize_runs
 from mindroom.history.summary_call import (
     CompactionForkToolCallError,
     _CompactionSummaryTimeoutError,
@@ -44,10 +45,10 @@ from mindroom.history.summary_fork import (
     lookup_fork_frame,
     prepare_fork_request,
     remember_fork_frame,
-    warm_cache_ttl_seconds,
+    warm_frame_key,
 )
 from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary
-from mindroom.history.types import HistoryPreparationInputs, HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryPreparationInputs, ScopeSummary
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
@@ -61,6 +62,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import (
+    Capabilities,
     ModelIdentity,
     ModelRequest,
     NativeCompactionReplay,
@@ -255,7 +257,6 @@ def _summarizer(
     on_usage: Any = None,  # noqa: ANN401
     timeout_s: float = 10.0,
     sid: str = "sess-matrix",
-    fork: SummaryFork | None = None,
 ) -> Summarizer:
     fb = SummaryModel(fallback, "fallback", 50_000) if fallback else None
     return Summarizer(
@@ -267,7 +268,6 @@ def _summarizer(
         sid,
         TEST_AGENT_SCOPE,
         on_usage,
-        fork=fork,
     )
 
 
@@ -448,19 +448,54 @@ async def test_request_compaction_summary_warns_on_usage_error_and_propagates_ti
         await task
 
 
-def test_warm_cache_ttl_seconds() -> None:
-    ext = {"extended_cache_time": True, "cache_system_prompt": True}
-    for identity, expected in [
-        (None, 3300.0),
-        (ModelIdentity(id="claude-sonnet-5", provider="Anthropic"), 3300.0),
-        (ModelIdentity(id="anthropic/claude-sonnet-5", provider="OpenRouter"), 3300.0),
-        (ModelIdentity(id="openai/gpt-5", provider="OpenRouter"), 240.0),
-        (ModelIdentity(id="deepseek-chat", provider="DeepSeek"), 240.0),
-    ]:
-        assert warm_cache_ttl_seconds(ext, identity=identity) == expected
-    assert warm_cache_ttl_seconds({"extended_cache_time": True, "cache_system_prompt": False}) == 240.0
-    assert warm_cache_ttl_seconds({"extended_cache_time": False, "cache_system_prompt": True}) == 240.0
-    assert warm_cache_ttl_seconds({}) == 240.0
+@pytest.mark.parametrize(
+    ("family", "provider", "model_id", "extra", "api", "expected"),
+    [
+        ("anthropic", "anthropic", "claude-sonnet-5", {}, None, 3300.0),
+        ("anthropic", "anthropic", "claude-sonnet-5", {"extended_cache_time": False}, None, 240.0),
+        ("anthropic", "anthropic", "claude-sonnet-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {}, None, 3300.0),
+        ("openai", "openrouter", "~anthropic/claude-sonnet-5", {}, None, 3300.0),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {"extended_cache_time": False}, None, 240.0),
+        ("openai", "openrouter", "anthropic/claude-sonnet-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "openrouter", "openai/gpt-5", {}, None, 240.0),
+        ("openai", "openrouter", "openai/gpt-5", {"cache_system_prompt": False}, None, None),
+        ("openai", "deepseek", "deepseek-chat", {}, None, 240.0),
+        ("openai", "openai", "gpt-5", {}, "responses", 240.0),
+        ("openai", "openai", "gpt-5", {"cache_system_prompt": False}, "responses", None),
+        ("claude_code", "claude_code", "claude-sonnet-5", {}, None, None),
+    ],
+)
+def test_provider_capabilities_prompt_cache_ttl_seconds(
+    tmp_path: Path,
+    family: str,
+    provider: str,
+    model_id: str,
+    extra: dict[str, Any],
+    api: str | None,
+    expected: float | None,
+) -> None:
+    from mindroom.config.models import ModelConfig  # noqa: PLC0415
+    from mindroom.providers.claude_code.builder import build_provider as build_claude_code  # noqa: PLC0415
+
+    spec: dict[str, Any] = {"provider": provider, "id": model_id, "extra_kwargs": {"api_key": "k", **extra}}
+    if api is not None:
+        spec["api"] = api
+    with isolated_provider_environment():
+        if family == "anthropic":
+            client = httpx2.AsyncClient(transport=httpx2_transport(lambda _req: sse_reply([])))
+            built = provider_for(spec, tmp_path, client)
+        elif family == "openai":
+            built = openai_family_adapter(spec, tmp_path, lambda _req: pytest.fail("unexpected HTTP"))
+        else:
+            _, runtime_paths = _make_config(tmp_path)
+            built = build_claude_code(
+                ModelConfig(provider=provider, id=model_id),
+                runtime_paths,
+                execution_identity=None,
+                auto_install=False,
+            )
+    assert built.capabilities.prompt_cache_ttl_seconds == expected
 
 
 def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path: Path) -> None:
@@ -488,12 +523,9 @@ def test_prepare_fork_request_happy_path_preserves_prefix_and_pins_hold(tmp_path
 def test_prepare_fork_request_gates() -> None:
     _, fork = _warm_fork()
     assert _gate(fork, identity=ModelIdentity(id="other", provider="Synthetic")) == (None, "different_model")
-    for cc_provider in ("claude_code", "Anthropic (Claude Code)"):
-        cc_model = ScriptedModel([], identity=ModelIdentity(id="claude", provider=cc_provider))
-        assert _gate(_warm_fork(cc_model)[1]) == (None, "unsupported_provider")
 
     older_msgs = (*fork.request.messages, _msg("user", "More"), _msg("assistant", "Unanchored"))
-    uncached = ScriptedModel([], model_params={"cache_system_prompt": False})
+    uncached = ScriptedModel([], capabilities=Capabilities(prompt_cache_ttl_seconds=None))
     alice_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-alice", "session_id": "sess-alice"})
     bob_routed = ScriptedModel([], model_params={"prompt_cache_key": "cache-bob", "session_id": "sess-bob"})
     _, alice_fork = _warm_fork(alice_routed)
@@ -530,11 +562,10 @@ def test_prepare_fork_request_gates() -> None:
     assert _gate(fork, now=_TS + 239.0)[1] is None
     assert _gate(fork, now=_TS + 240.0) == (None, "cache_cold")
     assert _gate(fork, now=_TS - 1.0) == (None, "cache_cold")
-    ext_params = {"extended_cache_time": True, "cache_system_prompt": True}
     ext_model = ScriptedModel(
         [],
         identity=ModelIdentity(id="claude-sonnet-5", provider="Anthropic"),
-        model_params=ext_params,
+        capabilities=Capabilities(prompt_cache_ttl_seconds=3300.0),
     )
     _, ext_fork = _warm_fork(ext_model)
     assert _gate(ext_fork, now=_TS + 3299.0)[1] is None
@@ -596,6 +627,14 @@ def test_fork_frame_lru_isolation_sanitization_and_eviction(tmp_path: Path) -> N
     remember_fork_frame((tmp_path / "a.db", "agent:code", "extra-64"), tpl, _SYS)
     assert lookup_fork_frame((tmp_path / "a.db", "agent:code", "extra-0")) is not None
     assert lookup_fork_frame((tmp_path / "a.db", "agent:code", "extra-1")) is None
+
+    # Omitting system_messages extracts leading role=="system" messages from the live request.
+    live_key = warm_frame_key(tmp_path / "a.db", TEST_AGENT_SCOPE, "sess-live-split")
+    live_req = ModelRequest(messages=(*_SYS, _msg("user", "u"), _msg("system", "mid-turn")), tools=(_TOOL,))
+    remember_fork_frame(live_key, live_req)
+    split_found = lookup_fork_frame(live_key)
+    assert split_found is not None
+    assert (split_found[0].messages, split_found[1]) == ((), _SYS)
 
 
 def test_build_scope_fork_constructs_turnless_whole_history_request() -> None:
@@ -768,11 +807,12 @@ async def test_wire_codex_fork_preserves_prompt_cache_key_and_session_id(tmp_pat
         8_192,
         False,
     )
-    summarizer = _summarizer(unbound, sid="sess-codex", fork=fork)
+    summarizer = _summarizer(unbound, sid="sess-codex")
     summary, _ = await summarize_runs(
         summarizer,
         None,
         [_completed_run("r1", messages=[live.messages[1], turn.message])],
+        fork=fork,
     )
     assert (summary, unbound_bodies) == ("## Goal\nCodex forked summary", [])
     (live_h, live_b), (fork_h, fork_b) = recorded
@@ -877,7 +917,7 @@ async def test_wire_openai_responses_stored_pre_reply_fork_preserves_portable_re
         _session("sess-resp", runs=[_completed_run("r1", messages=[live.messages[1], turn1.message])]),
     )
     xml_calls = SummaryCalls()
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     install_model_providers(monkeypatch, {"default": ScriptedModel([], identity=model.identity)})
     frame = RequestFrame(ModelRequest(messages=()), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
     prepared = await prepare_scope_history(
@@ -923,7 +963,7 @@ async def _run_pre_reply(
         replay_window_tokens=10_000,
         threshold_tokens=5_000,
     )
-    mp.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    mp.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(mp, active, other=summary_model(model_id="other-model", provider="openai"))
     seed_session(storage, _session(sid, runs=[run]))
     frame = RequestFrame(ModelRequest(messages=(), tools=(_TOOL,)), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
@@ -1050,7 +1090,7 @@ async def test_live_compact_scope_now_warm_hit_and_cold_or_drifted_fallback(
         remembered: tuple[Message, ...] | None,
     ) -> bool:
         clear_fork_frames()
-        monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+        monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
         _install_default(monkeypatch, model)
         seed_session(storage, _session(sid, runs=[_warm_run(model, template, 4_000, run_id=f"r-{sid}")]))
         sess = storage.load_session(sid)
@@ -1094,7 +1134,7 @@ async def test_live_compact_scope_now_skips_fork_for_different_requester_routing
 
     # Bob triggers /compact with a different requester-derived (prompt_cache_key, session_id) -> falls back to XML.
     xml_calls = SummaryCalls(summary="xml-for-bob")
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(monkeypatch, bob_model)
     ctx = _scope_ctx(storage, "sess-shared", config, paths)
     with capture_logs() as logs:
@@ -1109,6 +1149,42 @@ async def test_live_compact_scope_now_skips_fork_for_different_requester_routing
     assert (empty, len(xml_calls.inputs), bob_model.requests) == (False, 1, [])
     assert any(entry.get("fork_skip_reason") == "routing_key_mismatch" for entry in logs)
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-shared")[-1].summary == "xml-for-bob"
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_now_sizes_with_active_model_name_when_compaction_model_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000)
+    template, inputs = ModelRequest(messages=()), _inputs(config, compaction_model="other")
+    assert inputs.execution_plan.active_model_name == "default"
+    assert inputs.execution_plan.compaction_model_name == "other"
+    active = ScriptedModel([], identity=ModelIdentity(id="scripted-model", provider="openai"))
+    summary_provider = ScriptedModel([], identity=ModelIdentity(id="other-model", provider="openai"))
+    install_model_providers(monkeypatch, {"default": active, "other": summary_provider})
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", SummaryCalls(summary="xml"))
+    sizer_model_names: list[str] = []
+
+    def spy_sizer(model: Any, cfg: Any, model_name: str) -> RequestSizer:  # noqa: ANN401
+        sizer_model_names.append(model_name)
+        return request_sizer(model, cfg, model_name)
+
+    monkeypatch.setattr("mindroom.history.runtime.request_sizer", spy_sizer)
+    seed_session(storage, _session("sess-alias", runs=[_warm_run(active, template, 4_000, run_id="r-alias")]))
+    sess = storage.load_session("sess-alias")
+    assert sess is not None
+    set_force_compaction(storage, session=sess, forced=True)
+    remember_fork_frame((storage.path, TEST_AGENT_SCOPE.key, "sess-alias"), template, _SYS)
+    await compact_scope_now(
+        _scope_ctx(storage, "sess-alias", config, paths),
+        inputs,
+        lambda: active,
+        RecordingCompactionLifecycle(),
+        config,
+        paths,
+    )
+    assert sizer_model_names == ["default"]
 
 
 def _probe_tool() -> str:
@@ -1129,7 +1205,7 @@ async def _run_mid_turn(
 ) -> RunRecord:
     config, paths, store = env
     storage = store if scoped else None
-    mp.setattr("mindroom.history.compaction.generate_compaction_summary", xml_calls)
+    mp.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
     _install_default(mp, model)
     session = (storage.load_session(sid) if storage else None) or new_scope_session(
         session_id=sid,
@@ -1333,7 +1409,7 @@ def _fork_case(
     xml_fallback: ScriptedModel | None = None,
     on_usage: Any = None,  # noqa: ANN401
     timeout_s: float = 10.0,
-) -> tuple[ScriptedModel, Summarizer, list[RunRecord]]:
+) -> tuple[ScriptedModel, Summarizer, SummaryFork, list[RunRecord]]:
     fork_model = ScriptedModel([steps], identity=_ID)
     run = _warm_run(fork_model, ModelRequest(messages=()), 1_000)
     fork = SummaryFork(
@@ -1345,7 +1421,8 @@ def _fork_case(
     )
     return (
         fork_model,
-        _summarizer(xml_primary, fallback=xml_fallback, on_usage=on_usage, timeout_s=timeout_s, fork=fork),
+        _summarizer(xml_primary, fallback=xml_fallback, on_usage=on_usage, timeout_s=timeout_s),
+        fork,
         [run],
     )
 
@@ -1377,9 +1454,16 @@ async def test_fork_fallback_to_primary_xml() -> None:
     ]
     for steps, expected_xml, expected_reason, max_tokens, on_usage in cases:
         xml_primary = summary_model(expected_xml, model_id=_ID.id, provider=_ID.provider)
-        fork_model, summarizer, runs = _fork_case(steps, xml_primary, on_usage=on_usage)
+        fork_model, summarizer, fork, runs = _fork_case(steps, xml_primary, on_usage=on_usage)
         with capture_logs() as logs:
-            summary, _ = await summarize_runs(summarizer, None, runs, max_summary_tokens=max_tokens, model=fork_model)
+            summary, _ = await summarize_runs(
+                summarizer,
+                None,
+                runs,
+                fork=fork,
+                max_summary_tokens=max_tokens,
+                model=fork_model,
+            )
         assert (summary, len(xml_primary.requests)) == (expected_xml, 1)
         assert any(entry.get("fork_fallback_reason") == expected_reason for entry in logs)
 
@@ -1396,10 +1480,10 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
     # 1. ModelSafeguardRefusal WITH fallback -> jumps straight to fallback XML (never calls primary XML).
     xml_primary = summary_model("unused", model_id=_ID.id, provider=_ID.provider)
     xml_fallback = summary_model("xml-from-fallback", model_id="fallback-model", provider="openai")
-    _, summarizer, runs = _fork_case([_raise_step(refusal)], xml_primary, xml_fallback=xml_fallback)
+    _, summarizer, fork, runs = _fork_case([_raise_step(refusal)], xml_primary, xml_fallback=xml_fallback)
     with capture_logs() as logs:
-        summary, served = await summarize_runs(summarizer, None, runs)
-    assert (summary, served.model.name, xml_primary.requests, len(xml_fallback.requests)) == (
+        summary, served = await summarize_runs(summarizer, None, runs, fork=fork)
+    assert (summary, served.name, xml_primary.requests, len(xml_fallback.requests)) == (
         "xml-from-fallback",
         "fallback",
         [],
@@ -1414,9 +1498,9 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
     ]:
         err = ProviderUnavailable("transient", provider="openai")
         xml_primary = summary_model(err, "no-retry", model_id=_ID.id, provider=_ID.provider)
-        _, summarizer, runs = _fork_case(steps, xml_primary, timeout_s=timeout_s)
+        _, summarizer, fork, runs = _fork_case(steps, xml_primary, timeout_s=timeout_s)
         with capture_logs() as logs, pytest.raises(ProviderUnavailable):
-            await summarize_runs(summarizer, None, runs)
+            await summarize_runs(summarizer, None, runs, fork=fork)
         assert len(xml_primary.requests) == 1
         assert any(entry.get("fork_fallback_reason") == expected_reason for entry in logs)
 
@@ -1425,27 +1509,30 @@ async def test_fork_fallback_refusal_and_timeout_budget() -> None:
 async def test_fork_usage_save_failure_warns_and_fatal_errors_propagate() -> None:
     metrics = MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=20, cache_read_tokens=800))
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case(
+    _, summarizer, fork, runs = _fork_case(
         summary_steps(summary_turn("fork-ok", usage=metrics)),
         xml_primary,
         on_usage=_broken_usage,
     )
     with capture_logs() as logs:
-        summary, _ = await summarize_runs(summarizer, None, runs)
+        summary, _ = await summarize_runs(summarizer, None, runs, fork=fork)
     assert (summary, xml_primary.requests) == ("fork-ok", [])
     assert any(entry.get("event") == "compaction_summary_usage_save_failed" for entry in logs)
     assert any(entry.get("compaction_strategy") == "fork" and entry.get("cache_read_tokens") == 800 for entry in logs)
 
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case([_raise_step(AuthenticationFailed("bad key", provider="openai"))], xml_primary)
+    _, summarizer, fork, runs = _fork_case(
+        [_raise_step(AuthenticationFailed("bad key", provider="openai"))],
+        xml_primary,
+    )
     with pytest.raises(AuthenticationFailed):
-        await summarize_runs(summarizer, None, runs)
+        await summarize_runs(summarizer, None, runs, fork=fork)
     assert xml_primary.requests == []
 
     started = asyncio.Event()
     xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
-    _, summarizer, runs = _fork_case([_wait_step(started)], xml_primary)
-    task = asyncio.create_task(summarize_runs(summarizer, None, runs))
+    _, summarizer, fork, runs = _fork_case([_wait_step(started)], xml_primary)
+    task = asyncio.create_task(summarize_runs(summarizer, None, runs, fork=fork))
     await started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1476,7 +1563,7 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
         summary=loaded.summary,
         runs=loaded.runs,
     )
-    summarizer = _summarizer(xml_primary, sid="sess-race", fork=fork)
+    summarizer = _summarizer(xml_primary, sid="sess-race")
 
     async def complete_outcome(outcome: Any) -> Any:  # noqa: ANN401
         return outcome
@@ -1485,7 +1572,7 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
         await compact_scope_history(
             storage=storage,
             session=loaded,
-            state=HistoryScopeState(),
+            mode="auto",
             summarizer=summarizer,
             available_history_budget=50_000,
             max_summary_tokens=50_000,
@@ -1495,5 +1582,159 @@ async def test_fork_concurrent_conversation_change_aborts_before_persist(tmp_pat
             progress=None,
             complete=complete_outcome,
             model=concurrent_fork,
+            fork=fork,
         )
     assert (xml_primary.requests, summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-race")) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_passing_warm_fork_summary_is_tokenized_only_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warm fork summary passing max_summary_tokens is validated once in summarizer, not re-tokenized by callers."""
+    from mindroom.history.replay import estimate_summary_text_tokens  # noqa: PLC0415
+
+    _, _, storage = _fork_config(tmp_path)
+    template = ModelRequest(messages=())
+    fork_model = ScriptedModel([summary_steps("## Goal\nConcise fork summary")], identity=_ID)
+    seed_session(storage, _session("sess-once", runs=[_warm_run(fork_model, template, 1_000)]))
+    loaded = storage.load_session("sess-once")
+    assert loaded is not None
+    xml_primary = summary_model("never", model_id=_ID.id, provider=_ID.provider)
+    fork = build_scope_fork(
+        sizer=RequestSizer(fork_model, "openai"),
+        template=template,
+        system_messages=_SYS,
+        context_window=100_000,
+        reserve_tokens=4_096,
+        scope=TEST_AGENT_SCOPE,
+        summary=loaded.summary,
+        runs=loaded.runs,
+    )
+    calls_count = 0
+
+    def counted_estimate(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+        nonlocal calls_count
+        calls_count += 1
+        return estimate_summary_text_tokens(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.history.summarizer.estimate_summary_text_tokens", counted_estimate)
+
+    async def complete_outcome(outcome: Any) -> Any:  # noqa: ANN401
+        return outcome
+
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=loaded,
+        mode="auto",
+        summarizer=_summarizer(xml_primary, sid="sess-once"),
+        available_history_budget=50_000,
+        max_summary_tokens=50_000,
+        before_tokens=1_000,
+        replay_window_tokens=100_000,
+        threshold_tokens=80_000,
+        progress=None,
+        complete=complete_outcome,
+        model=fork_model,
+        fork=fork,
+    )
+    assert outcome is not None
+    assert calls_count == 1
+    assert xml_primary.requests == []
+
+
+@pytest.mark.asyncio
+async def test_scope_fork_fails_fast_when_native_compaction_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native prior answers fail fast in O(1); canonical prior answers on the same native-capable model still fork."""
+    from mindroom.history import runtime as history_runtime  # noqa: PLC0415
+    from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state  # noqa: PLC0415
+
+    config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000, replay_window_tokens=20_000)
+    inputs = _inputs(config)
+    native_settings = NativeCompactionReplay(route="anthropic:claude", threshold=12_000)
+
+    class _NativeRoute:
+        def native_compaction_settings(self, **_kwargs: Any) -> NativeCompactionReplay:  # noqa: ANN401
+            return native_settings
+
+    def seed_forced(sid: str, run: RunRecord) -> ScopeSessionContext:
+        seed_session(storage, _session(sid, runs=[run]))
+        loaded = storage.load_session(sid)
+        assert loaded is not None
+        set_force_compaction(storage, session=loaded, forced=True)
+        return _scope_ctx(storage, sid, config, paths)
+
+    frame = RequestFrame(ModelRequest(messages=()), _SYS, TurnMessages(prompt=_msg("user", "Turn 2")))
+    fork_model = ScriptedModel(
+        [summary_steps("## Goal\nCanonical fork hit")],
+        capabilities=Capabilities(native_compaction=True),
+        native_history_route=_NativeRoute(),
+    )
+    xml_calls = SummaryCalls(summary="xml-summary")
+    _install_default(monkeypatch, fork_model)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", xml_calls)
+
+    # 1. Warm canonical prior answer on a native-capable model still gets a warm fork hit.
+    canon = _warm_run(fork_model, ModelRequest(messages=(), portable_replay=True), 4_000, run_id="r-canon")
+    prepared_c = await prepare_scope_history(
+        sizer=RequestSizer(fork_model, "anthropic"),
+        frame=frame,
+        resolved_inputs=inputs,
+        runtime_paths=paths,
+        config=config,
+        scope_context=seed_forced("sess-canonical", canon),
+        compaction_lifecycle=RecordingCompactionLifecycle(),
+        pipeline_timing=None,
+        allow_native_compaction=True,
+    )
+    assert (prepared_c.compaction_reply_outcome, xml_calls.inputs, len(fork_model.requests)) == ("success", [], 1)
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key, "sess-canonical")[-1].summary == "## Goal\nCanonical fork hit"
+
+    # 2. Native prior answer (recorded_native_settings present) skips fork construction in O(1).
+    monkeypatch.setattr(history_runtime, "build_scope_fork", lambda **_kw: pytest.fail("must not build fork"))
+    native_run = _warm_run(
+        fork_model,
+        ModelRequest(messages=(), native_compaction=native_settings),
+        4_000,
+        run_id="r-nat",
+    )
+    native_run.messages[-1].provider_data = {
+        **(native_run.messages[-1].provider_data or {}),
+        NATIVE_CHECKPOINT_KEY: native_checkpoint_state([], native_settings),
+    }
+    with capture_logs() as pre_logs:
+        prepared_n = await prepare_scope_history(
+            sizer=RequestSizer(fork_model, "anthropic"),
+            frame=frame,
+            resolved_inputs=inputs,
+            runtime_paths=paths,
+            config=config,
+            scope_context=seed_forced("sess-native-pre", native_run),
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+            pipeline_timing=None,
+            allow_native_compaction=True,
+        )
+    assert prepared_n.compaction_reply_outcome == "success"
+    assert any(entry.get("fork_skip_reason") == "native_compaction_active" for entry in pre_logs)
+
+    # 3. Live /compact with a remembered native-compaction frame also skips fork construction in O(1).
+    ctx_live = seed_forced("sess-native-live", _warm_run(fork_model, ModelRequest(messages=()), 4_000, run_id="r-live"))
+    remember_fork_frame(
+        warm_frame_key(storage.path, TEST_AGENT_SCOPE, "sess-native-live"),
+        ModelRequest(messages=(*_SYS, _msg("user", "hi")), native_compaction=native_settings),
+    )
+    with capture_logs() as live_logs:
+        empty = await compact_scope_now(
+            ctx_live,
+            inputs,
+            lambda: fork_model,
+            RecordingCompactionLifecycle(),
+            config,
+            paths,
+        )
+    assert empty is False
+    assert any(entry.get("fork_skip_reason") == "native_compaction_active" for entry in live_logs)

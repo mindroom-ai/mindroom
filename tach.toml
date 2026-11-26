@@ -506,6 +506,7 @@ visibility = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
+    "mindroom.approval.tool_owners",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
 ]
@@ -890,6 +891,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.history.request_size",
     "mindroom.providers.pipeline",
+    "mindroom.usage.provider_analytics",
 ]
 
 [[modules]]
@@ -1425,6 +1427,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
+    "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.notices",
 ]
@@ -1445,10 +1448,13 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.tool_owners"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.approval.tool_approval",
     "mindroom.desktop.credentials",
     "mindroom.mcp.toolkit",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
@@ -1569,6 +1575,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.approval.inbound",
     "mindroom.approval.response",
+    "mindroom.approval.tool_owners",
     "mindroom.approval.transport",
     "mindroom.commands.auto_approve_commands",
     "mindroom.matrix_rtc.call_tools",
@@ -2514,6 +2521,7 @@ expose = [
     "WorkflowRunStore",
     "WorkflowRunStoreError",
     "owned_run",
+    "redact_json_text",
 ]
 
 [[modules]]
@@ -2565,6 +2573,7 @@ from = ["mindroom.workflow_runs.graph"]
 expose = [
     "AGENT_KINDS",
     "LOG_LINES",
+    "MESSAGE_LINES",
     "REPLACE",
     "Graph",
     "fit_snapshot",
@@ -2662,6 +2671,8 @@ expose = [
     "session_turn_message",
     "set_state",
     "valid_wait_seconds",
+    "visible_messages",
+    "visible_messages_with_omitted",
     "withdraw_unread",
 ]
 
@@ -3272,6 +3283,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.history.conversation_text",
+    "mindroom.history.policy",
     "mindroom.history.request_messages",
     "mindroom.history.request_size",
     "mindroom.history.runtime",
@@ -3304,7 +3316,6 @@ depends_on = [
     "mindroom.history.policy",
     "mindroom.history.session_context",
     "mindroom.history.storage",
-    "mindroom.history.types",
     "mindroom.session_storage.lanes",
     "mindroom.turn_model",
 ]
@@ -3339,23 +3350,35 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.compaction"
+path = "mindroom.history.summarizer"
 depends_on = [
-    "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
-    "mindroom.history.conversation_text",
+    "mindroom.failure_text",
     "mindroom.history.replay",
-    "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.summary_fork",
     "mindroom.history.summary_input",
-    "mindroom.history.types",
-    "mindroom.hooks",
     "mindroom.llm",
     "mindroom.native_compaction",
     "mindroom.providers.names",
     "mindroom.providers.registry",
-    "mindroom.failure_text",
+]
+visibility = [
+    "mindroom.history.compaction",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+]
+
+[[modules]]
+path = "mindroom.history.compaction"
+depends_on = [
+    "mindroom.session_storage.lanes",
+    "mindroom.history.conversation_text",
+    "mindroom.history.replay",
+    "mindroom.history.storage",
+    "mindroom.history.summarizer",
+    "mindroom.history.types",
+    "mindroom.hooks",
+    "mindroom.llm",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3383,12 +3406,11 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks.enrichment",
     "mindroom.llm",
-    "mindroom.providers.names",
 ]
 visibility = [
-    "mindroom.history.compaction",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.runtime",
+    "mindroom.history.summarizer",
 ]
 
 [[modules]]
@@ -3434,7 +3456,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.request_size",
-    "mindroom.history.compaction",
+    "mindroom.history.summarizer",
     "mindroom.providers.openai",
 ]
 
@@ -3618,11 +3640,11 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.history.request_size",
     "mindroom.history.storage",
+    "mindroom.history.summarizer",
     "mindroom.history.summary_call",
     "mindroom.history.summary_fork",
     "mindroom.history.types",
     "mindroom.failure_text",
-    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -8536,6 +8558,8 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
+    "approval_policy_names",
+    "effective_tool_approval_policy",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "human_gate",
@@ -9033,6 +9057,7 @@ visibility = [
     "mindroom.history.runtime",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
+    "mindroom.history.summarizer",
     "mindroom.teams",
 ]
 
@@ -9093,7 +9118,7 @@ depends_on = [
     "mindroom.usage.storage",
     "mindroom.history.request_messages",
 ]
-visibility = ["mindroom.history.compaction"]
+visibility = ["mindroom.history.summarizer"]
 
 [[modules]]
 path = "mindroom.participation"
@@ -10157,6 +10182,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.execution",
+    "mindroom.loop_hooks",
     "mindroom.response_turn",
     "mindroom.teams",
     "mindroom.tool_jobs.execution",
@@ -10550,7 +10576,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = ["mindroom.usage.provider_limits"]
+visibility = ["mindroom.usage.provider_analytics"]
 
 [[modules]]
 path = "mindroom.usage.limit_store"
@@ -10577,11 +10603,19 @@ depends_on = [
 visibility = ["mindroom.usage.provider_limits"]
 
 [[modules]]
+path = "mindroom.usage.provider_analytics"
+depends_on = [
+    "mindroom.model_usage",
+    "mindroom.usage.legacy_usage_storage",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
 path = "mindroom.usage.provider_limits"
 depends_on = [
-    "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.limit_store",
     "mindroom.usage.provider_accounts",
+    "mindroom.usage.provider_analytics",
     "mindroom.usage.provider_probes",
 ]
 
@@ -11157,6 +11191,7 @@ depends_on = [
     "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.history.storage",
+    "mindroom.history.summarizer",
     "mindroom.history.summary_fork",
     "mindroom.history.summary_message",
     "mindroom.history.types",

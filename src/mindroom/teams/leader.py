@@ -13,6 +13,7 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.resume import resume_inputs
 from mindroom.run_storage import persist_into
 from mindroom.teams.runtime import continue_team, run_team
+from mindroom.tool_jobs.consumption import acknowledge_saved_run
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -66,7 +67,7 @@ class LeaderRun:
                 compaction_requests=self.compaction_requests,
             ),
             hooks=self.hooks,
-            persist=persist_into(records, self.storage),
+            persist=persist_into(records, self.storage, on_saved=acknowledge_saved_run),
             request_template=self.request_template,
         )
 
@@ -97,7 +98,7 @@ class LeaderRun:
             decisions=decisions,
             context=context,
             hooks=self.hooks,
-            persist=persist_into(records, self.storage),
+            persist=persist_into(records, self.storage, on_saved=acknowledge_saved_run),
             request_template=self.request_template,
         )
 

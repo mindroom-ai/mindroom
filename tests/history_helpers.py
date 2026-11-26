@@ -28,13 +28,13 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.history import session_runs
-from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     append_compaction_chunk,
     new_scope_session,
     read_chunk_basis,
     with_force_compaction,
 )
+from mindroom.history.summarizer import Summarizer, SummaryModel
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleFailure,

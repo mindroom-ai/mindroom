@@ -29,13 +29,6 @@ register_builtin_tool_metadata(
         icon_color="text-violet-500",
         config_fields=[],
         dependencies=[],
-        function_names=(
-            "add_memory",
-            "delete_memory",
-            "get_memory",
-            "list_memories",
-            "search_memories",
-            "update_memory",
-        ),
+        function_names=("memory",),
     ),
 )

@@ -92,6 +92,42 @@ export interface ProviderLimitWindow {
   detail?: string;
 }
 
+/**
+ * Mutually exclusive 4-part processed token breakdown (`input_tokens` excludes cached tokens).
+ * Because this tracks all processed tokens across all four buckets, its sum can exceed `tokens_7d`
+ * on Anthropic-style providers where `total_tokens` excludes cache reads and writes.
+ */
+export interface TokenMix {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+export interface ModelUsage7d {
+  provider: string;
+  model: string;
+  account_id?: string;
+  tokens_7d: number;
+  cost_usd_7d: number | null;
+  run_count: number;
+  /** Processed tokens across all four buckets (sum may exceed `tokens_7d` on Anthropic-style providers). */
+  token_mix_7d?: TokenMix;
+  /** Aligns 1:1 with `ProviderUsageSnapshot.daily_7d` in chronological order (1..7 active UTC days, not always 7). */
+  daily_tokens_7d?: number[];
+}
+
+export interface AgentUsage7d {
+  entity: string;
+  tokens_7d: number;
+  cost_usd_7d: number | null;
+  run_count: number;
+  /** Processed tokens across all four buckets (sum may exceed `tokens_7d` on Anthropic-style providers). */
+  token_mix_7d?: TokenMix;
+  /** Aligns 1:1 with `ProviderUsageSnapshot.daily_7d` in chronological order (1..7 active UTC days, not always 7). */
+  daily_tokens_7d?: number[];
+}
+
 export interface ProviderLimitAccount {
   id: string;
   provider: string;
@@ -106,12 +142,15 @@ export interface ProviderLimitAccount {
   tokens_7d: number;
   cost_usd_7d: number | null;
   cost_estimated: boolean;
+  token_mix_7d?: TokenMix;
 }
 
 export interface ProviderUsageDailyRow {
   day: string;
   by_account: Record<string, number>;
   unattributed_tokens: number;
+  cost_by_account?: Record<string, number>;
+  unattributed_cost_usd?: number;
 }
 
 export interface ProviderUsageSnapshot {
@@ -123,4 +162,10 @@ export interface ProviderUsageSnapshot {
   daily_7d: ProviderUsageDailyRow[];
   unattributed_tokens_7d: number;
   unattributed_cost_usd_7d: number | null;
+  /** Processed tokens across all four buckets (sum may exceed `tokens_7d` on Anthropic-style providers). */
+  token_mix_7d?: TokenMix;
+  /** Net 7-day USD cache savings after subtracting cache-write surcharges; omitted when <= 0. */
+  cache_savings_usd_7d?: number;
+  top_models_7d?: ModelUsage7d[];
+  top_agents_7d?: AgentUsage7d[];
 }

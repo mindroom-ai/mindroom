@@ -1136,7 +1136,7 @@ async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str)
         folds.append(None)
         return "Short summary."
 
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", summarize)
     await conversation.turn("First question")
     told: list[int] = []
     for revision in range(12):

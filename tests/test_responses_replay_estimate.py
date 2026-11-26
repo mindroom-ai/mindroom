@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.policy import classify_compaction_decision, resolve_history_preparation_inputs
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_summary_tokens,
@@ -32,7 +32,6 @@ from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
@@ -111,18 +110,16 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         runs=[_completed_run("recent", messages=[message])],
         summary=ScopeSummary(text="Earlier work is complete.", updated_at=datetime.now(UTC)),
     )
-    config, runtime_paths = _make_config(
+    config, _runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=1000, replay_window_tokens=10_000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=20_000)},
     )
     adapter = responses_adapter(tmp_path, store=True)
-    resolved = resolve_entity_preparation_inputs(
+    resolved = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=config.resolve_scope("test_agent").history_settings,
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     )
     before = deepcopy(session)
     request_before = _replayed_input(adapter, [message])
@@ -599,12 +596,10 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     )
     model = pipeline_provider(responses_adapter(tmp_path))
     model_name = entity_model_name(config, "test_agent")
-    inputs = resolve_entity_preparation_inputs(
+    inputs = resolve_history_preparation_inputs(
         config=config,
-        runtime_paths=runtime_paths,
         history_settings=config.resolve_scope("test_agent").history_settings,
         active_model_name=model_name,
-        active_context_window=None,
     )
     frame = request_frame("And now?", system="You answer briefly.")
     history = prompt_visible_history(session, inputs.history_settings)

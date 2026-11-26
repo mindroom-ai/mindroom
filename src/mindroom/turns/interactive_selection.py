@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.active_runs import ActiveRunPublisher
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.constants import RuntimePaths
@@ -60,6 +62,10 @@ class InteractiveSelectionDispatch:
     response_target: MessageTarget
 
 
+def _allow_active_run(_room_id: str) -> bool:
+    return True
+
+
 @dataclass(frozen=True)
 class InteractiveSelectionsDeps:
     """Collaborators needed to admit and run interactive selections."""
@@ -77,6 +83,8 @@ class InteractiveSelectionsDeps:
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     dispatch_source_is_terminal: Callable[[str], Coroutine[Any, Any, bool]]
+    active_runs: ActiveRunPublisher | None = None
+    can_publish_active_run: Callable[[str], bool] = _allow_active_run
 
 
 @dataclass
@@ -306,99 +314,105 @@ class InteractiveSelections:
             await self._require_durable_interactive_selection(room.room_id, source_event_id)
             return False
         selection_handled_turn = pending_turn.record
-        # This acknowledgement is the placeholder the selection's answer then
-        # edits, which is what its `interactive_span_id` below says, so it
-        # is the turn's initial delivery and not its answer. Staging it that way
-        # also keeps it from settling the journal source: a placeholder
-        # discharges nothing, and a crash before the model finished would
-        # otherwise leave "Thinking..." in the room with
-        # nothing pending to replay.
-        ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
-            selection_handled_turn,
-            target=response_target,
-            # The answered question card already shows the choice, so this is the
-            # Thinking placeholder every reply starts with.
-            response_text=PROGRESS_PLACEHOLDER,
-            delivery_turn_id=source_event_id,
-            # The answer sends no placeholder of its own, so this one names the model as that placeholder would.
-            ai_run_content=self.deps.response_runner.placeholder_ai_run_content(
-                response_target,
-                requester_id=facts.run_requester_id,
-            ),
+        lease_cm = (
+            self.deps.active_runs.track(room.room_id, response_target.resolved_thread_id)
+            if self.deps.active_runs is not None and self.deps.can_publish_active_run(room.room_id)
+            else nullcontext()
         )
-        if not ack_event_id:
-            self.deps.logger.error(
-                "Failed to send acknowledgment for interactive selection",
-                source_event_id=source_event_id,
-            )
-            raise self._interactive_selection_retry_error(source_event_id)
-        # A reaction or numeric answer identifies the selection but does not
-        # carry the question's attachment context, so rebuild it from the
-        # conversation that asked the question.
-        try:
-            selection_payload = await self.deps.normalizer.build_dispatch_payload_with_attachments(
-                DispatchPayloadWithAttachmentsRequest(
-                    room_id=room.room_id,
-                    prompt=interactive.build_selection_prompt(selection),
-                    current_attachment_ids=[],
-                    thread_id=selection.thread_id,
-                    media_thread_id=response_target.resolved_thread_id,
-                    thread_history=thread_history,
-                ),
-            )
-        except Exception as error:
-            response_event_id = await self._finalize_dispatch_failure(
+        async with lease_cm:
+            # This acknowledgement is the placeholder the selection's answer then
+            # edits, which is what its `interactive_span_id` below says, so it
+            # is the turn's initial delivery and not its answer. Staging it that way
+            # also keeps it from settling the journal source: a placeholder
+            # discharges nothing, and a crash before the model finished would
+            # otherwise leave "Thinking..." in the room with
+            # nothing pending to replay.
+            ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
+                selection_handled_turn,
                 target=response_target,
-                error=error,
-                handled_turn=selection_handled_turn,
-                existing_event_id=ack_event_id,
+                # The answered question card already shows the choice, so this is the
+                # Thinking placeholder every reply starts with.
+                response_text=PROGRESS_PLACEHOLDER,
+                delivery_turn_id=source_event_id,
+                # The answer sends no placeholder of its own, so this one names the model as that placeholder would.
+                ai_run_content=self.deps.response_runner.placeholder_ai_run_content(
+                    response_target,
+                    requester_id=facts.run_requester_id,
+                ),
             )
-            if response_event_id is not None:
-                await self._require_durable_interactive_selection(room.room_id, source_event_id)
-                return False
-            raise self._interactive_selection_retry_error(source_event_id) from error
-        selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
-        selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
-        response_envelope = self._interactive_selection_response_envelope(
-            target=response_target,
-            facts=facts,
-            source_event_id=source_event_id,
-            selected_value=selection.selected_value,
-            attachment_ids=selection_attachment_ids,
-        )
-
-        pending_event_ids = tuple(dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)))
-        fate = await self.deps.response_runner.generate_response(
-            ResponseRequest(
-                prompt=selection_payload.prompt,
-                model_prompt=selection_payload.model_prompt,
-                thread_history=thread_history,
-                sources=ResponseSources(
-                    pending_event_ids=pending_event_ids,
-                    logical_source_event_ids=selection_handled_turn.source_event_ids,
-                    discovery_event_ids=selection_handled_turn.discovery_event_ids,
-                ),
-                history_boundary_event_id=source_event_id,
-                member_display_names=room_member_display_names(room),
-                existing_event_id=ack_event_id,
-                interactive_span_id=interactive_span_id,
-                user_id=facts.run_requester_id,
-                attachment_ids=selection_attachment_ids or None,
-                response_envelope=response_envelope,
-                matrix_run_metadata=selection_matrix_run_metadata,
-                prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
+            if not ack_event_id:
+                self.deps.logger.error(
+                    "Failed to send acknowledgment for interactive selection",
+                    source_event_id=source_event_id,
+                )
+                raise self._interactive_selection_retry_error(source_event_id)
+            # A reaction or numeric answer identifies the selection but does not
+            # carry the question's attachment context, so rebuild it from the
+            # conversation that asked the question.
+            try:
+                selection_payload = await self.deps.normalizer.build_dispatch_payload_with_attachments(
+                    DispatchPayloadWithAttachmentsRequest(
+                        room_id=room.room_id,
+                        prompt=interactive.build_selection_prompt(selection),
+                        current_attachment_ids=[],
+                        thread_id=selection.thread_id,
+                        media_thread_id=response_target.resolved_thread_id,
+                        thread_history=thread_history,
+                    ),
+                )
+            except Exception as error:
+                response_event_id = await self._finalize_dispatch_failure(
                     target=response_target,
-                    source_event_ids=selection_handled_turn.source_event_ids,
-                    thread_history=history,
+                    error=error,
+                    handled_turn=selection_handled_turn,
+                    existing_event_id=ack_event_id,
+                )
+                if response_event_id is not None:
+                    await self._require_durable_interactive_selection(room.room_id, source_event_id)
+                    return False
+                raise self._interactive_selection_retry_error(source_event_id) from error
+            selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
+            selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
+            response_envelope = self._interactive_selection_response_envelope(
+                target=response_target,
+                facts=facts,
+                source_event_id=source_event_id,
+                selected_value=selection.selected_value,
+                attachment_ids=selection_attachment_ids,
+            )
+
+            pending_event_ids = tuple(dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)))
+            fate = await self.deps.response_runner.generate_response(
+                ResponseRequest(
+                    prompt=selection_payload.prompt,
+                    model_prompt=selection_payload.model_prompt,
+                    thread_history=thread_history,
+                    sources=ResponseSources(
+                        pending_event_ids=pending_event_ids,
+                        logical_source_event_ids=selection_handled_turn.source_event_ids,
+                        discovery_event_ids=selection_handled_turn.discovery_event_ids,
+                    ),
+                    history_boundary_event_id=source_event_id,
+                    member_display_names=room_member_display_names(room),
+                    existing_event_id=ack_event_id,
+                    interactive_span_id=interactive_span_id,
+                    user_id=facts.run_requester_id,
+                    attachment_ids=selection_attachment_ids or None,
+                    response_envelope=response_envelope,
+                    matrix_run_metadata=selection_matrix_run_metadata,
+                    prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
+                        target=response_target,
+                        source_event_ids=selection_handled_turn.source_event_ids,
+                        thread_history=history,
+                    ),
                 ),
-            ),
-        )
-        # A reply's records, a refused claim, or an approval owns the selection; any other ending leaves it here.
-        if isinstance(fate, Owned):
-            return True
-        # No answer took the acknowledgement's reply, so end it rather than leave it saying it is still processing.
-        await self.deps.delivery_gateway.settle_unclaimed_reply(pending_event_ids, source_deleted=False)
-        return False
+            )
+            # A reply's records, a refused claim, or an approval owns the selection; any other ending leaves it here.
+            if isinstance(fate, Owned):
+                return True
+            # No answer took the acknowledgement's reply, so end it rather than leave it saying it is still processing.
+            await self.deps.delivery_gateway.settle_unclaimed_reply(pending_event_ids, source_deleted=False)
+            return False
 
     async def _interactive_selection_is_durably_terminal(self, room_id: str, source_event_id: str) -> bool:
         """Return whether the exact selection source is durably terminal.

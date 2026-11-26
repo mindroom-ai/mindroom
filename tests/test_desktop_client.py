@@ -173,16 +173,16 @@ async def test_browser_control_timeout_requests_browser_observation(monkeypatch:
 
 @pytest.mark.asyncio
 async def test_only_one_request_per_target_can_be_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Parallel tool calls cannot reorder or preplan multiple desktop actions."""
+    """Parallel tool calls cannot reorder or preplan multiple mutating desktop actions."""
     client = FakeClient()
     router = DesktopResponseRouter(client)
     send = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", send)
 
-    first = asyncio.create_task(router.request(TARGET, _command(), timeout_seconds=1))
+    first = asyncio.create_task(router.request(TARGET, _command(action="click"), timeout_seconds=1))
     await asyncio.sleep(0)
     with pytest.raises(DesktopRequestError, match="already in progress"):
-        await router.request(TARGET, _command(request_id="request-2"), timeout_seconds=1)
+        await router.request(TARGET, _command(request_id="request-2", action="click"), timeout_seconds=1)
 
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -275,7 +275,7 @@ async def test_management_actions_run_concurrently_with_run_shell_and_serialize_
     assert send_events == [("start", "shell-1")]
 
     # Conflicting commands while both lanes are occupied are rejected.
-    for req_id, action in (("shell-2", "run_shell"), ("status-2", "status"), ("click-1", "click")):
+    for req_id, action in (("shell-2", "run_shell"), ("check-conflict", "check_shell"), ("click-1", "click")):
         with pytest.raises(DesktopRequestError, match="already in progress"):
             await router.request(TARGET, _command(request_id=req_id, action=action), timeout_seconds=1)
 
@@ -315,6 +315,94 @@ async def test_management_actions_run_concurrently_with_run_shell_and_serialize_
     click_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await click_task
+
+    assert not router._pending
+    assert TARGET not in router._send_locks
+
+
+@pytest.mark.asyncio
+async def test_concurrent_read_only_requests_serialize_in_order_while_mutations_and_check_shell_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pure read-only calls serialize cleanly through send_lock; mutations and check_shell still reject."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
+
+    first_send_entered = asyncio.Event()
+    release_first_send = asyncio.Event()
+    send_events: list[tuple[str, str]] = []
+
+    async def tracked_send(_client: object, _target: object, *, event_type: str, content: dict[str, object]) -> None:
+        del event_type
+        req_id = str(content["request_id"])
+        send_events.append(("start", req_id))
+        if req_id == "read-1":
+            first_send_entered.set()
+            await release_first_send.wait()
+        send_events.append(("end", req_id))
+
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", tracked_send)
+
+    state_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="read-1", action="get_app_state"), timeout_seconds=1),
+    )
+    await first_send_entered.wait()
+    status_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="read-2", action="status"), timeout_seconds=1),
+    )
+    file_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="read-3", action="read_file"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+    assert send_events == [("start", "read-1")]
+
+    # Mutating actions and single-handover check_shell still fail fast while reads are in flight.
+    for req_id, action in (("click-1", "click"), ("check-1", "check_shell")):
+        with pytest.raises(DesktopRequestError, match="already in progress"):
+            await router.request(TARGET, _command(request_id=req_id, action=action), timeout_seconds=1)
+
+    release_first_send.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert send_events == [
+        ("start", "read-1"),
+        ("end", "read-1"),
+        ("start", "read-2"),
+        ("end", "read-2"),
+        ("start", "read-3"),
+        ("end", "read-3"),
+    ]
+
+    responses = [
+        DesktopResponse("read-1", "session-1", True, result={"step": 1}),
+        DesktopResponse("read-2", "session-1", True, result={"step": 2}),
+        DesktopResponse("read-3", "session-1", True, result={"step": 3}),
+    ]
+    for response in responses:
+        router.on_to_device_event(_event(response))
+    assert await asyncio.gather(state_task, status_task, file_task) == responses
+
+    # Symmetric check: read while mutation or check_shell is in flight fails fast immediately.
+    for in_flight_action, rejected_action in (("click", "get_app_state"), ("check_shell", "status")):
+        in_flight = asyncio.create_task(
+            router.request(
+                TARGET,
+                _command(request_id=f"in-{in_flight_action}", action=in_flight_action),
+                timeout_seconds=1,
+            ),
+        )
+        await asyncio.sleep(0)
+        with pytest.raises(DesktopRequestError, match="already in progress"):
+            await router.request(
+                TARGET,
+                _command(request_id=f"rej-{rejected_action}", action=rejected_action),
+                timeout_seconds=1,
+            )
+        in_flight.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await in_flight
 
     assert not router._pending
     assert TARGET not in router._send_locks

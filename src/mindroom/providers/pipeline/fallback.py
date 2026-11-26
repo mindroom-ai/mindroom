@@ -3,7 +3,8 @@
 The chain wraps the full request pipeline of each model, so every model keeps its own retries, media fallback,
 idle limit, and request log. A failure after the caller received output or a hosted tool committed is final, as is
 any failure another model would repeat (invalid request, context-window overflow, safeguard refusal, cancellation).
-A failure that names when its limit resets moves that route to the end of the chain until then.
+A failure that names when its limit resets moves that route to the end of the chain until then; an uncommitted
+``ProviderUnavailable`` failure without a reset hint cools that route down for a short default window.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import ProviderError, fails_over
+from mindroom.llm.errors import ProviderError, ProviderUnavailable, fails_over
 from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import (
     DeferredTools,
@@ -39,6 +40,7 @@ logger = get_logger(__name__)
 
 # When each route/account fingerprint may be tried again, on the ``time.monotonic`` clock.
 _COOLDOWN_UNTIL: dict[str, float] = {}
+_UNAVAILABLE_COOLDOWN_SECONDS = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,10 +110,15 @@ def _with_structured_output_prompt(
     return replace(request, messages=tuple(messages))
 
 
-def _remember_reset(key: str, error: ProviderError) -> None:
+def _remember_reset(key: str, error: ProviderError, *, committed: bool = False) -> None:
     if (hint := error.retry_after_seconds) is not None and hint > 0:
-        until = time.monotonic() + hint
-        _COOLDOWN_UNTIL[key] = max(_COOLDOWN_UNTIL.get(key, 0.0), until)
+        cooldown_seconds = hint
+    elif not committed and isinstance(error, ProviderUnavailable):
+        cooldown_seconds = _UNAVAILABLE_COOLDOWN_SECONDS
+    else:
+        return
+    until = time.monotonic() + cooldown_seconds
+    _COOLDOWN_UNTIL[key] = max(_COOLDOWN_UNTIL.get(key, 0.0), until)
 
 
 def _clear_cooldown(key: str, seen_until: float | None) -> None:
@@ -248,7 +255,7 @@ async def fallback_stream(
             defer_transient = request.overrides.transient_retries == "caller" and error.retryable
             can_fail_over = fails_over(error) and not defer_transient
             if can_fail_over:
-                _remember_reset(member.cooldown_key, error)
+                _remember_reset(member.cooldown_key, error, committed=committed)
             if committed or not can_fail_over:
                 raise
             failure = (member.name, error)

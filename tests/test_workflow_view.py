@@ -578,3 +578,38 @@ async def test_unsendable_final_card_backoff_never_overflows(stack: WorkflowStac
 
     assert stack.views._unsent[stack.run_id] == 1026
     assert stack.views._due[stack.run_id] > 0
+
+
+@pytest.mark.asyncio
+async def test_view_build_scopes_log_and_node_usage_on_rerun_and_includes_previews(stack: WorkflowStack) -> None:
+    """Rerunning a node scopes logs and per-node usage to the current execution while totals keep multi-attempt spend."""
+    assert await stack.result("@0", "tool", tool_args("counter", "text", size=4)) == "xxxx"
+    node1 = stack.store.get_node(stack.run_id, "@0")
+    assert node1 is not None
+    stack.store.add_usage(stack.run_id, "@0", node1.generation, 1, 1, {"input_tokens": 10, "cost_usd": 0.50})
+    stack.store.append_log(stack.run_id, stack.store.get_run(stack.run_id).epoch, "attempt 1 log")
+    await stack.finish_attempt("done-1")
+
+    built1 = stack.views._build(stack.run_id)
+    assert built1 is not None
+    assert built1[3].log == ["attempt 1 log"]
+    assert built1[3].nodes[0]["preview"] == "xxxx"
+    assert built1[3].nodes[0]["usage"]["cost_usd"] == pytest.approx(0.50)
+
+    await stack.resume(stack.run_id, rerun=[f"n{node1.seq}"])
+    assert await stack.result("@0", "tool", tool_args("counter", "text", size=2)) == "xx"
+    node2 = stack.store.get_node(stack.run_id, "@0")
+    assert node2 is not None
+    assert node2.generation == 2
+    stack.store.add_usage(stack.run_id, "@0", node2.generation, 1, 2, {"input_tokens": 5, "cost_usd": 0.25})
+    stack.store.append_log(stack.run_id, stack.store.get_run(stack.run_id).epoch, "attempt 2 log")
+
+    built2 = stack.views._build(stack.run_id)
+    assert built2 is not None
+    _run, _nodes, usage_totals, graph = built2
+    assert graph.log == ["attempt 2 log"]
+    assert graph.nodes[0]["preview"] == "xx"
+    assert graph.nodes[0]["usage"]["cost_usd"] == pytest.approx(0.25)
+    assert graph.nodes[0]["usage"]["input_tokens"] == 5
+    assert usage_totals["cost_usd"] == pytest.approx(0.75)
+    assert usage_totals["attempt_cost_usd"] == pytest.approx(0.25)

@@ -7,18 +7,27 @@ import copy
 import hashlib
 import json
 import time
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from mindroom.budgets.pricing import cost_usd, model_prices
 from mindroom.logging_config import get_logger
-from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.limit_store import PassiveWindow, format_utc_iso, get_passive_windows
 from mindroom.usage.provider_accounts import AccountSpec, discover_accounts
+from mindroom.usage.provider_analytics import (
+    AgentUsage7d,
+    DailyAccountUsage,
+    DailyUsageScan,
+    ModelUsage7d,
+    TokenMix,
+    UsageAttribution,
+    attribute_7d_usage,
+    opt_mix_dict,
+    strip_rich_analytics,
+)
 from mindroom.usage.provider_probes import (
     ProbeResult,
     UnavailableReason,
@@ -26,26 +35,26 @@ from mindroom.usage.provider_probes import (
     probe_codex,
     probe_openrouter,
 )
-from mindroom.usage.stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_daily_usage_with_entities
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
     from pathlib import Path
 
-    from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.usage import TokenCounts
-    from mindroom.usage.stats import UsageDailyBreakdownRow
 
 __all__ = [
     "CACHE_TTL_SECONDS",
     "REFRESH_COOLDOWN_SECONDS",
     "USAGE_REPORT_TTL_SECONDS",
     "USAGE_REPORT_WAIT_SECONDS",
+    "AgentUsage7d",
     "DailyAccountUsage",
+    "ModelUsage7d",
     "ProviderLimitAccount",
     "ProviderUsageSnapshot",
+    "TokenMix",
     "UnavailableReason",
     "clear_cache",
     "fit_to_device_budget",
@@ -63,7 +72,12 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ProviderLimitAccount:
-    """One billing account's limit windows and 7-day token/cost summary."""
+    """One billing account's limit windows and 7-day token/cost summary.
+
+    ``tokens_7d`` tracks ``TokenCounts.total_tokens``; ``token_mix_7d`` tracks processed tokens
+    across all four mutually exclusive buckets, so its sum can exceed ``tokens_7d`` on
+    Anthropic-style providers where ``total_tokens`` excludes cache reads and writes.
+    """
 
     id: str
     provider: str
@@ -78,6 +92,7 @@ class ProviderLimitAccount:
     tokens_7d: int
     cost_usd_7d: float | None
     cost_estimated: bool
+    token_mix_7d: TokenMix | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to the wire contract account shape."""
@@ -92,25 +107,20 @@ class ProviderLimitAccount:
             "tokens_7d": self.tokens_7d,
             "cost_usd_7d": self.cost_usd_7d,
             "cost_estimated": self.cost_estimated,
+            **opt_mix_dict(self.token_mix_7d),
         }
 
 
 @dataclass(frozen=True, slots=True)
-class DailyAccountUsage:
-    """Per-account token totals for one UTC calendar day."""
-
-    day: str
-    by_account: dict[str, int]
-    unattributed_tokens: int
-
-    def to_dict(self) -> dict[str, object]:
-        """Serialize to the wire contract daily row shape."""
-        return {"day": self.day, "by_account": dict(self.by_account), "unattributed_tokens": self.unattributed_tokens}
-
-
-@dataclass(frozen=True, slots=True)
 class ProviderUsageSnapshot:
-    """Complete snapshot of provider limits and 7-day usage attribution."""
+    """Complete snapshot of provider limits and 7-day usage attribution.
+
+    Optional additive rich analytics (``token_mix_7d``, ``cache_savings_usd_7d``, ``top_models_7d``,
+    ``top_agents_7d``) reconcile on the same 7-day UTC window as ``accounts`` and ``daily_7d``.
+    ``token_mix_7d`` sums all four processed token buckets (so its sum can exceed ``tokens_7d`` on
+    Anthropic-style providers), ``cache_savings_usd_7d`` reports net USD savings after cache-write
+    surcharges, and each rollup's ``daily_tokens_7d`` aligns 1:1 with ``daily_7d`` (1..7 active days).
+    """
 
     checked_at: str
     partial: bool
@@ -118,11 +128,15 @@ class ProviderUsageSnapshot:
     daily_7d: tuple[DailyAccountUsage, ...]
     unattributed_tokens_7d: int
     unattributed_cost_usd_7d: float | None
+    token_mix_7d: TokenMix | None = None
+    cache_savings_usd_7d: float | None = None
+    top_models_7d: tuple[ModelUsage7d, ...] = ()
+    top_agents_7d: tuple[AgentUsage7d, ...] = ()
 
     def to_dict(self, *, request_id: str | None = None) -> dict[str, object]:
         """Serialize to the locked ``version: 1`` wire contract."""
         head: dict[str, object] = {"version": 1, **({"request_id": request_id} if request_id is not None else {})}
-        return {
+        out: dict[str, object] = {
             **head,
             "checked_at": self.checked_at,
             "partial": self.partial,
@@ -130,18 +144,25 @@ class ProviderUsageSnapshot:
             "daily_7d": [row.to_dict() for row in self.daily_7d],
             "unattributed_tokens_7d": self.unattributed_tokens_7d,
             "unattributed_cost_usd_7d": self.unattributed_cost_usd_7d,
+            **opt_mix_dict(self.token_mix_7d),
         }
+        if self.cache_savings_usd_7d is not None and self.cache_savings_usd_7d > 0:
+            out["cache_savings_usd_7d"] = self.cache_savings_usd_7d
+        if self.top_models_7d:
+            out["top_models_7d"] = [model.to_dict() for model in self.top_models_7d]
+        if self.top_agents_7d:
+            out["top_agents_7d"] = [agent.to_dict() for agent in self.top_agents_7d]
+        return out
 
 
 type _CacheKey = tuple[Path, Path, str]
-type _DailyBreakdown = tuple[UsageDailyBreakdownRow, ...]
 type _InFlight[T] = WeakKeyDictionary[asyncio.AbstractEventLoop, dict[_CacheKey, asyncio.Task[T]]]
 
 _CACHE: OrderedDict[_CacheKey, tuple[ProviderUsageSnapshot, float]] = OrderedDict()
 _LAST_GOOD: OrderedDict[tuple[tuple[Path, Path], str, str], ProbeResult] = OrderedDict()
 _IN_FLIGHT: _InFlight[ProviderUsageSnapshot] = WeakKeyDictionary()
-_USAGE_REPORT_CACHE: OrderedDict[_CacheKey, tuple[_DailyBreakdown, float]] = OrderedDict()
-_USAGE_REPORT_IN_FLIGHT: _InFlight[_DailyBreakdown] = WeakKeyDictionary()
+_USAGE_REPORT_CACHE: OrderedDict[_CacheKey, tuple[DailyUsageScan, float]] = OrderedDict()
+_USAGE_REPORT_IN_FLIGHT: _InFlight[DailyUsageScan] = WeakKeyDictionary()
 _CACHE_EPOCH = [0]
 
 
@@ -182,6 +203,7 @@ def _build_account(
     now: datetime,
     tokens_7d: int,
     cost_usd_7d: float | None,
+    token_mix_7d: TokenMix | None = None,
     record_last_good: bool = True,
 ) -> ProviderLimitAccount:
     last_good_key = (runtime_key, spec.id, spec.scope_key)
@@ -214,74 +236,7 @@ def _build_account(
         tokens_7d=tokens_7d,
         cost_usd_7d=cost_usd_7d,
         cost_estimated=cost_usd_7d is not None,
-    )
-
-
-def _row_cost(totals: TokenCounts, priced: PricedModel | None) -> float | None:
-    if priced is None or not any(
-        (totals.input_tokens, totals.output_tokens, totals.cache_read_tokens, totals.cache_write_tokens),
-    ):
-        return None
-    return cost_usd(totals, priced)
-
-
-def _add_opt(base: float | None, delta: float | None) -> float | None:
-    return base if delta is None else (base or 0.0) + delta
-
-
-def _attribute_7d_usage(
-    accounts: list[AccountSpec],
-    daily_breakdown: _DailyBreakdown,
-    config: Config,
-    now: datetime,
-) -> tuple[dict[str, int], dict[str, float | None], tuple[DailyAccountUsage, ...], int, float | None]:
-    valid_days = {(now.astimezone(UTC).date() - timedelta(days=offset)).isoformat() for offset in range(7)}
-    owners_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for account in accounts:
-        for usage_key in account.usage_keys:
-            owners_by_key[usage_key].add(account.id)
-    prices = model_prices(config)
-    tokens_by_account: dict[str, int] = defaultdict(int)
-    cost_by_account: dict[str, float | None] = dict.fromkeys((a.id for a in accounts), None)
-    unattributed_tokens, unattributed_cost = 0, None
-    daily_rows: list[DailyAccountUsage] = []
-    for row in sorted(daily_breakdown, key=lambda item: item.date):
-        if row.date not in valid_days:
-            continue
-        day_by_account: dict[str, int] = defaultdict(int)
-        day_unattributed, accounted = 0, 0
-        for mrow in row.model_breakdown:
-            tokens = mrow.totals.total_tokens
-            accounted += tokens
-            ukey = (current_provider_name(mrow.model_provider), mrow.model)
-            row_cost = _row_cost(mrow.totals, prices.get(ukey))
-            owners = owners_by_key.get(ukey, set())
-            if len(owners) == 1:
-                owner = next(iter(owners))
-                tokens_by_account[owner] += tokens
-                if tokens > 0:
-                    day_by_account[owner] += tokens
-                cost_by_account[owner] = _add_opt(cost_by_account[owner], row_cost)
-            else:
-                day_unattributed += tokens
-                unattributed_tokens += tokens
-                unattributed_cost = _add_opt(unattributed_cost, row_cost)
-        if remainder := max(0, row.totals.total_tokens - accounted):
-            day_unattributed += remainder
-            unattributed_tokens += remainder
-        daily_rows.append(
-            DailyAccountUsage(
-                day=row.date,
-                by_account=dict(sorted(day_by_account.items())),
-                unattributed_tokens=day_unattributed,
-            ),
-        )
-    return (
-        dict(tokens_by_account),
-        {k: (None if v is None else round(v, 4)) for k, v in cost_by_account.items()},
-        tuple(daily_rows),
-        unattributed_tokens,
-        None if unattributed_cost is None else round(unattributed_cost, 4),
+        token_mix_7d=token_mix_7d,
     )
 
 
@@ -333,7 +288,7 @@ def _single_flight[T](
     return task
 
 
-def _get_cached_daily(usage_key: _CacheKey) -> _DailyBreakdown | None:
+def _get_cached_usage(usage_key: _CacheKey) -> DailyUsageScan | None:
     if (cached := _USAGE_REPORT_CACHE.get(usage_key)) is None:
         return None
     _USAGE_REPORT_CACHE.move_to_end(usage_key)
@@ -346,42 +301,40 @@ def _ensure_usage_refresh(
     usage_key: _CacheKey,
     since: float,
     epoch: int,
-) -> asyncio.Task[_DailyBreakdown]:
-    async def _run() -> _DailyBreakdown:
+) -> asyncio.Task[DailyUsageScan]:
+    async def _run() -> DailyUsageScan:
         try:
-            report = await asyncio.to_thread(
-                collect_admin_usage,
+            usage_scan = await asyncio.to_thread(
+                collect_admin_daily_usage_with_entities,
                 config=config,
                 runtime_paths=runtime_paths,
-                include_daily=True,
                 since=since,
             )
         except Exception as exc:
             logger.warning("provider_usage_7d_scan_failed", error_type=type(exc).__name__)
             raise
-        daily = report.daily_breakdown
         if epoch == _CACHE_EPOCH[0]:
-            _put_bounded(_USAGE_REPORT_CACHE, usage_key, (daily, _monotonic()), max_entries=_MAX_CACHE_ENTRIES)
+            _put_bounded(_USAGE_REPORT_CACHE, usage_key, (usage_scan, _monotonic()), max_entries=_MAX_CACHE_ENTRIES)
             for key in [k for k, (snap, _) in _CACHE.items() if k[:2] == usage_key[:2] and snap.partial]:
                 _CACHE.pop(key, None)
-        return daily
+        return usage_scan
 
     return _single_flight(_USAGE_REPORT_IN_FLIGHT, usage_key, _run)
 
 
-async def _resolve_daily_breakdown(
+async def _resolve_daily_usage(
     usage_key: _CacheKey,
-    usage_task: asyncio.Task[_DailyBreakdown] | None,
-    fallback_daily: _DailyBreakdown | None,
-) -> _DailyBreakdown | None:
-    if (cached := _get_cached_daily(usage_key)) is not None:
+    usage_task: asyncio.Task[DailyUsageScan] | None,
+    fallback_usage: DailyUsageScan | None,
+) -> DailyUsageScan | None:
+    if (cached := _get_cached_usage(usage_key)) is not None:
         return cached
-    if fallback_daily is not None or usage_task is None:
-        return fallback_daily
+    if fallback_usage is not None or usage_task is None:
+        return fallback_usage
     try:
         return await asyncio.wait_for(asyncio.shield(usage_task), timeout=USAGE_REPORT_WAIT_SECONDS)
     except TimeoutError:
-        return _get_cached_daily(usage_key)
+        return _get_cached_usage(usage_key)
     except Exception:
         return None
 
@@ -400,7 +353,7 @@ async def _compute_snapshot(
     specs = await asyncio.to_thread(discover_accounts, config, runtime_paths)
     runtime_key = (cache_key[0], cache_key[1])
     usage_key: _CacheKey = (*runtime_key, _usage_sources_signature(config))
-    cached_daily, cached_monotonic = _USAGE_REPORT_CACHE.get(usage_key, (None, None))
+    cached_usage, cached_monotonic = _USAGE_REPORT_CACHE.get(usage_key, (None, None))
     usage_ttl = REFRESH_COOLDOWN_SECONDS if force_refresh else USAGE_REPORT_TTL_SECONDS
     usage_task = (
         _ensure_usage_refresh(config, runtime_paths, usage_key, since, epoch)
@@ -408,11 +361,9 @@ async def _compute_snapshot(
         else None
     )
     probe_results = await asyncio.gather(*(_probe_account(spec, current_utc) for spec in specs))
-    daily_breakdown = await _resolve_daily_breakdown(usage_key, usage_task, cached_daily)
-    tokens_7d, costs_7d, daily_7d, unattr_tokens, unattr_cost = (
-        ({}, {}, (), 0, None)
-        if daily_breakdown is None
-        else _attribute_7d_usage(specs, daily_breakdown, config, current_utc)
+    usage_scan = await _resolve_daily_usage(usage_key, usage_task, cached_usage)
+    attribution = (
+        UsageAttribution() if usage_scan is None else attribute_7d_usage(specs, usage_scan, config, current_utc)
     )
     record_cache = epoch == _CACHE_EPOCH[0]
     accounts = tuple(
@@ -421,19 +372,24 @@ async def _compute_snapshot(
             probe,
             runtime_key=runtime_key,
             now=current_utc,
-            tokens_7d=tokens_7d.get(spec.id, 0),
-            cost_usd_7d=costs_7d.get(spec.id),
+            tokens_7d=attribution.tokens_by_account.get(spec.id, 0),
+            cost_usd_7d=attribution.cost_by_account.get(spec.id),
+            token_mix_7d=attribution.mix_by_account.get(spec.id),
             record_last_good=record_cache,
         )
         for spec, probe in zip(specs, probe_results, strict=True)
     )
     snapshot = ProviderUsageSnapshot(
         checked_at=format_utc_iso(current_utc),
-        partial=daily_breakdown is None,
+        partial=usage_scan is None,
         accounts=accounts,
-        daily_7d=daily_7d,
-        unattributed_tokens_7d=unattr_tokens,
-        unattributed_cost_usd_7d=unattr_cost,
+        daily_7d=attribution.daily_7d,
+        unattributed_tokens_7d=attribution.unattributed_tokens_7d,
+        unattributed_cost_usd_7d=attribution.unattributed_cost_usd_7d,
+        token_mix_7d=attribution.token_mix_7d,
+        cache_savings_usd_7d=attribution.cache_savings_usd_7d,
+        top_models_7d=attribution.top_models_7d,
+        top_agents_7d=attribution.top_agents_7d,
     )
     if record_cache:
         _put_bounded(_CACHE, cache_key, (snapshot, _monotonic()), max_entries=_MAX_CACHE_ENTRIES)
@@ -467,9 +423,15 @@ def _encoded_size(payload: Mapping[str, object]) -> int:
 
 
 def fit_to_device_budget(payload: dict[str, object], max_bytes: int = 48_000) -> dict[str, object]:
-    """Fit a serialized snapshot under ``max_bytes`` UTF-8 by dropping ``daily_7d``, then trimming ``model_keys``."""
+    """Fit a serialized snapshot under ``max_bytes`` UTF-8 by shedding rich analytics, ``daily_7d``, then ``model_keys``.
+
+    Stripping optional additive rich analytics (stage 1) leaves ``partial`` unchanged; ``partial`` flips to ``True``
+    only once core payload fields (``daily_7d``, ``model_keys``, or ``accounts``) are dropped.
+    """
     result = copy.deepcopy(payload)
     if _encoded_size(result) <= max_bytes:
+        return result
+    if strip_rich_analytics(result) and _encoded_size(result) <= max_bytes:
         return result
     result["daily_7d"] = []
     result["partial"] = True

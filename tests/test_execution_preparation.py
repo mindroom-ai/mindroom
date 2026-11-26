@@ -46,7 +46,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history.conversation_text import _own_thread_message_text
-from mindroom.history.policy import resolve_history_execution_plan
+from mindroom.history.policy import _resolve_history_execution_plan as resolve_history_execution_plan
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import PreparedScopeHistory
 from mindroom.history.types import (

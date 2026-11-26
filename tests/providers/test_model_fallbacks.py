@@ -24,7 +24,7 @@ from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
-from mindroom.history.compaction import SummaryModel, _summarize_chunk
+from mindroom.history.summarizer import SummaryModel, summarize_chunk
 from mindroom.history.summary_call import SummaryRetryPolicy, generate_compaction_summary
 from mindroom.llm.errors import (
     QUOTA_EXHAUSTED,
@@ -411,6 +411,103 @@ async def test_a_failure_without_a_reset_is_probed_again_on_the_next_request() -
     await drain(provider, _request())
 
     assert len(primary.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderUnavailable("upstream 500", provider="P", status_code=500),
+        ProviderUnavailable("stream stalled", provider="P", status_code=504, code=retry_stage.STREAM_STALLED),
+    ],
+    ids=["http-500", "stream-stalled"],
+)
+async def test_uncommitted_unavailable_cools_down_primary_and_recovers_after_expiry(
+    error: ProviderUnavailable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(fallback_stage.time, "monotonic", lambda: now[0])
+    primary = _Model("primary", [[error], _answer("primary")])
+    fallback = _Model("fallback", [_answer("fallback")])
+    provider = _with_fallbacks(primary, fallback)
+
+    await drain(provider, _request())
+    assert (len(primary.requests), len(fallback.requests)) == (1, 1)
+    assert fallback_stage._COOLDOWN_UNTIL["primary"] == 1000.0 + fallback_stage._UNAVAILABLE_COOLDOWN_SECONDS
+
+    # During cooldown, the next request skips primary and goes straight to fallback.
+    now[0] = 1060.0
+    await drain(provider, _request())
+    assert (len(primary.requests), len(fallback.requests)) == (1, 2)
+
+    # After cooldown expires, primary is probed again and clears cooldown on success.
+    now[0] = 1120.0
+    events = await drain(provider, _request())
+    assert (len(primary.requests), len(fallback.requests)) == (2, 2)
+    assert _text(events) == "answer"
+    assert "primary" not in fallback_stage._COOLDOWN_UNTIL
+
+
+@pytest.mark.asyncio
+async def test_committed_unavailable_without_reset_does_not_cool_down_primary() -> None:
+    primary = _Model(
+        "primary",
+        [
+            [TextDelta("partial"), ProviderUnavailable("dropped mid-stream", provider="P", status_code=503)],
+            _answer("primary"),
+        ],
+    )
+    fallback = _Model("fallback", [_answer("fallback")])
+    provider = _with_fallbacks(primary, fallback)
+
+    with pytest.raises(ProviderUnavailable):
+        await drain(provider, _request())
+    assert "primary" not in fallback_stage._COOLDOWN_UNTIL
+    assert fallback.requests == []
+
+    await drain(provider, _request())
+    assert (len(primary.requests), len(fallback.requests)) == (2, 0)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_explicit_reset_hint_wins_and_default_never_shortens_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [500.0]
+    monkeypatch.setattr(fallback_stage.time, "monotonic", lambda: now[0])
+    primary = _Model(
+        "primary",
+        [[ProviderUnavailable("overloaded", provider="P", status_code=503, retry_after_seconds=600)]],
+    )
+    provider = _with_fallbacks(primary, _Model("fallback", [_answer("fallback")]))
+
+    await drain(provider, _request())
+    assert fallback_stage._COOLDOWN_UNTIL["primary"] == 1100.0
+
+    # A subsequent default cooldown must not shorten the existing longer deadline.
+    fallback_stage._remember_reset("primary", ProviderUnavailable("down", provider="P", status_code=500))
+    assert fallback_stage._COOLDOWN_UNTIL["primary"] == 1100.0
+
+    # An explicit short hint is respected directly rather than replaced by the default window.
+    fallback_stage._remember_reset(
+        "short",
+        ProviderUnavailable("overloaded", provider="P", status_code=503, retry_after_seconds=15),
+    )
+    assert fallback_stage._COOLDOWN_UNTIL["short"] == 515.0
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_without_reset_is_probed_again_on_the_next_request() -> None:
+    primary = _Model("primary", [[RateLimited("slow down", provider="P", status_code=429)]])
+    fallback = _Model("fallback", [_answer("fallback")])
+    provider = _with_fallbacks(primary, fallback)
+
+    await drain(provider, _request())
+    await drain(provider, _request())
+
+    assert (len(primary.requests), len(fallback.requests)) == (2, 2)
+    assert "primary" not in fallback_stage._COOLDOWN_UNTIL
 
 
 @pytest.mark.asyncio
@@ -848,6 +945,8 @@ async def test_portable_replay_works_when_primary_recovers_after_fallback_tool_c
     assert isinstance(first_turn, TurnCompleted)
     assert (first_turn.message.provider_data or {})[FALLBACK_MODEL_KEY] == "project-b"
 
+    # Expire primary A's unavailability cooldown so the follow-up turn probes A again.
+    fallback_stage._COOLDOWN_UNTIL["project-a"] = time.monotonic() - 1
     tool_result = Message(role="tool", tool_call_id="call_b", content="72F sunny")
     await drain(
         provider,
@@ -925,7 +1024,7 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
 
     a_details, a_turn = _or_turn("a", "call_1")
     b_details, b_tool_turn = _or_turn("b", "call_2")
-    primary = _Model("or-a", [[_transient()], [_transient()], _answer("or-a", "recovered")])
+    primary = _Model("or-a", [[_transient()], _answer("or-a", "recovered")])
     fallback = _Model("or-b", [[TurnCompleted(message=b_tool_turn, stop_reason="tool_use")], _answer("or-b", "done")])
     provider = _with_fallbacks(primary, fallback)
 
@@ -951,9 +1050,10 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
     assert [call["id"] for call in cast("list[dict[str, object]]", b_messages[1]["tool_calls"])] == ["call_1"]
     assert [call["id"] for call in cast("list[dict[str, object]]", b_messages[3]["tool_calls"])] == ["call_2"]
 
-    # Turn 2b: primary A recovers -> keeps A's own signed reasoning, strips B's foreign signed reasoning.
+    # Turn 2b: primary A recovers after cooldown -> keeps A's own signed reasoning, strips B's foreign signed reasoning.
+    fallback_stage._COOLDOWN_UNTIL["or-a"] = time.monotonic() - 1
     await drain(provider, ModelRequest(messages=t2_messages))
-    sent_to_a = primary.requests[2]
+    sent_to_a = primary.requests[1]
     assert (sent_to_a.strip_encrypted_replay, sent_to_a.fallback_model) == (False, None)
     a_messages = cast("list[dict[str, object]]", _or_chat_kwargs(sent_to_a)["messages"])
     assert a_messages[1]["reasoning_details"] == a_details
@@ -1177,7 +1277,7 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compaction retries transient primary once then fails over on final retry, and never retries the same refuser."""
-    from mindroom.history import compaction as compaction_module  # noqa: PLC0415
+    from mindroom.history import summarizer as compaction_module  # noqa: PLC0415
     from tests.history_helpers import _summarizer  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -1196,12 +1296,13 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
     # 1. Sustained 503 on primary: attempt 1 retries primary, final attempt fails over to healthy backup.
     primary = _Model("primary", [[_transient()], [_transient()]])
     backup = _Model("backup", [_answer("backup", "Compact summary.")])
-    chunk = await _summarize_chunk(_summarizer(_with_fallbacks(primary, backup), 16_000, name="primary"), None, runs)
+    chunk = await summarize_chunk(_summarizer(_with_fallbacks(primary, backup), 16_000, name="primary"), None, runs)
     assert chunk is not None
     assert chunk.summary == "Compact summary."
     assert (len(primary.requests), len(backup.requests)) == (2, 1)
 
     # 2. Primary fails over to B on quota and B refuses: refusal fallback ALSO configured as B is NOT invoked again.
+    fallback_stage._COOLDOWN_UNTIL.clear()
     quota_primary = _Model("primary", [[_quota()]])
     refusal = ModelSafeguardRefusal(provider="backup-provider", model_id="backup-id", usage=MessageMetrics())
     avail_b = _Model("backup", [[refusal]])
@@ -1213,6 +1314,6 @@ async def test_compaction_chunk_final_transient_failover_and_distinct_refuser_ch
         fallback=SummaryModel(refusal_b, "backup", 16_000),
     )
     with pytest.raises(ModelSafeguardRefusal):
-        await _summarize_chunk(summarizer_same_b, None, runs)
+        await summarize_chunk(summarizer_same_b, None, runs)
     assert len(avail_b.requests) == 1
     assert refusal_b.requests == []

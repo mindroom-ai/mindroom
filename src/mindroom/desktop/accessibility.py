@@ -7,6 +7,7 @@ import json
 import math
 import re
 import sys
+import threading
 import time
 from collections import OrderedDict, deque
 from collections.abc import Sequence
@@ -37,13 +38,24 @@ class _RunningApplication(Protocol):
 class _Workspace(Protocol):
     def runningApplications(self) -> list[_RunningApplication]: ...  # noqa: N802
 
+    def URLForApplicationWithBundleIdentifier_(self, _bundle_identifier: str, /) -> object | None: ...  # noqa: N802
+
+    def openApplicationAtURL_configuration_completionHandler_(  # noqa: N802
+        self,
+        url: object,
+        configuration: object,
+        completion_handler: Callable[[object, object], None],
+    ) -> None: ...
+
 
 PRIMARY_SCREEN_APP_ID = "primary-screen"
 MAX_ACCESSIBILITY_ELEMENTS = 128
 MAX_RETAINED_STATES = 128
 STATE_TTL_SECONDS = 120.0
 _MAX_ACCESSIBILITY_DEPTH = 12
+_MAX_RAW_ACCESSIBILITY_DEPTH = 40
 _MAX_VISITED_ELEMENTS = 512
+_OPEN_APPLICATION_TIMEOUT_SECONDS = 5.0
 _MAX_TEXT_LENGTH = 160
 _STATE_STABILIZATION_ATTEMPTS = 12
 _STATE_STABILIZATION_DELAY_SECONDS = 0.05
@@ -226,7 +238,7 @@ class AccessibilityBackend(Protocol):
         """Launch or foreground one exact allowlisted application."""
         ...
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Capture and cache one fresh semantic state."""
         ...
 
@@ -234,11 +246,23 @@ class AccessibilityBackend(Protocol):
         """Revalidate state and bind capture to its exact local process."""
         ...
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+    def prepare_fallback(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> AccessibilityCapture:
         """Validate a fresh state, focus its app, and bind coordinate fallback to its process."""
         ...
 
-    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+    def prepare_keyboard(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> Callable[[], None]:
         """Validate a fresh state, focus its app, and return a guard to run before each keyboard input."""
         ...
 
@@ -283,6 +307,7 @@ class _StoredMacState:
     window_reference: object | None
     identities: tuple[_MacElementIdentity, ...] = ()
     created_at: float = field(default_factory=lambda: time.monotonic())
+    tree_captured: bool = True
 
 
 class MacAccessibilityBackend:
@@ -335,9 +360,9 @@ class MacAccessibilityBackend:
         try:
             application = self._running_application(app_id)
         except AccessibilityError:
-            _require_valid_activation_app_id(app_id)
+            application_url = _resolve_application_url(self._workspace, app_id)
             try:
-                _request_application_activation(app_id)
+                _open_application_url(self._workspace, application_url)
                 application = self._wait_for_running_application(app_id)
             except AccessibilityActionOutcomeUnknownError:
                 raise
@@ -355,7 +380,7 @@ class MacAccessibilityBackend:
             if stored.public.app_id == app_id:
                 del self._states[state_id]
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Retain bounded observations for 120 monotonic seconds after collection."""
         self._require_allowed(app_id)
         if app_id == PRIMARY_SCREEN_APP_ID:
@@ -363,6 +388,28 @@ class MacAccessibilityBackend:
             self._remember_state(_StoredMacState(state, _state_fingerprint(state), (), None, None))
             return state
         state_id = uuid4().hex
+        if not include_elements:
+            application, window_element, window = self._resolve_window(app_id)
+            state = AccessibilityState(
+                state_id=state_id,
+                app_id=app_id,
+                app_name=_application_name(application, app_id),
+                window=window,
+                elements=(),
+                truncated=False,
+                stability="stable",
+            )
+            self._remember_state(
+                _StoredMacState(
+                    state,
+                    _state_fingerprint(state),
+                    (),
+                    application,
+                    window_element,
+                    tree_captured=False,
+                ),
+            )
+            return state
         candidate = self._collect_app_state(app_id, state_id=state_id)
         if candidate.public.truncated:
             candidate.public = replace(candidate.public, stability="truncated")
@@ -416,15 +463,31 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return stored
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+    def prepare_fallback(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> AccessibilityCapture:
         """Revalidate exact state before focusing an allowed target, and return the process pointer input must reach."""
-        stored = self._focused_fallback_state(app_id, state_id)
+        stored = self._focused_fallback_state(app_id, state_id, allow_window_fallback=allow_window_fallback)
         process_id = None if stored.application is None else int(stored.application.processIdentifier())
         return AccessibilityCapture(stored.public, process_id)
 
-    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+    def prepare_keyboard(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> Callable[[], None]:
         """Focus a revalidated target and return a guard to call right before each keyboard input is posted."""
-        application = self._focused_fallback_state(app_id, state_id).application
+        application = self._focused_fallback_state(
+            app_id,
+            state_id,
+            allow_window_fallback=allow_window_fallback,
+        ).application
         if application is None:
             return _primary_screen_keyboard_guard
         input_posted = False
@@ -443,12 +506,19 @@ class MacAccessibilityBackend:
 
         return guard
 
-    def _focused_fallback_state(self, app_id: str, state_id: str) -> _StoredMacState:
-        stored = self._fresh_state(app_id, state_id)
-        self._activate(stored.application)
-        if stored.application is None:
-            return stored
-        return self._fresh_state(app_id, state_id)
+    def _focused_fallback_state(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> _StoredMacState:
+        revalidate = self._current_window_state if allow_window_fallback else self._fresh_state
+        current = revalidate(app_id, state_id)
+        self._activate(current.application)
+        if current.application is None:
+            return current
+        return revalidate(app_id, state_id)
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Revalidate app identity and window geometry around foreground capture."""
@@ -592,9 +662,6 @@ class MacAccessibilityBackend:
 
     def _fresh_state(self, app_id: str, state_id: str) -> _StoredMacState:
         stored = self._stored_state(app_id, state_id)
-        if stored.public.stability != "stable" or stored.public.truncated:
-            msg = "Accessibility fallback requires a stable complete observation; request get_app_state again."
-            raise AccessibilityError(msg)
         if app_id == PRIMARY_SCREEN_APP_ID:
             current = _primary_screen_state(self._screen_size(), state_id=state_id)
             if _state_fingerprint(current) != stored.fingerprint:
@@ -602,6 +669,9 @@ class MacAccessibilityBackend:
                 msg = "Accessibility state changed; request get_app_state again before acting."
                 raise AccessibilityError(msg)
             return stored
+        if not stored.tree_captured or stored.public.stability != "stable" or stored.public.truncated:
+            msg = "Accessibility fallback requires a stable complete observation; request get_app_state again."
+            raise AccessibilityError(msg)
         application = stored.application
         if application is None or stored.window_reference is None:
             self._states.pop(state_id, None)
@@ -660,6 +730,9 @@ class MacAccessibilityBackend:
         raise AccessibilityError(msg)
 
     def _current_capture_state(self, app_id: str, state_id: str) -> _StoredMacState:
+        return self._current_window_state(app_id, state_id, action="capture")
+
+    def _current_window_state(self, app_id: str, state_id: str, *, action: str = "acting") -> _StoredMacState:
         observed = self._stored_state(app_id, state_id)
         if app_id == PRIMARY_SCREEN_APP_ID:
             return self._fresh_state(app_id, state_id)
@@ -678,7 +751,7 @@ class MacAccessibilityBackend:
             raise
         if window != observed.public.window:
             self._states.pop(state_id, None)
-            msg = "Accessibility target window geometry changed; request get_app_state again before capture."
+            msg = f"Accessibility target window geometry changed; request get_app_state again before {action}."
             raise AccessibilityError(msg)
         return replace(observed, application=current_application)
 
@@ -721,7 +794,7 @@ class MacAccessibilityBackend:
         state = AccessibilityState(
             state_id=state_id,
             app_id=app_id,
-            app_name=_bounded_text(application.localizedName()) or _bounded_text(app_id) or app_id[:_MAX_TEXT_LENGTH],
+            app_name=_application_name(application, app_id),
             window=window,
             elements=elements,
             truncated=truncated,
@@ -732,7 +805,7 @@ class MacAccessibilityBackend:
         self,
         root: object,
     ) -> tuple[tuple[AccessibilityElement, ...], tuple[object, ...], tuple[_MacElementIdentity, ...], bool]:
-        queue: deque[tuple[object, int, int | None, tuple[object, ...]]] = deque([(root, 0, None, ())])
+        queue: deque[tuple[object, int, int, int | None, tuple[object, ...]]] = deque([(root, 0, 0, None, ())])
         seen: set[object] = {root}
         elements: list[AccessibilityElement] = []
         references: list[object] = []
@@ -740,7 +813,7 @@ class MacAccessibilityBackend:
         visited = 0
         truncated = False
         while queue and visited < _MAX_VISITED_ELEMENTS:
-            reference, depth, parent_index, ancestors = queue.popleft()
+            reference, depth, raw_depth, parent_index, ancestors = queue.popleft()
             visited += 1
             role = _bounded_text(self._copy_attribute(reference, self._services.kAXRoleAttribute)) or "AXUnknown"
             subrole = _bounded_text(self._copy_attribute(reference, self._services.kAXSubroleAttribute))
@@ -799,14 +872,17 @@ class MacAccessibilityBackend:
                 )
                 current_parent = index
             children = self._children(reference, role=role)
-            if depth >= _MAX_ACCESSIBILITY_DEPTH:
+            next_depth = depth + 1 if include else depth
+            next_raw_depth = raw_depth + 1
+            if next_depth > _MAX_ACCESSIBILITY_DEPTH or next_raw_depth > _MAX_RAW_ACCESSIBILITY_DEPTH:
                 truncated = truncated or bool(children)
                 continue
             truncated |= _enqueue_children(
                 queue,
                 seen,
                 children,
-                depth=depth + 1,
+                depth=next_depth,
+                raw_depth=next_raw_depth,
                 parent_index=current_parent,
                 ancestors=(*ancestors, reference),
                 remaining=_MAX_VISITED_ELEMENTS - visited - len(queue),
@@ -960,18 +1036,39 @@ class MacAccessibilityBackend:
     def _activate(self, application: _RunningApplication | None) -> None:
         if application is None:
             return
+        is_hidden = getattr(application, "isHidden", None)
+        unhide = getattr(application, "unhide", None)
+        if callable(unhide) and (not callable(is_hidden) or bool(is_hidden())):
+            unhide()
         activated = application.activateWithOptions_(0)
         if activated and _wait_for_activation(application, attempts=_DIRECT_ACTIVATION_ATTEMPTS):
+            return
+        if self._try_ax_frontmost(application) and _wait_for_activation(
+            application,
+            attempts=_DIRECT_ACTIVATION_ATTEMPTS,
+        ):
             return
         app_id = application.bundleIdentifier()
         if app_id is None:
             msg = "Allowed application has no bundle identifier for activation."
             raise AccessibilityError(msg)
-        _request_application_activation(app_id)
+        _require_valid_activation_app_id(app_id)
+        bundle_url_getter = getattr(application, "bundleURL", None)
+        application_url = bundle_url_getter() if callable(bundle_url_getter) else None
+        if application_url is None:
+            application_url = _resolve_application_url(self._workspace, app_id)
+        _open_application_url(self._workspace, application_url)
         if _wait_for_activation(application, attempts=_ACTIVATION_ATTEMPTS):
             return
         msg = "Allowed application did not become active before input."
         raise AccessibilityError(msg)
+
+    def _try_ax_frontmost(self, application: _RunningApplication) -> bool:
+        if not self._services.AXIsProcessTrusted():
+            return False
+        app_ref = self._services.AXUIElementCreateApplication(application.processIdentifier())
+        error = self._services.AXUIElementSetAttributeValue(app_ref, self._services.kAXFrontmostAttribute, True)
+        return error == self._services.kAXErrorSuccess
 
     @staticmethod
     def _validate_element_index(stored: _StoredMacState, element_index: int) -> object:
@@ -1058,19 +1155,33 @@ class ScreenshotOnlyAccessibilityBackend:
         msg = "Application launch is currently available only on macOS."
         raise AccessibilityError(msg)
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Create an empty state bound to the current primary-screen geometry."""
+        del include_elements
         self._require_primary(app_id)
         self._state = _primary_screen_state(self._screen_size(), state_id=uuid4().hex)
         return self._state
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+    def prepare_fallback(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> AccessibilityCapture:
         """Validate that coordinate fallback still targets the latest screen geometry."""
+        del allow_window_fallback
         return self.prepare_capture(app_id, state_id)
 
-    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
+    def prepare_keyboard(
+        self,
+        app_id: str,
+        state_id: str,
+        *,
+        allow_window_fallback: bool = False,
+    ) -> Callable[[], None]:
         """Validate that keyboard fallback still targets the latest screen geometry."""
-        self.prepare_fallback(app_id, state_id)
+        self.prepare_fallback(app_id, state_id, allow_window_fallback=allow_window_fallback)
         return _primary_screen_keyboard_guard
 
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
@@ -1138,22 +1249,48 @@ def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> 
     return False
 
 
+def _application_name(application: _RunningApplication, app_id: str) -> str:
+    return _bounded_text(application.localizedName()) or _bounded_text(app_id) or app_id[:_MAX_TEXT_LENGTH]
+
+
 def _require_valid_activation_app_id(app_id: str) -> None:
-    """Reject bundle IDs that cannot be embedded in the activation AppleScript."""
+    """Reject bundle IDs that do not match the expected reverse-DNS character set."""
     if re.fullmatch(r"[A-Za-z0-9.-]+", app_id) is None:
         msg = "Allowed application has an invalid bundle identifier for activation."
         raise AccessibilityError(msg)
 
 
-def _request_application_activation(app_id: str) -> None:
-    """Ask macOS to activate one exact bundle ID through a bounded Apple event."""
+def _resolve_application_url(workspace: _Workspace, app_id: str) -> object:
+    """Resolve the installed bundle URL for one exact allowlisted bundle ID."""
     _require_valid_activation_app_id(app_id)
+    url = workspace.URLForApplicationWithBundleIdentifier_(app_id)
+    if url is None:
+        msg = f"Allowed application {app_id!r} is not installed."
+        raise AccessibilityError(msg)
+    return url
+
+
+def _open_application_url(workspace: _Workspace, url: object) -> None:
+    """Launch or activate one resolved app bundle URL through NSWorkspace without AppleEvents."""
     import AppKit  # noqa: PLC0415
 
-    source = f'with timeout of 2 seconds\ntell application id "{app_id}" to activate\nend timeout'
-    script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[missing-attribute]
-    _result, error = script.executeAndReturnError_(None)
-    if error is not None:
+    config = AppKit.NSWorkspaceOpenConfiguration.configuration()  # ty: ignore[missing-attribute]
+    config.setActivates_(True)
+    config.setHides_(False)
+    config.setCreatesNewApplicationInstance_(False)
+    done = threading.Event()
+    open_error: list[object] = []
+
+    def completion_handler(_running_app: object, error: object) -> None:
+        if error is not None:
+            open_error.append(error)
+        done.set()
+
+    workspace.openApplicationAtURL_configuration_completionHandler_(url, config, completion_handler)
+    if not done.wait(timeout=_OPEN_APPLICATION_TIMEOUT_SECONDS):
+        msg = "Allowed application activation request timed out."
+        raise AccessibilityError(msg)
+    if open_error:
         msg = "Allowed application activation request failed before input."
         raise AccessibilityError(msg)
 
@@ -1231,11 +1368,12 @@ def _state_fingerprint(state: AccessibilityState) -> str:
 
 
 def _enqueue_children(
-    queue: deque[tuple[object, int, int | None, tuple[object, ...]]],
+    queue: deque[tuple[object, int, int, int | None, tuple[object, ...]]],
     seen: set[object],
     children: tuple[object, ...],
     *,
     depth: int,
+    raw_depth: int,
     parent_index: int | None,
     ancestors: tuple[object, ...],
     remaining: int,
@@ -1246,7 +1384,7 @@ def _enqueue_children(
         if remaining <= 0:
             return True
         seen.add(child)
-        queue.append((child, depth, parent_index, ancestors))
+        queue.append((child, depth, raw_depth, parent_index, ancestors))
         remaining -= 1
     return False
 

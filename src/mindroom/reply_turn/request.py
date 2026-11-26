@@ -224,7 +224,7 @@ async def response_typing_indicator(
 
     lease_cm = (
         active_runs.track(request.room_id, request.thread_id, active=False)
-        if active_runs is not None and request.contact is None
+        if active_runs is not None and not request.quiet
         else nullcontext()
     )
     async with lease_cm as lease:

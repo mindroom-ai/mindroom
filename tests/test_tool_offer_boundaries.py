@@ -235,8 +235,8 @@ def test_the_surface_lists_each_toolkit_with_its_owner_in_available_tool_order_t
 @pytest.mark.parametrize(
     ("agent", "toolkit", "function", "options", "expected"),
     [
-        pytest.param(_MEMORY, "memory", "add_memory", {}, True, id="memory-on"),
-        pytest.param(_MEMORY, "memory", "add_memory", {"memory_backend": "none"}, False, id="memory-none"),
+        pytest.param(_MEMORY, "memory", "memory", {}, True, id="memory-on"),
+        pytest.param(_MEMORY, "memory", "memory", {"memory_backend": "none"}, False, id="memory-none"),
         pytest.param(_ROOM_TOOL, "matrix_message", "matrix_message", {}, True, id="room-context-in-room"),
         pytest.param(_ROOM_TOOL, "matrix_message", "matrix_message", {"room": False}, False, id="roomless"),
         pytest.param(_DELEGATE, "delegate", "run_subagent", {}, True, id="delegate-depth-0"),
