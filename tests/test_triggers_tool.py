@@ -1623,6 +1623,7 @@ def _load_trigger_approval_rules(tmp_path: Path, *rules: str | tuple[str, str]) 
     [
         ("watch_room", "watch_room is now triggers"),
         ("watch_thread", "watch_thread is now triggers"),
+        ("watch_pr", "watch_pr is now triggers"),
         ("subscribe_event", "subscribe_event is now triggers"),
         ("create_trigger", "create_trigger is now triggers"),
         ("list_triggers", "list_triggers is now triggers"),
@@ -1751,6 +1752,8 @@ def test_retired_trigger_approval_rule_fails_even_when_another_toolkit_offers_sa
     "overrides",
     [
         {"exclude_tools": ["create_trigger"]},
+        {"exclude_tools": ["watch_pr"]},
+        {"include_tools": ["watch_pr"]},
         {"include_tools": "watch_room, list_triggers"},
     ],
 )

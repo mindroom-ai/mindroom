@@ -301,10 +301,11 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 
 # LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
 # Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
-#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
-#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
-#   function taking an `action` parameter.
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key) and
+#   later a separate watch_pr function, which could appear in tool_approval.rules[].match globs or
+#   include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480 (original 8) and v2026.11.633 (watch_pr); replacement: unreleased; all 9 were
+#   collapsed into a single `triggers` function taking an `action` parameter.
 # Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
 #   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
 #   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
@@ -320,6 +321,7 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
     "watch_thread": "triggers",
+    "watch_pr": "triggers",
     "subscribe_event": "triggers",
     "create_trigger": "triggers",
     "list_triggers": "triggers",
