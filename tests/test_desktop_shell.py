@@ -141,13 +141,46 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_commands_use_the_captured_environment_and_merge_output(tmp_path: Path) -> None:
-    """The login environment reaches commands, stdin is detached, and stderr keeps terminal order."""
+async def test_commands_use_the_captured_environment_and_split_streams(tmp_path: Path) -> None:
+    """The login environment reaches commands, stdin is detached, and stdout/stderr are captured separately."""
     shell = local_shell()
     shell.grant(60)
     command = 'printf "$MINDROOM_TEST_LOGIN_VALUE\\n"; printf "warning\\n" >&2; cat; printf "last"'
     result = await shell.execute(request(command, tmp_path))
-    assert completed_output(result) == "from-login\nwarning\nlast"
+    assert result.state == "completed"
+    assert result.exit_code == 0
+    assert result.output.read().decode() == "from-login\nlast"
+    assert result.output.read_stderr().decode() == "warning\n"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_late_approval_near_ttl_backgrounds_immediately_without_overwaiting(tmp_path: Path) -> None:
+    """When remaining TTL is within the safety margin, execute starts and backgrounds immediately."""
+    shell = local_shell()
+    shell.grant(60)
+    started = time.monotonic()
+    result = await shell.execute(request("sleep 30", tmp_path, timeout=30, lifetime_ms=400))
+    elapsed = time.monotonic() - started
+    assert result.state == "running"
+    assert result.handle is not None
+    assert elapsed < 0.5
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_stderr_offset_is_rejected_without_dropping_handle(tmp_path: Path) -> None:
+    """An invalid stderr_offset fails without modifying or handing over a completed handle."""
+    shell = local_shell()
+    shell.grant(60)
+    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path))
+    assert result.handle is not None
+    for bad in (-1, 99, 1):
+        with pytest.raises(DesktopShellError, match="stderr offset"):
+            shell.check(REQUESTER, AGENT, result.handle, stderr_offset=bad)
+    checked = shell.check(REQUESTER, AGENT, result.handle, offset=0, stderr_offset=0)
+    assert checked.output.read().decode() == "ok"
+    assert checked.output.read_stderr().decode() == "é"
     await shell.close()
 
 

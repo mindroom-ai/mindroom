@@ -30,8 +30,9 @@ from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestina
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
+    from mindroom.shell.output_capture import CapturedShellStream
+
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
-_MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
 # Letters, marks, and symbols that render as nothing or as empty space: every default-ignorable code point outside
 # the control and format categories, which approval surfaces already escape, plus two blank symbols.
@@ -78,49 +79,83 @@ class DesktopShellRequest:
 
 
 class DesktopShellOutput(ShellOutputCapture):
-    """Spool one command's combined output privately until the bridge transfers it."""
+    """Spool one command's stdout and stderr privately until the bridge transfers them."""
 
     def __init__(self, directory: str) -> None:
         super().__init__(ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES))
         self.exit_code: int | None = None
         self.completed = False
 
+    def _stream_size(self, stream: CapturedShellStream) -> int:
+        stream.file.flush()
+        return os.fstat(stream.file.fileno()).st_size
+
+    def _stream_read(self, stream: CapturedShellStream, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        size = self._stream_size(stream)
+        return os.pread(stream.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
+
+    def _stream_tail(self, stream: CapturedShellStream, max_bytes: int) -> bytes:
+        return self._stream_read(stream, max(0, self._stream_size(stream) - max_bytes))
+
+    def _check_stream_offset(self, stream: CapturedShellStream, offset: int, *, label: str) -> None:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            message = f"Shell {label} offset must be a nonnegative integer."
+            raise DesktopShellError(message)
+        size = self._stream_size(stream)
+        if offset > size:
+            message = f"Shell {label} offset is past the captured {label} ({size} bytes)."
+            raise DesktopShellError(message)
+        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
+        if offset < size and self._stream_read(stream, offset, 1)[0] & 0xC0 == 0x80:
+            message = f"Shell {label} offset must be at the start of a UTF-8 character."
+            raise DesktopShellError(message)
+
     @property
     def size(self) -> int:
-        """Return the retained UTF-8 bytes, at most the capture cap."""
-        self.stdout.file.flush()
-        return os.fstat(self.stdout.file.fileno()).st_size
+        """Return the retained stdout UTF-8 bytes, at most the capture cap."""
+        return self._stream_size(self.stdout)
 
     @property
     def truncated(self) -> bool:
-        """Report output dropped past the cap or lost to a capture error."""
+        """Report stdout dropped past the cap or lost to a capture error."""
         return self.stdout.error is not None
 
     def read(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        """Return retained output from byte *offset*, at most *max_bytes* of it.
+        """Return retained stdout from byte *offset*, at most *max_bytes* of it.
 
         ``pread`` leaves the file position where the engine's next write appends.
         """
-        size = self.size
-        return os.pread(self.stdout.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
+        return self._stream_read(self.stdout, offset, max_bytes)
 
     def tail(self, max_bytes: int) -> bytes:
-        """Return at most the newest *max_bytes* bytes; the first character may be partial."""
-        return self.read(max(0, self.size - max_bytes))
+        """Return at most the newest *max_bytes* bytes of stdout; the first character may be partial."""
+        return self._stream_tail(self.stdout, max_bytes)
 
     def check_offset(self, offset: int) -> None:
-        """Reject an offset that is negative, past the retained output, or inside a character."""
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-            message = "Shell output offset must be a nonnegative integer."
-            raise DesktopShellError(message)
-        size = self.size
-        if offset > size:
-            message = f"Shell output offset is past the captured output ({size} bytes)."
-            raise DesktopShellError(message)
-        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
-        if offset < size and self.read(offset, 1)[0] & 0xC0 == 0x80:
-            message = "Shell output offset must be at the start of a UTF-8 character."
-            raise DesktopShellError(message)
+        """Reject a stdout offset that is negative, past the retained output, or inside a character."""
+        self._check_stream_offset(self.stdout, offset, label="output")
+
+    @property
+    def stderr_size(self) -> int:
+        """Return the retained stderr UTF-8 bytes, at most the capture cap."""
+        return self._stream_size(self.stderr)
+
+    @property
+    def stderr_truncated(self) -> bool:
+        """Report stderr dropped past the cap or lost to a capture error."""
+        return self.stderr.error is not None
+
+    def read_stderr(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        """Return retained stderr from byte *offset*, at most *max_bytes* of it."""
+        return self._stream_read(self.stderr, offset, max_bytes)
+
+    def tail_stderr(self, max_bytes: int) -> bytes:
+        """Return at most the newest *max_bytes* bytes of stderr; the first character may be partial."""
+        return self._stream_tail(self.stderr, max_bytes)
+
+    def check_stderr_offset(self, offset: int) -> None:
+        """Reject a stderr offset that is negative, past the retained stderr, or inside a character."""
+        self._check_stream_offset(self.stderr, offset, label="stderr")
 
     def publish(self, return_code: int | None) -> str:
         """Record completion; the bridge transfers the spool instead of writing a workspace file."""
@@ -528,7 +563,7 @@ class DesktopShell:
             self._active_owner = (request.controller_key, request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.
             remaining = deadline - self._monotonic_clock() - _INLINE_WAIT_SAFETY_SECONDS
-            return await self._run(request, max(_MIN_INLINE_WAIT_SECONDS, min(request.timeout_seconds, remaining)))
+            return await self._run(request, max(0.0, min(request.timeout_seconds, remaining)))
         finally:
             self._pending = None
             self._decision = None
@@ -553,7 +588,7 @@ class DesktopShell:
                 timeout=inline_wait,
                 output_capture=output,
                 stdin=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 kill_group_after_exit=True,
                 # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
                 register_finished=True,
@@ -602,16 +637,20 @@ class DesktopShell:
         handle: str,
         *,
         offset: int | None = None,
+        stderr_offset: int | None = None,
         controller_key: str | None = None,
     ) -> DesktopShellResult:
         """Report the caller's own handle; a finished one stays until ``hand_over`` confirms its output arrived.
 
-        An invalid output ``offset`` is rejected without changing the handle, so a corrected check still gets the output.
+        An invalid output ``offset`` or ``stderr_offset`` is rejected without changing the handle, so a corrected check
+        still gets the output.
         """
         record = self._caller_record(requester_id, agent_name, handle, controller_key=controller_key)
         entry = self._handles[handle]
         if offset is not None:
             entry.output.check_offset(offset)
+        if stderr_offset is not None:
+            entry.output.check_stderr_offset(stderr_offset)
         if not record.finished:
             return DesktopShellResult("running", handle, None, entry.output)
         return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)

@@ -140,7 +140,7 @@ async def test_long_working_directory_reaches_the_shell(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     shell = _local_shell()
     shell.grant(60)
-    run = _command("run_shell", parameters={"command": "pwd", "cwd": str(nested)})
+    run = _run_shell("pwd", nested)
     assert (await _execute(shell, run))["output"] == f"{nested}\n"
     await shell.close()
 
@@ -207,7 +207,7 @@ async def test_other_callers_see_active_shell_without_its_request_id(tmp_path: P
     """A different allowed caller sees that a command is active, but never learns its request ID."""
     shell = _local_shell()
     shell.grant(60)
-    command = _command("run_shell", parameters={"command": "sleep 30", "cwd": str(tmp_path)})
+    command = _run_shell("sleep 30", tmp_path, request_id="request-1", timeout_seconds=30)
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_active(shell)
     bob = _command("status", requester_id=BOB)
@@ -238,6 +238,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 0,
         "next_offset": 6,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     assert (await _execute(shell, _handle_command("check_shell", handle, sequence=2)))["state"] == "running"
 
@@ -253,6 +259,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 6,
         "next_offset": 10,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
         await _execute(shell, _handle_command("check_shell", handle, sequence=sequence + 1))
@@ -502,6 +514,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output_truncated": False,
         "output_start": 0,
         "next_offset": len(expected),
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
@@ -673,4 +691,97 @@ async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound
     _assert_upload_fallback(result)
     # The handle keeps its output for the next page.
     assert released == []
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_split_stderr_streams_inline_and_pages_independently(tmp_path: Path) -> None:
+    """Running and finished shell replies carry separate stdout/stderr fields and support stderr_offset."""
+    shell = _local_shell()
+    shell.grant(60)
+    command = (
+        "printf 'out1'; printf 'err1' >&2; "
+        "while [ ! -f release ]; do sleep 0.05; done; "
+        "printf 'out2'; printf 'err2' >&2"
+    )
+    running = await _execute(shell, _run_shell(command, tmp_path))
+    handle = running["handle"]
+    assert isinstance(handle, str)
+    assert (running["output"], running["next_offset"]) == ("out1", 4)
+    assert (running["stderr"], running["stderr_next_offset"]) == ("err1", 4)
+
+    (tmp_path / "release").touch()
+    finished = None
+    for seq in range(2, 200):
+        reply = await _execute(
+            shell,
+            _handle_command("check_shell", handle, sequence=seq, offset=4, stderr_offset=4),
+        )
+        if reply["state"] != "running":
+            finished = reply
+            break
+        await asyncio.sleep(0.02)
+    assert finished is not None
+    assert (finished["output"], finished["output_start"], finished["next_offset"]) == ("out2", 4, 8)
+    assert (finished["stderr"], finished["stderr_start"], finished["stderr_next_offset"]) == ("err2", 4, 8)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_large_split_stdout_and_stderr_attach_separately_and_fallback_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large stdout and stderr upload separately; if stderr upload fails, handle stays open with fitted pages."""
+    uploaded: list[tuple[str, bytes]] = []
+
+    async def fake_upload(
+        _client: object,
+        content: bytes,
+        *,
+        mime_type: str,
+        filename: str,
+        timeout_seconds: float,
+    ) -> EncryptedDesktopMedia:
+        del mime_type, timeout_seconds
+        uploaded.append((filename, content))
+        if filename.endswith("-stderr.txt") and len(uploaded) == 2:
+            msg = "stderr upload failed"
+            raise DesktopMediaError(msg)
+        return replace(MEDIA, url=f"mxc://example.org/{filename}", mime_type="text/plain", size=len(content))
+
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", fake_upload)
+    shell = _local_shell()
+    shell.grant(60)
+    script = "import sys; sys.stdout.write('O' * 60_000); sys.stderr.write('E' * 60_000)"
+    first = await _execute(
+        shell,
+        _run_shell(f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}", tmp_path, timeout_seconds=5),
+    )
+    # First attempt failed on stderr upload -> handle kept open and both streams make inline progress.
+    handle = first["handle"]
+    assert isinstance(handle, str)
+    assert first["output_attachment"] is None
+    assert first["stderr_attachment"] is None
+    assert "stderr upload failed" in str(first["warning"])
+    assert 0 < first["next_offset"] < 60_000
+    assert 0 < first["stderr_next_offset"] < 60_000
+    assert fits_inline(_run_shell("true", tmp_path), first)
+
+    # Next check uploads both remaining slices and hands over the handle.
+    second = await _execute(
+        shell,
+        _handle_command(
+            "check_shell",
+            handle,
+            sequence=2,
+            offset=first["next_offset"],
+            stderr_offset=first["stderr_next_offset"],
+        ),
+    )
+    assert second["output_attachment"] is not None
+    assert second["stderr_attachment"] is not None
+    assert (second["next_offset"], second["stderr_next_offset"]) == (60_000, 60_000)
+    with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
+        await _execute(shell, _handle_command("check_shell", handle, sequence=3))
     await shell.close()

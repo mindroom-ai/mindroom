@@ -55,6 +55,7 @@ from mindroom.desktop.protocol import (
     DesktopResponse,
     EncryptedDesktopMedia,
 )
+from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.reply_fitting import _WIDEST_METRICS
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
@@ -416,7 +417,7 @@ async def test_exact_local_approval_runs_shell_once_and_restart_never_replays(
     """Only the exact pending ID starts the process, and redelivery returns the saved receipt."""
     journal = tmp_path / "commands.sqlite3"
     bridge = _local_bridge(shell=_local_shell(), journal_path=journal)
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _run_shell(PRIVATE_COMMAND, tmp_path, request_id="request-1")
     await bridge.on_to_device_event(_event(command))
     execution = asyncio.create_task(_execute(bridge))
     await _wait_for_pending_shell(bridge)
@@ -460,7 +461,7 @@ async def test_stop_settles_shell_work_promptly_without_replay(
     bridge = _local_bridge(shell=shell, journal_path=journal)
     if phase == "running":
         bridge.grant_local_shell(60)
-    command = _command("run_shell", parameters={"command": "printf started >> started; sleep 30", "cwd": str(tmp_path)})
+    command = _run_shell("printf started >> started; sleep 30", tmp_path, request_id="request-1")
     await bridge.on_to_device_event(_event(command))
     execution = asyncio.create_task(_execute(bridge))
     if phase == "pending":
@@ -505,7 +506,7 @@ async def test_stop_preserves_undelivered_cancellation_when_delivery_fails(
     monkeypatch.setattr("mindroom.desktop.bridge._STOP_DELIVERY_TIMEOUT_SECONDS", 0.05)
     journal = tmp_path / "commands.sqlite3"
     bridge = _local_bridge(shell=_local_shell(), journal_path=journal)
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _run_shell(PRIVATE_COMMAND, tmp_path, request_id="request-1")
     await bridge.on_to_device_event(_event(command))
     execution = asyncio.create_task(_execute(bridge))
     await _wait_for_pending_shell(bridge)
@@ -1014,6 +1015,12 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
             "output_attachment": None,
             "output_start": 0,
             "next_offset": len(output.encode()),
+            "stderr": "",
+            "stderr_bytes": 0,
+            "stderr_truncated": False,
+            "stderr_attachment": None,
+            "stderr_start": 0,
+            "stderr_next_offset": 0,
             "metrics": _WIDEST_METRICS,
         },
     ).content_bytes()
@@ -3476,3 +3483,48 @@ async def test_wire_trimmed_screenshot_backed_click_succeeds_after_unrelated_ax_
     await bridge.deliver_pending()
     assert not _response(transport).ok
     assert "Accessibility state changed" in (_response(transport).error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        DesktopProviderError("macOS display mapping is unavailable; reconnect displays and request fresh app state."),
+        AccessibilityError("Accessibility unavailable while lid is closed."),
+    ],
+)
+async def test_status_succeeds_with_shell_and_folders_when_gui_display_probe_fails(
+    transport: AsyncMock,
+    selected_root: Path,
+    exc: Exception,
+) -> None:
+    """Headless/lid-closed GUI probe errors degrade status gracefully instead of failing shell/folder discovery."""
+    provider = FakeProvider()
+
+    def failing_status() -> dict[str, object]:
+        raise exc
+
+    provider.status = failing_status  # type: ignore[method-assign]
+    filesystem = DesktopFilesystem([selected_root])
+    shell = _local_shell()
+    policy = replace(_policy(), shell_enabled=True, allowed_file_roots=(selected_root,))
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=policy,
+        filesystem=filesystem,
+        shell=shell,
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(bridge, _event(_command("status")))
+    response = _response(transport)
+    assert response.ok
+    assert response.result["gui_available"] is False
+    assert response.result["gui_error"] == str(exc)
+    bridge_status = response.result["bridge"]
+    assert bridge_status["gui_available"] is False
+    assert bridge_status["gui_permissions_ready"] is False
+    assert bridge_status["shell"]["enabled"] is True
+    assert len(bridge_status["file_roots"]) == 1
+    await shell.close()
+    bridge.close()

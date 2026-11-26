@@ -409,7 +409,7 @@ def _run_shell(
     sequence: int = 1,
     requester_id: str = ALICE,
     timeout_seconds: int = 1,
-    expires_at_ms: int = 11_000,
+    expires_at_ms: int = 120_000,
 ) -> DesktopCommand:
     return replace(
         _command(

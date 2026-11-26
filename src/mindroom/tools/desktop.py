@@ -48,7 +48,7 @@ if TYPE_CHECKING:
         "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one "
         "Desktop-enabled agent."
     ),
-    function_names=("desktop",),
+    function_names=("desktop", "run_desktop_shell"),
     managed_init_args=(ToolManagedInitArg.CREDENTIALS_MANAGER, ToolManagedInitArg.WORKER_TARGET),
 )
 def desktop_tools() -> type[DesktopTools]:

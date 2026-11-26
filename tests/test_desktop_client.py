@@ -275,7 +275,7 @@ async def test_management_actions_run_concurrently_with_run_shell_and_serialize_
     assert send_events == [("start", "shell-1")]
 
     # Conflicting commands while both lanes are occupied are rejected.
-    for req_id, action in (("shell-2", "run_shell"), ("check-conflict", "check_shell"), ("click-1", "click")):
+    for req_id, action in (("shell-2", "run_shell"), ("click-1", "click")):
         with pytest.raises(DesktopRequestError, match="already in progress"):
             await router.request(TARGET, _command(request_id=req_id, action=action), timeout_seconds=1)
 
@@ -321,10 +321,10 @@ async def test_management_actions_run_concurrently_with_run_shell_and_serialize_
 
 
 @pytest.mark.asyncio
-async def test_concurrent_read_only_requests_serialize_in_order_while_mutations_and_check_shell_conflict(
+async def test_concurrent_read_only_requests_serialize_in_order_while_mutations_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pure read-only calls serialize cleanly through send_lock; mutations and check_shell still reject."""
+    """Pure read-only calls serialize cleanly through send_lock; GUI mutations still conflict with reads."""
     client = FakeClient()
     router = DesktopResponseRouter(client)
     monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
@@ -357,10 +357,9 @@ async def test_concurrent_read_only_requests_serialize_in_order_while_mutations_
     await asyncio.sleep(0)
     assert send_events == [("start", "read-1")]
 
-    # Mutating actions and single-handover check_shell still fail fast while reads are in flight.
-    for req_id, action in (("click-1", "click"), ("check-1", "check_shell")):
-        with pytest.raises(DesktopRequestError, match="already in progress"):
-            await router.request(TARGET, _command(request_id=req_id, action=action), timeout_seconds=1)
+    # Mutating GUI actions still fail fast while reads are in flight.
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, _command(request_id="click-1", action="click"), timeout_seconds=1)
 
     release_first_send.set()
     await asyncio.sleep(0)
@@ -384,25 +383,65 @@ async def test_concurrent_read_only_requests_serialize_in_order_while_mutations_
         router.on_to_device_event(_event(response))
     assert await asyncio.gather(state_task, status_task, file_task) == responses
 
-    # Symmetric check: read while mutation or check_shell is in flight fails fast immediately.
-    for in_flight_action, rejected_action in (("click", "get_app_state"), ("check_shell", "status")):
-        in_flight = asyncio.create_task(
-            router.request(
-                TARGET,
-                _command(request_id=f"in-{in_flight_action}", action=in_flight_action),
-                timeout_seconds=1,
-            ),
-        )
-        await asyncio.sleep(0)
-        with pytest.raises(DesktopRequestError, match="already in progress"):
-            await router.request(
-                TARGET,
-                _command(request_id=f"rej-{rejected_action}", action=rejected_action),
-                timeout_seconds=1,
-            )
-        in_flight.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await in_flight
+    # Symmetric check: read while GUI mutation is in flight fails fast immediately.
+    in_flight = asyncio.create_task(
+        router.request(TARGET, _command(request_id="in-click", action="click"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, _command(request_id="rej-state", action="get_app_state"), timeout_seconds=1)
+    in_flight.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await in_flight
 
     assert not router._pending
     assert TARGET not in router._send_locks
+
+
+@pytest.mark.asyncio
+async def test_shell_handle_actions_conflict_only_on_same_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """check_shell/kill_shell conflict only on the same handle (or None), never with other handles, GUI, or reads."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
+
+    def cmd(request_id: str, action: str, handle: str | None = None) -> DesktopCommand:
+        base = _command(request_id=request_id, action=action)
+        params = {"handle": handle} if handle is not None else {}
+        return DesktopCommand(
+            request_id=base.request_id,
+            session_id=base.session_id,
+            sequence=base.sequence,
+            issued_at_ms=base.issued_at_ms,
+            expires_at_ms=base.expires_at_ms,
+            action=base.action,
+            requester_id=base.requester_id,
+            agent_name=base.agent_name,
+            parameters=params,
+        )
+
+    h1_check = asyncio.create_task(router.request(TARGET, cmd("c1", "check_shell", "shell:1"), timeout_seconds=1))
+    await asyncio.sleep(0)
+
+    # Same handle (check or kill) or missing handle conflicts.
+    for req_id, action, handle in (
+        ("c1-dup", "check_shell", "shell:1"),
+        ("k1-dup", "kill_shell", "shell:1"),
+        ("c-none", "check_shell", None),
+    ):
+        with pytest.raises(DesktopRequestError, match="already in progress"):
+            await router.request(TARGET, cmd(req_id, action, handle), timeout_seconds=1)
+
+    # Different handle, read-only status, GUI click, and run_shell all run concurrently with h1_check.
+    h2_check = asyncio.create_task(router.request(TARGET, cmd("c2", "check_shell", "shell:2"), timeout_seconds=1))
+    click_task = asyncio.create_task(
+        router.request(TARGET, _command(request_id="g1", action="click"), timeout_seconds=1),
+    )
+    await asyncio.sleep(0)
+
+    for req_id in ("c1", "c2", "g1"):
+        router.on_to_device_event(_event(DesktopResponse(req_id, "session-1", True, result={"ok": req_id})))
+    results = await asyncio.gather(h1_check, h2_check, click_task)
+    assert [r.result["ok"] for r in results] == ["c1", "c2", "g1"]
+    assert not router._pending

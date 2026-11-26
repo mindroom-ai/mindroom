@@ -14,6 +14,7 @@ import contextlib
 import errno
 import functools
 import itertools
+import json
 import os
 import re
 import shlex
@@ -26,7 +27,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
@@ -50,7 +51,12 @@ from mindroom.tool_jobs.control import job_owns_execution
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+DESKTOP_SHELL_FUNCTION = "run_desktop_shell"
 _DEFAULT_RUN_TIMEOUT_SECONDS = 120
+_SHELL_ARGS_ERROR = (
+    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
+)
+_SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 # Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
 _SHELL_REQUEST_GRACE_SECONDS = 30.0
 
@@ -339,13 +345,59 @@ def shell_call_timeout(timeout: float | None) -> float | None:
     return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
+def _looks_like_shell_command_line(command: str) -> bool:
+    """Return whether a single argv item is probably a shell command line."""
+    if any(char.isspace() for char in command):
+        return True
+    return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
+
+
+def parse_shell_args(args: object) -> str | list[str]:
+    """Parse natural shell command strings and explicit argv lists.
+
+    Returns a raw shell command line string when the caller supplied one (including a
+    single-item list containing shell syntax or whitespace), or an explicit argv list.
+    """
+    if isinstance(args, str):
+        stripped = args.strip()
+        if not stripped:
+            raise ValueError(_SHELL_ARGS_ERROR)
+        if stripped[0] not in "[{":
+            return args
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError as exc:
+            if any(char.isspace() for char in stripped):
+                return args
+            raise ValueError(_SHELL_ARGS_ERROR) from exc
+
+    if not isinstance(args, list):
+        raise ValueError(_SHELL_ARGS_ERROR)  # noqa: TRY004
+
+    if any(not isinstance(item, str) for item in args):
+        raise ValueError(_SHELL_ARGS_ERROR)
+
+    normalized_args = cast("list[str]", args)
+    if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
+        if not normalized_args[0].strip():
+            raise ValueError(_SHELL_ARGS_ERROR)
+        return normalized_args[0]
+    return normalized_args
+
+
+def normalize_shell_args(args: object) -> list[str]:
+    """Normalize natural shell command strings and explicit argv lists into argv."""
+    parsed = parse_shell_args(args)
+    return ["bash", "-c", parsed] if isinstance(parsed, str) else parsed
+
+
 def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
     """Return how long a reply waits for a shell command that runs as a job when its call sets no wait, else None.
 
     The reply waits as long as a command outside a job may run, then the command continues as a job, so a command
     that runs longer than the model expected never holds the conversation longer than one outside a job would.
     """
-    if registered_toolkit == "shell" and function_name == SHELL_FUNCTION:
+    if (registered_toolkit, function_name) in {("shell", SHELL_FUNCTION), ("desktop", DESKTOP_SHELL_FUNCTION)}:
         return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
     return None
 
@@ -764,12 +816,17 @@ async def stream_command(
             process.stdin.close()
 
 
-def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
+def format_shell_success(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
     output_notice, output = stdout_buf.render_parts(tail=tail)
     errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
     return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
+
+
+ShellOutputBuffer = _OutputBuffer
+ShellOutputProgress = _OutputProgress
+_success_message = format_shell_success
 
 
 async def _stop_timed_out_process(

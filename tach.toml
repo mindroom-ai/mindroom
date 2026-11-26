@@ -1733,7 +1733,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
-    "mindroom.constants",
+    "mindroom.custom_tools.desktop_shell",
     "mindroom.desktop.client",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
@@ -1743,10 +1743,27 @@ depends_on = [
     "mindroom.llm",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
     "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.custom_tools.desktop_shell"
+depends_on = [
+    "mindroom.desktop.client",
+    "mindroom.desktop.configuration",
+    "mindroom.desktop.media",
+    "mindroom.desktop.protocol",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.progress",
+]
+visibility = ["mindroom.custom_tools.desktop"]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
 # enforce both dependency edges and module visibility for each importer.
@@ -6701,6 +6718,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.custom_tools.desktop_shell",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.output_files",
 ]
@@ -10049,6 +10067,7 @@ visibility = [
     "mindroom.tool_jobs.notices",
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
     "mindroom.secret_request_cards",
+    "mindroom.custom_tools.desktop_shell",
     "mindroom.orchestration.workflow_runtime",
     "mindroom.workflow_runs.agent_nodes",
 ]
@@ -10079,6 +10098,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.custom_tools.desktop_shell",
     "mindroom.custom_tools.job",
     "mindroom.secret_request_cards",
 ]
