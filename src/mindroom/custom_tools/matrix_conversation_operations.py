@@ -72,7 +72,7 @@ def _message_payload(
         payload = {**payload, "room_id": message.room_id}
     stripped = strip_inline_media_from_content(message.content)
     if not has_tool_trace(message.content):
-        return {**payload, "content": stripped} if stripped != message.content else payload
+        return {**payload, "content": stripped} if stripped is not message.content else payload
     body = strip_visible_tool_markers(message.body)
     # The rendered HTML and the streaming canonical body repeat the markers, and the plain body carries the text.
     dropped = {"format", "formatted_body", STREAM_VISIBLE_BODY_KEY}

@@ -45,7 +45,7 @@ from mindroom.constants import (
 from mindroom.live_frames.frames import utf16_length
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.inline_media import filter_inline_media_for_html
+from mindroom.matrix.inline_media import copy_referenced_inline_media
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.state_failures import is_transient_homeserver_status, response_http_status
@@ -133,21 +133,6 @@ def _is_passthrough_edit_wrapper_key(key: object) -> bool:
 def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
     """Copy metadata keys that should survive the large-message preview event."""
     target_content.update({key: value for key, value in source_content.items() if _is_passthrough_preview_key(key)})
-
-
-def _attach_preview_inline_media(
-    preview_content: dict[str, Any],
-    inline_media_source: Mapping[str, Any] | None,
-) -> None:
-    """Keep only encrypted inline media keys referenced by the preview HTML."""
-    preview_content.pop(INLINE_MEDIA_CONTENT_KEY, None)
-    if inline_media_source is None:
-        return
-    formatted_body = preview_content.get("formatted_body")
-    if not isinstance(formatted_body, str):
-        return
-    if inline_media := filter_inline_media_for_html(inline_media_source, formatted_body):
-        preview_content[INLINE_MEDIA_CONTENT_KEY] = inline_media
 
 
 def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
@@ -428,7 +413,7 @@ def _build_nonterminal_streaming_edit_preview(
             file_info=file_info,
             original_size=original_size,
         )
-        _attach_preview_inline_media(preview_content, inline_media_source)
+        copy_referenced_inline_media(inline_media_source, preview_content)
         modified_content: dict[str, Any] = {
             "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {preview}",
@@ -518,7 +503,7 @@ def _fit_preview(
         preview = dict(preview_content)
         text = _create_preview(preview_text, limit, continuation_indicator=continuation_indicator) if limit > 0 else ""
         _set_preview_text(preview, text, preview_text)
-        _attach_preview_inline_media(preview, inline_media_source)
+        copy_referenced_inline_media(inline_media_source, preview)
         return preview
 
     overhead = calculate_event_size(build(0))

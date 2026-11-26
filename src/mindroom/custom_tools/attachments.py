@@ -734,8 +734,6 @@ class AttachmentTools(Toolkit):
     ) -> tuple[str, str] | str:
         if not room_encrypted:
             return "Inline images in unencrypted rooms need plaintext media, not encrypted Matrix media."
-        if not record.mime_type.startswith("image/"):
-            return "Inline images require an image attachment (image/* MIME type)."
         if record.size > MAX_SOURCE_BYTES:
             return f"Attachment is too large to use as an inline image ({record.size} bytes; max {MAX_SOURCE_BYTES})."
         register_inline_media(room_id, record.url, record.encrypted_file_content())
@@ -774,17 +772,17 @@ class AttachmentTools(Toolkit):
         if isinstance(resolved, str):
             return _attachment_tool_payload("error", message=resolved)
         record, _ = resolved
+        if not record.mime_type or not record.mime_type.startswith("image/"):
+            return _attachment_tool_payload(
+                "error",
+                message="Inline images require an image attachment (image/* MIME type).",
+            )
         if isinstance(record, RuntimeEncryptedMediaAttachment):
             result = self._inline_runtime_image(context.room_id, record, room_encrypted=room_encrypted)
             if isinstance(result, str):
                 return _attachment_tool_payload("error", message=result)
             mxc_uri, filename = result
         else:
-            if not record.mime_type or not record.mime_type.startswith("image/"):
-                return _attachment_tool_payload(
-                    "error",
-                    message="Inline images require an image attachment (image/* MIME type).",
-                )
             data, error = await asyncio.to_thread(
                 _read_attachment_bytes,
                 record,
@@ -806,11 +804,11 @@ class AttachmentTools(Toolkit):
             )
             if mxc_uri is None or upload_payload is None:
                 return _attachment_tool_payload("error", message="Failed to upload inline image.")
-            encrypted_file = upload_payload.get("file")
-            if isinstance(encrypted_file, dict) and encrypted_file.get("url") == mxc_uri:
+            if room_encrypted or "file" in upload_payload:
+                encrypted_file = upload_payload.get("file")
+                if not isinstance(encrypted_file, dict) or encrypted_file.get("url") != mxc_uri:
+                    return _attachment_tool_payload("error", message="Failed to upload encrypted inline image.")
                 register_inline_media(context.room_id, mxc_uri, encrypted_file)
-            elif room_encrypted or encrypted_file is not None:
-                return _attachment_tool_payload("error", message="Failed to upload encrypted inline image.")
         label = " ".join((alt or filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").splitlines())
         return _attachment_tool_payload(
             "ok",

@@ -39,10 +39,14 @@ def _img_mxc_uris(formatted_body: object) -> list[str]:
     )
 
 
-def strip_inline_media_from_content(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of one Matrix event content dict without ``io.mindroom.inline_media`` keys."""
+def strip_inline_media_from_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Return ``content`` without ``io.mindroom.inline_media`` keys, copying only if present."""
+    new_content = content.get("m.new_content")
+    inner_has_key = isinstance(new_content, Mapping) and INLINE_MEDIA_CONTENT_KEY in new_content
+    if INLINE_MEDIA_CONTENT_KEY not in content and not inner_has_key:
+        return content
     cleaned = {k: v for k, v in content.items() if k != INLINE_MEDIA_CONTENT_KEY}
-    if isinstance(new_content := cleaned.get("m.new_content"), Mapping):
+    if isinstance(new_content, Mapping) and INLINE_MEDIA_CONTENT_KEY in new_content:
         cleaned["m.new_content"] = {k: v for k, v in new_content.items() if k != INLINE_MEDIA_CONTENT_KEY}
     return cleaned
 
@@ -60,13 +64,20 @@ def filter_inline_media_for_html(source: Mapping[str, Any], formatted_body: str)
     return filtered or None
 
 
+def copy_referenced_inline_media(source: Mapping[str, Any] | None, target: dict[str, Any]) -> None:
+    """Copy onto ``target`` only the inline media keys from ``source`` referenced by ``target``'s HTML."""
+    target.pop(INLINE_MEDIA_CONTENT_KEY, None)
+    if source is None:
+        return
+    formatted_body = target.get("formatted_body")
+    if isinstance(formatted_body, str) and (inline_media := filter_inline_media_for_html(source, formatted_body)):
+        target[INLINE_MEDIA_CONTENT_KEY] = inline_media
+
+
 def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted: bool) -> dict[str, Any]:
     """Attach same-room encrypted inline image keys for ``<img src>`` URIs in ``content``."""
     if room_encrypted is not True:
-        has_key = INLINE_MEDIA_CONTENT_KEY in content or (
-            isinstance(new_content := content.get("m.new_content"), Mapping) and INLINE_MEDIA_CONTENT_KEY in new_content
-        )
-        return strip_inline_media_from_content(content) if has_key else content
+        return strip_inline_media_from_content(content)
     relates = content.get("m.relates_to")
     is_edit = (
         isinstance(content.get("m.new_content"), dict)
@@ -74,31 +85,20 @@ def attach_inline_media(content: dict[str, Any], room_id: str, *, room_encrypted
         and relates.get("rel_type") == "m.replace"
     )
     visible = content["m.new_content"] if is_edit else content
-    uris = _img_mxc_uris(visible.get("formatted_body"))
-    existing = visible.get(INLINE_MEDIA_CONTENT_KEY)
-    existing_map = existing if isinstance(existing, Mapping) else None
-    inline_media: dict[str, dict[str, Any]] = {}
+    formatted_body = visible.get("formatted_body")
+    uris = _img_mxc_uris(formatted_body)
+    inline_media: dict[str, dict[str, Any]] = (
+        filter_inline_media_for_html(visible, formatted_body) or {} if isinstance(formatted_body, str) and uris else {}
+    )
     if uris:
         with _LOCK:
             for uri in uris:
                 if (entry := _REGISTRY.get((room_id, uri))) is not None:
                     _REGISTRY.move_to_end((room_id, uri))
                     inline_media[uri] = copy.deepcopy(entry)
-                elif (
-                    existing_map is not None
-                    and isinstance(prior := existing_map.get(uri), Mapping)
-                    and prior.get("url") == uri
-                ):
-                    inline_media[uri] = copy.deepcopy(dict(prior))
-    if (
-        not inline_media
-        and INLINE_MEDIA_CONTENT_KEY not in visible
-        and (not is_edit or INLINE_MEDIA_CONTENT_KEY not in content)
-    ):
-        return content
-    updated = {k: v for k, v in visible.items() if k != INLINE_MEDIA_CONTENT_KEY}
-    if inline_media:
-        updated[INLINE_MEDIA_CONTENT_KEY] = inline_media
+    stripped = strip_inline_media_from_content(content)
+    if not inline_media:
+        return stripped
     if is_edit:
-        return {**{k: v for k, v in content.items() if k != INLINE_MEDIA_CONTENT_KEY}, "m.new_content": updated}
-    return updated
+        return {**stripped, "m.new_content": {**stripped["m.new_content"], INLINE_MEDIA_CONTENT_KEY: inline_media}}
+    return {**stripped, INLINE_MEDIA_CONTENT_KEY: inline_media}

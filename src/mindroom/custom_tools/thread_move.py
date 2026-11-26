@@ -30,7 +30,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.inline_media import filter_inline_media_for_html, register_inline_media
+from mindroom.matrix.inline_media import copy_referenced_inline_media, register_inline_media
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
@@ -87,12 +87,8 @@ def _plan_thread_copy(
         if message.content.get("msgtype") == "m.notice" or message.stream_status in UNFINISHED_REPLY_STATUSES:
             continue
         content = {key: message.content[key] for key in _COPIED_CONTENT_KEYS if key in message.content}
-        if (
-            carry_inline_media
-            and isinstance(formatted_body := content.get("formatted_body"), str)
-            and (inline_media := filter_inline_media_for_html(message.content, formatted_body))
-        ):
-            content[INLINE_MEDIA_CONTENT_KEY] = inline_media
+        if carry_inline_media:
+            copy_referenced_inline_media(message.content, content)
         # Copies are history, never requests: no mention in them may wake an agent.
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}

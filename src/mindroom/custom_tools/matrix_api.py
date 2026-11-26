@@ -1184,8 +1184,9 @@ class MatrixApiTools(Toolkit):
                     response=response,
                 )
             event_data = (
-                {**raw_event, "content": strip_inline_media_from_content(raw_content)}
+                {**raw_event, "content": stripped}
                 if isinstance(raw_content := raw_event.get("content"), dict)
+                and (stripped := strip_inline_media_from_content(raw_content)) is not raw_content
                 else raw_event
             )
             payload: dict[str, object] = {
