@@ -179,7 +179,7 @@ def build_model_provider(
             allow_fallback=allow_fallback,
         )
         provider = WrappedProvider(provider, stage)
-    return WrappedProvider(provider, connectivity_retry_stream)
+    return WrappedProvider(provider, partial(connectivity_retry_stream, runtime_paths=runtime_paths))
 
 
 def _budget_allows_fallback(

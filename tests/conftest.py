@@ -102,7 +102,6 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.connectivity import reset_connectivity_state
 from mindroom.constants import ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
@@ -176,6 +175,7 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
+from mindroom.providers.pipeline import connectivity as connectivity_pipeline
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.reply_turn.request import ResponseRequest
@@ -4413,12 +4413,26 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
+@pytest.fixture
+def real_connectivity_probe() -> None:
+    """Keep provider connectivity probes on their real httpx client for tests that stub httpx directly."""
+
+
 @pytest.fixture(autouse=True)
-def _reset_connectivity_state() -> Generator[None]:
-    """Keep process-global Matrix/provider connectivity state isolated per test."""
-    reset_connectivity_state()
+def _isolate_connectivity_probes(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None]:
+    """Keep provider connectivity probes online and isolated per test unless a test opts into the real probe."""
+    connectivity_pipeline._homeserver_probes.clear()
+    if "real_connectivity_probe" not in request.fixturenames:
+
+        async def _always_online(_url: str, _verify: object, _timeout_seconds: float) -> bool:
+            return True
+
+        monkeypatch.setattr(connectivity_pipeline, "_http_probe_homeserver", _always_online)
     yield
-    reset_connectivity_state()
+    connectivity_pipeline._homeserver_probes.clear()
 
 
 @pytest.fixture(autouse=True)

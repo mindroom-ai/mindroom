@@ -761,11 +761,11 @@ def test_only_a_model_with_fallbacks_gets_the_fallback_stage(runtime_paths: Runt
     plain = build_model_provider(config, runtime_paths, "codex")
 
     assert isinstance(chained, WrappedProvider)
-    assert chained.stage is connectivity_retry_stream
+    assert cast("partial[object]", chained.stage).func is connectivity_retry_stream
     assert isinstance(chained.inner, WrappedProvider)
     assert cast("partial[object]", chained.inner.stage).func is fallback_stream
     assert isinstance(plain, WrappedProvider)
-    assert plain.stage is connectivity_retry_stream
+    assert cast("partial[object]", plain.stage).func is connectivity_retry_stream
     assert not (
         isinstance(plain.inner, WrappedProvider) and getattr(plain.inner.stage, "func", None) is fallback_stream
     )

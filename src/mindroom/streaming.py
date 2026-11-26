@@ -10,12 +10,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from html import escape
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
 from mindroom.ai_run_metadata import build_terminal_note_ai_run_metadata_content, streaming_ai_run_content
-from mindroom.connectivity import matrix_offline, stream_activity_scope
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     COMPACTIONS_CONTENT_KEY,
@@ -355,7 +353,7 @@ class _LiveStateKey:
     accumulated_text: str
     reasoning_text: str
     segment_count: int
-    activity_key: tuple[int, int, bool]
+    activity_key: tuple[int, bool]
     compactions_key: tuple[ReplyCompactions | None, int]
     tools_key: tuple[bool, int, int, int]
 
@@ -397,7 +395,6 @@ class _PreparedStreamingDelivery:
     had_warmup_suffix: bool
     # The stream's pending-character count when this delivery's state was captured.
     chars_since_last_update: int
-    connectivity_activity_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,7 +422,6 @@ class _StreamingDeliverySnapshot:
     untransformed_text: str | None = None
     suppress_push: bool = False
     tool_trace_version: int = 0
-    connectivity_activity_version: int = 0
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -543,7 +539,6 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
         chars_since_last_update=snapshot.chars_since_last_update,
-        connectivity_activity_version=snapshot.connectivity_activity_version,
     )
 
 
@@ -671,9 +666,6 @@ class StreamingResponse:
     # Returns whether the finalized reply should suppress push while background work continues.
     suppress_final_push: Callable[[], Awaitable[bool]] | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
-    _connectivity_activities: dict[str, str] = field(default_factory=dict, init=False, repr=False)
-    _connectivity_activity_version: int = field(default=0, init=False, repr=False)
-    _delivered_connectivity_version: int = field(default=0, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
         default_factory=lambda: lru_cache(maxsize=1)(markdown_to_html),
@@ -853,43 +845,6 @@ class StreamingResponse:
                 cache.append((key, event))
         return tuple(event for _, event in cache)
 
-    def set_connectivity_activity(self, wait_id: str, text: str | None) -> bool:
-        """Set or clear one transient connectivity activity line; return whether visible text changed."""
-        before = tuple(dict.fromkeys(self._connectivity_activities.values()))
-        if text is None:
-            self._connectivity_activities.pop(wait_id, None)
-        else:
-            self._connectivity_activities[wait_id] = text
-        after = tuple(dict.fromkeys(self._connectivity_activities.values()))
-        if after == before:
-            return False
-        self._connectivity_activity_version += 1
-        if not after and not self._warmup_state.active_warmups and self._warmup_state.last_send_had_warmup_suffix:
-            self._warmup_state.needs_warmup_clear_edit = True
-        elif after:
-            self._warmup_state.needs_warmup_clear_edit = False
-        return True
-
-    def has_undelivered_connectivity_activity(self) -> bool:
-        """Return whether connectivity activity changed since the last durable delivery while Matrix is online."""
-        return not matrix_offline() and self._connectivity_activity_version != self._delivered_connectivity_version
-
-    def clear_connectivity_activities(self) -> None:
-        """Drop any transient connectivity activity lines before terminal finalization."""
-        if self._connectivity_activities:
-            self._connectivity_activities.clear()
-            self._connectivity_activity_version += 1
-
-    def _activity_lines(self) -> list[RenderedWarmupLine]:
-        """Return side-band activity lines (worker warmups plus connectivity notices on an existing event)."""
-        lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
-        if self.event_id is not None:
-            lines.extend(
-                RenderedWarmupLine(text=text, html=escape(text))
-                for text in dict.fromkeys(self._connectivity_activities.values())
-            )
-        return lines
-
     def live_state(self) -> tuple[str, LiveDocs] | None:
         """Return the reply's event id and what a live frame shows now, or None while frames must wait."""
         if not self.live_active:
@@ -900,7 +855,7 @@ class StreamingResponse:
             accumulated_text=self.accumulated_text,
             reasoning_text=self.reasoning_text,
             segment_count=len(self._reasoning_segments),
-            activity_key=(self._warmup_state.version, self._connectivity_activity_version, self.show_tool_calls),
+            activity_key=(self._warmup_state.version, self.show_tool_calls),
             compactions_key=(self.compactions, self.compactions.version if self.compactions is not None else 0),
             tools_key=(
                 self.show_tool_calls,
@@ -931,7 +886,9 @@ class StreamingResponse:
             activity=(
                 cached[1].activity
                 if cached is not None and cached[0].activity_key == key.activity_key
-                else "\n".join(line.text for line in self._activity_lines())
+                else "\n".join(
+                    line.text for line in self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+                )
             ),
             segments=(
                 cached[1].segments
@@ -1126,7 +1083,6 @@ class StreamingResponse:
         exit ends the reply.
         """
         self._warmup_state.clear_for_terminal_transition()
-        self.clear_connectivity_activities()
         self.end_reasoning_segment()
         canonical_final_body_candidate = self.canonical_final_body_candidate
         if canonical_final_body_candidate is None and self.accumulated_text.strip():
@@ -1306,7 +1262,6 @@ class StreamingResponse:
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
-            self._delivered_connectivity_version = prepared_delivery.connectivity_activity_version
             self._mark_delivery_committed(prepared_delivery.committed_state)
             self._committed_live_seq = prepared_delivery.content.get(LIVE_CHECKPOINT_KEY, {}).get("seq", -1)
             self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
@@ -1372,7 +1327,7 @@ class StreamingResponse:
         allow_empty_progress: bool,
     ) -> _StreamingDeliverySnapshot | None:
         """Freeze all mutable stream state needed for one formatting pass."""
-        warmup_suffix_lines = self._activity_lines()
+        warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return None
 
@@ -1396,7 +1351,6 @@ class StreamingResponse:
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
             tool_trace_version=self._tool_trace_version,
-            connectivity_activity_version=self._connectivity_activity_version,
         )
 
     def _active_model_payload(self) -> dict[str, str] | None:
@@ -2085,31 +2039,6 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             )
 
 
-def _make_stream_activity_callback(
-    streaming: StreamingResponse,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
-) -> Callable[[str, str | None], None]:
-    """Return the stream-activity callback that refreshes an existing reply only while Matrix is online."""
-    queued_edit = False
-
-    def on_change(wait_id: str, text: str | None) -> None:
-        nonlocal queued_edit
-        if not streaming.set_connectivity_activity(wait_id, text):
-            return
-        if streaming.event_id is None or matrix_offline():
-            return
-        if text is None and not queued_edit and not streaming._warmup_state.last_send_had_warmup_suffix:
-            return
-        queued_edit = text is not None
-        _queue_delivery_request(
-            delivery_queue,
-            force_refresh=True,
-            allow_empty_progress=not streaming.accumulated_text.strip(),
-        )
-
-    return on_change
-
-
 async def _drain_worker_progress_events(
     streaming: StreamingResponse,
     queue: asyncio.Queue[WorkerProgressEvent],
@@ -2436,7 +2365,6 @@ async def _run_live_frames(
             and (
                 streaming.has_uncommitted_presentation()
                 or streaming._warmup_state.active_warmups
-                or streaming.has_undelivered_connectivity_activity()
                 or streaming._warmup_state.needs_warmup_clear_edit
             )
         ):
@@ -2608,10 +2536,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
     task_errors: tuple[Exception | None, Exception | None] = (None, None)
-    with (
-        worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump,
-        stream_activity_scope(_make_stream_activity_callback(streaming, delivery_queue)),
-    ):
+    with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
             _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
@@ -2756,10 +2681,7 @@ async def stream_progress_edits(
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    with (
-        worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump,
-        stream_activity_scope(_make_stream_activity_callback(streaming, delivery_queue)),
-    ):
+    with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
             _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),

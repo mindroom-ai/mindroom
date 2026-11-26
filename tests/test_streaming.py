@@ -25,21 +25,17 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG,
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.connectivity import set_stream_activity
 from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
-    STREAM_VISIBLE_BODY_KEY,
-    STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.matrix import message_builder
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
-from mindroom.matrix.health import mark_matrix_sync_failure, mark_matrix_sync_success
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle
@@ -1697,151 +1693,3 @@ async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(co
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final.display_text == f"{_RESUMED_PREFIX}The second half."
     assert outcome.visible_body_state == "visible_body"
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_connectivity_activity_renders_in_live_frames_and_durable_edits_without_polluting_body(
-    config: Config,
-) -> None:
-    """Transient connectivity waiting status shows in live frames and durable suffix, never in accumulated text."""
-    notice = "⏳ Waiting for connection — will retry automatically."
-
-    # 1. LiveDocs.activity renders deduplicated waiting line and clears cleanly on remove / finalize.
-    live_hooks = _FakeGateway().hooks()
-    resp = StreamingResponse(
-        target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        event_id="$reply",
-        accumulated_text="Step 1 done.",
-        progress_write_ahead=live_hooks["progress_write_ahead"],
-        progress_delivered=live_hooks["progress_delivered"],
-    )
-    resp._shows_stream = True
-    resp.live = MagicMock(running=True, checkpoint=MagicMock(return_value={"seq": 1}))
-    assert resp.set_connectivity_activity("w1", notice) is True
-    assert resp.set_connectivity_activity("w2", notice) is False
-    live = resp.live_state()
-    assert live is not None
-    assert live[1].activity == notice
-    assert resp.accumulated_text == "Step 1 done."
-    assert resp.has_undelivered_connectivity_activity() is True
-    delivered = await resp._prepare_delivery_async(is_final=False, allow_empty_progress=False)
-    assert delivered is not None
-    checkpoint_gateway = _FakeGateway()
-    with patch("mindroom.streaming.edit_message_result", new=checkpoint_gateway.edit):
-        assert await resp._send_prepared_delivery(
-            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
-            prepared_delivery=delivered,
-            is_final=False,
-        )
-    # Once delivered, repeated live-frame ticks do not re-trigger durable edits for the same notice.
-    assert resp.has_undelivered_connectivity_activity() is False
-    assert resp.set_connectivity_activity("w1", None) is False
-    assert resp.set_connectivity_activity("w2", None) is True
-    # Clearing the notice schedules one more edit while online, suppressed while Matrix is offline.
-    assert resp.has_undelivered_connectivity_activity() is True
-    mark_matrix_sync_failure("helper")
-    assert resp.has_undelivered_connectivity_activity() is False
-    mark_matrix_sync_success("helper")
-    assert resp.has_undelivered_connectivity_activity() is True
-    live = resp.live_state()
-    assert live is not None
-    assert live[1].activity == ""
-
-    # 2. Durable edits in send_streaming_response carry STREAM_WARMUP_SUFFIX_KEY and clear on resume/finalize.
-    gateway = _FakeGateway()
-
-    async def stream() -> AsyncIterator[object]:
-        yield TextDelta("Before outage.")
-        await gateway.wait_for_ops(1)
-        set_stream_activity("wait-1", notice)
-        await gateway.wait_for_ops(2)
-        set_stream_activity("wait-1", None)
-        await gateway.wait_for_ops(3)
-        yield TextDelta(" After recovery.")
-
-    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
-        await send_streaming_response(
-            client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
-            target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            response_stream=stream(),
-            existing_event_id="$reply",
-            adopt_existing_placeholder=True,
-            **gateway.hooks(),
-        )
-
-    assert gateway.ops[1].content[STREAM_WARMUP_SUFFIX_KEY] == notice
-    assert notice not in gateway.ops[1].content[STREAM_VISIBLE_BODY_KEY]
-    assert STREAM_WARMUP_SUFFIX_KEY not in gateway.ops[2].content
-    assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
-    assert STREAM_WARMUP_SUFFIX_KEY not in gateway.ops[-1].content
-    assert gateway.ops[-1].display_text == "Before outage. After recovery."
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_connectivity_activity_skips_matrix_edits_without_event_id_or_while_matrix_offline(
-    config: Config,
-) -> None:
-    """Connectivity wait status never triggers an initial Matrix create or futile edits while Matrix is offline."""
-    notice = "⏳ Waiting for connection — will retry automatically."
-
-    # 1. No event_id yet: setting and clearing activity queues zero initial sends.
-    gateway_no_event = _FakeGateway()
-    created_before_text = False
-
-    async def stream_no_event() -> AsyncIterator[object]:
-        nonlocal created_before_text
-        set_stream_activity("w1", notice)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        created_before_text = bool(gateway_no_event.ops)
-        set_stream_activity("w1", None)
-        yield TextDelta("First real text.")
-
-    with patch("mindroom.streaming.edit_message_result", new=gateway_no_event.edit):
-        await send_streaming_response(
-            client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
-            target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            response_stream=stream_no_event(),
-            **gateway_no_event.hooks(),
-        )
-    assert created_before_text is False
-    assert notice not in gateway_no_event.ops[-1].display_text
-
-    # 2. Existing event_id, but Matrix is offline: setting activity queues zero Matrix edits.
-    gateway_offline = _FakeGateway()
-    mark_matrix_sync_failure("helper")
-    edits_while_offline = 0
-
-    async def stream_offline() -> AsyncIterator[object]:
-        nonlocal edits_while_offline
-        set_stream_activity("w2", notice)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        edits_while_offline = len(gateway_offline.ops)
-        mark_matrix_sync_success("helper")
-        set_stream_activity("w2", None)
-        await asyncio.sleep(0)
-        yield TextDelta("Recovered answer.")
-
-    with patch("mindroom.streaming.edit_message_result", new=gateway_offline.edit):
-        await send_streaming_response(
-            client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
-            target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            response_stream=stream_offline(),
-            existing_event_id="$reply",
-            adopt_existing_placeholder=True,
-            **gateway_offline.hooks(),
-        )
-    assert edits_while_offline == 0
-    assert gateway_offline.ops[-1].display_text == "Recovered answer."
-    assert STREAM_WARMUP_SUFFIX_KEY not in gateway_offline.ops[-1].content
