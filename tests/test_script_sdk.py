@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.script_runs.launch_contract import MAX_TOKEN_BYTES, digest_arguments
+from mindroom.script_runs.transport import ScriptGatewayTransport
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 if TYPE_CHECKING:
@@ -70,8 +71,7 @@ def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
     _configure(monkeypatch, tmp_path)
     requests: list[Request] = []
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         requests.append(request)
         if request.method == "POST":
             payload = json.loads(request.data or b"{}")
@@ -80,7 +80,7 @@ def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
         assert request.full_url.endswith("/runs/run-1/calls/stable-call")
         return io.BytesIO(_receipt("completed", result={"status": "ok"}))
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     result = MindRoomTools(poll_interval_seconds=0.0001).call(
         "website",
@@ -111,8 +111,7 @@ def test_script_sdk_digests_the_json_wire_argument_representation(
     _configure(monkeypatch, tmp_path)
     posted_arguments: dict[str, object] = {}
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         payload = json.loads(request.data or b"{}")
         posted_arguments.update(payload["arguments"])
         return io.BytesIO(
@@ -123,7 +122,7 @@ def test_script_sdk_digests_the_json_wire_argument_representation(
             ),
         )
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     result = MindRoomTools(poll_interval_seconds=0.0001).call(
         "website",
@@ -153,12 +152,11 @@ def test_script_sdk_rejects_invalid_arguments_before_post(
     _configure(monkeypatch, tmp_path)
     requests: list[Request] = []
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         requests.append(request)
         return io.BytesIO(b"{}")
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", **invalid_arguments)
@@ -181,8 +179,7 @@ def test_script_sdk_rejects_cyclic_arguments_before_post(
     _configure(monkeypatch, tmp_path)
     requests: list[Request] = []
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         requests.append(request)
         return io.BytesIO(b"{}")
 
@@ -195,7 +192,7 @@ def test_script_sdk_rejects_cyclic_arguments_before_post(
         cyclic_sequence.append(cyclic_sequence)
         cyclic = cyclic_sequence
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", payload=cyclic)
@@ -243,15 +240,14 @@ def test_script_sdk_retries_same_submit_after_a_retryable_failure(
     methods: list[str] = []
     payloads: list[bytes | None] = []
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         methods.append(request.method)
         payloads.append(request.data)
         if len(methods) == 1:
             raise first_failure(request)
         return io.BytesIO(_receipt("completed", result="accepted earlier"))
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
@@ -279,8 +275,7 @@ def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
     _configure(monkeypatch, tmp_path)
     methods: list[str] = []
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         methods.append(request.method)
         if len(methods) == 1:
             raise _http_error(request, 503, "Service Unavailable", b'{"detail":"acceptance not yet determined"}')
@@ -294,7 +289,7 @@ def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
             ),
         )
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call(
@@ -312,8 +307,7 @@ def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch
     """A terminal broker failure must retain its failure kind and retryability."""
     _configure(monkeypatch, tmp_path)
 
-    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, _request: Request) -> io.BytesIO:
         return io.BytesIO(
             _receipt(
                 "failed",
@@ -321,7 +315,7 @@ def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch
             ),
         )
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
@@ -339,8 +333,7 @@ def test_script_sdk_raises_typed_approval_denial(
     """A denied background call is distinguishable from a successful string result."""
     _configure(monkeypatch, tmp_path)
 
-    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, _request: Request) -> io.BytesIO:
         return io.BytesIO(
             _receipt(
                 "failed",
@@ -349,7 +342,7 @@ def test_script_sdk_raises_typed_approval_denial(
             ),
         )
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url")
@@ -377,11 +370,10 @@ def test_script_sdk_rejects_invalid_receipts(
     """Removed call states, malformed states, and non-receipt bodies become one stable non-retryable SDK error."""
     _configure(monkeypatch, tmp_path)
 
-    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, _request: Request) -> io.BytesIO:
         return io.BytesIO(body)
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
@@ -418,12 +410,11 @@ def test_script_sdk_marks_a_call_the_gateway_never_accepted_as_rejected(
     _configure(monkeypatch, tmp_path)
     remaining = list(failures)
 
-    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
-        del timeout
+    def open_request(_self: ScriptGatewayTransport, request: Request) -> io.BytesIO:
         status = remaining.pop(0)
         raise _http_error(request, status, "Refused", b'{"detail":"refused"}')
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")

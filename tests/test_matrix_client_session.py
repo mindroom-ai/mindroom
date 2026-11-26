@@ -8,6 +8,7 @@ import socket
 import ssl
 import stat
 from collections.abc import Iterator, Mapping
+from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
@@ -18,6 +19,7 @@ import nio
 import pytest
 from aiohttp import web
 from nio.durable import DurableSyncConfig
+from nio.durable.transport import Transport
 from nio.store.database import DefaultStore, SqliteStore
 from structlog.testing import capture_logs
 
@@ -35,6 +37,7 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_session import (
     MindRoomAsyncClient,
     PermanentMatrixStartupError,
+    _MatrixTransportShutdownError,
     create_matrix_http_client,
     login_flows,
     matrix_client_config,
@@ -42,6 +45,7 @@ from mindroom.matrix.client_session import (
 from tests.conftest import legacy_default_store_client
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 
@@ -1142,3 +1146,177 @@ async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch
         ("warning", "ClientConnectorError"),
     ]
     assert failures[1]["error"] == "TimeoutError"
+
+
+@asynccontextmanager
+async def _local_raw_http_server(
+    handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+) -> AsyncIterator[str]:
+    """Serve raw TCP HTTP responses on an ephemeral loopback port and clean up open sockets on exit."""
+    active: set[asyncio.Task[None]] = set()
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        active.add(task)
+        try:
+            await handler(reader, writer)
+        finally:
+            active.discard(task)
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.close()
+        for task in list(active):
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+        await server.wait_closed()
+
+
+@asynccontextmanager
+async def _timeout_test_client(
+    base_url: str,
+    *,
+    request_timeout: float = 0.15,
+    access_token: str | None = None,
+) -> AsyncIterator[MindRoomAsyncClient]:
+    """Yield one ``MindRoomAsyncClient`` configured for local timeout tests and close it on exit."""
+    client = MindRoomAsyncClient(
+        base_url,
+        "@agent:localhost",
+        config=nio.AsyncClientConfig(request_timeout=request_timeout, max_timeouts=0),
+    )
+    if access_token is not None:
+        client.access_token = access_token
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall_mode", ["headers", "body"])
+async def test_send_timeout_zero_bounds_stalled_headers_and_body_and_retries_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    stall_mode: str,
+) -> None:
+    """``timeout=0`` bounds stalled header and body reads via ``request_timeout`` and recovers on a fresh socket."""
+    connections = 0
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal connections
+        connections += 1
+        await reader.readuntil(b"\r\n\r\n")
+        if connections in (1, 2):
+            if stall_mode == "body":
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+                await writer.drain()
+            await asyncio.Event().wait()
+            return
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload")
+        await writer.drain()
+
+    monkeypatch.setattr("nio.durable.transport.asyncio.sleep", AsyncMock())
+    async with (
+        _local_raw_http_server(handler) as base_url,
+        _timeout_test_client(base_url, access_token="tok") as client,  # noqa: S106
+    ):
+
+        async def read_stalled() -> bytes:
+            response = await client.send("GET", "/stall", None, None, None, 0)
+            try:
+                return await response.read()
+            finally:
+                response.release()
+
+        # Connection 1: positional timeout=0 hits SocketTimeoutError (TimeoutError) on headers or body.
+        with pytest.raises(aiohttp.SocketTimeoutError):
+            await read_stalled()
+        # Connections 2 -> 3: keyword timeout=0 via Transport times out on dead socket and retries on a fresh one.
+        payload = await asyncio.wait_for(
+            Transport(client, max_bytes=1024).request("GET", "/media", request_timeout=0),
+            timeout=3.0,
+        )
+        assert payload == b"payload"
+        assert connections == 3
+
+
+@pytest.mark.asyncio
+async def test_send_timeout_zero_allows_slow_trickle_past_request_timeout() -> None:
+    """A multi-chunk body trickling past ``request_timeout`` total still succeeds when each chunk arrives in time."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n")
+        await writer.drain()
+        for chunk in (b"aaa", b"bbb", b"ccc", b"ddd"):
+            await asyncio.sleep(0.07)
+            writer.write(chunk)
+            await writer.drain()
+
+    async with _local_raw_http_server(handler) as base_url, _timeout_test_client(base_url) as client:
+        response = await client.send("GET", "/trickle", None, None, None, 0)
+        try:
+            assert await response.read() == b"aaabbbcccddd"
+        finally:
+            response.release()
+
+
+@pytest.mark.asyncio
+async def test_send_timeout_zero_session_init_headers_ssl_fence_and_unbounded_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``timeout=0`` respects the shutdown fence, lazily creates ``client_session``, merges headers/ssl, and honors config=0."""
+    calls: list[dict[str, Any]] = []
+
+    class RecordingSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.connector = SimpleNamespace(connect=lambda: None)
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> object:  # noqa: ANN401
+            calls.append({"method": method, "url": url, **kwargs})
+            return SimpleNamespace(status=200)
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("nio.client.async_client.ClientSession", RecordingSession)
+
+    fenced = MindRoomAsyncClient("https://matrix.example.org", "@agent:localhost")
+    fenced.begin_process_shutdown_transport_fence()
+    with pytest.raises(_MatrixTransportShutdownError):
+        await fenced.send("GET", "/fenced", timeout=0)
+    assert fenced.client_session is None
+
+    ssl_context = ssl.create_default_context()
+    client = MindRoomAsyncClient(
+        "https://matrix.example.org",
+        "@agent:localhost",
+        ssl=ssl_context,
+        config=nio.AsyncClientConfig(
+            request_timeout=12.5,
+            custom_headers={"X-Custom": "override", "X-Extra": "1"},
+        ),
+    )
+    assert client.client_session is None
+    await client.send("GET", "/media", headers={"X-Custom": "base", "X-Keep": "ok"}, timeout=0)
+    assert client.client_session is not None
+    assert calls[-1]["headers"] == {"X-Custom": "override", "X-Keep": "ok", "X-Extra": "1"}
+    assert calls[-1]["ssl"] is ssl_context
+    assert calls[-1]["timeout"] == aiohttp.ClientTimeout(total=None, connect=12.5, sock_connect=12.5, sock_read=12.5)
+
+    unbounded = MindRoomAsyncClient(
+        "https://matrix.example.org",
+        "@agent:localhost",
+        config=nio.AsyncClientConfig(request_timeout=0),
+    )
+    await unbounded.send("GET", "/unbounded", timeout=0)
+    assert calls[-1]["ssl"] is True
+    assert calls[-1]["timeout"] == aiohttp.ClientTimeout(total=0)

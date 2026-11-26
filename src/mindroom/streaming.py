@@ -334,6 +334,11 @@ def _tool_traces_match(
     )
 
 
+def _tool_entry_live_started_at(entry: ToolTraceEntry) -> float | None:
+    """Return a running entry's live-only start timestamp, or None once completed."""
+    return entry.started_at if entry.type == "tool_call_started" else None
+
+
 def _copy_changed_tool_trace(
     existing: list[ToolTraceEntry],
     incoming: list[ToolTraceEntry],
@@ -341,7 +346,9 @@ def _copy_changed_tool_trace(
     """Return owned trace entries, reusing unchanged existing entries and copying changed or new ones."""
     return [
         existing[index]
-        if index < len(existing) and _tool_trace_identity(existing[index]) == _tool_trace_identity(entry)
+        if index < len(existing)
+        and _tool_trace_identity(existing[index]) == _tool_trace_identity(entry)
+        and _tool_entry_live_started_at(existing[index]) == _tool_entry_live_started_at(entry)
         else replace(entry)
         for index, entry in enumerate(incoming)
     ]
@@ -800,12 +807,26 @@ class StreamingResponse:
         """Record an in-place tool trace mutation."""
         self._tool_trace_version += 1
 
-    def replace_tool_trace(self, entries: list[ToolTraceEntry]) -> None:
-        """Replace the tool trace with owned entry copies if anything changed."""
-        if _tool_traces_match(self.tool_trace, entries):
-            return
-        self.tool_trace = _copy_changed_tool_trace(self.tool_trace, entries)
-        self._tool_trace_version += 1
+    def _merge_tool_trace(self, incoming: list[ToolTraceEntry], *, prefix_len: int = 0) -> bool:
+        """Replace entries after ``prefix_len`` with owned copies; return whether durable identity changed."""
+        existing = self.tool_trace if prefix_len == 0 else self.tool_trace[prefix_len:]
+        durable_changed = not _tool_traces_match(existing, incoming)
+        if not durable_changed and all(
+            _tool_entry_live_started_at(a) == _tool_entry_live_started_at(b)
+            for a, b in zip(existing, incoming, strict=True)
+        ):
+            return False
+        merged = _copy_changed_tool_trace(existing, incoming)
+        self.tool_trace = merged if prefix_len == 0 else [*self.tool_trace[:prefix_len], *merged]
+        if durable_changed:
+            self._tool_trace_version += 1
+        else:
+            self._tool_progress_version += 1
+        return durable_changed
+
+    def replace_tool_trace(self, entries: list[ToolTraceEntry]) -> bool:
+        """Replace the tool trace with owned entry copies; return whether durable trace identity changed."""
+        return self._merge_tool_trace(entries)
 
     def set_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Set one running tool's live progress text if it changed."""
@@ -832,13 +853,17 @@ class StreamingResponse:
         cache, trace, progress_map = self._live_tool_cache, self.tool_trace, self.tool_progress
         del cache[len(trace) :]
         for index, entry in enumerate(trace):
-            progress = progress_map.get(entry.tool_call_id) if entry.tool_call_id is not None else None
-            key = (_tool_trace_identity(entry), progress)
+            running = entry.type == "tool_call_started"
+            progress = progress_map.get(entry.tool_call_id) if running and entry.tool_call_id is not None else None
+            started_at = entry.started_at if running else None
+            key = (_tool_trace_identity(entry), progress, started_at)
             if index < len(cache) and cache[index][0] == key:
                 continue
             event = serialize_tool_trace_entry(entry)
             if progress is not None:
                 event["progress"] = progress
+            if started_at is not None:
+                event["started_at"] = started_at
             if index < len(cache):
                 cache[index] = (key, event)
             else:
@@ -907,12 +932,9 @@ class StreamingResponse:
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
         """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
         resumed_count = len(self.resumed_tool_trace)
-        existing = self.tool_trace if resumed_count == 0 else self.tool_trace[resumed_count:]
-        if len(incoming) < len(existing) or _tool_traces_match(existing, incoming):
+        if len(incoming) < len(self.tool_trace) - resumed_count:
             return
-        merged = _copy_changed_tool_trace(existing, incoming)
-        self.tool_trace = merged if resumed_count == 0 else [*self.tool_trace[:resumed_count], *merged]
-        self._tool_trace_version += 1
+        self._merge_tool_trace(incoming, prefix_len=resumed_count)
 
     def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
         """Append additive streaming text regardless of snapshot replacement mode; a tool ``marker`` is a paragraph."""
@@ -2696,10 +2718,9 @@ async def stream_progress_edits(
                 # Only live frames show it; no write carries it.
                 streaming.replace_tool_progress(chunk.tool_progress)
             trace_changed = False
-            if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
+            if chunk.tool_trace is not None:
                 # Callers keep mutating their trace entries; hold the published state.
-                streaming.replace_tool_trace(deepcopy(chunk.tool_trace))
-                trace_changed = True
+                trace_changed = streaming.replace_tool_trace(chunk.tool_trace)
             if not published:
                 published = True
                 streaming.accumulated_text = chunk.content

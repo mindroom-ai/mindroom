@@ -47,6 +47,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Masking only the shown part of a report was tried and rejected: each rule it needed to keep a value from showing without its label exposed another way to show one.
   A call keeps only its newest report and shows it at most ten times a second, the rate live frames go out, so a worker that floods reports costs the primary at most ten redactions a second per call.
   A call's output stays with that call: a delegated agent's tool output does not reach the parent's delegation entry, which shows the delegation's own activity, and only a job forwards its output to the call that started it and may be waiting for it.
+- A running tool call in a live reply frame also carries an optional `started_at` (Unix seconds when the call started in the live stream) on its `tool_call_started` entry so clients can show a live elapsed timer. It is omitted once the call completes (`tool_call_completed`), never written to durable edits, the final message, or the stored tool trace, and old clients ignore the key.
 
 ## Rejected alternatives
 
@@ -89,6 +90,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
     `reasoning` and `activity` are always empty.
 - `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
   - `agent`: the sub-agent's name; `model`: the model it runs on, which follows a switch during the run, as the `model` object of `io.mindroom.ai_run` (`config`, the configured model key such as `default`, plus `display_name`, `id`, and `provider` when known); `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
+  - `caller_tool_call_id`: the parent's `tool_call_id` that launched this child turn (at most 256 characters), omitted when absent; links a top-level reply's tool row to its sub-agent run (nested delegators omit `tool_call_id` on sub-agent tool entries); old clients ignore the key.
   - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
   - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
   - `usage`: what the run has used so far, as `input_tokens`, the whole prompts with cache reads and writes included on every provider, and `output_tokens`, both summed over the run's model requests that ended, `tool_calls`, every call the run started, the ones whose rows the caps removed included, and `cost_usd`, those tokens at the deployment's prices, left out when none of them is of a priced model.
@@ -104,7 +106,8 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   So the n-th marker of `md` belongs to `tools[n-1]`, and a client renders the documents with the reply renderer.
   Text on both sides of a tool call is separated by the marker's blank lines; text items that meet because a cap removed what was between them are joined by a blank line.
   A completed call's entry has `type: "tool_call_completed"`, a running call's `tool_call_started`; a paused call that resumes keeps its row.
-  Every entry also carries `started_at`: the Unix seconds when the call was first announced, which the row keeps when the call resumes after a pause and when it completes, so a client can show how long a running call has run; it is `null` for a row that only a completion made, as when the cap had removed its start; it is kept when previews are hidden; old clients ignore the key.
+  Every entry also carries `started_at`: the Unix seconds when the call was first announced, which the row keeps when the call resumes after a pause and when it completes (and resets when a new start reuses a finished call's ID), so a client can show how long a running call has run; it is `null` for a row that only a completion made, as when the cap had removed its start; it is kept when previews are hidden; old clients ignore the key.
+  Completed and terminal-settled entries also carry `ended_at` (Unix seconds when the call finished or was settled, omitted while running, and kept when previews are hidden), and running entries carry an optional `progress` string (the call's latest redacted live progress, capped at its last 1,000 characters like reply frames, cleared on completion or settlement, and omitted when previews are hidden or dropped to fit the frame); old clients ignore both keys.
 - `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
 - Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
   An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.
@@ -116,14 +119,14 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   Text and previews are redacted before any cut, so a secret is masked whole.
   How many older items the caps removed is not part of the frame.
 - Size: a frame must fit the 60,000-byte limit as nio sends it (compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes; in an encrypted room the Megolm ciphertext, padding, base64, and envelope are counted as well).
-  A snapshot that does not fit drops the tool previews first, then cuts the oldest text from the front by the least that fits.
-  A snapshot that would fit with its previews without the usage in `meta` keeps both and cuts that much of the oldest text.
+  A snapshot that does not fit drops running tool `progress` first, then tool previews, then cuts the oldest text from the front by the least that fits.
+  After dropping any running `progress`, a snapshot that would fit with its previews without the usage in `meta` keeps both and cuts that much of the oldest text.
   Known limit: a snapshot with too little text to cut, such as one of tool rows alone, drops its previews when the usage pushes it over the limit; the tool names stay.
   A fitted frame is always a snapshot, and later deltas keep its fit, so they stay appends.
   A delta that does not fit is replaced by a fitted snapshot.
 - A frame never carries an empty delta: when only `meta` changed, such as a status, the frame is a snapshot.
-- 🔒 Previews: `args_preview` and `result_preview` appear only when the turn in the room that started the chain shows its tool calls (`show_tool_calls`); nested sub-agents follow their root's turn.
-  Otherwise a row carries only `type` and `tool_name`, so the room sees for a sub-agent what it sees for the agent that delegated.
+- 🔒 Previews: `args_preview`, `result_preview`, and running `progress` appear only when the turn in the room that started the chain shows its tool calls (`show_tool_calls`); nested sub-agents follow their root's turn.
+  Otherwise a row carries only `type`, `tool_name`, `started_at`, `ended_at` once finished, and `is_error` when set, so the room sees for a sub-agent what it sees for the agent that delegated.
 - Budget: one publisher per (sending account, room) sends all of that account's runs in that room, one send in flight and at least 125 ms between sends, so at most 8 frames a second, which leaves at least 12 of the homeserver's 30 events a second per sender and room for the account's own reply frames.
   Runs with something to send are served in turn.
   A run's changes are coalesced to at most one per 250 ms before they reach the publisher, and a status change goes out at once.

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -148,10 +149,18 @@ class Retry:
     delay_seconds: float = 0.0
 
 
+async def _resolve_retry(
+    retry: Callable[[ProviderError], Retry | None | Awaitable[Retry | None]],
+    error: ProviderError,
+) -> Retry | None:
+    result = retry(error)
+    return await result if inspect.isawaitable(result) else result
+
+
 async def attempts(
     inner: ModelProvider,
     request: ModelRequest,
-    retry: Callable[[ProviderError], Retry | None],
+    retry: Callable[[ProviderError], Retry | None | Awaitable[Retry | None]],
     *,
     next_event: Callable[[AsyncIterator[StreamEvent]], Awaitable[StreamEvent]] = anext,
 ) -> AsyncIterator[StreamEvent]:
@@ -194,7 +203,7 @@ async def attempts(
             # stages around this one, and every reissue after it goes without that state too, with the retries the
             # retry stage has left for it.
             error.replay_stripped = stripped = error.replay_stripped or request.strip_encrypted_replay
-            if committed or (reissue := retry(error)) is None:
+            if committed or (reissue := await _resolve_retry(retry, error)) is None:
                 raise
             # A failure raised above the retry stage, such as a download, carries no budget; the request's stays.
             budget = error.retry_budget or request.retry_budget

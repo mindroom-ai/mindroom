@@ -7,7 +7,8 @@ import logging
 import threading
 from functools import wraps
 from html import unescape
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from itertools import islice
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 from urllib.parse import quote
 
 from github import Auth, Github, GithubException
@@ -277,6 +278,72 @@ def _format_content_write_result(
     )
 
 
+_RepoReadAction = Literal[
+    "list_repositories",
+    "search_repositories",
+    "get_repository",
+    "get_repository_with_stats",
+    "get_repository_languages",
+    "get_repository_stars",
+    "list_branches",
+    "get_file_content",
+    "get_directory_content",
+    "get_branch_content",
+    "search_code",
+]
+_IssuePrReadAction = Literal[
+    "list_issues",
+    "get_issue",
+    "list_issue_comments",
+    "get_pull_requests",
+    "get_pull_request",
+    "get_pull_request_changes",
+    "get_pull_request_comments",
+    "get_pull_request_with_details",
+    "get_pull_request_count",
+    "search_issues_and_prs",
+]
+_IssueWriteAction = Literal[
+    "create_issue",
+    "edit_issue",
+    "comment_on_issue",
+    "close_issue",
+    "reopen_issue",
+    "assign_issue",
+    "label_issue",
+]
+_PrWriteAction = Literal[
+    "create_pull_request",
+    "create_pull_request_comment",
+    "edit_pull_request_comment",
+    "create_review_request",
+]
+_RepoWriteAction = Literal[
+    "create_repository",
+    "delete_repository",
+    "create_branch",
+    "set_default_branch",
+    "create_file",
+    "update_file",
+    "delete_file",
+]
+
+
+_REPO_READ_ACTIONS = frozenset(get_args(_RepoReadAction))
+_ISSUE_PR_READ_ACTIONS = frozenset(get_args(_IssuePrReadAction))
+_ISSUE_WRITE_ACTIONS = frozenset(get_args(_IssueWriteAction))
+_PR_WRITE_ACTIONS = frozenset(get_args(_PrWriteAction))
+_REPO_WRITE_ACTIONS = frozenset(get_args(_RepoWriteAction))
+
+
+def _missing_arg_error(field: str, action: str) -> str:
+    return json.dumps({"error": f"{field} is required for {action}"})
+
+
+def _unsupported_action_error(group: str, action: str) -> str:
+    return json.dumps({"error": f"Unsupported GitHub {group} action: {action}"})
+
+
 class GithubTools(Toolkit):
     """Native GitHub tools authenticated by explicit or requester-scoped OAuth credentials."""
 
@@ -334,45 +401,11 @@ class GithubTools(Toolkit):
             self.g = self.authenticate()
 
         tools: list[Callable[..., str]] = [
-            self.search_repositories,
-            self.list_repositories,
-            self.get_repository,
-            self.get_pull_request,
-            self.get_pull_request_changes,
-            self.create_issue,
-            self.create_repository,
-            self.delete_repository,
-            self.list_branches,
-            self.get_repository_languages,
-            self.get_pull_request_count,
-            self.get_repository_stars,
-            self.get_pull_requests,
-            self.get_pull_request_comments,
-            self.create_pull_request_comment,
-            self.edit_pull_request_comment,
-            self.get_pull_request_with_details,
-            self.get_repository_with_stats,
-            self.list_issues,
-            self.get_issue,
-            self.comment_on_issue,
-            self.close_issue,
-            self.reopen_issue,
-            self.assign_issue,
-            self.label_issue,
-            self.list_issue_comments,
-            self.edit_issue,
-            self.create_pull_request,
-            self.create_file,
-            self.get_file_content,
-            self.update_file,
-            self.delete_file,
-            self.get_directory_content,
-            self.get_branch_content,
-            self.create_branch,
-            self.set_default_branch,
-            self.search_code,
-            self.search_issues_and_prs,
-            self.create_review_request,
+            self.github_read_repo,
+            self.github_read_issues_prs,
+            self.github_write_issues,
+            self.github_write_pr,
+            self.github_write_repo,
         ]
         super().__init__(name="github", tools=tools)
         self._wrap_oauth_function_entrypoints()
@@ -481,30 +514,8 @@ class GithubTools(Toolkit):
             return Github(base_url=self.base_url, auth=auth)
         return Github(auth=auth)
 
-    def search_repositories(
-        self,
-        query: str,
-        sort: str = "stars",
-        order: str = "desc",
-        page: int = 1,
-        per_page: int = 30,
-    ) -> str:
-        """Search for repositories on GitHub.
-
-        Note: GitHub's Search API has a maximum limit of 1000 results per query.
-
-        Args:
-            query: The search query keywords.
-            sort: The field to sort results by ('stars', 'forks', or 'updated'). Defaults to 'stars'.
-            order: The order of results ('asc' or 'desc'). Defaults to 'desc'.
-            page: Page number of results to return, counting from 1. Defaults to 1.
-            per_page: Number of results per page. Max 100. Defaults to 30.
-
-        Returns:
-            A JSON-formatted string containing a list of repositories matching the search query.
-
-        """
-        per_page = min(per_page, 100)
+    def _search_repositories(self, query: str, sort: str, order: str, page: int, per_page: int) -> str:
+        resolved_per_page = min(per_page, 100)
         repositories = self.g.search_repositories(query=query, sort=sort, order=order)
         repo_list = [
             {
@@ -515,69 +526,11 @@ class GithubTools(Toolkit):
                 "forks": repo.forks_count,
                 "language": repo.language,
             }
-            for repo in repositories.get_page(page - 1)[:per_page]
+            for repo in repositories.get_page(page - 1)[:resolved_per_page]
         ]
         return json.dumps(repo_list, indent=2)
 
-    def list_repositories(self) -> str:
-        """List all repositories for the authenticated user.
-
-        Returns:
-            A JSON-formatted string containing a list of repository names.
-
-        """
-        repos = self.g.get_user().get_repos()
-        return json.dumps([repo.full_name for repo in repos], indent=2)
-
-    def create_repository(
-        self,
-        name: str,
-        private: bool = False,
-        description: str | None = None,
-        auto_init: bool = False,
-        organization: str | None = None,
-    ) -> str:
-        """Create a new repository on GitHub.
-
-        Args:
-            name: The name of the repository.
-            private: Whether the repository is private. Defaults to False.
-            description: A short description of the repository.
-            auto_init: Whether to initialize the repository with a README. Defaults to False.
-            organization: Name of organization to create repo in. If None, creates in user account.
-
-        Returns:
-            A JSON-formatted string containing the created repository details.
-
-        """
-        resolved_description = description if description is not None else ""
-        owner: Any = self.g.get_organization(organization) if organization else self.g.get_user()
-        repo = owner.create_repo(
-            name=name,
-            private=private,
-            description=resolved_description,
-            auto_init=auto_init,
-        )
-        return json.dumps(
-            {
-                "name": repo.full_name,
-                "url": repo.html_url,
-                "private": repo.private,
-                "description": repo.description,
-            },
-            indent=2,
-        )
-
-    def get_repository(self, repo_name: str) -> str:
-        """Get details of a specific repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-
-        Returns:
-            A JSON-formatted string containing repository details.
-
-        """
+    def _get_repository(self, repo_name: str) -> str:
         repo = self.g.get_repo(repo_name)
         return json.dumps(
             {
@@ -594,157 +547,225 @@ class GithubTools(Toolkit):
             indent=2,
         )
 
-    def get_repository_languages(self, repo_name: str) -> str:
-        """Get the languages used in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-
-        Returns:
-            A JSON-formatted string containing the map of languages to byte counts.
-
-        """
+    def _get_repository_with_stats(self, repo_name: str) -> str:
         repo = self.g.get_repo(repo_name)
-        return json.dumps(_numeric_languages(repo.get_languages()), indent=2)
+        repo_info: dict[str, Any] = {
+            "id": int(repo.id),
+            "name": str(repo.name),
+            "full_name": str(repo.full_name),
+            "owner": str(repo.owner.login),
+            "description": str(repo.description) if repo.description else None,
+            "html_url": str(repo.html_url),
+            "homepage": str(repo.homepage) if repo.homepage else None,
+            "language": str(repo.language) if repo.language else None,
+            "created_at": _safe_primitive(repo.created_at),
+            "updated_at": _safe_primitive(repo.updated_at),
+            "pushed_at": _safe_primitive(repo.pushed_at),
+            "size": int(repo.size),
+            "stargazers_count": int(repo.stargazers_count),
+            "watchers_count": int(repo.watchers_count),
+            "forks_count": int(repo.forks_count),
+            "open_issues_count": int(repo.open_issues_count),
+            "default_branch": str(repo.default_branch),
+            "topics": [str(topic) for topic in repo.get_topics()],
+            "license": str(repo.license.name) if repo.license and repo.license.name else None,
+            "private": bool(repo.private),
+            "archived": bool(repo.archived),
+            "languages": _numeric_languages(repo.get_languages()),
+            "actual_open_issues": _collect_actual_open_issues(repo),
+            "open_pr_count": _collect_open_pr_count(repo),
+            "recent_open_prs": _collect_recent_open_prs(repo),
+            "pr_metrics": _collect_pr_metrics(repo),
+            "contributors": _collect_contributors(repo),
+        }
+        return json.dumps(repo_info, indent=2)
 
-    def get_pull_request_count(
-        self,
-        repo_name: str,
-        state: str = "all",
-        author: str | None = None,
-        base: str | None = None,
-        head: str | None = None,
-    ) -> str:
-        """Get the count of pull requests for a repository based on query parameters.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            state: The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'.
-            author: Filter PRs by author username.
-            base: Filter PRs by base branch name.
-            head: Filter PRs by head branch name.
-
-        Returns:
-            A JSON-formatted string containing the count of pull requests.
-
-        """
-        filters: dict[str, Any] = {"state": state}
-        if base is not None:
-            filters["base"] = base
-        if head is not None:
-            filters["head"] = head
-
-        pulls = self.g.get_repo(repo_name).get_pulls(**filters)
-        if author is not None:
-            count = sum(1 for pull in pulls if pull.user.login == author and state in ("all", pull.state))
+    def _get_file_content(self, repo_name: str, path: str, ref: str | None) -> str:
+        repo = self.g.get_repo(repo_name)
+        file_content = repo.get_contents(path, ref=ref) if ref is not None else repo.get_contents(path)
+        if isinstance(file_content, list):
+            return json.dumps({"error": f"{path} is a directory, not a file"})
+        try:
+            decoded_content = file_content.decoded_content.decode("utf-8")
+        except Exception as exc:
+            logger.debug("github_file_decode_failed", error_type=type(exc).__name__)
+            decoded_content = "Binary file (content not displayed)"
         else:
-            count = pulls.totalCount
-            if count is None:
-                count = sum(1 for _pull in pulls)
-        return json.dumps({"count": count}, indent=2)
-
-    def get_pull_request(self, repo_name: str, pr_number: int) -> str:
-        """Get details of a specific pull request.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-
-        Returns:
-            A JSON-formatted string containing pull request details.
-
-        """
-        pr = self.g.get_repo(repo_name).get_pull(pr_number)
+            if _is_binary_text(decoded_content):
+                decoded_content = "Binary file (content not displayed)"
         return json.dumps(
             {
-                "number": pr.number,
-                "title": pr.title,
-                "user": pr.user.login,
-                "body": pr.body,
-                "created_at": pr.created_at.isoformat(),
-                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
-                "state": pr.state,
-                "merged": pr.is_merged(),
-                "mergeable": pr.mergeable,
-                "url": pr.html_url,
+                "name": file_content.name,
+                "path": file_content.path,
+                "sha": file_content.sha,
+                "size": file_content.size,
+                "type": file_content.type,
+                "url": file_content.html_url,
+                "content": decoded_content,
             },
             indent=2,
         )
 
-    def get_pull_request_changes(self, repo_name: str, pr_number: int) -> str:
-        """Get the changes (files modified) in a pull request.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-
-        Returns:
-            A JSON-formatted string containing the list of changed files.
-
-        """
-        pr = self.g.get_repo(repo_name).get_pull(pr_number)
-        changes = [
-            {
-                "filename": file.filename,
-                "status": file.status,
-                "additions": file.additions,
-                "deletions": file.deletions,
-                "changes": file.changes,
-                "raw_url": file.raw_url,
-                "blob_url": file.blob_url,
-                "patch": file.patch,
-            }
-            for file in pr.get_files()
-        ]
-        return json.dumps(changes, indent=2)
-
-    def create_issue(self, repo_name: str, title: str, body: str | None = None) -> str:
-        """Create an issue in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            title: The title of the issue.
-            body: The body content of the issue.
-
-        Returns:
-            A JSON-formatted string containing the created issue details.
-
-        """
+    def _get_directory_content(self, repo_name: str, path: str, ref: str | None) -> str:
         repo = self.g.get_repo(repo_name)
-        issue = repo.create_issue(title=title) if body is None else repo.create_issue(title=title, body=body)
+        contents = repo.get_contents(path, ref=ref) if ref is not None else repo.get_contents(path)
+        if not isinstance(contents, list):
+            return json.dumps({"error": f"{path} is a file, not a directory"})
+        items = [
+            {
+                "name": content.name,
+                "path": content.path,
+                "type": content.type,
+                "size": content.size,
+                "sha": content.sha,
+                "url": content.html_url,
+                "download_url": content.download_url,
+            }
+            for content in contents
+        ]
+        items.sort(key=lambda item: (item["type"] != "dir", str(item["name"]).lower()))
+        return json.dumps(items, indent=2)
+
+    def _search_code(
+        self,
+        query: str,
+        *,
+        language: str | None,
+        repo: str | None,
+        user: str | None,
+        path: str | None,
+        filename: str | None,
+    ) -> str:
+        parts = [cleaned] if (cleaned := query.strip()) else []
+        for key, value in (
+            ("language", language),
+            ("repo", repo),
+            ("user", user),
+            ("path", path),
+            ("filename", filename),
+        ):
+            if value:
+                parts.append(f"{key}:{value}")
+        search_query = " ".join(parts)
+        if not search_query:
+            return _missing_arg_error("query", "search_code")
+
+        code_results = self.g.search_code(search_query)
+        results: list[dict[str, Any]] = []
+        for page_index in range(2):
+            if len(results) >= 60:
+                break
+            page_items = code_results.get_page(page_index)
+            if not page_items:
+                break
+            results.extend(
+                {
+                    "repository": code.repository.full_name,
+                    "path": code.path,
+                    "name": code.name,
+                    "sha": code.sha,
+                    "html_url": code.html_url,
+                    "git_url": code.git_url,
+                    "score": code.score,
+                }
+                for code in page_items
+            )
         return json.dumps(
             {
-                "id": issue.id,
-                "number": issue.number,
-                "title": issue.title,
-                "body": issue.body,
-                "url": issue.html_url,
-                "state": issue.state,
-                "created_at": issue.created_at.isoformat(),
-                "user": issue.user.login,
+                "query": search_query,
+                "total_count": code_results.totalCount,
+                "results_count": len(results),
+                "results": results,
             },
             indent=2,
         )
 
-    def list_issues(self, repo_name: str, state: str = "open", page: int = 1, per_page: int = 20) -> str:
-        """List issues for a repository with pagination.
+    def _dispatch_repo_read(self, action: _RepoReadAction, repo_name: str, path: str | None, ref: str | None) -> str:
+        simple_handlers: dict[str, Callable[[str], str]] = {
+            "get_repository": self._get_repository,
+            "get_repository_with_stats": self._get_repository_with_stats,
+            "get_repository_languages": lambda r: json.dumps(
+                _numeric_languages(self.g.get_repo(r).get_languages()),
+                indent=2,
+            ),
+            "get_repository_stars": lambda r: json.dumps({"stars": self.g.get_repo(r).stargazers_count}, indent=2),
+            "list_branches": lambda r: json.dumps(
+                [branch.name for branch in self.g.get_repo(r).get_branches()],
+                indent=2,
+            ),
+        }
+        if (handler := simple_handlers.get(action)) is not None:
+            return handler(repo_name)
+        if action == "get_file_content":
+            return self._get_file_content(repo_name, path, ref) if path else _missing_arg_error("path", action)
+        if action == "get_directory_content":
+            return (
+                self._get_directory_content(repo_name, path, ref)
+                if path is not None
+                else _missing_arg_error("path", action)
+            )
+        if action == "get_branch_content":
+            return self._get_directory_content(repo_name, "", ref or "main")
+        return json.dumps({"error": f"Unsupported GitHub repo read action: {action}"})
 
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            state: The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'.
-            page: Page number of results to return, counting from 1. Defaults to 1.
-            per_page: Number of results per page. Defaults to 20.
+    def github_read_repo(
+        self,
+        action: _RepoReadAction,
+        repo_name: str | None = None,
+        query: str | None = None,
+        path: str | None = None,
+        ref: str | None = None,
+        language: str | None = None,
+        user: str | None = None,
+        filename: str | None = None,
+        sort: str = "stars",
+        order: str = "desc",
+        page: int = 1,
+        per_page: int = 30,
+    ) -> str:
+        """Read GitHub repositories, branches, files, directories, and code search results.
 
-        Returns:
-            A JSON-formatted string containing a list of issues with pagination metadata.
-
+        - `list_repositories`: list authenticated user's repository full names
+        - `search_repositories`: search repos by `query` (`sort`, `order`, `page`, `per_page`)
+        - `get_repository`: repository metadata for `repo_name` (`owner/repo`)
+        - `get_repository_with_stats`: detailed stats, languages, PR metrics, and contributors for `repo_name`
+        - `get_repository_languages`: language byte counts for `repo_name`
+        - `get_repository_stars`: star count for `repo_name`
+        - `list_branches`: branch names for `repo_name`
+        - `get_file_content`: decoded file text and SHA for `repo_name` and `path` (optional `ref`)
+        - `get_directory_content`: directory listing for `repo_name` and `path` (optional `ref`)
+        - `get_branch_content`: root directory listing for `repo_name` at `ref` (default `main`)
+        - `search_code`: search code by `query` (optional `repo_name`, `language`, `user`, `path`, `filename`)
         """
+        if action not in _REPO_READ_ACTIONS:
+            return _unsupported_action_error("repo read", action)
+        if action == "list_repositories":
+            return json.dumps([repo.full_name for repo in self.g.get_user().get_repos()], indent=2)
+        if action == "search_repositories":
+            return (
+                self._search_repositories(query, sort, order, page, per_page)
+                if query
+                else _missing_arg_error("query", action)
+            )
+        if action == "search_code":
+            return self._search_code(
+                query or "",
+                language=language,
+                repo=repo_name,
+                user=user,
+                path=path,
+                filename=filename,
+            )
+        if not repo_name:
+            return _missing_arg_error("repo_name", action)
+        return self._dispatch_repo_read(action, repo_name, path, ref)
+
+    def _list_issues(self, repo_name: str, state: str, page: int, per_page: int) -> str:
         all_issues = [issue for issue in self.g.get_repo(repo_name).get_issues(state=state) if not issue.pull_request]
         total_issues = len(all_issues)
         total_pages = (total_issues + per_page - 1) // per_page
         resolved_page = max(1, min(page, total_pages) if total_pages > 0 else 1)
         start = (resolved_page - 1) * per_page
-        page_slice = all_issues[start : start + per_page]
         issue_list = [
             {
                 "number": issue.number,
@@ -754,7 +775,7 @@ class GithubTools(Toolkit):
                 "state": issue.state,
                 "url": issue.html_url,
             }
-            for issue in page_slice
+            for issue in all_issues[start : start + per_page]
         ]
         meta = {
             "current_page": resolved_page,
@@ -764,17 +785,7 @@ class GithubTools(Toolkit):
         }
         return json.dumps({"data": issue_list, "meta": meta}, indent=2)
 
-    def get_issue(self, repo_name: str, issue_number: int) -> str:
-        """Get details of a specific issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-
-        Returns:
-            A JSON-formatted string containing issue details.
-
-        """
+    def _get_issue(self, repo_name: str, issue_number: int) -> str:
         issue = self.g.get_repo(repo_name).get_issue(number=issue_number)
         return json.dumps(
             {
@@ -792,238 +803,88 @@ class GithubTools(Toolkit):
             indent=2,
         )
 
-    def comment_on_issue(self, repo_name: str, issue_number: int, comment_body: str) -> str:
-        """Add a comment to an issue.
+    def _list_issue_comments(self, repo_name: str, issue_number: int) -> str:
+        comments = self.g.get_repo(repo_name).get_issue(number=issue_number).get_comments()
+        return json.dumps(
+            [
+                {
+                    "id": comment.id,
+                    "user": comment.user.login,
+                    "body": comment.body,
+                    "created_at": comment.created_at.isoformat(),
+                    "url": comment.html_url,
+                }
+                for comment in comments
+            ],
+            indent=2,
+        )
 
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-            comment_body: The content of the comment.
+    def _get_pull_requests(
+        self,
+        repo_name: str,
+        state: str,
+        sort: str,
+        direction: str,
+        page: int,
+        per_page: int,
+    ) -> str:
+        resolved_page = max(1, page)
+        if per_page <= 0:
+            return json.dumps([], indent=2)
+        start = (resolved_page - 1) * per_page
+        pulls = self.g.get_repo(repo_name).get_pulls(state=state, sort=sort, direction=direction)
+        pr_list = [
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "user": pr.user.login,
+                "created_at": pr.created_at.isoformat(),
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "state": pr.state,
+                "url": pr.html_url,
+            }
+            for pr in islice(pulls, start, start + per_page)
+        ]
+        return json.dumps(pr_list, indent=2)
 
-        Returns:
-            A JSON-formatted string containing the comment details.
-
-        """
-        comment = self.g.get_repo(repo_name).get_issue(number=issue_number).create_comment(body=comment_body)
+    def _get_pull_request(self, repo_name: str, pr_number: int) -> str:
+        pr = self.g.get_repo(repo_name).get_pull(pr_number)
         return json.dumps(
             {
-                "id": comment.id,
-                "body": comment.body,
-                "user": comment.user.login,
-                "created_at": comment.created_at.isoformat(),
-                "url": comment.html_url,
+                "number": pr.number,
+                "title": pr.title,
+                "user": pr.user.login,
+                "body": pr.body,
+                "created_at": pr.created_at.isoformat(),
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "state": pr.state,
+                "merged": pr.is_merged(),
+                "mergeable": pr.mergeable,
+                "url": pr.html_url,
             },
             indent=2,
         )
 
-    def close_issue(self, repo_name: str, issue_number: int) -> str:
-        """Close an issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-
-        Returns:
-            A JSON-formatted string confirming the issue is closed.
-
-        """
-        self.g.get_repo(repo_name).get_issue(number=issue_number).edit(state="closed")
-        return json.dumps({"message": f"Issue #{issue_number} closed."}, indent=2)
-
-    def reopen_issue(self, repo_name: str, issue_number: int) -> str:
-        """Reopen a closed issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-
-        Returns:
-            A JSON-formatted string confirming the issue is reopened.
-
-        """
-        self.g.get_repo(repo_name).get_issue(number=issue_number).edit(state="open")
-        return json.dumps({"message": f"Issue #{issue_number} reopened."}, indent=2)
-
-    def assign_issue(self, repo_name: str, issue_number: int, assignees: list[str]) -> str:
-        """Assign users to an issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-            assignees: A list of usernames to assign.
-
-        Returns:
-            A JSON-formatted string confirming the assignees.
-
-        """
-        self.g.get_repo(repo_name).get_issue(number=issue_number).edit(assignees=cast("list[Any]", assignees))
-        return json.dumps({"message": f"Issue #{issue_number} assigned to {assignees}."}, indent=2)
-
-    def label_issue(self, repo_name: str, issue_number: int, labels: list[str]) -> str:
-        """Add labels to an issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-            labels: A list of label names to add.
-
-        Returns:
-            A JSON-formatted string confirming the labels.
-
-        """
-        self.g.get_repo(repo_name).get_issue(number=issue_number).edit(labels=labels)
-        return json.dumps({"message": f"Labels {labels} added to issue #{issue_number}."}, indent=2)
-
-    def list_issue_comments(self, repo_name: str, issue_number: int) -> str:
-        """List comments on an issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-
-        Returns:
-            A JSON-formatted string containing a list of comments.
-
-        """
-        comments = self.g.get_repo(repo_name).get_issue(number=issue_number).get_comments()
-        comment_list = [
-            {
-                "id": comment.id,
-                "user": comment.user.login,
-                "body": comment.body,
-                "created_at": comment.created_at.isoformat(),
-                "url": comment.html_url,
-            }
-            for comment in comments
-        ]
-        return json.dumps(comment_list, indent=2)
-
-    def edit_issue(
-        self,
-        repo_name: str,
-        issue_number: int,
-        title: str | None = None,
-        body: str | None = None,
-    ) -> str:
-        """Edit the title or body of an issue.
-
-        Args:
-            repo_name: The full name of the repository.
-            issue_number: The number of the issue.
-            title: The new title for the issue.
-            body: The new body content for the issue.
-
-        Returns:
-            A JSON-formatted string confirming the issue has been updated.
-
-        """
-        if title is None and body is None:
-            return json.dumps({"error": f"Provide a title or body to update issue #{issue_number}."})
-        issue = self.g.get_repo(repo_name).get_issue(number=issue_number)
-        if title is None:
-            assert body is not None
-            issue.edit(body=body)
-        elif body is None:
-            issue.edit(title=title)
-        else:
-            issue.edit(title=title, body=body)
-        return json.dumps({"message": f"Issue #{issue_number} updated."}, indent=2)
-
-    def delete_repository(self, repo_name: str) -> str:
-        """Delete a repository (requires admin permissions).
-
-        Args:
-            repo_name: Full repository name (e.g., 'owner/repo').
-
-        Returns:
-            Success confirmation or error message.
-
-        """
-        self.g.get_repo(repo_name).delete()
-        return json.dumps({"message": f"Repository {repo_name} deleted successfully"}, indent=2)
-
-    def list_branches(self, repo_name: str) -> str:
-        """List all branches in a repository.
-
-        Args:
-            repo_name: Full repository name (e.g., 'owner/repo').
-
-        Returns:
-            JSON list of branch names.
-
-        """
-        branches = [branch.name for branch in self.g.get_repo(repo_name).get_branches()]
-        return json.dumps(branches, indent=2)
-
-    def get_repository_stars(self, repo_name: str) -> str:
-        """Get the number of stars for a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-
-        Returns:
-            A JSON-formatted string containing the star count.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        return json.dumps({"stars": repo.stargazers_count}, indent=2)
-
-    def get_pull_requests(
-        self,
-        repo_name: str,
-        state: str = "open",
-        sort: str = "created",
-        direction: str = "desc",
-        limit: int = 50,
-    ) -> str:
-        """Get pull requests matching query parameters.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            state: State of the PRs to retrieve ('open', 'closed', or 'all'). Defaults to 'open'.
-            sort: Sort field ('created', 'updated', 'popularity', 'long-running'). Defaults to 'created'.
-            direction: Sort direction ('asc' or 'desc'). Defaults to 'desc'.
-            limit: Maximum number of pull requests to return. Defaults to 50.
-
-        Returns:
-            A JSON-formatted string containing a list of pull requests.
-
-        """
-        pulls = self.g.get_repo(repo_name).get_pulls(state=state, sort=sort, direction=direction)
-        pr_list: list[dict[str, Any]] = []
-        for pr in pulls:
-            if len(pr_list) >= limit:
-                break
-            pr_list.append(
+    def _get_pull_request_changes(self, repo_name: str, pr_number: int) -> str:
+        pr = self.g.get_repo(repo_name).get_pull(pr_number)
+        return json.dumps(
+            [
                 {
-                    "number": pr.number,
-                    "title": pr.title,
-                    "user": pr.user.login,
-                    "created_at": pr.created_at.isoformat(),
-                    "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
-                    "state": pr.state,
-                    "url": pr.html_url,
-                },
-            )
-        return json.dumps(pr_list, indent=2)
+                    "filename": file.filename,
+                    "status": file.status,
+                    "additions": file.additions,
+                    "deletions": file.deletions,
+                    "changes": file.changes,
+                    "raw_url": file.raw_url,
+                    "blob_url": file.blob_url,
+                    "patch": file.patch,
+                }
+                for file in pr.get_files()
+            ],
+            indent=2,
+        )
 
-    def get_pull_request_comments(
-        self,
-        repo_name: str,
-        pr_number: int,
-        include_issue_comments: bool = True,
-    ) -> str:
-        """Get all comments on a pull request.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-            include_issue_comments: Whether to include general PR comments. Defaults to True.
-
-        Returns:
-            A JSON-formatted string containing a list of pull request comments.
-
-        """
+    def _get_pull_request_comments(self, repo_name: str, pr_number: int, include_issue_comments: bool) -> str:
         pr = self.g.get_repo(repo_name).get_pull(pr_number)
         comment_list: list[dict[str, Any]] = [
             {
@@ -1056,89 +917,7 @@ class GithubTools(Toolkit):
         comment_list.sort(key=lambda item: item["created_at"], reverse=True)
         return json.dumps(comment_list, indent=2)
 
-    def create_pull_request_comment(
-        self,
-        repo_name: str,
-        pr_number: int,
-        body: str,
-        commit_id: str,
-        path: str,
-        position: int,
-    ) -> str:
-        """Create a comment on a specific line of a specific file in a pull request.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-            body: The text of the comment.
-            commit_id: The SHA of the commit to comment on.
-            path: The relative path to the file to comment on.
-            position: The line index in the diff to comment on.
-
-        Returns:
-            A JSON-formatted string containing the created comment details.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        pr = repo.get_pull(pr_number)
-        commit = repo.get_commit(commit_id)
-        comment = pr.create_comment(body, commit, path, position)
-        return json.dumps(
-            {
-                "id": comment.id,
-                "body": comment.body,
-                "user": comment.user.login,
-                "created_at": comment.created_at.isoformat(),
-                "path": comment.path,
-                "position": comment.position,
-                "commit_id": comment.commit_id,
-                "url": comment.html_url,
-            },
-            indent=2,
-        )
-
-    def edit_pull_request_comment(self, repo_name: str, comment_id: int, body: str) -> str:
-        """Edit an existing pull request comment.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            comment_id: The id of the comment to edit.
-            body: The new text of the comment.
-
-        Returns:
-            A JSON-formatted string containing the updated comment details.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        target = next((comment for comment in repo.get_pulls_comments() if comment.id == comment_id), None)
-        if target is None:
-            return f"Could not find comment #{comment_id} in repository: {repo_name}"
-        target.edit(body)
-        return json.dumps(
-            {
-                "id": target.id,
-                "body": target.body,
-                "user": target.user.login,
-                "updated_at": target.updated_at.isoformat(),
-                "path": target.path,
-                "position": target.position,
-                "commit_id": target.commit_id,
-                "url": target.html_url,
-            },
-            indent=2,
-        )
-
-    def get_pull_request_with_details(self, repo_name: str, pr_number: int) -> str:
-        """Get comprehensive details of a pull request including comments, labels, and metadata.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-
-        Returns:
-            A JSON-formatted string containing detailed pull request information.
-
-        """
+    def _get_pull_request_with_details(self, repo_name: str, pr_number: int) -> str:
         pr = self.g.get_repo(repo_name).get_pull(pr_number)
         review_comments = [
             {
@@ -1217,472 +996,45 @@ class GithubTools(Toolkit):
             indent=2,
         )
 
-    def get_repository_with_stats(self, repo_name: str) -> str:
-        """Get comprehensive repository information including statistics.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-
-        Returns:
-            A JSON-formatted string containing detailed repository information and statistics.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        repo_info: dict[str, Any] = {
-            "id": int(repo.id),
-            "name": str(repo.name),
-            "full_name": str(repo.full_name),
-            "owner": str(repo.owner.login),
-            "description": str(repo.description) if repo.description else None,
-            "html_url": str(repo.html_url),
-            "homepage": str(repo.homepage) if repo.homepage else None,
-            "language": str(repo.language) if repo.language else None,
-            "created_at": _safe_primitive(repo.created_at),
-            "updated_at": _safe_primitive(repo.updated_at),
-            "pushed_at": _safe_primitive(repo.pushed_at),
-            "size": int(repo.size),
-            "stargazers_count": int(repo.stargazers_count),
-            "watchers_count": int(repo.watchers_count),
-            "forks_count": int(repo.forks_count),
-            "open_issues_count": int(repo.open_issues_count),
-            "default_branch": str(repo.default_branch),
-            "topics": [str(topic) for topic in repo.get_topics()],
-            "license": str(repo.license.name) if repo.license and repo.license.name else None,
-            "private": bool(repo.private),
-            "archived": bool(repo.archived),
-            "languages": _numeric_languages(repo.get_languages()),
-            "actual_open_issues": _collect_actual_open_issues(repo),
-            "open_pr_count": _collect_open_pr_count(repo),
-            "recent_open_prs": _collect_recent_open_prs(repo),
-            "pr_metrics": _collect_pr_metrics(repo),
-            "contributors": _collect_contributors(repo),
-        }
-        return json.dumps(repo_info, indent=2)
-
-    def create_pull_request(
+    def _get_pull_request_count(
         self,
         repo_name: str,
-        title: str,
-        body: str,
-        head: str,
-        base: str,
-        draft: bool = False,
-        maintainer_can_modify: bool = True,
+        *,
+        state: str,
+        author: str | None,
+        base: str | None,
+        head: str | None,
     ) -> str:
-        """Create a new pull request in a repository.
+        filters: dict[str, Any] = {"state": state}
+        if base is not None:
+            filters["base"] = base
+        if head is not None:
+            filters["head"] = head
 
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            title: The title of the pull request.
-            body: The body text of the pull request.
-            head: The name of the branch where your changes are implemented.
-            base: The name of the branch you want the changes pulled into.
-            draft: Whether the pull request is a draft. Defaults to False.
-            maintainer_can_modify: Whether maintainers can modify the PR. Defaults to True.
-
-        Returns:
-            A JSON-formatted string containing the created pull request details.
-
-        """
-        pr = self.g.get_repo(repo_name).create_pull(
-            title=title,
-            body=body,
-            head=head,
-            base=base,
-            draft=draft,
-            maintainer_can_modify=maintainer_can_modify,
-        )
-        return json.dumps(
-            {
-                "number": pr.number,
-                "title": pr.title,
-                "body": pr.body,
-                "user": pr.user.login,
-                "state": pr.state,
-                "created_at": pr.created_at.isoformat(),
-                "html_url": pr.html_url,
-                "base": pr.base.ref,
-                "head": pr.head.ref,
-                "mergeable": pr.mergeable,
-            },
-            indent=2,
-        )
-
-    def create_review_request(
-        self,
-        repo_name: str,
-        pr_number: int,
-        reviewers: list[str],
-        team_reviewers: list[str] | None = None,
-    ) -> str:
-        """Create a review request for a pull request.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            pr_number: The number of the pull request.
-            reviewers: List of user logins that will be requested to review.
-            team_reviewers: List of team slugs that will be requested to review. Defaults to None.
-
-        Returns:
-            A JSON-formatted string with the success message or error.
-
-        """
-        pr = self.g.get_repo(repo_name).get_pull(pr_number)
-        pr.create_review_request(reviewers=reviewers, team_reviewers=team_reviewers or [])
-        return json.dumps(
-            {
-                "message": f"Review request created for PR #{pr_number}",
-                "requested_reviewers": reviewers,
-                "requested_team_reviewers": team_reviewers or [],
-            },
-            indent=2,
-        )
-
-    def create_file(
-        self,
-        repo_name: str,
-        path: str,
-        content: str,
-        message: str,
-        branch: str | None = None,
-    ) -> str:
-        """Create a new file in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            path: The path to the file in the repository.
-            content: The content of the file.
-            message: The commit message.
-            branch: The branch to commit to. Defaults to repository's default branch.
-
-        Returns:
-            A JSON-formatted string containing the file creation result.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        content_bytes = content.encode("utf-8")
-        if branch is None:
-            result = repo.create_file(path=path, message=message, content=content_bytes)
+        pulls = self.g.get_repo(repo_name).get_pulls(**filters)
+        if author is not None:
+            count = sum(1 for pull in pulls if pull.user.login == author and state in ("all", pull.state))
         else:
-            result = repo.create_file(path=path, message=message, content=content_bytes, branch=branch)
-        return _format_content_write_result(
-            cast("_ContentWriteResult", result["content"]),
-            cast("_CommitWriteResult", result["commit"]),
-            message,
-        )
+            count = pulls.totalCount
+            if count is None:
+                count = sum(1 for _pull in pulls)
+        return json.dumps({"count": count}, indent=2)
 
-    def get_file_content(self, repo_name: str, path: str, ref: str | None = None) -> str:
-        """Get the content of a file in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            path: The path to the file in the repository.
-            ref: The name of the commit/branch/tag. Defaults to the repository's default branch.
-
-        Returns:
-            A JSON-formatted string containing the file content and metadata.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        file_content = repo.get_contents(path, ref=ref) if ref is not None else repo.get_contents(path)
-        if isinstance(file_content, list):
-            return json.dumps({"error": f"{path} is a directory, not a file"})
-
-        try:
-            decoded_content = file_content.decoded_content.decode("utf-8")
-        except Exception as exc:
-            logger.debug("github_file_decode_failed", error_type=type(exc).__name__)
-            decoded_content = "Binary file (content not displayed)"
-        else:
-            if _is_binary_text(decoded_content):
-                decoded_content = "Binary file (content not displayed)"
-
-        return json.dumps(
-            {
-                "name": file_content.name,
-                "path": file_content.path,
-                "sha": file_content.sha,
-                "size": file_content.size,
-                "type": file_content.type,
-                "url": file_content.html_url,
-                "content": decoded_content,
-            },
-            indent=2,
-        )
-
-    def update_file(
-        self,
-        repo_name: str,
-        path: str,
-        content: str,
-        message: str,
-        sha: str,
-        branch: str | None = None,
-    ) -> str:
-        """Update an existing file in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            path: The path to the file in the repository.
-            content: The new content of the file.
-            message: The commit message.
-            sha: The blob SHA of the file being replaced.
-            branch: The branch to commit to. Defaults to the repository's default branch.
-
-        Returns:
-            A JSON-formatted string containing the file update result.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        if branch is None:
-            result = repo.update_file(path=path, message=message, content=content.encode("utf-8"), sha=sha)
-        else:
-            result = repo.update_file(
-                path=path,
-                message=message,
-                content=content.encode("utf-8"),
-                sha=sha,
-                branch=branch,
-            )
-        return _format_content_write_result(
-            cast("_ContentWriteResult", result["content"]),
-            cast("_CommitWriteResult", result["commit"]),
-            message,
-        )
-
-    def delete_file(
-        self,
-        repo_name: str,
-        path: str,
-        message: str,
-        sha: str,
-        branch: str | None = None,
-    ) -> str:
-        """Delete a file from a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            path: The path to the file in the repository.
-            message: The commit message.
-            sha: The blob SHA of the file being deleted.
-            branch: The branch to commit to. Defaults to the repository's default branch.
-
-        Returns:
-            A JSON-formatted string confirming deletion.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        if branch is None:
-            result = repo.delete_file(path=path, message=message, sha=sha)
-        else:
-            result = repo.delete_file(path=path, message=message, sha=sha, branch=branch)
-        commit_result = cast("_CommitWriteResult", result["commit"])
-        return json.dumps(
-            {
-                "message": f"File {path} deleted successfully",
-                "commit": {
-                    "sha": commit_result.sha,
-                    "message": message,
-                    "url": commit_result.html_url,
-                },
-            },
-            indent=2,
-        )
-
-    def _get_directory_content(self, repo_name: str, path: str, ref: str | None = None) -> str:
-        repo = self.g.get_repo(repo_name)
-        contents = repo.get_contents(path, ref=ref) if ref is not None else repo.get_contents(path)
-        if not isinstance(contents, list):
-            return json.dumps({"error": f"{path} is a file, not a directory"})
-        items = [
-            {
-                "name": content.name,
-                "path": content.path,
-                "type": content.type,
-                "size": content.size,
-                "sha": content.sha,
-                "url": content.html_url,
-                "download_url": content.download_url,
-            }
-            for content in contents
-        ]
-        items.sort(key=lambda item: (item["type"] != "dir", str(item["name"]).lower()))
-        return json.dumps(items, indent=2)
-
-    def get_directory_content(self, repo_name: str, path: str, ref: str | None = None) -> str:
-        """Get the contents of a directory in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            path: The path to the directory in the repository. Use empty string for root.
-            ref: The name of the commit/branch/tag. Defaults to repository's default branch.
-
-        Returns:
-            A JSON-formatted string containing a list of directory contents.
-
-        """
-        return self._get_directory_content(repo_name, path, ref=ref)
-
-    def get_branch_content(self, repo_name: str, branch: str = "main") -> str:
-        """Get the root directory content of a specific branch.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            branch: The branch name. Defaults to "main".
-
-        Returns:
-            A JSON-formatted string containing a list of branch contents.
-
-        """
-        return self._get_directory_content(repo_name, "", ref=branch)
-
-    def create_branch(self, repo_name: str, branch_name: str, source_branch: str | None = None) -> str:
-        """Create a new branch in a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            branch_name: The name of the new branch.
-            source_branch: The source branch to create from. Defaults to repository's default branch.
-
-        Returns:
-            A JSON-formatted string containing information about the created branch.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        resolved_source = repo.default_branch if source_branch is None else source_branch
-        sha = repo.get_git_ref(f"heads/{resolved_source}").object.sha
-        new_branch = repo.create_git_ref(f"refs/heads/{branch_name}", sha)
-        return json.dumps(
-            {
-                "name": branch_name,
-                "sha": new_branch.object.sha,
-                "url": f"{repo.html_url.rstrip('/')}/tree/{quote(branch_name, safe='/')}",
-            },
-            indent=2,
-        )
-
-    def set_default_branch(self, repo_name: str, branch_name: str) -> str:
-        """Set the default branch for a repository.
-
-        Args:
-            repo_name: The full name of the repository (e.g., 'owner/repo').
-            branch_name: The name of the branch to set as default.
-
-        Returns:
-            A JSON-formatted string with success message or error.
-
-        """
-        repo = self.g.get_repo(repo_name)
-        branches = [branch.name for branch in repo.get_branches()]
-        if branch_name not in branches:
-            return json.dumps({"error": f"Branch '{branch_name}' does not exist"})
-        repo.edit(default_branch=branch_name)
-        return json.dumps(
-            {
-                "message": f"Default branch changed to {branch_name}",
-                "repository": repo_name,
-                "default_branch": branch_name,
-            },
-            indent=2,
-        )
-
-    def search_code(
+    def _search_issues_and_prs(
         self,
         query: str,
-        language: str | None = None,
-        repo: str | None = None,
-        user: str | None = None,
-        path: str | None = None,
-        filename: str | None = None,
+        *,
+        state: str | None,
+        type_filter: str | None,
+        repo: str | None,
+        user: str | None,
+        label: str | None,
+        sort: str,
+        order: str,
+        page: int,
+        per_page: int,
     ) -> str:
-        """Search for code in GitHub repositories.
-
-        Args:
-            query: The search query.
-            language: Filter by language. Defaults to None.
-            repo: Filter by repository (e.g., 'owner/repo'). Defaults to None.
-            user: Filter by user or organization. Defaults to None.
-            path: Filter by file path. Defaults to None.
-            filename: Filter by filename. Defaults to None.
-
-        Returns:
-            A JSON-formatted string containing the search results.
-
-        """
-        parts = [query]
-        for key, value in (
-            ("language", language),
-            ("repo", repo),
-            ("user", user),
-            ("path", path),
-            ("filename", filename),
-        ):
-            if value:
-                parts.append(f"{key}:{value}")
-        search_query = " ".join(parts)
-
-        code_results = self.g.search_code(search_query)
-        results: list[dict[str, Any]] = []
-        for page_index in range(2):
-            if len(results) >= 60:
-                break
-            page_items = code_results.get_page(page_index)
-            if not page_items:
-                break
-            results.extend(
-                {
-                    "repository": code.repository.full_name,
-                    "path": code.path,
-                    "name": code.name,
-                    "sha": code.sha,
-                    "html_url": code.html_url,
-                    "git_url": code.git_url,
-                    "score": code.score,
-                }
-                for code in page_items
-            )
-        return json.dumps(
-            {
-                "query": search_query,
-                "total_count": code_results.totalCount,
-                "results_count": len(results),
-                "results": results,
-            },
-            indent=2,
-        )
-
-    def search_issues_and_prs(
-        self,
-        query: str,
-        state: str | None = None,
-        type_filter: str | None = None,
-        repo: str | None = None,
-        user: str | None = None,
-        label: str | None = None,
-        sort: str = "created",
-        order: str = "desc",
-        page: int = 1,
-        per_page: int = 30,
-    ) -> str:
-        """Search for issues and pull requests on GitHub.
-
-        Args:
-            query: The search query.
-            state: Filter by state ('open', 'closed'). Defaults to None.
-            type_filter: Filter by type ('issue', 'pr'). Defaults to None.
-            repo: Filter by repository (e.g., 'owner/repo'). Defaults to None.
-            user: Filter by user or organization. Defaults to None.
-            label: Filter by label. Defaults to None.
-            sort: Sort results by ('created', 'updated', 'comments'). Defaults to "created".
-            order: Sort order ('asc', 'desc'). Defaults to "desc".
-            page: Page number for pagination. Defaults to 1.
-            per_page: Number of results per page. Defaults to 30.
-
-        Returns:
-            A JSON-formatted string containing the search results.
-
-        """
-        parts = [unescape(query)]
+        parts = [cleaned] if (cleaned := unescape(query).strip()) else []
         # GitHub search has no state:all qualifier and returns nothing for it.
         if state and state != "all":
             parts.append(f"state:{state}")
@@ -1694,6 +1046,8 @@ class GithubTools(Toolkit):
             if value:
                 parts.append(f"{key}:{value}")
         search_query = " ".join(parts)
+        if not search_query:
+            return _missing_arg_error("query", "search_issues_and_prs")
 
         issue_results = self.g.search_issues(search_query, sort=sort, order=order)
         effective_per_page = min(per_page, 100)
@@ -1729,3 +1083,523 @@ class GithubTools(Toolkit):
             },
             indent=2,
         )
+
+    def _dispatch_numbered_issue_pr_read(
+        self,
+        action: _IssuePrReadAction,
+        repo_name: str,
+        number: int,
+        include_issue_comments: bool,
+    ) -> str | None:
+        handlers: dict[str, Callable[[], str]] = {
+            "get_issue": lambda: self._get_issue(repo_name, number),
+            "list_issue_comments": lambda: self._list_issue_comments(repo_name, number),
+            "get_pull_request": lambda: self._get_pull_request(repo_name, number),
+            "get_pull_request_changes": lambda: self._get_pull_request_changes(repo_name, number),
+            "get_pull_request_comments": lambda: self._get_pull_request_comments(
+                repo_name,
+                number,
+                include_issue_comments,
+            ),
+            "get_pull_request_with_details": lambda: self._get_pull_request_with_details(repo_name, number),
+        }
+        handler = handlers.get(action)
+        return None if handler is None else handler()
+
+    def github_read_issues_prs(  # noqa: PLR0911
+        self,
+        action: _IssuePrReadAction,
+        repo_name: str | None = None,
+        number: int | None = None,
+        query: str | None = None,
+        state: str | None = None,
+        type_filter: str | None = None,
+        user: str | None = None,
+        label: str | None = None,
+        base: str | None = None,
+        head: str | None = None,
+        include_issue_comments: bool = True,
+        sort: str = "created",
+        order: str = "desc",
+        page: int = 1,
+        per_page: int | None = None,
+    ) -> str:
+        """Read and search GitHub issues and pull requests.
+
+        - `list_issues`: issues in `repo_name` (`state` default `open`, `page`, `per_page` default 20)
+        - `get_issue`: issue details for `repo_name` and `number`
+        - `list_issue_comments`: comments on issue `number` in `repo_name`
+        - `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `page`, `per_page` default 50)
+        - `get_pull_request`: PR metadata for `repo_name` and `number`
+        - `get_pull_request_changes`: changed files and patches for PR `number` in `repo_name`
+        - `get_pull_request_comments`: comments on PR `number` in `repo_name` (`include_issue_comments`)
+        - `get_pull_request_with_details`: full PR details, comments, commits, and files for `repo_name` and `number`
+        - `get_pull_request_count`: count PRs in `repo_name` (`state` default `all`, optional `user` author, `base`, `head`)
+        - `search_issues_and_prs`: search by `query` (optional `repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` default 30)
+        """
+        if action not in _ISSUE_PR_READ_ACTIONS:
+            return _unsupported_action_error("issue/PR read", action)
+        if action == "search_issues_and_prs":
+            return self._search_issues_and_prs(
+                query or "",
+                state=state,
+                type_filter=type_filter,
+                repo=repo_name,
+                user=user,
+                label=label,
+                sort=sort,
+                order=order,
+                page=page,
+                per_page=30 if per_page is None else per_page,
+            )
+        if not repo_name:
+            return _missing_arg_error("repo_name", action)
+        if action == "list_issues":
+            return self._list_issues(repo_name, state or "open", page, 20 if per_page is None else per_page)
+        if action == "get_pull_requests":
+            return self._get_pull_requests(
+                repo_name,
+                state or "open",
+                sort,
+                order,
+                page,
+                50 if per_page is None else per_page,
+            )
+        if action == "get_pull_request_count":
+            return self._get_pull_request_count(repo_name, state=state or "all", author=user, base=base, head=head)
+        if number is None:
+            return _missing_arg_error("number", action)
+        if (
+            result := self._dispatch_numbered_issue_pr_read(action, repo_name, number, include_issue_comments)
+        ) is not None:
+            return result
+        return json.dumps({"error": f"Unsupported GitHub issue/PR read action: {action}"})
+
+    def _create_issue(self, repo_name: str, title: str, body: str | None) -> str:
+        repo = self.g.get_repo(repo_name)
+        issue = repo.create_issue(title=title) if body is None else repo.create_issue(title=title, body=body)
+        return json.dumps(
+            {
+                "id": issue.id,
+                "number": issue.number,
+                "title": issue.title,
+                "body": issue.body,
+                "url": issue.html_url,
+                "state": issue.state,
+                "created_at": issue.created_at.isoformat(),
+                "user": issue.user.login,
+            },
+            indent=2,
+        )
+
+    def _edit_issue(self, repo_name: str, issue_number: int, title: str | None, body: str | None) -> str:
+        if title is None and body is None:
+            return json.dumps({"error": f"Provide a title or body to update issue #{issue_number}."})
+        issue = self.g.get_repo(repo_name).get_issue(number=issue_number)
+        if title is None:
+            assert body is not None
+            issue.edit(body=body)
+        elif body is None:
+            issue.edit(title=title)
+        else:
+            issue.edit(title=title, body=body)
+        return json.dumps({"message": f"Issue #{issue_number} updated."}, indent=2)
+
+    def _comment_on_issue(self, repo_name: str, issue_number: int, body: str) -> str:
+        comment = self.g.get_repo(repo_name).get_issue(number=issue_number).create_comment(body=body)
+        return json.dumps(
+            {
+                "id": comment.id,
+                "body": comment.body,
+                "user": comment.user.login,
+                "created_at": comment.created_at.isoformat(),
+                "url": comment.html_url,
+            },
+            indent=2,
+        )
+
+    def _mutate_existing_issue(
+        self,
+        action: _IssueWriteAction,
+        repo_name: str,
+        issue_number: int,
+        *,
+        title: str | None,
+        body: str | None,
+        assignees: list[str] | None,
+        labels: list[str] | None,
+    ) -> str:
+        if action == "edit_issue":
+            return self._edit_issue(repo_name, issue_number, title, body)
+        if action == "comment_on_issue":
+            return (
+                self._comment_on_issue(repo_name, issue_number, body)
+                if body is not None
+                else _missing_arg_error("body", action)
+            )
+        if action == "assign_issue" and assignees is None:
+            return _missing_arg_error("assignees", action)
+        if action == "label_issue" and labels is None:
+            return _missing_arg_error("labels", action)
+        issue = self.g.get_repo(repo_name).get_issue(number=issue_number)
+        if action in ("close_issue", "reopen_issue"):
+            state = "closed" if action == "close_issue" else "open"
+            issue.edit(state=state)
+            message = f"Issue #{issue_number} {'closed' if state == 'closed' else 'reopened'}."
+        elif action == "assign_issue":
+            assert assignees is not None
+            issue.edit(assignees=cast("list[Any]", assignees))
+            message = f"Issue #{issue_number} assigned to {assignees}."
+        elif action == "label_issue":
+            assert labels is not None
+            issue.edit(labels=labels)
+            message = f"Labels {labels} added to issue #{issue_number}."
+        else:
+            return json.dumps({"error": f"Unsupported GitHub issue write action: {action}"})
+        return json.dumps({"message": message}, indent=2)
+
+    def github_write_issues(
+        self,
+        action: _IssueWriteAction,
+        repo_name: str,
+        issue_number: int | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        assignees: list[str] | None = None,
+        labels: list[str] | None = None,
+    ) -> str:
+        """Create, edit, comment on, close, reopen, assign, or label GitHub issues.
+
+        - `create_issue`: create issue in `repo_name` (`title`, optional `body`)
+        - `edit_issue`: update `title` and/or `body` on `issue_number`
+        - `comment_on_issue`: post `body` comment on `issue_number`
+        - `close_issue`: close `issue_number`
+        - `reopen_issue`: reopen `issue_number`
+        - `assign_issue`: assign `assignees` to `issue_number`
+        - `label_issue`: set `labels` on `issue_number`
+        """
+        if action not in _ISSUE_WRITE_ACTIONS:
+            return _unsupported_action_error("issue write", action)
+        if action == "create_issue":
+            return self._create_issue(repo_name, title, body) if title else _missing_arg_error("title", action)
+        if issue_number is None:
+            return _missing_arg_error("issue_number", action)
+        return self._mutate_existing_issue(
+            action,
+            repo_name,
+            issue_number,
+            title=title,
+            body=body,
+            assignees=assignees,
+            labels=labels,
+        )
+
+    def _create_pull_request(
+        self,
+        repo_name: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+        draft: bool,
+        maintainer_can_modify: bool,
+    ) -> str:
+        pr = self.g.get_repo(repo_name).create_pull(
+            title=title,
+            body=body,
+            head=head,
+            base=base,
+            draft=draft,
+            maintainer_can_modify=maintainer_can_modify,
+        )
+        return json.dumps(
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "body": pr.body,
+                "user": pr.user.login,
+                "state": pr.state,
+                "created_at": pr.created_at.isoformat(),
+                "html_url": pr.html_url,
+                "base": pr.base.ref,
+                "head": pr.head.ref,
+                "mergeable": pr.mergeable,
+            },
+            indent=2,
+        )
+
+    def _create_pull_request_comment(
+        self,
+        repo_name: str,
+        pr_number: int,
+        body: str,
+        commit_id: str,
+        path: str,
+        position: int,
+    ) -> str:
+        repo = self.g.get_repo(repo_name)
+        pr = repo.get_pull(pr_number)
+        commit = repo.get_commit(commit_id)
+        comment = pr.create_comment(body, commit, path, position)
+        return json.dumps(
+            {
+                "id": comment.id,
+                "body": comment.body,
+                "user": comment.user.login,
+                "created_at": comment.created_at.isoformat(),
+                "path": comment.path,
+                "position": comment.position,
+                "commit_id": comment.commit_id,
+                "url": comment.html_url,
+            },
+            indent=2,
+        )
+
+    def _edit_pull_request_comment(self, repo_name: str, comment_id: int, body: str) -> str:
+        repo = self.g.get_repo(repo_name)
+        target = next((comment for comment in repo.get_pulls_comments() if comment.id == comment_id), None)
+        if target is None:
+            return f"Could not find comment #{comment_id} in repository: {repo_name}"
+        target.edit(body)
+        return json.dumps(
+            {
+                "id": target.id,
+                "body": target.body,
+                "user": target.user.login,
+                "updated_at": target.updated_at.isoformat(),
+                "path": target.path,
+                "position": target.position,
+                "commit_id": target.commit_id,
+                "url": target.html_url,
+            },
+            indent=2,
+        )
+
+    def _create_review_request(
+        self,
+        repo_name: str,
+        pr_number: int,
+        reviewers: list[str],
+        team_reviewers: list[str] | None,
+    ) -> str:
+        pr = self.g.get_repo(repo_name).get_pull(pr_number)
+        pr.create_review_request(reviewers=reviewers, team_reviewers=team_reviewers or [])
+        return json.dumps(
+            {
+                "message": f"Review request created for PR #{pr_number}",
+                "requested_reviewers": reviewers,
+                "requested_team_reviewers": team_reviewers or [],
+            },
+            indent=2,
+        )
+
+    def github_write_pr(  # noqa: PLR0911
+        self,
+        action: _PrWriteAction,
+        repo_name: str,
+        pr_number: int | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        head: str | None = None,
+        base: str | None = None,
+        draft: bool = False,
+        maintainer_can_modify: bool = True,
+        commit_id: str | None = None,
+        path: str | None = None,
+        position: int | None = None,
+        comment_id: int | None = None,
+        reviewers: list[str] | None = None,
+        team_reviewers: list[str] | None = None,
+    ) -> str:
+        """Create pull requests, review comments, and review requests on GitHub.
+
+        - `create_pull_request`: open PR in `repo_name` (`title`, `body`, `head`, `base`, optional `draft`, `maintainer_can_modify`)
+        - `create_pull_request_comment`: post diff review comment on `pr_number` (`body`, `commit_id`, `path`, `position`)
+        - `edit_pull_request_comment`: update `comment_id` in `repo_name` with `body`
+        - `create_review_request`: request `reviewers` (and optional `team_reviewers`) on `pr_number`
+        """
+        if action not in _PR_WRITE_ACTIONS:
+            return _unsupported_action_error("PR write", action)
+        if action == "create_pull_request":
+            if not title or not head or not base:
+                return _missing_arg_error("title, head, and base", action)
+            return self._create_pull_request(repo_name, title, body or "", head, base, draft, maintainer_can_modify)
+        if action == "create_pull_request_comment":
+            if pr_number is None or body is None or not commit_id or not path or position is None:
+                return _missing_arg_error("pr_number, body, commit_id, path, and position", action)
+            return self._create_pull_request_comment(repo_name, pr_number, body, commit_id, path, position)
+        if action == "edit_pull_request_comment":
+            if comment_id is None or body is None:
+                return _missing_arg_error("comment_id and body", action)
+            return self._edit_pull_request_comment(repo_name, comment_id, body)
+        if action == "create_review_request":
+            if pr_number is None or reviewers is None:
+                return _missing_arg_error("pr_number and reviewers", action)
+            return self._create_review_request(repo_name, pr_number, reviewers, team_reviewers)
+        return json.dumps({"error": f"Unsupported GitHub PR write action: {action}"})
+
+    def _create_repository(
+        self,
+        name: str,
+        private: bool,
+        description: str | None,
+        auto_init: bool,
+        organization: str | None,
+    ) -> str:
+        owner: Any = self.g.get_organization(organization) if organization else self.g.get_user()
+        repo = owner.create_repo(
+            name=name,
+            private=private,
+            description=description if description is not None else "",
+            auto_init=auto_init,
+        )
+        return json.dumps(
+            {
+                "name": repo.full_name,
+                "url": repo.html_url,
+                "private": repo.private,
+                "description": repo.description,
+            },
+            indent=2,
+        )
+
+    def _create_branch(self, repo_name: str, branch: str, source_branch: str | None) -> str:
+        repo = self.g.get_repo(repo_name)
+        resolved_source = repo.default_branch if source_branch is None else source_branch
+        sha = repo.get_git_ref(f"heads/{resolved_source}").object.sha
+        new_branch = repo.create_git_ref(f"refs/heads/{branch}", sha)
+        return json.dumps(
+            {
+                "name": branch,
+                "sha": new_branch.object.sha,
+                "url": f"{repo.html_url.rstrip('/')}/tree/{quote(branch, safe='/')}",
+            },
+            indent=2,
+        )
+
+    def _set_default_branch(self, repo_name: str, branch: str) -> str:
+        repo = self.g.get_repo(repo_name)
+        if branch not in [item.name for item in repo.get_branches()]:
+            return json.dumps({"error": f"Branch '{branch}' does not exist"})
+        repo.edit(default_branch=branch)
+        return json.dumps(
+            {
+                "message": f"Default branch changed to {branch}",
+                "repository": repo_name,
+                "default_branch": branch,
+            },
+            indent=2,
+        )
+
+    def _write_repo_file(
+        self,
+        action: Literal["create_file", "update_file", "delete_file"],
+        repo_name: str,
+        path: str,
+        message: str,
+        *,
+        content: str | None,
+        sha: str | None,
+        branch: str | None,
+    ) -> str:
+        repo = self.g.get_repo(repo_name)
+        if action == "create_file":
+            if content is None:
+                return _missing_arg_error("content", action)
+            content_bytes = content.encode("utf-8")
+            result = (
+                repo.create_file(path=path, message=message, content=content_bytes)
+                if branch is None
+                else repo.create_file(path=path, message=message, content=content_bytes, branch=branch)
+            )
+            return _format_content_write_result(
+                cast("_ContentWriteResult", result["content"]),
+                cast("_CommitWriteResult", result["commit"]),
+                message,
+            )
+        if not sha:
+            return _missing_arg_error("sha", action)
+        if action == "update_file":
+            if content is None:
+                return _missing_arg_error("content", action)
+            content_bytes = content.encode("utf-8")
+            result = (
+                repo.update_file(path=path, message=message, content=content_bytes, sha=sha)
+                if branch is None
+                else repo.update_file(path=path, message=message, content=content_bytes, sha=sha, branch=branch)
+            )
+            return _format_content_write_result(
+                cast("_ContentWriteResult", result["content"]),
+                cast("_CommitWriteResult", result["commit"]),
+                message,
+            )
+        result = (
+            repo.delete_file(path=path, message=message, sha=sha)
+            if branch is None
+            else repo.delete_file(path=path, message=message, sha=sha, branch=branch)
+        )
+        commit_result = cast("_CommitWriteResult", result["commit"])
+        return json.dumps(
+            {
+                "message": f"File {path} deleted successfully",
+                "commit": {
+                    "sha": commit_result.sha,
+                    "message": message,
+                    "url": commit_result.html_url,
+                },
+            },
+            indent=2,
+        )
+
+    def github_write_repo(  # noqa: PLR0911
+        self,
+        action: _RepoWriteAction,
+        repo_name: str | None = None,
+        name: str | None = None,
+        branch: str | None = None,
+        source_branch: str | None = None,
+        path: str | None = None,
+        content: str | None = None,
+        message: str | None = None,
+        sha: str | None = None,
+        private: bool = False,
+        description: str | None = None,
+        auto_init: bool = False,
+        organization: str | None = None,
+    ) -> str:
+        """Create/delete repositories, manage branches, and create/update/delete repository files.
+
+        - `create_repository`: create repo `name` (optional `private`, `description`, `auto_init`, `organization`)
+        - `delete_repository`: permanently delete `repo_name`
+        - `create_branch`: create `branch` in `repo_name` (optional `source_branch`, defaults to default branch)
+        - `set_default_branch`: set `repo_name` default branch to `branch`
+        - `create_file`: create `path` in `repo_name` (`content`, `message`, optional `branch`)
+        - `update_file`: update `path` in `repo_name` (`content`, `message`, `sha`, optional `branch`)
+        - `delete_file`: delete `path` in `repo_name` (`message`, `sha`, optional `branch`)
+        """
+        if action not in _REPO_WRITE_ACTIONS:
+            return _unsupported_action_error("repo write", action)
+        if action == "create_repository":
+            return (
+                self._create_repository(name, private, description, auto_init, organization)
+                if name
+                else _missing_arg_error("name", action)
+            )
+        if not repo_name:
+            return _missing_arg_error("repo_name", action)
+        if action == "delete_repository":
+            self.g.get_repo(repo_name).delete()
+            return json.dumps({"message": f"Repository {repo_name} deleted successfully"}, indent=2)
+        if action in ("create_branch", "set_default_branch"):
+            if not branch:
+                return _missing_arg_error("branch", action)
+            return (
+                self._create_branch(repo_name, branch, source_branch)
+                if action == "create_branch"
+                else self._set_default_branch(repo_name, branch)
+            )
+        if action in ("create_file", "update_file", "delete_file"):
+            if not path or not message:
+                return _missing_arg_error("path and message", action)
+            return self._write_repo_file(action, repo_name, path, message, content=content, sha=sha, branch=branch)
+        return json.dumps({"error": f"Unsupported GitHub repo write action: {action}"})

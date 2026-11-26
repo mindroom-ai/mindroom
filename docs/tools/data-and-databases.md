@@ -254,21 +254,14 @@ agents:
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.
 
-| Function | What it does |
-| --- | --- |
-| `google_drive_list_files()` | Lists recently modified files. |
-| `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
-| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None, convert_to=None)` | Uploads a local file; relative paths start at the agent workspace. With `convert_to` set to `document`, `spreadsheet`, or `presentation`, Drive converts the file into a Google Doc, Sheet, or Slides file. |
-| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing file, which keeps its ID, link, and sharing. |
-| `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
-| `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
-| `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
+| Function | Actions | What it does |
+| --- | --- | --- |
+| `google_drive_read(action, ...)` | `list`, `search`, `read`, `download` | Lists recently modified files, searches metadata with a Drive `query` such as `name contains 'budget'`, returns Google Docs, Sheets, Slides, Apps Script, and plain-text files up to `max_read_size` as text, or saves `file_id` into `google-drive-downloads/<file id>/` in the agent workspace (exporting Workspace files to a native format or `export_format`). |
+| `google_drive_write(action, ...)` | `upload`, `update`, `create_folder`, `move`, `trash` | Uploads `local_path` (with optional `parent_id`, `name`, `mime_type`, `convert_to` `document`/`spreadsheet`/`presentation`), replaces contents of `file_id` keeping its ID and sharing, creates folders, moves or renames files, or moves a file to trash (never permanent delete). |
 
-Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Use `google_drive_read(action="read", ...)` to read a document or text file, and `google_drive_read(action="download", ...)` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
 Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
-When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
+When `google_drive_read(action="read", ...)` refuses a file and the `download` action is enabled, the error suggests `google_drive_read(action="download")` if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
@@ -282,28 +275,20 @@ Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `list_files` | `boolean` | `true` | Enable file listing. |
-| `search_files` | `boolean` | `true` | Enable metadata search. |
-| `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
-| `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
+| `list_files` | `boolean` | `true` | Enable `google_drive_read(action="list")`. |
+| `search_files` | `boolean` | `true` | Enable `google_drive_read(action="search")`. |
+| `read_file` | `boolean` | `true` | Enable `google_drive_read(action="read")`. |
+| `download_file` | `boolean` | `true` | Enable `google_drive_read(action="download")` into the agent workspace. |
+| `write` | `boolean` | `true` | Enable `google_drive_write()` (`upload`, `update`, `create_folder`, `move`, and `trash`); `false` removes it. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read(action="read")` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_read(action="download")` saves, in bytes. |
 
-To require a person to approve each Drive change, add [Tool Approval](../tool-approval.md) rules:
+To require a person to approve each Drive change, add a [Tool Approval](../tool-approval.md) rule:
 
 ```yaml
 tool_approval:
   rules:
-    - match: google_drive_upload_file
-      action: require_approval
-    - match: google_drive_update_file
-      action: require_approval
-    - match: google_drive_create_folder
-      action: require_approval
-    - match: google_drive_move_file
-      action: require_approval
-    - match: google_drive_trash_file
+    - match: google_drive_write
       action: require_approval
 ```
 
@@ -332,21 +317,31 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 ## [`google_sheets`]
 
-`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, `update_sheet(data, spreadsheet_id=None, range_name=None)`, and `batch_update_sheet(spreadsheet_id, requests)`.
-When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
-`update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
-`update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
-`batch_update_sheet()` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
-`batch_update_sheet()` can also delete sheets, rows, and ranges, and a [Tool Approval](../tool-approval.md) rule for `update_sheet` does not match it; a `*update_sheet` rule matches both, including the prefixed names of additional Google workspace accounts.
+`google_sheets` provides `google_sheets_read(spreadsheet_id=None, spreadsheet_range=None)` and `google_sheets_write(action, ...)` with actions `create`, `update`, and `batch_update`.
+When `spreadsheet_id` or `spreadsheet_range` is configured, `google_sheets_read()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
+`google_sheets_write(action="update", ...)` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
+`google_sheets_write(action="update", ...)` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+`google_sheets_write(action="batch_update", ...)` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
+`google_sheets_write(action="batch_update", ...)` can also delete sheets, rows, and ranges; add exact [Tool Approval](../tool-approval.md) rules for `google_sheets_write` and for each prefixed workspace function (such as `work_google_sheets_write`) to gate every Sheets write action:
+
+```yaml
+tool_approval:
+  rules:
+    - match: google_sheets_write
+      action: require_approval
+    - match: work_google_sheets_write
+      action: require_approval
+```
+
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `spreadsheet_id` | `text` | `null` | Spreadsheet ID used by every `read_sheet()` call. |
-| `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
-| `read` | `boolean` | `true` | Enable `read_sheet()`. |
-| `create` | `boolean` | `true` | Enable `create_sheet()`. |
-| `update` | `boolean` | `true` | Enable `update_sheet()` and `batch_update_sheet()`. |
+| `spreadsheet_id` | `text` | `null` | Spreadsheet ID used by every `google_sheets_read()` call. |
+| `spreadsheet_range` | `text` | `null` | Range used by every `google_sheets_read()` call, such as `Sheet1!A1:Z100`. |
+| `read` | `boolean` | `true` | Enable `google_sheets_read()`. |
+| `create` | `boolean` | `true` | Enable `google_sheets_write(action="create")`. |
+| `update` | `boolean` | `true` | Enable `google_sheets_write()` `update` and `batch_update` actions. |
 
 ```yaml
 agents:

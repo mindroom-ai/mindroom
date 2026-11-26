@@ -1273,3 +1273,40 @@ async def test_cli_exit_of_a_paused_reply_already_ended_does_nothing(tmp_path: P
     assert observer.notes == []
     assert observer.expire.await_count == 0
     assert observer.wakes == []
+
+
+async def test_resumed_span_stop_during_context_refresh_settles_without_turn_resumed(tmp_path: Path) -> None:
+    """A span Stop during approval context refresh cancels refresh, settles as user-stopped, and emits no turn resume."""
+    bot = _new_bot(tmp_path)
+    started = asyncio.Event()
+
+    async def hung_refresh(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    execute = AsyncMock()
+    with _observed(bot) as observer:
+        task = asyncio.create_task(
+            _resume(bot, execute, refresh_mid_turn_context_for_approval=AsyncMock(side_effect=hung_refresh)),
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+        reply = await _store(bot).replies.for_event("$waiting")
+        assert reply is not None
+        assert reply.current_span_id is not None
+        assert bot._reply_runtime.spans.cancel(reply.current_span_id, cancel_source="user_stop") is True
+        returned = await asyncio.wait_for(task, timeout=2)
+
+    assert returned is False
+    execute.assert_not_awaited()
+    observer.lifecycle.start_turn.assert_not_awaited()
+    assert await _outcome(bot, observer) == _settled(
+        NoteKind.CANCELLED,
+        _STOP.reason,
+        ReplyState.CANCELLED,
+        finalized=0,
+    )
+    settled_reply = await _store(bot).replies.for_event("$waiting")
+    assert settled_reply is not None
+    assert settled_reply.current_span_id is None
+    assert bot._reply_runtime.spans.live_span_ids() == frozenset()
+    assert not bot._reply_runtime.spans.claimed_span_ids()

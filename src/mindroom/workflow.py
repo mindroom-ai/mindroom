@@ -1,6 +1,6 @@
 """The workflow SDK: what a workflow script imports, running in the script's own process.
 
-Standard library only, plus the launch contract.
+Standard library only, plus the shared script gateway transport.
 MindRoom calls `main(args)`; every SDK call inside it is one saved node of the run.
 """
 
@@ -10,24 +10,25 @@ import base64
 import difflib
 import functools
 import hashlib
-import http.client
 import json
 import math
-import os
 import sys
 import threading
 import time
 import traceback
 import types
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast
 
-from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
+from mindroom.script_runs.transport import (
+    GatewayDecodeError,
+    GatewayHTTPError,
+    GatewayTransportError,
+    ScriptGatewayTransport,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -173,9 +174,8 @@ class _Gateway:
     """Blocking client of the attempt's workflow routes on the script gateway."""
 
     def __init__(self) -> None:
-        run_id = urllib.parse.quote(os.environ[RUN_ID_ENV], safe="")
-        self._base = f"{os.environ[GATEWAY_URL_ENV].rstrip('/')}/workflow/{run_id}"
-        self._token = Path(os.environ[TOKEN_PATH_ENV]).read_text(encoding="utf-8").strip()
+        self._transport = ScriptGatewayTransport(timeout_seconds=_HTTP_TIMEOUT_SECONDS)
+        self._prefix = f"workflow/{urllib.parse.quote(self._transport.run_id, safe='')}"
 
     def _request(
         self,
@@ -185,30 +185,21 @@ class _Gateway:
         *,
         state: str | None = None,
     ) -> object:
-        data = None if body is None else json.dumps(body, allow_nan=False, separators=(",", ":")).encode()
+        headers = None if state is None else {"X-Workflow-State": state}
         faults = 0
         while True:
-            headers = {
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type": "application/json",
-                **({"X-Workflow-State": state} if state is not None else {}),
-            }
-            request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
-                f"{self._base}/{route}",
-                data=data,
-                headers=headers,
-                method=method,
-            )
             try:
-                with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310
-                    return json.loads(response.read())
-            except urllib.error.HTTPError as exc:
+                return self._transport.request_json(method, f"{self._prefix}/{route}", body, headers=headers)
+            except GatewayHTTPError as exc:
                 # A plain 500 that repeats is a fault of MindRoom, not a restart: any other 5xx says to try again.
-                faults = faults + 1 if exc.code == http.client.INTERNAL_SERVER_ERROR else 0
-                if exc.code < http.client.INTERNAL_SERVER_ERROR or faults > _MAX_SERVER_FAULTS:
-                    raise _refusal(exc, route=route, sent_bytes=len(data or b"")) from None
-            except (urllib.error.URLError, OSError, http.client.HTTPException):
+                faults = faults + 1 if exc.status == 500 else 0
+                if exc.status < 500 or faults > _MAX_SERVER_FAULTS:
+                    raise _refusal(exc, route=route) from None
+            except GatewayTransportError:
                 pass
+            except GatewayDecodeError:
+                msg = "MindRoom returned an invalid JSON response."
+                raise WorkflowError(msg) from None
             # A restarting gateway looks like this; the node's outcome is saved there, so asking again is safe.
             time.sleep(_RETRY_SECONDS)
 
@@ -243,17 +234,14 @@ class _Gateway:
         self._request("POST", "finish", {"result": result} if error is None else {"error": error})
 
 
-def _refusal(exc: urllib.error.HTTPError, *, route: str, sent_bytes: int) -> BaseException:
+def _refusal(exc: GatewayHTTPError, *, route: str) -> BaseException:
     """Turn a refusal into what the script should see; a superseded attempt must stop acting."""
-    if exc.code == http.client.CONFLICT:
+    if exc.status == 409:
         return SystemExit(_SUPERSEDED_EXIT_CODE)
-    try:
-        answer = json.loads(exc.read())
-    except ValueError:
-        answer = None
-    details: dict[str, object] = answer if isinstance(answer, dict) else {}
-    if exc.code == http.client.REQUEST_ENTITY_TOO_LARGE:
-        size = details.get("bytes", sent_bytes)
+    details = exc.payload or {}
+    if exc.status == 413:
+        raw_size = details.get("bytes")
+        size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else exc.sent_bytes
         raw_limit = details.get("limit")
         if isinstance(raw_limit, int) and raw_limit > 0:
             limit = f"{raw_limit // (1024 * 1024)} MiB" if raw_limit % (1024 * 1024) == 0 else f"{raw_limit:,} bytes"
@@ -266,7 +254,7 @@ def _refusal(exc: urllib.error.HTTPError, *, route: str, sent_bytes: int) -> Bas
         return WorkflowError(
             f"Request is {size:,} bytes, limit {limit}. Write the inputs to a workspace file and pass the path.",
         )
-    return WorkflowError(f"MindRoom refused the request ({exc.code}): {details.get('detail', exc.reason)}")
+    return WorkflowError(f"MindRoom refused the request ({exc.status}): {exc.detail or exc.reason}")
 
 
 @functools.cache

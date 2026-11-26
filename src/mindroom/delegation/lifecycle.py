@@ -45,7 +45,7 @@ from mindroom.delegation.workers import child_placement
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.failure_text import failure_text
 from mindroom.live_frames import subagents as subagent_frames
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -553,6 +553,9 @@ async def observe_child_event(event: RunEvent) -> None:
         started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
         _report_child_activity(observation, f"\nCalling {event.call.tool_name} (started {started} UTC)\n")
         _publish(delegation_id, lambda feed: feed.tool_started(event, now=started_at))
+    elif isinstance(event, ToolProgress):
+        _publish(delegation_id, lambda feed: feed.tool_progress(event.tool_call_id, event.text))
+        return
     elif isinstance(event, RunFinished):
         if not observation.owns(record := event.record):
             return

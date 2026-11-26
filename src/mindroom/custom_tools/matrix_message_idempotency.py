@@ -34,9 +34,9 @@ _MAX_PENDING_RECORDS = 1_024
 _MAX_STORE_BYTES = 16 * 1024 * 1024
 # https://spec.matrix.org/latest/appendices/#event-ids limits IDs to 255 UTF-8 bytes.
 _MAX_EVENT_ID_BYTES = 255
-# Six JSON escape bytes per event-ID byte plus a float timestamp fit in 2 KiB.
+# Six JSON escape bytes per event-ID byte for event_id and title_event_id plus a float timestamp fit in 4 KiB.
 # Reserve this for each pending row in addition to its current serialized size.
-_RECEIPT_RESERVE_BYTES = 2048
+_RECEIPT_RESERVE_BYTES = 4096
 _CAPACITY_ERROR = (
     "Matrix message send capacity is exhausted; retry existing keys or wait for completed receipts to expire."
 )
@@ -57,8 +57,10 @@ class _Intent(BaseModel):
     recipient_user_id: str | None
     thread_id: str | None
     starts_thread: bool
+    title: str | None = None
     event_id: str | None = None
     completed_at: float | None = None
+    title_event_id: str | None = None
 
 
 class _State(BaseModel):
@@ -87,8 +89,19 @@ def _check_admission(state: _State) -> None:
         raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
 
 
-def _write(path: Path, state: _State) -> None:
+def _serialize_state(state: _State) -> dict[str, Any]:
+    """Serialize state while omitting null title fields so untitled v1 receipts stay rollback-compatible."""
     payload = state.model_dump(mode="json")
+    for row in payload["sends"].values():
+        if row["title"] is None:
+            row.pop("title")
+        if row["title_event_id"] is None:
+            row.pop("title_event_id")
+    return payload
+
+
+def _write(path: Path, state: _State) -> None:
+    payload = _serialize_state(state)
     if _serialized_size(payload) > _MAX_STORE_BYTES:
         raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
     write_json_file_durable(path, payload, strict_atomic_replace=True)
@@ -109,6 +122,10 @@ def _read(path: Path, scope: tuple[str, str, str]) -> _State:
         or any(
             (intent.payload is None) != (intent.event_id is not None)
             or (intent.completed_at is not None) != (intent.event_id is not None)
+            or (
+                intent.title_event_id is not None
+                and (not intent.title_event_id or intent.event_id is None or intent.title is None)
+            )
             or not intent.sender_id
             or not intent.device_id
             or not intent.transaction_id
@@ -134,6 +151,12 @@ class MatrixMessageSendClaim:
     path: Path
     state: _State
     key: str
+    _root_timeout: asyncio.Timeout | None = None
+
+    @property
+    def title_timeout_seconds(self) -> float:
+        """Return the bounded deadline for best-effort initial title delivery."""
+        return _CLAIM_TIMEOUT_SECONDS
 
     @property
     def intent(self) -> _Intent | None:
@@ -148,6 +171,7 @@ class MatrixMessageSendClaim:
         recipient_user_id: str | None,
         thread_id: str | None,
         starts_thread: bool,
+        title: str | None = None,
     ) -> None:
         """Persist exactly the payload Matrix will receive before attempting delivery."""
         context = self.context
@@ -165,9 +189,10 @@ class MatrixMessageSendClaim:
             recipient_user_id=recipient_user_id,
             thread_id=thread_id,
             starts_thread=starts_thread,
+            title=title,
         )
         reserved_size = (
-            _serialized_size(self.state.model_dump(mode="json")) + _pending_count(self.state) * _RECEIPT_RESERVE_BYTES
+            _serialized_size(_serialize_state(self.state)) + _pending_count(self.state) * _RECEIPT_RESERVE_BYTES
         )
         if reserved_size > _MAX_STORE_BYTES:
             raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
@@ -204,7 +229,27 @@ class MatrixMessageSendClaim:
         # A prior replace may have succeeded before its directory fsync failed.
         # Re-publish even an existing receipt before reporting durable success.
         await run_blocking_until_complete(_write, self.path, self.state)
+        if self._root_timeout is not None:
+            self._root_timeout.reschedule(None)
         return intent.event_id, intent.event_id if intent.starts_thread else intent.thread_id
+
+    async def record_title(self, title_event_id: str) -> None:
+        """Persist the initial thread title event ID on an already-delivered receipt."""
+        intent = self.intent
+        assert intent is not None
+        if intent.event_id is None or intent.title is None:
+            msg = "Cannot record a thread title receipt without a delivered titled send."
+            raise MatrixMessageIdempotencyError(msg)
+        if not title_event_id or len(title_event_id.encode("utf-8")) > _MAX_EVENT_ID_BYTES:
+            msg = "Matrix returned an invalid title event ID."
+            raise MatrixMessageIdempotencyError(msg)
+        previous_title_event_id = intent.title_event_id
+        intent.title_event_id = title_event_id
+        try:
+            await run_blocking_until_complete(_write, self.path, self.state)
+        except Exception:
+            intent.title_event_id = previous_title_event_id
+            raise
 
 
 @asynccontextmanager
@@ -212,6 +257,8 @@ async def _claim_matrix_message_send(
     context: ToolRuntimeContext,
     room_id: str,
     idempotency_key: str,
+    *,
+    root_timeout: asyncio.Timeout | None = None,
 ) -> AsyncIterator[MatrixMessageSendClaim]:
     """Serialize one requester/agent/room store across tasks and processes."""
     root = context.runtime_paths.control_state_root
@@ -244,7 +291,7 @@ async def _claim_matrix_message_send(
         key = _digest(idempotency_key)
         if key not in state.sends:
             _check_admission(state)
-        yield MatrixMessageSendClaim(context, path, state, key)
+        yield MatrixMessageSendClaim(context, path, state, key, _root_timeout=root_timeout)
 
 
 @asynccontextmanager
@@ -255,8 +302,13 @@ async def claim_matrix_message_send(
 ) -> AsyncIterator[MatrixMessageSendClaim]:
     """Bound lock wait, preparation, and transport while allowing durable writes to settle."""
     try:
-        async with asyncio.timeout(_CLAIM_TIMEOUT_SECONDS):
-            async with _claim_matrix_message_send(context, room_id, idempotency_key) as claim:
+        async with asyncio.timeout(_CLAIM_TIMEOUT_SECONDS) as root_timeout:
+            async with _claim_matrix_message_send(
+                context,
+                room_id,
+                idempotency_key,
+                root_timeout=root_timeout,
+            ) as claim:
                 yield claim
     except TimeoutError as exc:
         msg = "Idempotent Matrix send timed out; retry with the same idempotency_key."

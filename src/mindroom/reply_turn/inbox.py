@@ -7,6 +7,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.orchestration.runtime import request_task_cancel
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -16,6 +17,7 @@ from mindroom.response_shutdown_diagnostics import (
     context_with_response_shutdown_trace,
 )
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, ORDERLY_SHUTDOWN, ResponseShutdownTimeoutError
+from mindroom.turn_record import RevisionSnapshotChangedError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -172,6 +174,14 @@ class InboxResponses:
         if isinstance(error, ResponseAdmissionRefusedError):
             # The Matrix callback awaiting this pre-lock task surfaces the
             # refusal into sync-checkpoint failure accounting.
+            return
+        if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
+            self.logger.info(
+                "inbox_response_task_retrying",
+                task_name=task.get_name(),
+                exception_type=error.__class__.__name__,
+                error=str(error),
+            )
             return
         if error is not None:
             self.logger.error(

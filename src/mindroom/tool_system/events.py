@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -77,6 +78,8 @@ class ToolTraceEntry:
     # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
     # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.
     call: ReportedCall | None = field(default=None, compare=False, repr=False)
+    # Unix seconds when the tool call started in a live stream; only live frames emit it, never durable writes.
+    started_at: float | None = field(default=None, compare=False)
 
 
 @dataclass(slots=True)
@@ -139,6 +142,7 @@ class StreamingToolTracker:
             return "", None
         visible_text, trace_entry = format_tool_started_event(call, tool_index=tool_index, origin=origin)
         trace_entry.member_id = member_id
+        trace_entry.started_at = time.time()
         self.pending_tools.append(
             _PendingStreamingTool(
                 member_id=member_id,

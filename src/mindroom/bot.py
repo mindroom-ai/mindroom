@@ -581,6 +581,7 @@ class AgentBot:
             # `_settle_reply_debt_later` and `_reply_row_resolved`.
             approval_ended=self._settle_reply_debt_later,
             reply_stopped=partial(cancel_stopped_reply_jobs, self.runtime_paths),
+            release_sources=self._journal_dispatcher.release_delivered_turn_sources,
         )
 
         async def should_suppress_final_push(

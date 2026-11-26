@@ -574,7 +574,9 @@ def _record_answer(
             **resolved_context.record_kwargs(),
         )
         return
-    if not resolved_context.config.debug.log_llm_requests:
+    runtime_context = get_tool_runtime_context()
+    log_config = runtime_context.current_config if runtime_context is not None else resolved_context.config
+    if not log_config.debug.log_llm_requests:
         return
     record_tool_success(
         tool_name=tool_name,

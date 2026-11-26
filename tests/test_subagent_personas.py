@@ -380,12 +380,12 @@ def test_render_profile_listing_empty() -> None:
 
 def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
     """Toolkit and toolkit.function entries pass when the caller has the toolkit."""
-    _validate_persona_tools(("filesystem", "gmail.search_emails"), _toolkits("filesystem", "gmail"), cap=None)
+    _validate_persona_tools(("filesystem", "gmail.gmail_read"), _toolkits("filesystem", "gmail"), cap=None)
     _validate_persona_tools(None, _toolkits("filesystem"), cap=None)
     _validate_persona_tools((), _toolkits(), cap=None)
 
 
-@pytest.mark.parametrize("entry", ["shell", "gmail.send_email_x", "gmail.", ".search_emails"])
+@pytest.mark.parametrize("entry", ["shell", "gmail.gmail_send_x", "gmail.", ".gmail_read"])
 def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str) -> None:
     """Entries outside the caller's toolkits, or unknown functions, fail with the available names."""
     with pytest.raises(_PersonaError) as error:
@@ -395,10 +395,10 @@ def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str)
 
 def test_persona_allows_whole_toolkits_and_single_functions() -> None:
     """Toolkit entries keep every function of that concrete toolkit; function entries keep one."""
-    entries = ("gmail.search_emails", "filesystem")
+    entries = ("gmail.gmail_read", "filesystem")
     assert persona_allows(entries, "filesystem", "read_file")
-    assert persona_allows(entries, "gmail", "search_emails")
-    assert not persona_allows(entries, "gmail", "send_email")
+    assert persona_allows(entries, "gmail", "gmail_read")
+    assert not persona_allows(entries, "gmail", "gmail_send")
     assert not persona_allows(entries, "shell", "run_shell_command")
 
 
@@ -409,7 +409,7 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
         return function.name != "write_file"
 
     visible, disabled = persona_tool_policy(
-        ("gmail.search_emails", "filesystem"),
+        ("gmail.gmail_read", "filesystem"),
         lambda: ["filesystem", "gmail", "shell"],
         caller_filter,
     )
@@ -425,14 +425,12 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
 
 def test_function_level_cap_admits_only_named_functions() -> None:
     """A cap that names one function admits that function, not its whole toolkit or a sibling."""
-    cap = ("gmail.search_emails", "filesystem")
-    _validate_persona_tools(("gmail.search_emails", "filesystem"), _toolkits("gmail", "filesystem"), cap)
-    for entry in ("gmail", "gmail.send_email", "calculator"):
+    cap = ("gmail.gmail_read", "filesystem")
+    _validate_persona_tools(("gmail.gmail_read", "filesystem"), _toolkits("gmail", "filesystem"), cap)
+    for entry in ("gmail", "gmail.gmail_send", "calculator"):
         with pytest.raises(_PersonaError) as error:
             _validate_persona_tools((entry,), _toolkits("gmail", "filesystem", "calculator"), cap)
-        assert (
-            str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, filesystem."
-        )
+        assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.gmail_read, filesystem."
 
 
 def test_mcp_function_entries_are_not_checked_against_bridge_metadata() -> None:

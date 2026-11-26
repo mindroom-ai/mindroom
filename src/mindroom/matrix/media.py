@@ -518,7 +518,8 @@ async def download_mxc_bytes(
     """Download one MXC payload, abandoning it as soon as it passes ``max_bytes``.
 
     nio's ``download`` holds the whole body before a caller can measure it, so this streams it instead.
-    ``request_timeout`` overrides the client's total request timeout; ``0`` disables it.
+    ``request_timeout`` overrides the client's total request timeout; ``0`` removes the total cap while
+    ``MindRoomAsyncClient`` still bounds connect and read stalls by ``request_timeout``.
     """
     server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
     if not mxc_url.startswith("mxc://") or not server_name or not separator or not media_id:

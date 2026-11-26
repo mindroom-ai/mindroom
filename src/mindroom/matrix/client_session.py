@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import aiohttp
 import nio
+from nio.client.async_client import client_session
 from nio.client.base_client import logged_in_async
 
 from mindroom.constants import (
@@ -26,6 +27,8 @@ from mindroom.tls_trust import verifying_ssl_context
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
     from pathlib import Path
+
+    from nio.client.async_client import AsyncDataT
 
 
 logger = get_logger(__name__)
@@ -98,23 +101,73 @@ class MindRoomAsyncClient(nio.AsyncClient):
         """Return whether orderly shutdown permanently closed new transport."""
         return self._process_shutdown_transport_fenced
 
-    async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        """Prepare dynamic request headers before every transport attempt."""
+    async def send(
+        self,
+        method: str,
+        path: str,
+        data: None | str | AsyncDataT = None,
+        headers: dict[str, str] | None = None,
+        trace_context: object = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - nio's request timeout parameter
+    ) -> aiohttp.ClientResponse:
+        """Prepare dynamic request headers before every transport attempt and bound ``timeout=0`` requests."""
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
-        headers = self.config.custom_headers
-        if isinstance(headers, _AsyncRequestHeaders):
-            await headers.prepare()
+        custom_headers = self.config.custom_headers
+        if isinstance(custom_headers, _AsyncRequestHeaders):
+            await custom_headers.prepare()
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
         # nio retries connection errors while logging only "Timed out", so name the real cause here.
         try:
-            response = await super().send(*args, **kwargs)
+            if timeout == 0 and not isinstance(timeout, bool) and self.config.request_timeout > 0:
+                response = await self._send_without_total_timeout(
+                    method,
+                    path,
+                    data=data,
+                    headers=headers,
+                    trace_context=trace_context,
+                )
+            else:
+                response = await super().send(method, path, data, headers, trace_context, timeout)
         except (aiohttp.ClientConnectionError, TimeoutError) as exc:
             self._log_transport_failure(exc)
             raise
         self._transport_failure_logged = False
         return response
+
+    @client_session
+    async def _send_without_total_timeout(
+        self,
+        method: str,
+        path: str,
+        *,
+        data: None | str | AsyncDataT,
+        headers: dict[str, str] | None,
+        trace_context: object,
+    ) -> aiohttp.ClientResponse:
+        """Send one ``timeout=0`` request with no total cap while still bounding connect and read stalls."""
+        assert self.client_session is not None
+        request_headers = dict(headers) if headers is not None else {}
+        if self.config.custom_headers is not None:
+            request_headers.update(self.config.custom_headers)
+        bound = self.config.request_timeout
+        request_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=bound,
+            sock_connect=bound,
+            sock_read=bound,
+        )
+        request_ssl = self.ssl if self.ssl is not None else True
+        return await self.client_session.request(
+            method,
+            self.homeserver + path,
+            data=data,
+            ssl=request_ssl,
+            headers=request_headers,
+            trace_request_ctx=trace_context,
+            timeout=request_timeout,
+        )
 
     @logged_in_async
     async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:

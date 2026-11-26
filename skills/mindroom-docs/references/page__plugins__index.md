@@ -975,7 +975,7 @@ To set up a workspace:
 
 When a workspace tool needs a login, it returns its own chat authorization link.
 Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
-Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
+Functions are prefixed, such as `secondary_gmail_read` and `secondary_gmail_send`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `gmail_send` does not match `secondary_gmail_send`.
 
 ### Google Cloud tools
 

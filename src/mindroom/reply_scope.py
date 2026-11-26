@@ -28,6 +28,7 @@ from mindroom.event_journal.replies import (
     Decide,
     ReplyCreation,
     ReplyStopped,
+    SourcesSettled,
     WakeApproval,
 )
 from mindroom.final_delivery import Cancelled, Failed, FailureCause
@@ -87,6 +88,8 @@ class SpanHandle:
     unconfirmed_progress: rl.ProgressConfirmation | None = None
     # Set once the reply shows an event in the room, which the span's Stop button goes on.
     reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+    # Whether a background task is currently deciding and showing this span's Stop button.
+    stop_button_in_flight: bool = False
     # The automatic compactions this span's answer ran, which every write of it carries, its terminal note included.
     compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
     # The active model payload this span's writes carry until settled run metadata replaces it.
@@ -114,6 +117,10 @@ class SpanHandle:
     def stopped(self) -> bool:
         """Return whether a Stop reached this span, whose calls then start no background job."""
         return self.runtime.spans.stopped(self.span_id)
+
+    def register(self, task: asyncio.Task[object]) -> None:
+        """Register the active task executing this reply span."""
+        self.runtime.spans.register(self.span_id, task)
 
     def note_reply(self, reply: rl.Reply) -> None:
         """Remember the reply as last committed or read."""
@@ -302,6 +309,10 @@ def replaced_for_config_change(generation: str | None) -> bool:
     return generation in _REPLACED_FOR_CONFIG_CHANGE
 
 
+def _no_release_sources(_event_ids: tuple[str, ...]) -> None:
+    """Default no-op source release when no journal worker tracks deferred sources."""
+
+
 @dataclass
 class ReplyRuntime:
     """One bot instance's owner of its replies' claims and span exits."""
@@ -314,6 +325,8 @@ class ReplyRuntime:
     approval_ended: Callable[[str], None]
     # Refuses approvals to the jobs a stopped reply's calls started, given the reply's id.
     reply_stopped: Callable[[str], Awaitable[None]]
+    # Forgets settled journal sources in memory once their reply transition commits.
+    release_sources: Callable[[tuple[str, ...]], None] = _no_release_sources
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -322,6 +335,18 @@ class ReplyRuntime:
         init=False,
         repr=False,
     )
+
+    def _run_sync_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
+        """Run in-memory post-commit effects after awaited ones, with span cancels last."""
+        for effect in effects:
+            if isinstance(effect, SourcesSettled):
+                self.release_sources(effect.event_ids)
+            elif isinstance(effect, ApprovalEnded):
+                self.claim_may_proceed(effect.reply_id)
+                self.approval_ended(effect.reply_id)
+        for effect in effects:
+            if isinstance(effect, rl.CancelSpan):
+                self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
 
     async def run_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
         """Run what committed reply transitions left for after their commit.
@@ -340,13 +365,7 @@ class ReplyRuntime:
                 elif isinstance(effect, ReplyStopped):
                     await self.reply_stopped(effect.reply_id)
         finally:
-            for effect in effects:
-                if isinstance(effect, ApprovalEnded):
-                    self.claim_may_proceed(effect.reply_id)
-                    self.approval_ended(effect.reply_id)
-            for effect in effects:
-                if isinstance(effect, rl.CancelSpan):
-                    self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+            self._run_sync_effects(effects)
 
     async def _span_tool_calls(self, span_ids: tuple[str, ...]) -> tuple[ToolTraceEntry, ...]:
         """Return the tool calls these spans recorded, in the order they started."""

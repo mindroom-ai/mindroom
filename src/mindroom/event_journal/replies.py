@@ -63,8 +63,15 @@ class ReplyStopped:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class SourcesSettled:
+    """After commit: these journal sources settled with their reply, so the worker can forget their deferrals."""
+
+    event_ids: tuple[str, ...]
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | ReplyStopped
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | ReplyStopped | SourcesSettled
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -137,6 +144,8 @@ def _run(
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
             journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
+            if span.sources.pending_event_ids:
+                post_commit.append(SourcesSettled(span.sources.pending_event_ids))
             # Nothing answers a turn whose every message the user deleted, whichever rule settles it.
             logical = span.sources.logical_source_event_ids
             if answered and not set(logical).issubset(

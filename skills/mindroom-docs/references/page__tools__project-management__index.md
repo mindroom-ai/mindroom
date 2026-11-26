@@ -27,7 +27,7 @@ Missing Python dependencies are installed at first use, as described in [Automat
 
 ## [`github`]
 
-`github` covers repository search and stats, branches, files, issues, labels, pull requests, review requests, and code search.
+`github` covers repository search and stats, branches, files, issues, labels, pull requests, review requests, and code search through five risk-scoped functions: `github_read_repo()`, `github_read_issues_prs()`, `github_write_issues()`, `github_write_pr()`, and `github_write_repo()`.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |

@@ -8183,32 +8183,38 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_repositories",
-        "description": "Search for repositories on GitHub.\nNote: GitHub's Search API has a maximum limit of 1000 results per query.",
+        "name": "github_read_repo",
+        "description": "Read GitHub repositories, branches, files, directories, and code search results.\n- `list_repositories`: list authenticated user's repository full names\n- `search_repositories`: search repos by `query` (`sort`, `order`, `page`, `per_page`)\n- `get_repository`: repository metadata for `repo_name` (`owner/repo`)\n- `get_repository_with_stats`: detailed stats, languages, PR metrics, and contributors for `repo_name`\n- `get_repository_languages`: language byte counts for `repo_name`\n- `get_repository_stars`: star count for `repo_name`\n- `list_branches`: branch names for `repo_name`\n- `get_file_content`: decoded file text and SHA for `repo_name` and `path` (optional `ref`)\n- `get_directory_content`: directory listing for `repo_name` and `path` (optional `ref`)\n- `get_branch_content`: root directory listing for `repo_name` at `ref` (default `main`)\n- `search_code`: search code by `query` (optional `repo_name`, `language`, `user`, `path`, `filename`)",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_repositories",
+                "search_repositories",
+                "get_repository",
+                "get_repository_with_stats",
+                "get_repository_languages",
+                "get_repository_stars",
+                "list_branches",
+                "get_file_content",
+                "get_directory_content",
+                "get_branch_content",
+                "search_code"
+              ]
+            },
+            "repo_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "query": {
-              "type": "string",
-              "description": "The search query keywords."
-            },
-            "sort": {
-              "type": "string",
-              "description": "The field to sort results by ('stars', 'forks', or 'updated'). Defaults to 'stars'."
-            },
-            "order": {
-              "type": "string",
-              "description": "The order of results ('asc' or 'desc'). Defaults to 'desc'."
-            },
-            "page": {
-              "type": "integer",
-              "description": "Page number of results to return, counting from 1. Defaults to 1."
-            },
-            "per_page": {
-              "type": "integer",
-              "description": "Number of results per page. Max 100. Defaults to 30."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -8216,565 +8222,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_repositories",
-        "description": "List all repositories for the authenticated user.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_repository",
-        "description": "Get details of a specific repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request",
-        "description": "Get details of a specific pull request.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "pr_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_changes",
-        "description": "Get the changes (files modified) in a pull request.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "pr_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_issue",
-        "description": "Create an issue in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "title": {
-              "type": "string",
-              "description": "The title of the issue."
-            },
-            "body": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The body content of the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_repository",
-        "description": "Create a new repository on GitHub.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "The name of the repository."
-            },
-            "private": {
-              "type": "boolean",
-              "description": "Whether the repository is private. Defaults to False."
-            },
-            "description": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "A short description of the repository."
-            },
-            "auto_init": {
-              "type": "boolean",
-              "description": "Whether to initialize the repository with a README. Defaults to False."
-            },
-            "organization": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Name of organization to create repo in. If None, creates in user account."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_repository",
-        "description": "Delete a repository (requires admin permissions).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "Full repository name (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_branches",
-        "description": "List all branches in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "Full repository name (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_repository_languages",
-        "description": "Get the languages used in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_count",
-        "description": "Get the count of pull requests for a repository based on query parameters.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "state": {
-              "type": "string",
-              "description": "The state of the PRs to count ('open', 'closed', 'all'). Defaults to 'all'."
-            },
-            "author": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter PRs by author username."
-            },
-            "base": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter PRs by base branch name."
-            },
-            "head": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter PRs by head branch name."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_repository_stars",
-        "description": "Get the number of stars for a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_requests",
-        "description": "Get pull requests matching query parameters.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "state": {
-              "type": "string",
-              "description": "State of the PRs to retrieve ('open', 'closed', or 'all'). Defaults to 'open'."
-            },
-            "sort": {
-              "type": "string",
-              "description": "Sort field ('created', 'updated', 'popularity', 'long-running'). Defaults to 'created'."
-            },
-            "direction": {
-              "type": "string",
-              "description": "Sort direction ('asc' or 'desc'). Defaults to 'desc'."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum number of pull requests to return. Defaults to 50."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_comments",
-        "description": "Get all comments on a pull request.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
-            },
-            "include_issue_comments": {
-              "type": "boolean",
-              "description": "Whether to include general PR comments. Defaults to True."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "pr_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_pull_request_comment",
-        "description": "Create a comment on a specific line of a specific file in a pull request.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
-            },
-            "body": {
-              "type": "string",
-              "description": "The text of the comment."
-            },
-            "commit_id": {
-              "type": "string",
-              "description": "The SHA of the commit to comment on."
+              ]
             },
             "path": {
-              "type": "string",
-              "description": "The relative path to the file to comment on."
-            },
-            "position": {
-              "type": "integer",
-              "description": "The line index in the diff to comment on."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -8782,635 +8232,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "pr_number",
-            "body",
-            "commit_id",
-            "path",
-            "position"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "edit_pull_request_comment",
-        "description": "Edit an existing pull request comment.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "comment_id": {
-              "type": "integer",
-              "description": "The id of the comment to edit."
-            },
-            "body": {
-              "type": "string",
-              "description": "The new text of the comment."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "comment_id",
-            "body"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_with_details",
-        "description": "Get comprehensive details of a pull request including comments, labels, and metadata.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "pr_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_repository_with_stats",
-        "description": "Get comprehensive repository information including statistics.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_issues",
-        "description": "List issues for a repository with pagination.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "state": {
-              "type": "string",
-              "description": "The state of issues to list ('open', 'closed', 'all'). Defaults to 'open'."
-            },
-            "page": {
-              "type": "integer",
-              "description": "Page number of results to return, counting from 1. Defaults to 1."
-            },
-            "per_page": {
-              "type": "integer",
-              "description": "Number of results per page. Defaults to 20."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_issue",
-        "description": "Get details of a specific issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "comment_on_issue",
-        "description": "Add a comment to an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "comment_body": {
-              "type": "string",
-              "description": "The content of the comment."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number",
-            "comment_body"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "close_issue",
-        "description": "Close an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reopen_issue",
-        "description": "Reopen a closed issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "assign_issue",
-        "description": "Assign users to an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "assignees": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "A list of usernames to assign."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number",
-            "assignees"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "label_issue",
-        "description": "Add labels to an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "labels": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "A list of label names to add."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number",
-            "labels"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_issue_comments",
-        "description": "List comments on an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "edit_issue",
-        "description": "Edit the title or body of an issue.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository."
-            },
-            "issue_number": {
-              "type": "integer",
-              "description": "The number of the issue."
-            },
-            "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The new title for the issue."
-            },
-            "body": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The new body content for the issue."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "issue_number"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_pull_request",
-        "description": "Create a new pull request in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "title": {
-              "type": "string",
-              "description": "The title of the pull request."
-            },
-            "body": {
-              "type": "string",
-              "description": "The body text of the pull request."
-            },
-            "head": {
-              "type": "string",
-              "description": "The name of the branch where your changes are implemented."
-            },
-            "base": {
-              "type": "string",
-              "description": "The name of the branch you want the changes pulled into."
-            },
-            "draft": {
-              "type": "boolean",
-              "description": "Whether the pull request is a draft. Defaults to False."
-            },
-            "maintainer_can_modify": {
-              "type": "boolean",
-              "description": "Whether maintainers can modify the PR. Defaults to True."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "title",
-            "body",
-            "head",
-            "base"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_file",
-        "description": "Create a new file in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "path": {
-              "type": "string",
-              "description": "The path to the file in the repository."
-            },
-            "content": {
-              "type": "string",
-              "description": "The content of the file."
-            },
-            "message": {
-              "type": "string",
-              "description": "The commit message."
-            },
-            "branch": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The branch to commit to. Defaults to repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "path",
-            "content",
-            "message"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_file_content",
-        "description": "Get the content of a file in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "path": {
-              "type": "string",
-              "description": "The path to the file in the repository."
+              ]
             },
             "ref": {
               "anyOf": [
@@ -9420,324 +8242,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The name of the commit/branch/tag. Defaults to the repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_file",
-        "description": "Update an existing file in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "path": {
-              "type": "string",
-              "description": "The path to the file in the repository."
-            },
-            "content": {
-              "type": "string",
-              "description": "The new content of the file."
-            },
-            "message": {
-              "type": "string",
-              "description": "The commit message."
-            },
-            "sha": {
-              "type": "string",
-              "description": "The blob SHA of the file being replaced."
-            },
-            "branch": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The branch to commit to. Defaults to the repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "path",
-            "content",
-            "message",
-            "sha"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_file",
-        "description": "Delete a file from a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "path": {
-              "type": "string",
-              "description": "The path to the file in the repository."
-            },
-            "message": {
-              "type": "string",
-              "description": "The commit message."
-            },
-            "sha": {
-              "type": "string",
-              "description": "The blob SHA of the file being deleted."
-            },
-            "branch": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The branch to commit to. Defaults to the repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "path",
-            "message",
-            "sha"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_directory_content",
-        "description": "Get the contents of a directory in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "path": {
-              "type": "string",
-              "description": "The path to the directory in the repository. Use empty string for root."
-            },
-            "ref": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The name of the commit/branch/tag. Defaults to repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_branch_content",
-        "description": "Get the root directory content of a specific branch.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "branch": {
-              "type": "string",
-              "description": "The branch name. Defaults to \"main\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_branch",
-        "description": "Create a new branch in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "branch_name": {
-              "type": "string",
-              "description": "The name of the new branch."
-            },
-            "source_branch": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The source branch to create from. Defaults to repository's default branch."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "branch_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "set_default_branch",
-        "description": "Set the default branch for a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo_name": {
-              "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
-            },
-            "branch_name": {
-              "type": "string",
-              "description": "The name of the branch to set as default."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo_name",
-            "branch_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_code",
-        "description": "Search for code in GitHub repositories.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The search query."
+              ]
             },
             "language": {
               "anyOf": [
@@ -9747,19 +8252,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by language. Defaults to None."
-            },
-            "repo": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              ]
             },
             "user": {
               "anyOf": [
@@ -9769,19 +8262,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by user or organization. Defaults to None."
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter by file path. Defaults to None."
+              ]
             },
             "filename": {
               "anyOf": [
@@ -9791,8 +8272,19 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by filename. Defaults to None."
+              ]
+            },
+            "sort": {
+              "type": "string"
+            },
+            "order": {
+              "type": "string"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "per_page": {
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9808,7 +8300,7 @@
             }
           },
           "required": [
-            "query"
+            "action"
           ]
         },
         "strict": false,
@@ -9816,14 +8308,55 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_issues_and_prs",
-        "description": "Search for issues and pull requests on GitHub.",
+        "name": "github_read_issues_prs",
+        "description": "Read and search GitHub issues and pull requests.\n- `list_issues`: issues in `repo_name` (`state` default `open`, `page`, `per_page` default 20)\n- `get_issue`: issue details for `repo_name` and `number`\n- `list_issue_comments`: comments on issue `number` in `repo_name`\n- `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `page`, `per_page` default 50)\n- `get_pull_request`: PR metadata for `repo_name` and `number`\n- `get_pull_request_changes`: changed files and patches for PR `number` in `repo_name`\n- `get_pull_request_comments`: comments on PR `number` in `repo_name` (`include_issue_comments`)\n- `get_pull_request_with_details`: full PR details, comments, commits, and files for `repo_name` and `number`\n- `get_pull_request_count`: count PRs in `repo_name` (`state` default `all`, optional `user` author, `base`, `head`)\n- `search_issues_and_prs`: search by `query` (optional `repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` default 30)",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The search query."
+              "enum": [
+                "list_issues",
+                "get_issue",
+                "list_issue_comments",
+                "get_pull_requests",
+                "get_pull_request",
+                "get_pull_request_changes",
+                "get_pull_request_comments",
+                "get_pull_request_with_details",
+                "get_pull_request_count",
+                "search_issues_and_prs"
+              ]
+            },
+            "repo_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "number": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "state": {
               "anyOf": [
@@ -9833,8 +8366,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by state ('open', 'closed'). Defaults to None."
+              ]
             },
             "type_filter": {
               "anyOf": [
@@ -9844,19 +8376,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by type ('issue', 'pr'). Defaults to None."
-            },
-            "repo": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter by repository (e.g., 'owner/repo'). Defaults to None."
+              ]
             },
             "user": {
               "anyOf": [
@@ -9866,8 +8386,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by user or organization. Defaults to None."
+              ]
             },
             "label": {
               "anyOf": [
@@ -9877,24 +8396,49 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Filter by label. Defaults to None."
+              ]
+            },
+            "base": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "head": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "include_issue_comments": {
+              "type": "boolean"
             },
             "sort": {
-              "type": "string",
-              "description": "Sort results by ('created', 'updated', 'comments'). Defaults to \"created\"."
+              "type": "string"
             },
             "order": {
-              "type": "string",
-              "description": "Sort order ('asc', 'desc'). Defaults to \"desc\"."
+              "type": "string"
             },
             "page": {
-              "type": "integer",
-              "description": "Page number for pagination. Defaults to 1."
+              "type": "integer"
             },
             "per_page": {
-              "type": "integer",
-              "description": "Number of results per page. Defaults to 30."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9910,7 +8454,7 @@
             }
           },
           "required": [
-            "query"
+            "action"
           ]
         },
         "strict": false,
@@ -9918,25 +8462,230 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_review_request",
-        "description": "Create a review request for a pull request.",
+        "name": "github_write_issues",
+        "description": "Create, edit, comment on, close, reopen, assign, or label GitHub issues.\n- `create_issue`: create issue in `repo_name` (`title`, optional `body`)\n- `edit_issue`: update `title` and/or `body` on `issue_number`\n- `comment_on_issue`: post `body` comment on `issue_number`\n- `close_issue`: close `issue_number`\n- `reopen_issue`: reopen `issue_number`\n- `assign_issue`: assign `assignees` to `issue_number`\n- `label_issue`: set `labels` on `issue_number`",
         "parameters": {
           "type": "object",
           "properties": {
-            "repo_name": {
+            "action": {
               "type": "string",
-              "description": "The full name of the repository (e.g., 'owner/repo')."
+              "enum": [
+                "create_issue",
+                "edit_issue",
+                "comment_on_issue",
+                "close_issue",
+                "reopen_issue",
+                "assign_issue",
+                "label_issue"
+              ]
+            },
+            "repo_name": {
+              "type": "string"
+            },
+            "issue_number": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "assignees": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "labels": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action",
+            "repo_name"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "github_write_pr",
+        "description": "Create pull requests, review comments, and review requests on GitHub.\n- `create_pull_request`: open PR in `repo_name` (`title`, `body`, `head`, `base`, optional `draft`, `maintainer_can_modify`)\n- `create_pull_request_comment`: post diff review comment on `pr_number` (`body`, `commit_id`, `path`, `position`)\n- `edit_pull_request_comment`: update `comment_id` in `repo_name` with `body`\n- `create_review_request`: request `reviewers` (and optional `team_reviewers`) on `pr_number`",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_pull_request",
+                "create_pull_request_comment",
+                "edit_pull_request_comment",
+                "create_review_request"
+              ]
+            },
+            "repo_name": {
+              "type": "string"
             },
             "pr_number": {
-              "type": "integer",
-              "description": "The number of the pull request."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "head": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "maintainer_can_modify": {
+              "type": "boolean"
+            },
+            "commit_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "comment_id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "reviewers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of user logins that will be requested to review."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "team_reviewers": {
               "anyOf": [
@@ -9949,8 +8698,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "List of team slugs that will be requested to review. Defaults to None."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9966,9 +8714,153 @@
             }
           },
           "required": [
-            "repo_name",
-            "pr_number",
-            "reviewers"
+            "action",
+            "repo_name"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "github_write_repo",
+        "description": "Create/delete repositories, manage branches, and create/update/delete repository files.\n- `create_repository`: create repo `name` (optional `private`, `description`, `auto_init`, `organization`)\n- `delete_repository`: permanently delete `repo_name`\n- `create_branch`: create `branch` in `repo_name` (optional `source_branch`, defaults to default branch)\n- `set_default_branch`: set `repo_name` default branch to `branch`\n- `create_file`: create `path` in `repo_name` (`content`, `message`, optional `branch`)\n- `update_file`: update `path` in `repo_name` (`content`, `message`, `sha`, optional `branch`)\n- `delete_file`: delete `path` in `repo_name` (`message`, `sha`, optional `branch`)",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_repository",
+                "delete_repository",
+                "create_branch",
+                "set_default_branch",
+                "create_file",
+                "update_file",
+                "delete_file"
+              ]
+            },
+            "repo_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "branch": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_branch": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sha": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "private": {
+              "type": "boolean"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "auto_init": {
+              "type": "boolean"
+            },
+            "organization": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
           ]
         },
         "strict": false,
@@ -9978,20 +8870,35 @@
     ]
   },
   "gmail": {
-    "instructions": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(thread_id, message_id, to, subject, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
-    "guidance": "You have access to Gmail tools for reading, composing, and organizing emails.\n\n## Pagination\nList methods return `nextPageToken` in the response when more results exist.\nPass this value as the `page_token` parameter to fetch the next page.\n\n## Gmail Query Syntax\nUse these operators in search and context query parameters:\n- `from:user@example.com` / `to:user@example.com` — filter by sender/recipient\n- `subject:\"meeting notes\"` — filter by subject\n- `is:unread` / `is:starred` / `is:important` — filter by status\n- `has:attachment` — emails with attachments\n- `newer_than:7d` / `older_than:1m` — relative date (d=days, m=months, y=years)\n- `after:2024/01/01` / `before:2024/12/31` — absolute date range\n- `label:work` — filter by label\n- `from:me` — emails sent by the user\n- Combine with spaces (AND): `from:me newer_than:7d has:attachment`\n## Composing Emails\n- **New email:** `send_email(to, subject, body)` or `create_draft_email(to, subject, body)`\n- **Reply (send now):** `send_email_reply(thread_id, message_id, to, subject, body)` keeps the message in the thread\n- **Reply (draft):** `create_draft_email(to, subject, body, thread_id=..., message_id=...)` creates a draft reply in the thread. Get thread_id and message_id from the original message first.",
+    "instructions": "## Gmail Query & Pagination\nPass `nextPageToken` as `page_token` for subsequent pages.\nQuery operators: `from:`, `to:`, `subject:\"...\"`, `is:unread`, `is:starred`, `is:important`, `has:attachment`, `newer_than:7d`, `older_than:1m`, `after:YYYY/MM/DD`, `before:YYYY/MM/DD`, `label:`, `from:me` (space = AND).\n## Threading\n- Reply in-thread: `gmail_send(action='reply', thread_id=..., message_id=..., to=..., subject=..., body=...)`\n- Draft reply in-thread: `gmail_draft(action='create', to=..., subject=..., body=..., thread_id=..., message_id=...)`",
+    "guidance": "## Gmail Query & Pagination\nPass `nextPageToken` as `page_token` for subsequent pages.\nQuery operators: `from:`, `to:`, `subject:\"...\"`, `is:unread`, `is:starred`, `is:important`, `has:attachment`, `newer_than:7d`, `older_than:1m`, `after:YYYY/MM/DD`, `before:YYYY/MM/DD`, `label:`, `from:me` (space = AND).\n## Threading\n- Reply in-thread: `gmail_send(action='reply', thread_id=..., message_id=..., to=..., subject=..., body=...)`\n- Draft reply in-thread: `gmail_draft(action='create', to=..., subject=..., body=..., thread_id=..., message_id=...)`",
     "functions": [
       {
-        "name": "get_latest_emails",
-        "description": "Get the latest X emails from the user's inbox.",
+        "name": "gmail_read",
+        "description": "Read and search Gmail messages, threads, drafts, and custom labels.\n- `latest`: latest inbox emails (`count`, `page_token`)\n- `from_user`: emails from sender `user` (`count`, `page_token`)\n- `unread`: unread emails (`count`, `page_token`)\n- `starred`: starred emails (`count`, `page_token`)\n- `by_context`: emails matching context `query` (`count`, `page_token`)\n- `by_date`: emails from `start_date` (`YYYY/MM/DD`, optional `range_in_days`, `count`, `page_token`)\n- `by_thread`: formatted text of all messages in `thread_id`\n- `search_emails`: full search with Gmail `query` (`count`, `page_token`)\n- `get_message`: full message JSON for `message_id` (optional `download_attachments`)\n- `get_thread`: structured JSON of all messages in `thread_id`\n- `search_threads`: thread IDs and snippets matching `query` (`count`, `page_token`)\n- `get_draft`: full draft JSON for `draft_id`\n- `list_drafts`: draft IDs (`count`, `page_token`)\n- `list_custom_labels`: list user-created labels",
         "parameters": {
           "type": "object",
           "properties": {
-            "count": {
-              "type": "integer",
-              "description": "Number of latest emails to retrieve."
+            "action": {
+              "type": "string",
+              "enum": [
+                "latest",
+                "from_user",
+                "unread",
+                "starred",
+                "by_context",
+                "by_date",
+                "by_thread",
+                "search_emails",
+                "get_message",
+                "get_thread",
+                "search_threads",
+                "get_draft",
+                "list_drafts",
+                "list_custom_labels"
+              ]
             },
-            "page_token": {
+            "query": {
               "anyOf": [
                 {
                   "type": "string"
@@ -9999,43 +8906,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_emails_from_user",
-        "description": "Get X number of emails from a specific user (name or email).",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "user": {
-              "type": "string",
-              "description": "Name or email address of the sender."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of emails to retrieve."
-            },
-            "page_token": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10043,10 +8916,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
+              ]
             },
-            "mindroom_output_path": {
+            "message_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10054,28 +8926,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_unread_emails",
-        "description": "Get the X number of latest unread emails from the user's inbox.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of unread emails to retrieve."
+              ]
             },
-            "page_token": {
+            "thread_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10083,10 +8936,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
+              ]
             },
-            "mindroom_output_path": {
+            "draft_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10094,110 +8946,17 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_starred_emails",
-        "description": "Get X number of starred emails from the user's inbox.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of starred emails to retrieve."
+              ]
             },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_emails_by_context",
-        "description": "Get X number of emails matching a specific context or search term.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "context": {
-              "type": "string",
-              "description": "Search term or context to match in emails."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of emails to retrieve."
-            },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_emails_by_date",
-        "description": "Get emails from a date or date range.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "start_date": {
-              "type": "string",
-              "description": "Start date in YYYY/MM/DD format (e.g. \"2026/03/01\")."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "range_in_days": {
               "anyOf": [
@@ -10207,19 +8966,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Number of days to include in the range (default: None, meaning all emails after start_date)."
+              ]
             },
-            "num_emails": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Maximum number of emails to retrieve (default: 10)."
+            "count": {
+              "type": "integer"
             },
             "page_token": {
               "anyOf": [
@@ -10229,631 +8979,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_emails_by_thread",
-        "description": "Retrieve all emails from a specific thread.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "thread_id": {
-              "type": "string",
-              "description": "The ID of the email thread."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_emails",
-        "description": "Get X number of emails based on a given natural text query.\nSearches in to, from, cc, subject and email body contents.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Natural language query to search for."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Number of emails to retrieve."
-            },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "mark_email_as_read",
-        "description": "Mark a specific email as read by removing the 'UNREAD' label.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "message_id": {
-              "type": "string",
-              "description": "The ID of the message to mark as read."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "mark_email_as_unread",
-        "description": "Mark a specific email as unread by adding the 'UNREAD' label.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "message_id": {
-              "type": "string",
-              "description": "The ID of the message to mark as unread."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "star_email",
-        "description": "Add a star to an email message.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "message_id": {
-              "type": "string",
-              "description": "The ID of the message to star."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "unstar_email",
-        "description": "Remove the star from an email message.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "message_id": {
-              "type": "string",
-              "description": "The ID of the message to unstar."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_draft_email",
-        "description": "Create and save a draft email.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "to": {
-              "type": "string",
-              "description": "Comma-separated recipient email addresses."
-            },
-            "subject": {
-              "type": "string",
-              "description": "Email subject."
-            },
-            "body": {
-              "type": "string",
-              "description": "Email body content."
-            },
-            "cc": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Comma-separated CC email addresses (optional)."
-            },
-            "bcc": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Comma-separated BCC email addresses (optional)."
-            },
-            "attachments": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "File path(s) for attachments (optional)."
-            },
-            "thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Thread ID for reply drafts (optional)."
-            },
-            "message_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Message ID being replied to, used with thread_id (optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "send_email",
-        "description": "Send an email immediately.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "to": {
-              "type": "string",
-              "description": "Comma-separated recipient email addresses."
-            },
-            "subject": {
-              "type": "string",
-              "description": "Email subject."
-            },
-            "body": {
-              "type": "string",
-              "description": "Email body content."
-            },
-            "cc": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Comma-separated CC email addresses (optional)."
-            },
-            "bcc": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Comma-separated BCC email addresses (optional)."
-            },
-            "attachments": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "File path(s) for attachments (optional)."
-            },
-            "thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Thread ID to send as a reply (optional)."
-            },
-            "message_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Message ID being replied to, used with thread_id (optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "send_email_reply",
-        "description": "Respond to an existing email thread.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "thread_id": {
-              "type": "string",
-              "description": "The ID of the email thread to reply to."
-            },
-            "message_id": {
-              "type": "string",
-              "description": "The ID of the email being replied to."
-            },
-            "to": {
-              "type": "string",
-              "description": "Comma-separated recipient email addresses."
-            },
-            "subject": {
-              "type": "string",
-              "description": "Email subject (prefixed with \"Re:\" if not already)."
-            },
-            "body": {
-              "type": "string",
-              "description": "Email body content."
-            },
-            "cc": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Comma-separated CC email addresses (optional)."
-            },
-            "attachments": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "File path(s) for attachments (optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_custom_labels",
-        "description": "List only user-created custom labels (filters out system labels) in a numbered format.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "apply_label",
-        "description": "Find emails matching a context (search query) and apply a label, creating it if necessary.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "context": {
-              "type": "string",
-              "description": "Gmail search query (e.g., 'is:unread category:promotions')."
-            },
-            "label_name": {
-              "type": "string",
-              "description": "Name of the label to apply."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of emails to process."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "remove_label",
-        "description": "Remove a label from emails matching a context (search query).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "context": {
-              "type": "string",
-              "description": "Gmail search query."
-            },
-            "label_name": {
-              "type": "string",
-              "description": "Name of the label to remove."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of emails to process."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_custom_label",
-        "description": "Delete a custom label (with safety confirmation).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "label_name": {
-              "type": "string",
-              "description": "Name of the label to delete."
-            },
-            "confirm": {
-              "type": "boolean",
-              "description": "Must be True to actually delete the label."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_message",
-        "description": "Get a single email message by its ID with full content including headers, body, and attachment metadata.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "message_id": {
-              "type": "string",
-              "description": "The Gmail message ID."
+              ]
             },
             "download_attachments": {
-              "type": "boolean",
-              "description": "If True, download attachments to disk and include file paths in the response."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10868,175 +8997,45 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_thread",
-        "description": "Get all messages in a Gmail thread as structured JSON.",
+        "name": "gmail_draft",
+        "description": "Create or update a Gmail draft without sending.\n- `create`: save a new draft (`to`, `subject`, `body`, optional `cc`, `bcc`, `attachments`, `thread_id`, `message_id`)\n- `update`: replace `draft_id` (`to`, `subject`, `body`, optional `cc`, `bcc`, `attachments`, `thread_id`, `message_id`)",
         "parameters": {
           "type": "object",
           "properties": {
-            "thread_id": {
+            "action": {
               "type": "string",
-              "description": "The Gmail thread ID."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_threads",
-        "description": "Search Gmail threads using Gmail query syntax.\nReturns thread IDs and snippets, not full message content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Gmail search query string. Supports all Gmail operators like from:, to:, subject:, is:unread, etc."
-            },
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of threads to return (default 10, max 500)."
-            },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_draft",
-        "description": "Get a draft email by its ID with full message content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "draft_id": {
-              "type": "string",
-              "description": "The Gmail draft ID."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_drafts",
-        "description": "List draft emails in the mailbox.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "count": {
-              "type": "integer",
-              "description": "Maximum number of drafts to return (default 10, max 500)."
-            },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_draft",
-        "description": "Replace the content of an existing draft email.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "draft_id": {
-              "type": "string",
-              "description": "The Gmail draft ID to update."
+              "enum": [
+                "create",
+                "update"
+              ]
             },
             "to": {
-              "type": "string",
-              "description": "Comma-separated recipient email addresses."
+              "type": "string"
             },
             "subject": {
-              "type": "string",
-              "description": "Email subject line."
+              "type": "string"
             },
             "body": {
-              "type": "string",
-              "description": "Email body content."
+              "type": "string"
+            },
+            "draft_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cc": {
               "anyOf": [
@@ -11046,8 +9045,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Comma-separated CC email addresses (optional)."
+              ]
             },
             "bcc": {
               "anyOf": [
@@ -11057,8 +9055,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Comma-separated BCC email addresses (optional)."
+              ]
             },
             "attachments": {
               "anyOf": [
@@ -11074,8 +9071,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "File path(s) for attachments (optional)."
+              ]
             },
             "thread_id": {
               "anyOf": [
@@ -11085,8 +9081,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Thread ID for reply drafts (optional)."
+              ]
             },
             "message_id": {
               "anyOf": [
@@ -11096,8 +9091,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Message ID being replied to, used with thread_id (optional)."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11112,25 +9106,124 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "send_email_to_self",
-        "description": "Send an email to the connected Gmail account.",
+        "name": "gmail_send",
+        "description": "Send an email or thread reply to external recipients immediately.\n- `send`: send email (`to`, `subject`, `body`, optional `cc`, `bcc`, `attachments`, `thread_id`, `message_id`)\n- `reply`: reply in thread (`thread_id`, `message_id`, `to`, `subject`, `body`, optional `cc`, `attachments`)",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "send",
+                "reply"
+              ]
+            },
+            "to": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "cc": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bcc": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attachments": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "message_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "gmail_send_to_self",
+        "description": "Send an email strictly to the connected Gmail account's own address.",
         "parameters": {
           "type": "object",
           "properties": {
             "subject": {
-              "type": "string",
-              "description": "Email subject."
+              "type": "string"
             },
             "body": {
-              "type": "string",
-              "description": "Email body content."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11148,6 +9241,81 @@
           "required": [
             "subject",
             "body"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "gmail_manage",
+        "description": "Organize Gmail messages and manage custom labels.\n- `mark_read`: mark `message_id` as read\n- `mark_unread`: mark `message_id` as unread\n- `star`: star `message_id`\n- `unstar`: unstar `message_id`\n- `apply_label`: apply (or create) `label_name` to up to `count` emails matching `query`\n- `remove_label`: remove `label_name` from up to `count` emails matching `query`\n- `delete_custom_label`: permanently delete user label `label_name` (requires `confirm=True`)",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "mark_read",
+                "mark_unread",
+                "star",
+                "unstar",
+                "apply_label",
+                "remove_label",
+                "delete_custom_label"
+              ]
+            },
+            "message_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "label_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "count": {
+              "type": "integer"
+            },
+            "confirm": {
+              "type": "boolean"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
           ]
         },
         "strict": false,
@@ -11250,18 +9418,47 @@
     ]
   },
   "google_calendar": {
-    "instructions": "You have access to Google Calendar tools for managing events and scheduling.\n\n## Date/Time Formats\n- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- Always specify timezone when creating events\n\n## Tips\n- Use get_event to fetch full details before updating an event\n- Use check_availability to check multiple people's schedules at once\n- Use quick_add_event for simple events from natural language descriptions\n- Use search_events for full-text search across event fields\n- Event IDs from list_events can be used with get_event, update_event, delete_event",
-    "guidance": "You have access to Google Calendar tools for managing events and scheduling.\n\n## Date/Time Formats\n- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- Always specify timezone when creating events\n\n## Tips\n- Use get_event to fetch full details before updating an event\n- Use check_availability to check multiple people's schedules at once\n- Use quick_add_event for simple events from natural language descriptions\n- Use search_events for full-text search across event fields\n- Event IDs from list_events can be used with get_event, update_event, delete_event",
+    "instructions": "- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- When calling `google_calendar_write` to create or update events, specify an IANA `timezone` or include an offset (defaults to UTC)",
+    "guidance": "- All dates use ISO format: YYYY-MM-DDTHH:MM:SS\n- When calling `google_calendar_write` to create or update events, specify an IANA `timezone` or include an offset (defaults to UTC)",
     "functions": [
       {
-        "name": "list_events",
-        "description": "List upcoming events from the user's Google Calendar.",
+        "name": "google_calendar_read",
+        "description": "Read Google Calendar events, calendars, attendees, and availability.\n- `list_events`: list upcoming events (`limit`, optional `start_date`, `end_date`, `page_token`)\n- `get_event`: get full details for `event_id`\n- `fetch_all_events`: paginate all events in range (`limit` per page, optional `start_date`, `end_date`)\n- `search_events`: full-text search with `query` (`limit`, optional `start_date`, `end_date`, `page_token`)\n- `get_event_attendees`: list attendees and RSVP statuses for `event_id`\n- `list_calendars`: list accessible calendars (optional `page_token`)\n- `check_availability`: check free/busy between `start_date` and `end_date` (optional `attendee_emails`, `timezone`)\n- `find_available_slots`: find free working-hours slots of `duration_minutes` between `start_date` and `end_date`",
         "parameters": {
           "type": "object",
           "properties": {
-            "limit": {
-              "type": "integer",
-              "description": "Number of events to return (default: 10)."
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_events",
+                "get_event",
+                "fetch_all_events",
+                "search_events",
+                "get_event_attendees",
+                "list_calendars",
+                "check_availability",
+                "find_available_slots"
+              ]
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "start_date": {
               "anyOf": [
@@ -11271,8 +9468,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Start date in ISO format (YYYY-MM-DDTHH:MM:SS). Defaults to now."
+              ]
             },
             "end_date": {
               "anyOf": [
@@ -11282,8 +9478,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "End date in ISO format. Only events starting before this are returned."
+              ]
+            },
+            "limit": {
+              "type": "integer"
             },
             "page_token": {
               "anyOf": [
@@ -11293,194 +9491,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_event",
-        "description": "Get full details of a single Google Calendar event by its ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "event_id": {
-              "type": "string",
-              "description": "The unique identifier of the event."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "fetch_all_events",
-        "description": "Fetch all Google Calendar events in a given date range.\nPaginates through results automatically to retrieve every matching event.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "max_results": {
-              "type": "integer",
-              "description": "Number of events to fetch per page (default: 10, max: 100)."
-            },
-            "start_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Start of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
-            },
-            "end_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "End of range in ISO format (YYYY-MM-DDTHH:MM:SS)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "find_available_slots",
-        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.\nDates, working hours and the returned slots are in your Google Calendar timezone, or UTC if that\ntimezone cannot be loaded; the result's \"timezone\" field names the one used.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "start_date": {
-              "type": "string",
-              "description": "Start date in ISO format (YYYY-MM-DD)."
-            },
-            "end_date": {
-              "type": "string",
-              "description": "End date in ISO format (YYYY-MM-DD)."
+              ]
             },
             "duration_minutes": {
-              "type": "integer",
-              "description": "Length of the desired slot in minutes (default: 30)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_calendars",
-        "description": "List all available Google Calendars for the authenticated user.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "check_availability",
-        "description": "Check availability of one or more people within a time window.\nReturns busy time ranges for each attendee.\nUse \"me\" or omit attendee_emails to check the authenticated user's own calendar.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "start_date": {
-              "type": "string",
-              "description": "Start of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
-            },
-            "end_date": {
-              "type": "string",
-              "description": "End of the time window in ISO format (YYYY-MM-DDTHH:MM:SS)."
+              "type": "integer"
             },
             "attendee_emails": {
               "anyOf": [
@@ -11493,8 +9507,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Email addresses to check availability for. Defaults to the authenticated user's calendar\nif not provided. Use \"me\" for the authenticated user alongside other emails."
+              ]
             },
             "timezone": {
               "anyOf": [
@@ -11504,8 +9517,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Timezone for the query (default: UTC)."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11520,23 +9532,32 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_event_attendees",
-        "description": "Get the attendee list and their RSVP statuses for a Google Calendar event.",
+        "name": "google_calendar_write",
+        "description": "Create, update, move, RSVP to, or delete Google Calendar events.\n- `create_event`: create event (`start_date`, `end_date`, optional `title`, `description`, `location`, `timezone` default UTC, `attendees`, `add_google_meet_link`, `notify_attendees` default False)\n- `update_event`: update `event_id` (`title`, `start_date`, `end_date`, `description`, `location`, `timezone`, `attendees`, `notify_attendees` default False)\n- `delete_event`: delete `event_id` (optional `notify_attendees` default True)\n- `quick_add_event`: create event from natural-language `text`\n- `move_event`: move `event_id` to `destination_calendar_id` (optional `notify_attendees` default False)\n- `respond_to_event`: set RSVP on `event_id` (`response`: `accepted`, `declined`, or `tentative`)",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_event",
+                "update_event",
+                "delete_event",
+                "quick_add_event",
+                "move_event",
+                "respond_to_event"
+              ]
+            },
             "event_id": {
-              "type": "string",
-              "description": "ID of the event."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -11544,96 +9565,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_events",
-        "description": "Search Google Calendar events by text across summary, description, location, and attendees.\nUnlike list_events which returns upcoming events, this performs full-text search.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Free-text search terms."
-            },
-            "start_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Start of search window in ISO format."
-            },
-            "end_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "End of search window in ISO format."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of events to return (default: 10)."
-            },
-            "page_token": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_event",
-        "description": "Create a new event in the Google Calendar.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "start_date": {
-              "type": "string",
-              "description": "Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
-            },
-            "end_date": {
-              "type": "string",
-              "description": "End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)."
+              ]
             },
             "title": {
               "anyOf": [
@@ -11643,8 +9575,27 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Title/summary of the event."
+              ]
+            },
+            "start_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "end_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "description": {
               "anyOf": [
@@ -11654,8 +9605,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Detailed description of the event."
+              ]
             },
             "location": {
               "anyOf": [
@@ -11665,8 +9615,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Location of the event."
+              ]
             },
             "timezone": {
               "anyOf": [
@@ -11676,8 +9625,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Timezone for the event (default: UTC)."
+              ]
             },
             "attendees": {
               "anyOf": [
@@ -11690,19 +9638,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "List of attendee email addresses."
+              ]
             },
             "add_google_meet_link": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Whether to add a Google Meet video link."
+              "type": "boolean"
             },
             "notify_attendees": {
               "anyOf": [
@@ -11712,199 +9651,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Whether to send email notifications to attendees."
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_event",
-        "description": "Update an existing event in the Google Calendar.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "event_id": {
-              "type": "string",
-              "description": "ID of the event to update."
-            },
-            "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New title/summary."
-            },
-            "description": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New description."
-            },
-            "location": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New location."
-            },
-            "start_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New start date/time in ISO format."
-            },
-            "end_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New end date/time in ISO format."
-            },
-            "timezone": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New timezone."
-            },
-            "attendees": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Updated list of attendee email addresses."
-            },
-            "notify_attendees": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Whether to send email notifications."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_event",
-        "description": "Delete an event from the Google Calendar.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "event_id": {
-              "type": "string",
-              "description": "ID of the event to delete."
-            },
-            "notify_attendees": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Whether to send notifications to attendees (default: True)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "quick_add_event",
-        "description": "Create a Google Calendar event from a natural language description.\nExamples: \"Meeting with John tomorrow 3pm\", \"Lunch at noon on Friday\".",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "text": {
-              "type": "string",
-              "description": "Natural language description of the event including date, time, and title."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -11912,43 +9661,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "move_event",
-        "description": "Move a Google Calendar event to a different calendar.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "event_id": {
-              "type": "string",
-              "description": "ID of the event to move."
+              ]
             },
             "destination_calendar_id": {
-              "type": "string",
-              "description": "ID of the target calendar."
-            },
-            "notify_attendees": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Whether to notify attendees of the move."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -11956,30 +9671,15 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "respond_to_event",
-        "description": "Set the authenticated user's attendance response for a Google Calendar event.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "event_id": {
-              "type": "string",
-              "description": "ID of the event."
+              ]
             },
             "response": {
               "type": "string",
-              "description": "Response status - one of \"accepted\", \"declined\", or \"tentative\"."
+              "enum": [
+                "accepted",
+                "declined",
+                "tentative"
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11994,7 +9694,9 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -12246,15 +9948,24 @@
     ]
   },
   "google_drive": {
-    "instructions": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
-    "guidance": "You have access to Google Drive tools for searching, reading, uploading, and downloading files.\n\n## Drive Query Syntax\nUse these operators in search and list query parameters:\n- `name contains 'report'` — files with \"report\" in the name\n- `name = 'Budget 2025.xlsx'` — exact name match\n- `mimeType = 'application/vnd.google-apps.document'` — Google Docs only\n- `mimeType = 'application/vnd.google-apps.spreadsheet'` — Google Sheets only\n- `mimeType = 'application/pdf'` — PDF files only\n- `mimeType = 'application/vnd.google-apps.folder'` — folders only\n- `modifiedTime > '2025-01-01T00:00:00'` — modified after date\n- `'<folder_id>' in parents` — files inside a specific folder\n- `sharedWithMe` — files shared with the user\n- `starred` — starred files\n- Combine with `and` / `or`: `name contains 'report' and mimeType = 'application/pdf'`\n- Trashed files are filtered automatically. Do not add trashed clauses.\n\n## Handling Incomplete Results\nIf search returns `incompleteSearch: true`, some shared drives could not be searched.\nThis is a server-side limitation of the `allDrives` corpus, not a problem with your query.\n- Inform the user that results may be incomplete due to shared drive limitations\n- Do NOT retry the same query — the limitation is server-side\n- For complete results, the user must reconfigure with `corpora=\"user\"` or `corpora=\"drive\"`",
+    "instructions": "## Drive Query Syntax\nOperators for `query`: `name contains 'report'`, `name = 'Budget.xlsx'`, `mimeType = 'application/vnd.google-apps.document'` (or `spreadsheet`, `folder`, `'application/pdf'`), `modifiedTime > '2025-01-01T00:00:00'`, `'<folder_id>' in parents`, `sharedWithMe`, `starred`, combined with `and` / `or`. Trashed files are excluded automatically.\n\nIf search returns `incompleteSearch: true`, some shared drives could not be searched by `allDrives`; inform the user without retrying.",
+    "guidance": "## Drive Query Syntax\nOperators for `query`: `name contains 'report'`, `name = 'Budget.xlsx'`, `mimeType = 'application/vnd.google-apps.document'` (or `spreadsheet`, `folder`, `'application/pdf'`), `modifiedTime > '2025-01-01T00:00:00'`, `'<folder_id>' in parents`, `sharedWithMe`, `starred`, combined with `and` / `or`. Trashed files are excluded automatically.\n\nIf search returns `incompleteSearch: true`, some shared drives could not be searched by `allDrives`; inform the user without retrying.",
     "functions": [
       {
-        "name": "google_drive_list_files",
-        "description": "List recent files and folders from Google Drive.",
+        "name": "google_drive_read",
+        "description": "List, search, read text from, or download Google Drive files.\n- `list`: list recent files (optional `query`, `max_results`, `page_token`)\n- `search`: search metadata using Drive `query` (`max_results`, `page_token`)\n- `read`: read Workspace or plain-text `file_id` as text\n- `download`: save `file_id` into workspace `google-drive-downloads/<file_id>/` (optional `export_format` MIME type for Workspace files)",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "search",
+                "read",
+                "download"
+              ]
+            },
             "query": {
               "anyOf": [
                 {
@@ -12263,14 +9974,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Optional Drive query to filter results."
+              ]
             },
-            "page_size": {
-              "type": "integer",
-              "description": "Number of files to return (default 10)."
-            },
-            "page_token": {
+            "file_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -12278,48 +9984,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_search_files",
-        "description": "Search Google Drive using a query expression.\nSearches in file name, type, folder, owner, and modification date.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Drive query expression (see instructions for syntax)."
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "Number of files to return (default 10)."
+              "type": "integer"
             },
             "page_token": {
               "anyOf": [
@@ -12329,67 +9997,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Token from a previous response to fetch the next page."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_read_file",
-        "description": "Read a Drive file and return its text content, including files in Shared Drives.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_download_file",
-        "description": "Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.\nReturns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own\ngoogle-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,\nwhile downloading the same file again under the same name replaces its earlier copy. Google Workspace\nfiles are exported to a native format such as .docx or .xlsx.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string",
-              "description": "The Drive file ID."
+              ]
             },
             "export_format": {
               "anyOf": [
@@ -12399,8 +10007,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "MIME type to export a Google Workspace file to instead, such as application/pdf."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -12416,7 +10023,7 @@
             }
           },
           "required": [
-            "file_id"
+            "action"
           ]
         },
         "strict": false,
@@ -12424,15 +10031,32 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "google_drive_upload_file",
-        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs\nsupports, such as headings, tables, lists, links, and the images a Word file embeds; \"spreadsheet\" a\nGoogle Sheet from Excel or CSV; \"presentation\" Google Slides from PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
+        "name": "google_drive_write",
+        "description": "Upload, update, organize, or trash Google Drive files and folders.\n- `upload`: upload `local_path` (optional `parent_id`, `name`, `mime_type`, `convert_to` Workspace type)\n- `update`: replace contents of `file_id` from `local_path` (optional `mime_type`; replaces whole Workspace file)\n- `create_folder`: create folder `name` (optional `parent_id`)\n- `move`: move `file_id` to `parent_id` (optional rename `name`)\n- `trash`: move `file_id` to trash (soft-delete only)",
         "parameters": {
           "type": "object",
           "properties": {
-            "local_path": {
-              "type": "string"
+            "action": {
+              "type": "string",
+              "enum": [
+                "upload",
+                "update",
+                "create_folder",
+                "move",
+                "trash"
+              ]
             },
-            "folder_id": {
+            "file_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "local_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -12443,6 +10067,16 @@
               ]
             },
             "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "parent_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -12484,165 +10118,7 @@
             }
           },
           "required": [
-            "local_path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_update_file",
-        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it, so formatting that is not in the local file is lost and comments on the replaced\ncontent lose their place.\nTo change part of such a file, use the Google Docs or Google Sheets tool instead.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string"
-            },
-            "local_path": {
-              "type": "string"
-            },
-            "mime_type": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_id",
-            "local_path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_create_folder",
-        "description": "Create a Google Drive folder, optionally under one parent folder.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "parent_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_move_file",
-        "description": "Move one Drive file to a new parent and optionally rename it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string"
-            },
-            "new_parent_id": {
-              "type": "string"
-            },
-            "name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_id",
-            "new_parent_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_drive_trash_file",
-        "description": "Move one Drive file to trash without permanently deleting it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "file_id"
+            "action"
           ]
         },
         "strict": false,
@@ -12959,8 +10435,8 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_sheet",
-        "description": "Read values from a Google Sheet. Prioritizes instance attributes over method parameters.",
+        "name": "google_sheets_read",
+        "description": "Read values from a Google Sheet range as a JSON list of rows.\nConfigured toolkit `spreadsheet_id` and `spreadsheet_range` override call arguments when set.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -12972,8 +10448,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Fallback spreadsheet ID if instance attribute is None."
+              ]
             },
             "spreadsheet_range": {
               "anyOf": [
@@ -12983,8 +10458,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Fallback range if instance attribute is None."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13006,49 +10480,18 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_sheet",
-        "description": "Create a Google Sheet with a given title.",
+        "name": "google_sheets_write",
+        "description": "Create, update, format, or duplicate Google Sheets.\n- `create`: new spreadsheet with `title`\n- `update`: overwrite `spreadsheet_id` at `range_name` with literal 2D `data` (ignores configured read defaults)\n- `batch_update`: apply Sheets API `batchUpdate` `requests` to `spreadsheet_id` in order (formatting, widths, frozen rows, filters, sheet edits)",
         "parameters": {
           "type": "object",
           "properties": {
-            "title": {
+            "action": {
               "type": "string",
-              "description": "The title of the Google Sheet."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_sheet",
-        "description": "Update a Google Sheet with the provided data.\nNote: This function can overwrite existing data in the sheet.\nUser needs to ensure that the provided range correctly matches the data that needs to be updated.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "type": "array",
-              "items": {
-                "type": "array",
-                "items": {}
-              },
-              "description": "The data to update the sheet with."
+              "enum": [
+                "create",
+                "update",
+                "batch_update"
+              ]
             },
             "spreadsheet_id": {
               "anyOf": [
@@ -13058,8 +10501,17 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The ID of the Google Sheet."
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "range_name": {
               "anyOf": [
@@ -13069,50 +10521,38 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The range of the Google Sheet to update."
+              ]
             },
-            "mindroom_output_path": {
+            "data": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {}
+                  }
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "data"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "batch_update_sheet",
-        "description": "Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.\nUse this for changes that update_sheet cannot make, such as cell formatting, column widths,\nfrozen rows, filters, conditional formatting, merged cells, and adding or renaming sheets.\nEach request is one Sheets API Request object, for example\n{\"repeatCell\": {\"range\": {\"sheetId\": 0, \"endRowIndex\": 1},\n\"cell\": {\"userEnteredFormat\": {\"textFormat\": {\"bold\": true}}}, \"fields\": \"userEnteredFormat.textFormat.bold\"}}.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "spreadsheet_id": {
-              "type": "string",
-              "description": "The ID of the Google Sheet."
+              ]
             },
             "requests": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
                 },
-                "additionalProperties": {}
-              },
-              "description": "Sheets API batchUpdate Request objects."
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13128,8 +10568,7 @@
             }
           },
           "required": [
-            "spreadsheet_id",
-            "requests"
+            "action"
           ]
         },
         "strict": false,
@@ -13656,16 +11095,19 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_entity_state",
-        "description": "Get the current state of a Home Assistant entity.",
+        "name": "homeassistant_read",
+        "description": "Read Home Assistant entity states.\n- `list_entities`: list up to 50 entities (optional `domain` prefix, e.g. `light`, `sensor`)\n- `get_state`: full state and attributes for `entity_id`",
         "parameters": {
           "type": "object",
           "properties": {
-            "entity_id": {
+            "action": {
               "type": "string",
-              "description": "The entity ID (e.g., 'light.living_room', 'switch.bedroom_fan')"
+              "enum": [
+                "list_entities",
+                "get_state"
+              ]
             },
-            "mindroom_output_path": {
+            "entity_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -13673,57 +11115,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_entities",
-        "description": "List all entities in Home Assistant, optionally filtered by domain.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
             "domain": {
-              "type": "string",
-              "description": "Optional domain to filter by (e.g., 'light', 'switch', 'sensor')"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "turn_on",
-        "description": "Turn on a device (light, switch, etc.).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The entity ID to turn on (e.g., 'light.living_room')"
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13739,7 +11134,7 @@
             }
           },
           "required": [
-            "entity_id"
+            "action"
           ]
         },
         "strict": false,
@@ -13747,16 +11142,26 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "turn_off",
-        "description": "Turn off a device (light, switch, etc.).",
+        "name": "homeassistant_control",
+        "description": "Control Home Assistant devices, scenes, automations, and services.\n- `turn_on`: turn on `entity_id`\n- `turn_off`: turn off `entity_id`\n- `toggle`: toggle `entity_id`\n- `set_brightness`: set light `entity_id` to `brightness` (0-255)\n- `set_color`: set light `entity_id` to `rgb_color` (`[r, g, b]`, each 0-255)\n- `set_temperature`: set climate `entity_id` to `temperature`\n- `activate_scene`: activate scene `entity_id`\n- `trigger_automation`: trigger automation `entity_id`\n- `call_service`: call `domain`/`service` with optional `entity_id` and `data` (dict or JSON string)",
         "parameters": {
           "type": "object",
           "properties": {
-            "entity_id": {
+            "action": {
               "type": "string",
-              "description": "The entity ID to turn off (e.g., 'light.living_room')"
+              "enum": [
+                "turn_on",
+                "turn_off",
+                "toggle",
+                "set_brightness",
+                "set_color",
+                "set_temperature",
+                "activate_scene",
+                "trigger_automation",
+                "call_service"
+              ]
             },
-            "mindroom_output_path": {
+            "entity_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -13764,251 +11169,77 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "toggle",
-        "description": "Toggle a device (if on, turn off; if off, turn on).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The entity ID to toggle (e.g., 'switch.bedroom_fan')"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "set_brightness",
-        "description": "Set the brightness of a light.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The light entity ID (e.g., 'light.living_room')"
+              ]
             },
             "brightness": {
-              "type": "integer",
-              "description": "Brightness level (0-255, where 255 is 100%)"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "integer"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id",
-            "brightness"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "set_color",
-        "description": "Set the color of a light using RGB values.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The light entity ID (e.g., 'light.living_room')"
+              ]
             },
-            "red": {
-              "type": "integer",
-              "description": "Red value (0-255)"
-            },
-            "green": {
-              "type": "integer",
-              "description": "Green value (0-255)"
-            },
-            "blue": {
-              "type": "integer",
-              "description": "Blue value (0-255)"
-            },
-            "mindroom_output_path": {
+            "rgb_color": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id",
-            "red",
-            "green",
-            "blue"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "set_temperature",
-        "description": "Set the temperature of a climate device.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The climate entity ID (e.g., 'climate.thermostat')"
+              ]
             },
             "temperature": {
-              "type": "number",
-              "description": "Target temperature in the unit configured in Home Assistant"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "number"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "entity_id",
-            "temperature"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "activate_scene",
-        "description": "Activate a Home Assistant scene.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "scene_id": {
-              "type": "string",
-              "description": "The scene entity ID (e.g., 'scene.movie_time')"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "scene_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "trigger_automation",
-        "description": "Trigger a Home Assistant automation.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "automation_id": {
-              "type": "string",
-              "description": "The automation entity ID (e.g., 'automation.morning_routine')"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "automation_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "call_service",
-        "description": "Call a generic Home Assistant service.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "domain": {
-              "type": "string",
-              "description": "The service domain (e.g., 'light', 'switch', 'notify')"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "service": {
-              "type": "string",
-              "description": "The service name (e.g., 'turn_on', 'toggle', 'send_message')"
-            },
-            "entity_id": {
-              "type": "string",
-              "description": "The entity ID(s) to apply the service to (optional)"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "data": {
-              "type": "string",
-              "description": "Additional service data as JSON string (optional)"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14024,8 +11255,7 @@
             }
           },
           "required": [
-            "domain",
-            "service"
+            "action"
           ]
         },
         "strict": false,
@@ -14913,6 +12143,17 @@
             "new_thread": {
               "type": "boolean",
               "description": "Start a separate thread; send only, cannot combine with thread_id."
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pinned thread title; send + new_thread only."
             },
             "event_id": {
               "anyOf": [
