@@ -46,7 +46,7 @@ def _valid_plugin(root: Path) -> Path:
         },
         modules={
             "tools.py": (
-                "from agno.tools import Toolkit\n"
+                "from mindroom.plugin_api import Toolkit\n"
                 "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
                 "from mindroom.tool_system.registration import register_tool_with_metadata\n"
                 "class DemoTool(Toolkit):\n"
@@ -203,26 +203,6 @@ def _tool_plugin(root: Path, factory: str) -> Path:
     )
 
 
-def test_check_plugin_rejects_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path: Path) -> None:
-    """MindRoom runs MCP servers only from ``mcp_servers:``, so a plugin toolkit wrapping Agno ``MCPTools`` fails."""
-    plugin_root = _tool_plugin(
-        tmp_path / "plugin",
-        "def wrapper_tools():\n"
-        "    from agno.tools.mcp import MCPTools\n"
-        "    class FilesystemMCPTools(MCPTools):\n"
-        "        pass\n"
-        "    return FilesystemMCPTools\n",
-    )
-    original_tool_metadata = dict(builtin_tool_registry().entries)
-    published = plugins_module._PUBLISHED
-
-    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools.*mcp_servers:"):
-        check_plugin(plugin_root)
-
-    assert original_tool_metadata == dict(builtin_tool_registry().entries)
-    assert plugins_module._PUBLISHED is published
-
-
 def test_check_plugin_checks_a_toolkit_its_factory_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
     """A factory's lazy relative import finds the plugin's own module during the check, as after publication."""
     plugin_root = _tool_plugin(
@@ -230,12 +210,23 @@ def test_check_plugin_checks_a_toolkit_its_factory_imports_from_the_plugin_lazil
         "def wrapper_tools():\n    from .impl import Tools\n    return Tools\n",
     )
     (plugin_root / "impl.py").write_text(
-        "from agno.tools.mcp import MCPTools\nclass Tools(MCPTools):\n    pass\n",
+        "from mindroom.plugin_api import Toolkit, tool\n"
+        "class Tools(Toolkit):\n"
+        "    name = 'wrapper'\n"
+        "    @tool\n"
+        "    def run(self, agent: object) -> str:\n"
+        "        del agent\n"
+        "        return ''\n",
         encoding="utf-8",
     )
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
 
-    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools"):
+    with pytest.raises(ValueError, match=r"^Tool 'wrapper' cannot offer its function 'run': .* takes agent"):
         check_plugin(plugin_root)
+
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
 
 
 def test_check_plugin_runs_an_oauth_callback_that_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
@@ -326,33 +317,21 @@ def test_check_plugin_rejects_a_tool_function_annotated_with_a_type_imported_onl
         check_plugin(plugin_root)
 
 
-@pytest.mark.parametrize(
-    ("imports", "parameter"),
-    [
-        ("", "agent"),
-        ("", "team"),
-        ("", "run_context"),
-        ("from agno.agent import Agent", "owner: Agent"),
-        ("from agno.team import Team", "owner: Team"),
-        ("from agno.run import RunContext", "context: RunContext"),
-    ],
-)
-def test_check_plugin_rejects_a_tool_function_taking_what_only_agno_toolkits_are_handed(
+@pytest.mark.parametrize("parameter", ["agent", "team", "run_context"])
+def test_check_plugin_rejects_a_tool_function_taking_reserved_framework_parameters(
     tmp_path: Path,
-    imports: str,
     parameter: str,
 ) -> None:
-    """A parameter Agno would hand its agent, team, or run context drops the toolkit, so the check names it and fails."""
+    """A parameter reserving a retired framework object drops the toolkit, so the check names it and fails."""
     plugin_root = _owned_toolkit_plugin(
         tmp_path / "plugin",
-        f"from datetime import date\n{imports}",
+        "from datetime import date",
         f"day: date, {parameter}",
     )
-    name = parameter.partition(":")[0]
 
     with pytest.raises(
         ValueError,
-        match=rf"^Tool 'calendar' cannot offer its function 'schedule': .* takes {name}, which only Agno toolkits",
+        match=rf"^Tool 'calendar' cannot offer its function 'schedule': .* takes {parameter}, which MindRoom does not inject",
     ):
         check_plugin(plugin_root)
 

@@ -23,11 +23,11 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.todo_state import todos_path
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )

@@ -36,7 +36,7 @@ from mindroom.tool_jobs.runtime import (
     JobAccessError,
     register_background_runtime,
 )
-from mindroom.tool_system.agno_toolkits import Function, Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -44,11 +44,11 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, member_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
 )
-from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
@@ -399,7 +399,7 @@ async def test_only_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path:
         jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
-        delegation = offered_agno_function(Function.from_callable(delegate_task_to_member))
+        delegation = adapt_callable(delegate_task_to_member)
         call_context = ToolCallContext(run_id="team-run", session_id=context.session_id, user_id=None)
         with tool_runtime_context(context), recording_tool_calls(recorder):
             await execute_tool_call(job, {"action": "list"}, call_context, middleware=jobs.middleware)

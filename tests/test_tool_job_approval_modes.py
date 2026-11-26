@@ -45,10 +45,10 @@ from mindroom.tool_jobs.control import JobControl, job_checkpoint, job_control_c
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE, AdaptedToolkit
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE, AdaptedToolkit, ToolFunction, ToolGate
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -89,7 +89,11 @@ class _NativeTools(Toolkit):
         self.observed = observed
         super().__init__(name="native", tools=[self.native_step])
         bind_toolkit_construction(self, ToolConstruction("native_plugin", None))
-        self.get_async_functions()["native_step"].requires_confirmation = True
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        if function.name == "native_step":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     async def native_step(self, **options: int) -> str:
         """Observe native keywords without declaring a reserved managed parameter."""

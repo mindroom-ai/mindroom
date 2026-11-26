@@ -21,10 +21,10 @@ from mindroom.custom_tools.chat_ui import ChatUITools, show_computer_once
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.agent_tool_helpers import toolkit_offers
 from tests.chat_ui_contract_fixture import (
     REQUESTER_ID,

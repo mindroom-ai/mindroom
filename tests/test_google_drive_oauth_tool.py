@@ -23,14 +23,14 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
-from mindroom.tool_system.agno_toolkits import (
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
     rename_toolkit_functions,
     toolkit_function_names,
 )
-from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials

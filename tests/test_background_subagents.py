@@ -12,7 +12,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools.toolkit import Toolkit
 
 from mindroom.delegation.background import (
     delegation_child,
@@ -31,6 +30,7 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from tests.agent_tool_helpers import detached_policy, toolkit_offers
 from tests.conftest import test_runtime_paths

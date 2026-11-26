@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from structlog.testing import capture_logs
 
 import mindroom.agents as agents_module
@@ -33,6 +31,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.tool_function import ToolGate
@@ -554,12 +553,24 @@ def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers
 def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_toolkit(tmp_path: Path) -> None:
     """Tool search shows a deferred function's instructions; an eager toolkit offering one is refused, not the agent."""
     config, runtime_paths = _config(tmp_path, tools=[{"wikipedia": {"defer": True}}, "arxiv"])
+    original_adapt = agents_module.adapt_toolkit
 
     def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        function = Function(name=f"{tool_name}_lookup", entrypoint=ping, instructions="Look up named pages only.")
-        return Toolkit(name=tool_name, tools=[function])
+        toolkit = Toolkit(name=tool_name)
+        toolkit.functions[f"{tool_name}_lookup"] = ping
+        return toolkit
 
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+    def adapt_with_function_instructions(toolkit: Toolkit, **kwargs: Any) -> Any:  # noqa: ANN401
+        adapted = original_adapt(toolkit, **kwargs)
+        if toolkit.name in {"wikipedia", "arxiv"}:
+            return replace(adapted, function_instructions={f"{toolkit.name}_lookup": "Look up named pages only."})
+        return adapted
+
+    with (
+        patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit),
+        patch.object(agents_module, "adapt_toolkit", side_effect=adapt_with_function_instructions),
+        capture_logs() as logs,
+    ):
         build = _build(config, runtime_paths)
 
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["wikipedia", "skills"]
@@ -568,40 +579,44 @@ def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_tool
     assert (warning["tool"], warning["error"]) == (
         "arxiv",
         (
-            "Tool function 'arxiv_lookup' sets instructions for Agno to add to the system prompt, which MindRoom adds"
-            " only per toolkit; set them on the toolkit instead"
+            "Tool function 'arxiv_lookup' sets per-function prompt instructions, which MindRoom adds only per toolkit;"
+            " set them on the toolkit instead"
         ),
     )
-
-
-def _no_hook(*_args: object, **_kwargs: object) -> None:
-    return None
-
-
-_REFUSED_FIELDS = [
-    {"pre_hook": _no_hook},
-    {"requires_user_input": True},
-    {"external_execution": True},
-    {"instructions": "Look up named pages."},
-]
 
 
 @pytest.mark.parametrize(
     ("agent_mode", "narrowed_by"),
     [("standard", "caller"), ("standard", "persona"), ("minimal", "caller")],
 )
-@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "external_execution", "instructions"])
+@pytest.mark.parametrize(
+    "refusal_override",
+    [
+        {"refused": {"lookup": "Tool function 'lookup' cannot run"}},
+        {"function_instructions": {"lookup": "Look up named pages."}},
+    ],
+    ids=["refused", "instructions"],
+)
 def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
     tmp_path: Path,
     agent_mode: str,
     narrowed_by: str,
-    refused: dict[str, object],
+    refusal_override: dict[str, dict[str, str]],
 ) -> None:
     """A function setting a field MindRoom refuses fails its toolkit only when the agent offers it."""
     config, runtime_paths = _config(tmp_path, tools=["wikipedia"])
+    original_adapt = agents_module.adapt_toolkit
 
     def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        return Toolkit(name=tool_name, tools=[Function(name="lookup", entrypoint=ping, **refused), ping])
+        toolkit = Toolkit(name=tool_name, tools=[ping])
+        toolkit.functions["lookup"] = ping
+        return toolkit
+
+    def adapt_with_refusal(toolkit: Toolkit, **kwargs: Any) -> Any:  # noqa: ANN401
+        adapted = original_adapt(toolkit, **kwargs)
+        if toolkit.name == "wikipedia":
+            return replace(adapted, **refusal_override)
+        return adapted
 
     narrowing: dict[str, Any] = (
         {"tool_function_filter": lambda function: function.name != "lookup"}
@@ -615,7 +630,11 @@ def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
             ),
         }
     )
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+    with (
+        patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit),
+        patch.object(agents_module, "adapt_toolkit", side_effect=adapt_with_refusal),
+        capture_logs() as logs,
+    ):
         build = _build(config, runtime_paths, agent_mode=agent_mode, **narrowing)
 
     assert not [log for log in logs if log["event"] == "Could not load tool for agent construction"]
@@ -750,8 +769,12 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
     def build_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name != "wikipedia":
             return build_agent_toolkit(tool_name, **kwargs)
+
+        def bad_search(agent: object = None) -> str:
+            return str(agent)
+
         toolkit = Toolkit(name="wikipedia", tools=[ping])
-        toolkit.functions["search_wikipedia"] = Function(name="search_wikipedia")
+        toolkit.functions["search_wikipedia"] = bad_search
         return toolkit
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
@@ -761,7 +784,8 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
     assert build.request_template.deferred_tools.names == frozenset()
     assert not any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert (warning["tool"], warning["error"]) == ("wikipedia", "Tool function 'search_wikipedia' has no entrypoint")
+    assert warning["tool"] == "wikipedia"
+    assert "'search_wikipedia' takes agent" in warning["error"]
 
 
 def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_path: Path) -> None:

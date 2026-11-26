@@ -1156,7 +1156,7 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
 
 def test_native_delegate_pauses_for_its_driver() -> None:
     """A native parent must pause before entering the child call stack."""
-    from agno.tools import Toolkit  # noqa: PLC0415 - the Agno toolkit is the authoring API the flags live on
+    from mindroom.tool_system.authoring import Toolkit  # noqa: PLC0415
 
     async def run_subagent(agent_name: str, task: str) -> str:
         return f"{agent_name}: {task}"
@@ -1168,7 +1168,7 @@ def test_native_delegate_pauses_for_its_driver() -> None:
 
 def test_detached_delegate_retains_inline_execution() -> None:
     """Detached callers cannot take ownership of Matrix approvals."""
-    from agno.tools import Toolkit  # noqa: PLC0415 - the Agno toolkit is the authoring API the flags live on
+    from mindroom.tool_system.authoring import Toolkit  # noqa: PLC0415
 
     async def run_subagent(agent_name: str, task: str) -> str:
         return f"{agent_name}: {task}"

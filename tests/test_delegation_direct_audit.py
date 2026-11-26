@@ -29,10 +29,10 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,

@@ -42,10 +42,10 @@ from mindroom.tool_jobs.execution import assembled_job_tools
 from mindroom.tool_jobs.publication import _job_state
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit, toolkit_function_names
 from mindroom.workflow_runs.limits import WorkflowLimits, ceiling
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.access_schema_support import with_responder_access

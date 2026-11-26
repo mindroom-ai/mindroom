@@ -32,7 +32,7 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_payload_preparation import _STEER_CONTINUATION_LINE, _steered_follow_up_prompt
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (

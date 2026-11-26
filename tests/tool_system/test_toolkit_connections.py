@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
-from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
 from mindroom.agent_cli.minimal_agent import prepare_minimal_catalog
@@ -28,6 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
@@ -67,7 +67,7 @@ EVENTS: list[str] = []
 class _DatabaseTools(Toolkit):
     """A toolkit that holds a database connection for one run, as Agno's Postgres toolkit does."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def __init__(self) -> None:
         super().__init__(name="database", tools=[self.query])
@@ -93,7 +93,7 @@ class _DatabaseTools(Toolkit):
 class _ArchiveTools(Toolkit):
     """A second toolkit that holds a connection for one run."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def __init__(self) -> None:
         super().__init__(name="archive", tools=[self.fetch])
@@ -399,7 +399,7 @@ async def test_a_shielded_lifecycle_hands_its_task_to_retain_only_when_the_calle
 class _FailingLifecycleTools(Toolkit):
     """A toolkit whose connect and close raise what the test sets, recording each step."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def __init__(self, *, connect_error: Exception | None = None, close_error: Exception | None = None) -> None:
         super().__init__(name="database")

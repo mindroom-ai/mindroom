@@ -53,7 +53,6 @@ import pytest
 import pytest_asyncio
 import structlog
 import yaml
-from agno.utils import log as agno_log
 from aioresponses import aioresponses
 from openai import AsyncOpenAI, OpenAI
 from structlog.testing import ReturnLoggerFactory
@@ -2806,9 +2805,7 @@ def write_demo_tool_plugin(plugin_root: Path, tool_name: str) -> None:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -3000,9 +2997,7 @@ def write_generation_probe_plugin(plugin_root: Path, generation: int) -> list[tu
     )
     header = f"import sys\n\nGENERATION = {generation}\n_seen = sys.modules[{_GENERATION_PROBE_MODULE!r}].seen\n\n"
     (plugin_root / "tools.py").write_text(
-        header + "from agno.tools import Toolkit\n"
-        "\n"
-        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+        header + "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
         "\n"
         "class GenerationProbeTools(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -3917,11 +3912,6 @@ def _isolate_structlog_configuration(
     monkeypatch.setattr(logging_config, "_library_logging", False)
     if request.node.path.name != "test_logging_config.py":
         monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
-    # `setup_logging` reroutes Agno's loggers; give later tests on this worker Agno's own setup back.
-    agno_loggers = [
-        (agno_logger, agno_logger.handlers[:], agno_logger.filters[:], agno_logger.level, agno_logger.propagate)
-        for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger)
-    ]
     # `setup_logging` also sets the root level and handlers; a DEBUG root makes every later test on this worker
     # render and capture each debug record, which took team turns past the timeout.
     root_logger = logging.getLogger()
@@ -3934,11 +3924,6 @@ def _isolate_structlog_configuration(
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
-    for agno_logger, handlers, filters, level, propagate in agno_loggers:
-        agno_logger.handlers[:] = handlers
-        agno_logger.filters[:] = filters
-        agno_logger.setLevel(level)
-        agno_logger.propagate = propagate
 
 
 @pytest.fixture(autouse=True)

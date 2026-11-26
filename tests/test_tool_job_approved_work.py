@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -19,8 +19,10 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from tests.conftest import preserved_builtin_tools
 from tests.delegation_helpers import (
     ScriptedAgents,
@@ -49,9 +51,10 @@ class SlowTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="slow", tools=[self.work])
-        for functions in (self.functions, self.async_functions):
-            if "work" in functions:
-                functions["work"].requires_confirmation = True
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Require confirmation on every offered function."""
+        return replace(function, gate=ToolGate.CONFIRM)
 
     async def work(self) -> str:
         """Do the approved work."""

@@ -21,7 +21,7 @@ from mindroom.tool_jobs.conversation import ConversationKey, current_conversatio
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.registration import register_tool_with_metadata

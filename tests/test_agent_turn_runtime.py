@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
 from mindroom import ai, loop_hooks, response_turn
@@ -75,6 +74,7 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
@@ -119,8 +119,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.run import RunContext as AgnoRunContext
-
     from mindroom.constants import RuntimePaths
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_runner import ResponseRunner
@@ -155,16 +153,16 @@ class _ProbeToolkit(Toolkit):
         type(self).calls.append(label)
         return f"touched {label}"
 
-    async def remember(self, label: str, run_context: AgnoRunContext | None = None) -> str:
+    async def remember(self, label: str) -> str:
         """Keep a label in the run's shared session state.
 
         Args:
             label: What to keep.
-            run_context: The run, supplied by the loop.
 
         """
-        assert run_context is not None
-        run_context.session_state["remembered"] = label
+        call = current_call()
+        assert call is not None
+        call.session_state["remembered"] = label
         return "remembered"
 
 

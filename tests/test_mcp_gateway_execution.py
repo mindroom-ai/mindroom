@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from agno.tools import Toolkit
 from starlette.applications import Starlette
 from starlette.routing import Route
 from structlog.testing import capture_logs
@@ -23,9 +22,9 @@ from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
-from mindroom.tool_system.authoring import toolkit_functions
+from mindroom.tool_system.authoring import Toolkit, toolkit_functions
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
+from mindroom.tool_system.toolkits import configure_toolkit_functions
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
 from tests.test_mcp_gateway_tools import context  # noqa: F401
 
@@ -81,7 +80,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
         def __init__(self) -> None:
             block("build")
             super().__init__(name="calculator", tools=[self.work])
-            self._requires_connect = True
+            self.requires_connect = True
 
         def connect(self) -> None:
             block("connect")
@@ -658,7 +657,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
     class AsyncToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[self.work])
-            self._requires_connect = True
+            self.requires_connect = True
 
         async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
@@ -720,7 +719,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
     class FailingCloseToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[self.work])
-            self._requires_connect = True
+            self.requires_connect = True
 
         async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass

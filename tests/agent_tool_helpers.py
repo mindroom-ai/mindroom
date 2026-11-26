@@ -15,10 +15,10 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import HookBindings
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import authoring
-from mindroom.tool_system.agno_toolkits import Toolkit, toolkit_function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, execute_tool_call
 from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.toolkits import toolkit_function
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookRegistry
-    from mindroom.tool_system.agno_toolkits import AnyToolkit, Function
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolOutcome
 
@@ -50,7 +50,7 @@ class UnansweredCallTools(authoring.Toolkit):
         return replace(function, gate=ToolGate.DELEGATION) if function.name in self.unanswered else function
 
 
-def toolkit_offers(toolkit: AnyToolkit, name: str) -> ToolFunction:
+def toolkit_offers(toolkit: Toolkit, name: str) -> ToolFunction:
     """Return the function of ``name`` ``toolkit`` offers, as an agent's run offers it."""
     function = toolkit_function(toolkit, name)
     if function is None:
@@ -58,7 +58,7 @@ def toolkit_offers(toolkit: AnyToolkit, name: str) -> ToolFunction:
     return function
 
 
-def blocking_entrypoint(toolkit: AnyToolkit, name: str) -> Callable[..., Any]:
+def blocking_entrypoint(toolkit: Toolkit, name: str) -> Callable[..., Any]:
     """Return the entrypoint ``toolkit`` offers for ``name`` as a blocking call, which runs an async one to its end."""
     entrypoint = toolkit_offers(toolkit, name).entrypoint
 
@@ -67,13 +67,6 @@ def blocking_entrypoint(toolkit: AnyToolkit, name: str) -> Callable[..., Any]:
         return asyncio.run(result) if inspect.iscoroutine(result) else result
 
     return call
-
-
-def offered_agno_function(function: Function) -> ToolFunction:
-    """Return ``function``, an Agno function built alone, as a toolkit holding it offers it."""
-    toolkit = Toolkit(name="test")
-    toolkit.functions[function.name] = function
-    return toolkit_offers(toolkit, function.name)
 
 
 def offered_function(build: AgentBuild, name: str) -> ToolFunction:

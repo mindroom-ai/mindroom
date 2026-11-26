@@ -12,9 +12,9 @@ import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.aws_ses import aws_ses_tools
 from mindroom.tools.discord import discord_tools
 from mindroom.tools.email import email_tools

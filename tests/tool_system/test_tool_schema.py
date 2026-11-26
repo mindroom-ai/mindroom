@@ -1,12 +1,4 @@
-"""The owned schema generator renders each annotation as Agno did, and owned coercion gives a body what Agno's gave.
-
-The generator derives every tool's schema, MindRoom's own and the Agno toolkits', which the tool goldens pin. The
-annotation-kind cases run each kind of annotation and docstring a tool may use through both generators, and the two
-outputs must serialize to the same bytes, so a plugin's Agno toolkit is offered what Agno offered; every argument golden
-whose probe takes no framework object runs through owned toolkit functions. Values annotated ``Any`` or ``object`` are
-where the two differ on purpose: the owned generator leaves them unconstrained, and the comparison renders them as
-Agno's open fix does (``support.agno_derivation``).
-"""
+"""The native schema generator renders every annotation kind and docstring style deterministically."""
 
 # The annotation-kind probes exist for their signatures, which no body reads.
 # ruff: noqa: ARG001, ARG002
@@ -33,10 +25,10 @@ from pydantic import BaseModel
 
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.pandas import pandas_tools
 from tests.agent_tool_helpers import toolkit_offers
@@ -331,13 +323,301 @@ ANNOTATION_KINDS = (
 )
 
 
+_EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
+    "scalars": (
+        "Take scalars.",
+        {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "description": "A whole number."},
+                "ratio": {"type": "number", "description": "A decimal number."},
+                "enabled": {"type": "boolean", "description": "A flag."},
+                "label": {"type": "string", "description": "Free text."},
+            },
+            "required": ["count", "ratio", "enabled", "label"],
+        },
+    ),
+    "optionals": (
+        "Take optional values and defaults.",
+        {
+            "type": "object",
+            "properties": {
+                "typed": {"type": "string", "description": "Optional text."},
+                "union": {"type": "integer", "description": "Optional number."},
+                "piped": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "description": "Optional number with a pipe.",
+                },
+                "choice": {"type": "string", "enum": ["a", "b"], "description": "An optional choice."},
+                "flag": {"type": "boolean", "description": "A defaulted flag."},
+            },
+            "required": [],
+        },
+    ),
+    "literals": (
+        "Take constrained choices.",
+        {
+            "type": "object",
+            "properties": {
+                "words": {"type": "string", "enum": ["fast", "slow"]},
+                "numbers": {"type": "integer", "enum": [1, 2]},
+                "flags": {"type": "boolean", "enum": [True]},
+                "mixed": {"enum": ["a", 1]},
+            },
+            "required": ["words", "numbers", "flags", "mixed"],
+        },
+    ),
+    "enums": (
+        "Take enumerations.",
+        {
+            "type": "object",
+            "properties": {
+                "color": {"type": "string", "enum": ["red", "green"]},
+                "level": {"type": "string", "enum": [1, 2]},
+            },
+            "required": ["color"],
+        },
+    ),
+    "collections": (
+        "Take sequences.",
+        {
+            "type": "object",
+            "properties": {
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "pairs": {"type": "array", "items": {"type": "integer"}},
+                "unique": {"type": "array", "items": {"type": "string"}},
+                "frozen": {"type": "array", "items": {"type": "integer"}},
+                "bare": {"type": "array"},
+                "legacy": {"type": "array", "items": {"type": "string"}},
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "number"},
+                                {"type": "boolean"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+                "either": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            },
+            "required": ["tags", "pairs", "unique", "frozen", "bare", "legacy", "rows", "either"],
+        },
+    ),
+    "mappings": (
+        "Take mappings.",
+        {
+            "type": "object",
+            "properties": {
+                "bare": {"type": "object", "additionalProperties": True},
+                "legacy": {
+                    "type": "object",
+                    "propertyNames": {"type": "string"},
+                    "additionalProperties": {"type": "string"},
+                },
+                "typed": {
+                    "type": "object",
+                    "propertyNames": {"type": "string"},
+                    "additionalProperties": {"type": "integer"},
+                },
+                "anything": {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}},
+                "objects": {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}},
+                "unions": {
+                    "type": "object",
+                    "propertyNames": {"type": "string"},
+                    "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}]},
+                },
+                "nested": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "propertyNames": {"type": "string"},
+                            "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            },
+            "required": ["bare", "legacy", "typed", "anything", "objects", "unions"],
+        },
+    ),
+    "models": (
+        "Take structured values.",
+        {
+            "type": "object",
+            "properties": {
+                "outer": {
+                    "description": "A model holding nested models.",
+                    "properties": {
+                        "name": {"title": "Name", "type": "string"},
+                        "inner": {
+                            "description": "A model nested in another.",
+                            "properties": {
+                                "key": {"title": "Key", "type": "string"},
+                                "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+                            },
+                            "required": ["key"],
+                            "title": "Inner",
+                            "type": "object",
+                        },
+                        "extras": {
+                            "default": [],
+                            "items": {
+                                "description": "A model nested in another.",
+                                "properties": {
+                                    "key": {"title": "Key", "type": "string"},
+                                    "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+                                },
+                                "required": ["key"],
+                                "title": "Inner",
+                                "type": "object",
+                            },
+                            "title": "Extras",
+                            "type": "array",
+                        },
+                        "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Note"},
+                        "maybe": {
+                            "anyOf": [
+                                {
+                                    "description": "A model nested in another.",
+                                    "properties": {
+                                        "key": {"title": "Key", "type": "string"},
+                                        "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+                                    },
+                                    "required": ["key"],
+                                    "title": "Inner",
+                                    "type": "object",
+                                },
+                                {"type": "null"},
+                            ],
+                            "default": None,
+                        },
+                    },
+                    "required": ["name", "inner"],
+                    "title": "Outer",
+                    "type": "object",
+                },
+                "tree": {
+                    "description": "A model nested in itself.",
+                    "properties": {
+                        "label": {"title": "Label", "type": "string"},
+                        "children": {
+                            "default": [],
+                            "items": {"type": "object", "description": "A nested TreeNode object of this same shape."},
+                            "title": "Children",
+                            "type": "array",
+                        },
+                    },
+                    "required": ["label"],
+                    "title": "TreeNode",
+                    "type": "object",
+                },
+                "many": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "description": "A model nested in another.",
+                                "properties": {
+                                    "key": {"title": "Key", "type": "string"},
+                                    "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+                                },
+                                "required": ["key"],
+                                "title": "Inner",
+                                "type": "object",
+                            },
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            },
+            "required": ["outer", "tree"],
+        },
+    ),
+    "untyped": (
+        "Take values of any type.",
+        {
+            "type": "object",
+            "properties": {"value": {}, "anything": {}, "thing": {}},
+            "required": ["value", "anything", "thing"],
+        },
+    ),
+    "no_docstring": ("", {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}),
+    "google_style": (
+        "Search for something.\nA longer body that explains\nover two lines.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "How many results."},
+            },
+            "required": ["query"],
+        },
+    ),
+    "numpy_style": (
+        "Search for something.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "(int) How many results."},
+            },
+            "required": ["query"],
+        },
+    ),
+    "rest_style": (
+        "Search for something.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "How many results."},
+            },
+            "required": ["query"],
+        },
+    ),
+    "undocumented_parameter": (
+        "Search for something.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "How many results."},
+            },
+            "required": ["query"],
+        },
+    ),
+    "asynchronous": (
+        "Search asynchronously.",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The query."}},
+            "required": ["query"],
+        },
+    ),
+    "keyword_only": (
+        "Take keyword-only parameters.",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "required": {"type": "boolean"}},
+            "required": ["query", "required"],
+        },
+    ),
+}
+
+
 @pytest.mark.parametrize("entrypoint", ANNOTATION_KINDS, ids=lambda entrypoint: entrypoint.__name__)
-def test_each_annotation_kind_derives_agnos_schema(entrypoint: Callable[..., Any]) -> None:
-    """Each kind of annotation, default, and docstring style derives the bytes Agno derives."""
-    assert_same_bytes(owned_derivation(entrypoint), support.agno_derivation(entrypoint))
+def test_each_annotation_kind_derives_expected_schema(entrypoint: Callable[..., Any]) -> None:
+    """Each kind of annotation, default, and docstring style derives its pinned schema bytes."""
+    assert_same_bytes(owned_derivation(entrypoint), _EXPECTED_ANNOTATION_SCHEMAS[entrypoint.__name__])
 
 
-def test_a_bound_method_derives_agnos_schema() -> None:
+def test_a_bound_method_derives_expected_schema() -> None:
     """A method's ``self`` is bound, so only its own parameters reach the schema."""
 
     class Holder:
@@ -351,7 +631,20 @@ def test_a_bound_method_derives_agnos_schema() -> None:
             """
             return query
 
-    assert_same_bytes(owned_derivation(Holder().method), support.agno_derivation(Holder().method))
+    assert_same_bytes(
+        owned_derivation(Holder().method),
+        (
+            "Search.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The query."},
+                    "limit": {"type": "integer", "description": "How many."},
+                },
+                "required": ["query"],
+            },
+        ),
+    )
 
 
 def test_variadic_parameters_stay_out_of_the_schema() -> None:
@@ -419,12 +712,12 @@ def test_an_annotation_that_does_not_resolve_raises() -> None:
 
 
 def owned_probe_functions() -> dict[str, Any]:
-    """Adapt the argument probes that take no framework object as one owned toolkit, keyed by function name."""
-    toolkit = Toolkit(name="probes", tools=[probe for probe in probes.PROBES if probe is not probes.probe_agent])
+    """Adapt the argument probes as one toolkit, keyed by function name."""
+    toolkit = Toolkit(name="probes", tools=list(probes.PROBES))
     return {function.name: function for function in adapt_toolkit(toolkit).functions}
 
 
-_OWNED_CASES = sorted(case_id for case_id, case in ARGUMENTS.items() if case["function"] != "probe_agent")
+_OWNED_CASES = sorted(ARGUMENTS)
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
 from mindroom import ai_runtime, loop_hooks, response_turn
@@ -68,6 +67,7 @@ from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
 from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, tool_markers_in_text

@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import yaml
-from agno.run import RunContext
 
 from mindroom.agents import create_agent
 from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
@@ -27,7 +26,6 @@ from mindroom.desktop.protocol import DesktopResponse
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
@@ -627,9 +625,9 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         "key": {Opaque(): "value"},
         "nonfinite": float("nan"),
         "positional": Opaque(),
-        # What an entrypoint's ``agent`` or ``team`` parameter receives, carrying the toolkit's state.
-        "actor": ToolCallActor(session_state={"secret": _MODEL_KEY}),
-        "context": {"alias": RunContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})},
+        # Arbitrary runtime objects carrying secrets must never cross the worker boundary.
+        "actor": SimpleNamespace(session_state={"secret": _MODEL_KEY}),
+        "context": {"alias": SimpleNamespace(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})},
     }[shape]
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -663,7 +661,7 @@ def test_declared_unused_agent_keeps_call_arguments(
     def entrypoint(agent: object, path: Path, *, options: object) -> None:
         del agent, path, options
 
-    owner = ToolCallActor(session_state={"secret": _MODEL_KEY})
+    owner = SimpleNamespace(session_state={"secret": _MODEL_KEY})
     path = tmp_path / "output.wav"
     options = {"values": (1, True, None, 2.5)}
     args = (owner, path) if positional else ()

@@ -25,11 +25,11 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthConsentGroup, OAuthTokenResult
 from mindroom.oauth.registry import oauth_provider_registry
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, google_workspace_oauth_providers
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins, prepare_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import publish_oauth_credentials

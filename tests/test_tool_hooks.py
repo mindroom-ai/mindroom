@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response
@@ -54,7 +53,7 @@ from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system import tool_hooks
-from mindroom.tool_system.agno_toolkits import Function
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_started_event
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -65,9 +64,10 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.agent_tool_helpers import detached_policy, offered_agno_function, tool_policy
+from tests.agent_tool_helpers import detached_policy, tool_policy
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -289,8 +289,8 @@ def _agent_bot(
     return bot
 
 
-def _first_function(toolkit: Toolkit) -> Function:
-    functions = [*toolkit.functions.values(), *toolkit.async_functions.values()]
+def _first_function(toolkit: Toolkit) -> ToolFunction:
+    functions = adapt_toolkit(toolkit).functions
     assert functions
     return functions[0]
 
@@ -299,7 +299,7 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
     """Run the toolkit's first function with ``text="hi"`` through the tool-call policy, as the loop runs a call."""
     middleware = detached_policy(registry)
     return await execute_tool_call(
-        offered_agno_function(_first_function(toolkit)),
+        _first_function(toolkit),
         {"text": "hi"},
         ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         middleware=(middleware,),
@@ -698,7 +698,7 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
 
     with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
         await execute_tool_call(
-            offered_agno_function(Function(name="sync_tool", entrypoint=sync_tool)),
+            adapt_callable(sync_tool),
             {},
             ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
             middleware=(middleware,),

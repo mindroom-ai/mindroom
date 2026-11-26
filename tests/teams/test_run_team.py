@@ -11,7 +11,7 @@ import asyncio
 import json
 import threading
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from structlog.testing import capture_logs
@@ -25,6 +25,7 @@ from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPON
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_usage
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode
+from mindroom.tool_system.invocation import current_tool_call
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
@@ -201,20 +202,11 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_and_memb
     assert isinstance(events[-1], RunFinished)
 
 
-class _RunMetadata(Protocol):
-    """The part of the run context a tool receives that ``room_of_the_turn`` reads."""
-
-    metadata: dict[str, Any] | None
-
-
-def room_of_the_turn(run_context: _RunMetadata) -> str:
-    """Return the room the turn's run metadata names.
-
-    Args:
-        run_context: The run's context, which the loop injects.
-
-    """
-    return str((run_context.metadata or {}).get("room_id"))
+def room_of_the_turn() -> str:
+    """Return the room the turn's run metadata names."""
+    call = current_tool_call()
+    assert call is not None
+    return str((call.context.metadata or {}).get("room_id"))
 
 
 async def test_a_member_s_tools_read_the_team_s_metadata_which_only_the_team_s_record_stores() -> None:
