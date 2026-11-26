@@ -1832,6 +1832,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining CPU and memory requests and limits for the `small`, `standard`, and `large` profiles | Built-in profiles |
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Positive seconds to retain finished background-script runs, tool-call receipts, and approval records | `2592000` (30 days) |
+| `MINDROOM_SHELL_SYSTEMD_SLICE` | Linux systemd user slice name (for example `mindroom-shells.slice`) to isolate local `shell` commands outside MindRoom's own service cgroup via `systemd-run --user --scope`; see [Linux resource isolation](https://docs.mindroom.chat/tools/execution-and-coding/#linux-resource-isolation) | _(unset)_ |
 
 See [Background Scripts](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) for when each script gateway variable is required, and [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference) for the other `MINDROOM_SANDBOX_*` and Kubernetes worker variables.
 Credential seed variables are described in [Credential Seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
@@ -11830,6 +11831,59 @@ run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
+
+### Linux resource isolation
+
+On Linux, MindRoom starts shell commands at `SCHED_IDLE` CPU priority (`chrt -i 0`, falling back to moving the process tree after spawn) and idle disk I/O priority (`ionice -c 3`, which takes effect when the disk scheduler honors I/O priorities such as BFQ, and fails open when unavailable).
+
+Deployments that route `shell` to Docker or Kubernetes workers already isolate commands in their worker containers.
+When running `shell` directly in the MindRoom process on a Linux systemd host (`defaults.allow_shell_without_worker: true`), spawned commands inherit MindRoom's own service cgroup by default, so heavy builds or test suites can compete with MindRoom for RAM and swap.
+
+To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
+MindRoom probes `systemd-run --user --scope` together with `env` once per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)` and caches the result for the process lifetime, failing open when unavailable (including on older systemd releases without `--expand-environment=no`).
+When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
+
+Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
+
+1. Enable lingering so `user@<uid>.service` starts at boot (`sudo loginctl enable-linger <user>`), and delegate controllers to it (for example in `/etc/systemd/system/user@<uid>.service.d/delegate.conf`):
+
+   ```ini
+   [Service]
+   Delegate=cpu cpuset io memory pids
+   ```
+
+2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with limits sized to the host:
+
+   ```ini
+   [Unit]
+   Description=MindRoom agent shell subprocesses
+
+   [Slice]
+   MemoryHigh=50%
+   MemoryMax=60%
+   MemorySwapMax=4G
+   CPUWeight=1
+   IOWeight=1
+   ```
+
+   You can also set `AllowedCPUs=` to reserve dedicated threads for MindRoom and the host.
+
+3. Point MindRoom's service at the user manager and slice, and tear the slice down on service stop so detached shells do not outlive a restart:
+
+   ```ini
+   [Unit]
+   After=user@<uid>.service
+   Wants=user@<uid>.service
+
+   [Service]
+   Environment=XDG_RUNTIME_DIR=/run/user/<uid>
+   Environment=MINDROOM_SHELL_SYSTEMD_SLICE=mindroom-shells.slice
+   ExecStopPost=-/usr/bin/systemctl --user stop mindroom-shells.slice
+   MemoryMin=4G
+   MemoryLow=6G
+   ```
+
+   In cgroup v2, `MemoryMin` and `MemoryLow` are bounded by ancestor cgroups, so set matching values on `system.slice` (and on the container cgroup when running inside LXC/Incus).
 
 ### Named workers
 
