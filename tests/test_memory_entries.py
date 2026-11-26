@@ -204,3 +204,17 @@ def test_large_entry_splits_in_linear_time() -> None:
     assert len(pieces) == 501
     assert all(300 <= len(piece) <= 1_200 for piece in pieces)
     assert " ".join(pieces).split() == entry.split()
+
+
+def test_id_prefix_before_spaceless_text_does_not_emit_bare_id_chunk() -> None:
+    """An ID prefix followed by a long spaceless/CJK run splits evenly rather than isolating the bare ID."""
+    prefix = "- [id=m_20261109111659_x] "
+    entry = prefix + "あ" * 1_380
+
+    pieces = split_memory_entries(entry, 1_200)
+
+    assert len(pieces) == 2
+    assert all(len(prefix) < len(piece) <= 1_200 for piece in pieces)
+    assert all(len(piece) >= 600 for piece in pieces)
+    assert pieces[0].startswith(prefix)
+    assert "".join(pieces) == entry
