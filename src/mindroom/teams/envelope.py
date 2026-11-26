@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -135,15 +135,16 @@ class PreparedTeamExecution:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
+    media: MediaInputs = field(default_factory=MediaInputs)
 
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
         return render_prepared_messages_text(self.turn.in_request_order())
 
-    def run_input(self, media: MediaInputs) -> list[Message]:
+    def run_input(self) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
-        return build_request(summary=self.summary, history=self.history, turn=self.turn, media=media)
+        return build_request(summary=self.summary, history=self.history, turn=self.turn, media=self.media)
 
 
 async def prepare_materialized_team_execution(
@@ -231,6 +232,7 @@ async def prepare_materialized_team_execution(
         run_metadata=run_metadata,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
+        media=prepared_execution.media,
     )
 
 
@@ -303,7 +305,7 @@ def run_prepared_team(
             stream = context_bound_async_stream(
                 context_factory=lambda: bind_shell_background_scope(scope),
                 stream_factory=lambda: leader.start(
-                    prepared.run_input(MediaInputs()),
+                    prepared.run_input(),
                     run_id=str(uuid4()),
                     user_id=user_id,
                     metadata=prepared.run_metadata,
@@ -493,7 +495,7 @@ class _TeamTurn:
             agent_count=len(members.requested_agent_names),
             mode=self.spec.mode.value,
         )
-        run_input = prepared.run_input(self.ctx.media or MediaInputs())
+        run_input = prepared.run_input()
         logger.info(
             "team_prompt_preview",
             agents=members.display_names,

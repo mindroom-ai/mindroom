@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import PreparedTools
-from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
+from mindroom.attachments.storage import (
+    attachment_records_for_visible_message,
+    format_attachment_annotation,
+    format_omitted_inline_files_note,
+)
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     ORIGINAL_SENDER_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
     SOURCE_KIND_KEY,
@@ -57,6 +62,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.token_counting.requests import file_tokens_within_budget
 from mindroom.tool_jobs.execution import offered_definitions
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
@@ -75,6 +81,7 @@ if TYPE_CHECKING:
         PreparedHistoryState,
         ResolvedHistorySettings,
     )
+    from mindroom.llm.media import File
     from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
@@ -114,6 +121,7 @@ class _PreparedExecutionContext:
     turn: TurnMessages
     unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
+    media: MediaInputs = field(default_factory=MediaInputs)
 
     @property
     def replay_plan(self) -> ResolvedReplayPlan | None:
@@ -470,11 +478,12 @@ def _build_thread_history_messages(
     static_token_budget: int | None,
     turn_tokens: Callable[[TurnMessages], int],
     attachment_context: _ThreadAttachmentContext | None,
+    prompt_note: str | None = None,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
 
     def with_context(context_messages: Sequence[Message] = ()) -> TurnMessages:
-        return _messages_with_current_prompt(
+        turn = _messages_with_current_prompt(
             prompt,
             context_messages=context_messages,
             transient_context_messages=transient_context_messages,
@@ -486,6 +495,7 @@ def _build_thread_history_messages(
             timezone=timezone,
             member_display_names=member_display_names,
         )
+        return _with_prompt_note(turn, prompt_note)
 
     if not thread_history:
         return with_context()
@@ -690,6 +700,76 @@ async def _finalize_prepared_history(
     )
 
 
+def _with_prompt_note(turn: TurnMessages, note: str | None) -> TurnMessages:
+    """Append ``note`` to ``turn.prompt`` outside any ``<msg>`` tag so every request of the turn carries it."""
+    if not note:
+        return turn
+    content = turn.prompt.content
+    return replace(turn, prompt=replace(turn.prompt, content=f"{content}\n\n{note}" if content else note))
+
+
+def _select_inline_file_media(
+    model: ModelProvider,
+    frame: Callable[[TurnMessages], RequestFrame],
+    media: MediaInputs,
+    turn: TurnMessages,
+    limit: int | None,
+    scope_context: ScopeSessionContext | None,
+) -> tuple[MediaInputs, str | None]:
+    """Keep incoming ``media.files`` within the turn's auto-inline file budgets, preserving non-file media untouched.
+
+    Text files are bounded by both ``DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES`` (50 KiB) and half the remaining
+    headroom below ``limit``. PDFs and binary documents are bounded only by half the remaining headroom (unbounded
+    when ``limit`` is None).
+    """
+    if not media.files:
+        return media, None
+    remaining_headroom: int | None = None
+    if limit is not None:
+        session = scope_context.session if scope_context is not None else None
+        summary = session.summary if session is not None else None
+        base_request = frame(with_media(turn, replace(media, files=()))).request(summary=summary)
+        base_tokens = model.request_tokens(base_request)
+        remaining_headroom = max(0, limit - base_tokens) // 2
+
+    kept_files: list[File] = []
+    omitted_files: list[File] = []
+    remaining_text_bytes = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    for file in media.files:
+        counted = file_tokens_within_budget(
+            model.token_counter,
+            file,
+            text_byte_budget=remaining_text_bytes,
+            headroom_budget=remaining_headroom,
+        )
+        if counted is not None:
+            tokens, text_bytes_used = counted
+            kept_files.append(file)
+            remaining_text_bytes -= text_bytes_used
+            if remaining_headroom is not None:
+                remaining_headroom -= tokens
+        else:
+            omitted_files.append(file)
+    if not omitted_files:
+        return media, None
+    return replace(media, files=tuple(kept_files)), format_omitted_inline_files_note(omitted_files)
+
+
+def _prepare_turn_media(
+    model: ModelProvider,
+    frame: Callable[[TurnMessages], RequestFrame],
+    media: MediaInputs,
+    turn: TurnMessages,
+    limit: int | None,
+    scope_context: ScopeSessionContext | None,
+) -> tuple[MediaInputs, str | None, Callable[[TurnMessages], RequestFrame]]:
+    """Select auto-inlined files, build their omission note, and attach kept media to ``frame`` when it fits."""
+    selected_media, omission_note = _select_inline_file_media(model, frame, media, turn, limit, scope_context)
+    noted_turn = _with_prompt_note(turn, omission_note)
+    prepared_frame = _frame_holding_attachments(model, frame, selected_media, noted_turn, limit, scope_context)
+    return selected_media, omission_note, prepared_frame
+
+
 def _frame_holding_attachments(
     model: ModelProvider,
     frame: Callable[[TurnMessages], RequestFrame],
@@ -804,17 +884,18 @@ async def _prepare_execution_context_common(
         )
 
     provisional_messages, _ = turn_messages(seen_event_ids)
-    media = ctx.media or MediaInputs()
+    raw_media = ctx.media or MediaInputs()
     limit = resolved_inputs.execution_plan.limit_tokens
-    replay_frame = await asyncio.to_thread(
-        _frame_holding_attachments,
+    media, omission_note, replay_frame = await asyncio.to_thread(
+        _prepare_turn_media,
         sizer.model,
         frame,
-        media,
+        raw_media,
         provisional_messages,
         limit,
         scope_context,
     )
+    provisional_messages = _with_prompt_note(provisional_messages, omission_note)
     prepared_scope_history = await prepare_scope_history(
         sizer=sizer,
         frame=replay_frame(provisional_messages),
@@ -826,11 +907,12 @@ async def _prepare_execution_context_common(
         pipeline_timing=pipeline_timing,
         allow_native_compaction=ctx.scheduled_history_budget is None,
     )
-    final_messages, unseen_event_ids = turn_messages(
+    raw_final_messages, unseen_event_ids = turn_messages(
         await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
         if history_boundary_event_id and thread_history
         else set(),
     )
+    final_messages = _with_prompt_note(raw_final_messages, omission_note)
 
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
@@ -854,12 +936,12 @@ async def _prepare_execution_context_common(
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
         # The thread is fitted beside what the reply cannot trim without it, and the reply replays no summary.
-        fallback_frame = await asyncio.to_thread(
-            _frame_holding_attachments,
+        media, fallback_omission_note, fallback_frame = await asyncio.to_thread(
+            _prepare_turn_media,
             sizer.model,
             frame,
-            media,
-            replace(final_messages, context=()),
+            raw_media,
+            replace(raw_final_messages, context=()),
             limit,
             None,
         )
@@ -884,6 +966,7 @@ async def _prepare_execution_context_common(
             turn_tokens=turn_tokens,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
+            prompt_note=fallback_omission_note,
         )
         fallback_context_tokens = await asyncio.to_thread(turn_tokens, final_messages)
         if prepared_history.replay_plan is not None:
@@ -896,6 +979,7 @@ async def _prepare_execution_context_common(
         turn=final_messages,
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
+        media=media,
     )
 
 
