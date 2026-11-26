@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -149,25 +148,32 @@ def upload_content_uri(upload_result: object) -> str | None:
     return None
 
 
-async def homeserver_max_upload_size(client: nio.AsyncClient) -> int | None:
+def cached_homeserver_max_upload_size(client: nio.AsyncClient) -> int | None:
+    """Return the cached ``m.upload.size`` limit for ``client``, if known."""
+    try:
+        return _MAX_UPLOAD_SIZE_CACHE.get(client)
+    except TypeError:
+        return None
+
+
+async def homeserver_max_upload_size(client: nio.AsyncClient, *, force_refresh: bool = False) -> int | None:
     """Return the homeserver's advertised ``m.upload.size`` limit in bytes, cached per client.
 
+    Pass ``force_refresh=True`` to bypass and refresh or evict any cached limit before rejecting an upload.
     Fails open to ``None`` when the homeserver omits the limit, returns an error, or the client
     cannot query the content repository configuration. Failures are not cached so transient errors recover.
     """
-    try:
-        cached = _MAX_UPLOAD_SIZE_CACHE.get(client)
-    except TypeError:
-        cached = None
-    if cached is not None:
+    if force_refresh:
+        with contextlib.suppress(TypeError):
+            _MAX_UPLOAD_SIZE_CACHE.pop(client, None)
+    elif (cached := cached_homeserver_max_upload_size(client)) is not None:
         return cached
 
     fetch_config = getattr(client, "content_repository_config", None)
     if not callable(fetch_config):
         return None
     try:
-        maybe_response = fetch_config()
-        response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
+        response = await fetch_config()
     except Exception as error:
         logger.debug("homeserver_upload_limit_fetch_failed", error=str(error))
         return None

@@ -24,6 +24,7 @@ from mindroom.matrix.large_messages import (
     prepare_large_message,
 )
 from mindroom.matrix.media import (
+    cached_homeserver_max_upload_size,
     durable_session_closed,
     homeserver_max_upload_size,
     prepare_media_upload,
@@ -657,6 +658,26 @@ def _preflight_too_large_failure(
     return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, detail, status=413)
 
 
+async def _check_upload_size_limit(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    filename: str,
+    file_size: int,
+) -> tuple[int | None, MatrixDeliveryFailure | None]:
+    """Check ``file_size`` against ``m.upload.size``, revalidating a cached limit before rejecting."""
+    cached_limit = cached_homeserver_max_upload_size(client)
+    if cached_limit is not None:
+        if file_size <= cached_limit:
+            return cached_limit, None
+        max_upload_size = await homeserver_max_upload_size(client, force_refresh=True)
+    else:
+        max_upload_size = await homeserver_max_upload_size(client)
+    if max_upload_size is not None and file_size > max_upload_size:
+        return max_upload_size, _preflight_too_large_failure(room_id, filename, file_size, max_upload_size)
+    return max_upload_size, None
+
+
 async def _upload_prepared_media(
     client: nio.AsyncClient,
     *,
@@ -687,8 +708,8 @@ async def _upload_prepared_media(
     raw_response = upload_response[0] if isinstance(upload_response, tuple) else upload_response
     http_status = response_http_status(raw_response)
     if isinstance(raw_response, nio.UploadError) and (raw_response.status_code == "M_TOO_LARGE" or http_status == 413):
-        if max_upload_size is None:
-            max_upload_size = await homeserver_max_upload_size(client)
+        if max_upload_size is None or file_size <= max_upload_size:
+            max_upload_size = await homeserver_max_upload_size(client, force_refresh=True)
         detail = _format_media_too_large_detail(filename, file_size, max_upload_size)
         logger.error(
             "matrix_media_upload_too_large",
@@ -704,57 +725,16 @@ async def _upload_prepared_media(
     return MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, str(raw_response), status=http_status)
 
 
-async def _upload_file_as_mxc_outcome(
-    client: nio.AsyncClient,
-    room_id: str,
-    file_path: Path,
-    *,
-    mimetype: str,
-    filename: str,
-) -> tuple[str, dict[str, Any]] | MatrixDeliveryFailure:
-    """Upload a local file as MXC, checking ``m.upload.size`` before reading it into RAM."""
-    try:
-        file_size = (await asyncio.to_thread(file_path.stat)).st_size
-    except OSError:
-        logger.exception("Failed to stat file before upload", path=str(file_path))
-        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Failed to read file before upload")
-
-    max_upload_size = await homeserver_max_upload_size(client)
-    if max_upload_size is not None and file_size > max_upload_size:
-        return _preflight_too_large_failure(room_id, filename, file_size, max_upload_size)
-
-    try:
-        file_bytes = await asyncio.to_thread(file_path.read_bytes)
-    except OSError:
-        logger.exception("Failed to read file before upload", path=str(file_path))
-        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Failed to read file before upload")
-
-    return await _upload_media_bytes_as_mxc_outcome(
-        client,
-        room_id,
-        file_bytes,
-        filename=filename,
-        mimetype=mimetype,
-        max_upload_size=max_upload_size,
-        max_upload_size_checked=True,
-    )
-
-
-async def _upload_media_bytes_as_mxc_outcome(
+async def _upload_checked_media_bytes(
     client: nio.AsyncClient,
     room_id: str,
     media_bytes: bytes,
     *,
     filename: str,
     mimetype: str,
-    max_upload_size: int | None = None,
-    max_upload_size_checked: bool = False,
+    max_upload_size: int | None,
 ) -> tuple[str, dict[str, Any]] | MatrixDeliveryFailure:
-    if not max_upload_size_checked:
-        max_upload_size = await homeserver_max_upload_size(client)
-    if max_upload_size is not None and len(media_bytes) > max_upload_size:
-        return _preflight_too_large_failure(room_id, filename, len(media_bytes), max_upload_size)
-
+    """Encrypt (when required) and upload media bytes whose size already passed pre-flight."""
     room_encrypted = await resolve_room_encryption_outcome(client, room_id, operation="upload_media_bytes")
     if isinstance(room_encrypted, MatrixDeliveryFailure):
         return room_encrypted
@@ -802,6 +782,56 @@ async def _upload_media_bytes_as_mxc_outcome(
     return mxc_uri, upload_payload
 
 
+async def _upload_file_as_mxc_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: Path,
+    *,
+    mimetype: str,
+    filename: str,
+) -> tuple[str, dict[str, Any]] | MatrixDeliveryFailure:
+    """Upload a local file as MXC, checking ``m.upload.size`` before reading it into RAM."""
+    try:
+        file_size = (await asyncio.to_thread(file_path.stat)).st_size
+    except OSError:
+        logger.exception("Failed to stat file before upload", path=str(file_path))
+        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Failed to read file before upload")
+
+    max_upload_size, too_large = await _check_upload_size_limit(
+        client,
+        room_id=room_id,
+        filename=filename,
+        file_size=file_size,
+    )
+    if too_large is not None:
+        return too_large
+
+    try:
+        file_bytes = await asyncio.to_thread(file_path.read_bytes)
+    except OSError:
+        logger.exception("Failed to read file before upload", path=str(file_path))
+        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Failed to read file before upload")
+
+    if max_upload_size is not None and len(file_bytes) > max_upload_size:
+        max_upload_size, too_large = await _check_upload_size_limit(
+            client,
+            room_id=room_id,
+            filename=filename,
+            file_size=len(file_bytes),
+        )
+        if too_large is not None:
+            return too_large
+
+    return await _upload_checked_media_bytes(
+        client,
+        room_id,
+        file_bytes,
+        filename=filename,
+        mimetype=mimetype,
+        max_upload_size=max_upload_size,
+    )
+
+
 async def upload_media_bytes_as_mxc_outcome(
     client: nio.AsyncClient,
     room_id: str,
@@ -814,7 +844,22 @@ async def upload_media_bytes_as_mxc_outcome(
 
     The payload carries an encrypted ``file`` exactly when the room is encrypted once the upload finished.
     """
-    return await _upload_media_bytes_as_mxc_outcome(client, room_id, media_bytes, filename=filename, mimetype=mimetype)
+    max_upload_size, too_large = await _check_upload_size_limit(
+        client,
+        room_id=room_id,
+        filename=filename,
+        file_size=len(media_bytes),
+    )
+    if too_large is not None:
+        return too_large
+    return await _upload_checked_media_bytes(
+        client,
+        room_id,
+        media_bytes,
+        filename=filename,
+        mimetype=mimetype,
+        max_upload_size=max_upload_size,
+    )
 
 
 async def upload_media_bytes_as_mxc(
@@ -952,6 +997,8 @@ async def send_file_message_outcome(
         filename=display_name,
     )
     if isinstance(upload_outcome, MatrixDeliveryFailure):
+        # Surface PAYLOAD_TOO_LARGE directly; other upload failures return None so callers
+        # like matrix_user_writes._delivered know no event was requested instead of reporting "unconfirmed".
         if upload_outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
             return upload_outcome
         return None
