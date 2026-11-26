@@ -349,7 +349,8 @@ async def launch_child(
     store, job_runtime = engine.store, jobs or runtime.jobs
     session = store.get_node(run.run_id, node.session_key) if node.session_key else None
     source = session.request if session is not None else node.request
-    first_turn = node.kind != "turn" or node.request.get("turn", 1) == 1
+    raw_turn = node.request.get("turn", 1)
+    first_turn = node.kind != "turn" or (isinstance(raw_turn, int) and not isinstance(raw_turn, bool) and raw_turn == 1)
     if turn == 1 and first_turn and not source.get("agent") and node.name in context.current_config.agents:
         await asyncio.to_thread(store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
 
@@ -465,10 +466,7 @@ async def await_child(  # noqa: C901
         since = loop.time()
         try:
             waited = (
-                await wait(
-                    approval_timeout=None if waiting else 0,
-                    work_timeout=0 if waiting else left,
-                )
+                await wait(approval_timeout=None if waiting else 0, work_timeout=0 if waiting else left)
                 if on_waiting is not None
                 else await wait(timeout=0)
             )

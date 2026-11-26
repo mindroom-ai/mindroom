@@ -334,12 +334,12 @@ async def _reuse_saved(
     await engine.stamp(
         saved,
         epoch,
+        dirty_after=regrouped,
         attempt=run.attempt,
         stale=False,
         cached=action == "hit",
         phase=phase,
         members=members,
-        dirty_after=regrouped,
     )
     if action == "raise_indeterminate":
         return replace(receipt(saved), state=WorkflowNodeState.FAILED)

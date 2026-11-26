@@ -81,7 +81,6 @@ __all__ = [
     "AcknowledgeWait",
     "BackgroundJob",
     "BackgroundOutcome",
-    "ConversationWorkingState",
     "EncodedResultPayload",
     "JobAccessError",
     "JobClaim",
@@ -252,7 +251,7 @@ def _stopped_while_working(job: BackgroundJob) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationWorkingState:
+class _ConversationWorkingState:
     """One conversation's live approval, active-job, and unconsumed ended-job state."""
 
     awaiting_approval: bool = False
@@ -1253,22 +1252,6 @@ class ToolJobRuntime:
         returned_inline: bool = False,
         adapter: Mapping[str, Any] | None = None,
     ) -> None:
-        """Mark one claimed outcome consumed after its parent tool result has been durably saved."""
-        await self._acknowledge_wait(
-            job_id,
-            claim,
-            returned_inline=returned_inline,
-            adapter=adapter,
-        )
-
-    async def _acknowledge_wait(
-        self,
-        job_id: str,
-        claim: JobClaim | None,
-        *,
-        returned_inline: bool = False,
-        adapter: Mapping[str, Any] | None = None,
-    ) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
 
         ``returned_inline`` says that tool result belongs to the call that started the job, and ``adapter`` holds
@@ -1461,7 +1444,7 @@ class ToolJobRuntime:
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
 
-    async def conversation_working_state(self, key: ConversationKey) -> ConversationWorkingState:
+    async def conversation_working_state(self, key: ConversationKey) -> _ConversationWorkingState:
         """Inspect one conversation's approval, active-job, and unconsumed ended-job state.
 
         Any matching job waiting on approval (including a workflow-node child) marks
@@ -1470,7 +1453,7 @@ class ToolJobRuntime:
         """
         async with self._lock:
             if self._closed:
-                return ConversationWorkingState()
+                return _ConversationWorkingState()
             has_active = False
             ended: list[BackgroundJob] = []
             for entry in self._by_conversation.get(
@@ -1481,14 +1464,14 @@ class ToolJobRuntime:
                     continue
                 status = entry.job.status
                 if status == "awaiting_approval":
-                    return ConversationWorkingState(awaiting_approval=True)
+                    return _ConversationWorkingState(awaiting_approval=True)
                 if entry.job.depth != 0 or is_workflow_node_job(entry.job):
                     continue
                 if status not in TERMINAL_STATUSES:
                     has_active = True
                 elif not entry.job.consumed and entry.claim is None and self._grant(entry.job) == "allowed":
                     ended.append(entry.job)
-            return ConversationWorkingState(has_active=has_active, ended_jobs=tuple(ended))
+            return _ConversationWorkingState(has_active=has_active, ended_jobs=tuple(ended))
 
     async def expire_ended(
         self,

@@ -108,16 +108,15 @@ def _parse_metadata(raw: bytes) -> tuple[str, dict[str, str]]:
         return "", {}
     raw_doc = ast.get_docstring(tree)
     description = next((line.strip() for line in raw_doc.splitlines() if line.strip()), "") if raw_doc else ""
-    values: list[ast.expr] = []
-    for stmt in tree.body:
-        is_args = (
-            isinstance(stmt, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "ARGS" for target in stmt.targets)
-        ) or (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id == "ARGS")
-        if is_args:
-            value = stmt.value
-            if value is not None:
-                values.append(value)
+    values: list[ast.expr] = [
+        value
+        for stmt in tree.body
+        if (
+            (isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ARGS" for t in stmt.targets))
+            or (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id == "ARGS")
+        )
+        and (value := stmt.value) is not None
+    ]
     args: dict[str, str] = {}
     if values:
         with suppress(ValueError, TypeError):

@@ -2762,7 +2762,6 @@ depends_on = [
 [[interfaces]]
 from = ["mindroom.workflow_runs.engine"]
 expose = [
-    "Places",
     "ResumeAccess",
     "SupersededAttemptError",
     "WorkflowEngine",

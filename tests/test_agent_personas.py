@@ -20,12 +20,12 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation.personas import _inline_persona as inline_persona
 from mindroom.delegation.personas import (
-    PersonaError,
+    _PersonaError,
     caller_toolkit_names,
     persona_tool_policy,
 )
-from mindroom.delegation.personas import _inline_persona as inline_persona
 from mindroom.delegation.state import SubagentPersona
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -276,7 +276,7 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
     """A named function the caller's configuration filters out stops construction."""
     runtime = _runtime(tmp_path, tools=[{"filesystem": {"include_tools": ["read_file"]}}])
 
-    with pytest.raises(PersonaError, match=r"'filesystem\.write_file' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'filesystem\.write_file' is not available to you"):
         _child(runtime, ["filesystem.read_file", "filesystem.write_file"])
 
 
@@ -306,7 +306,7 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
     def caller_filter(function: ToolFunction) -> bool:
         return function.name != "write_file" and function.toolkit != "calculator"
 
-    with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
+    with pytest.raises(_PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)
 
 
@@ -674,7 +674,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
 
-    with pytest.raises(PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
         agents.create_agent(
             "code",
             config,
@@ -705,7 +705,7 @@ def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, mon
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
 
-    with pytest.raises(PersonaError, match=r"'sleep\.shared' is not available to you"):
+    with pytest.raises(_PersonaError, match=r"'sleep\.shared' is not available to you"):
         agents.create_agent(
             "code",
             config,
@@ -731,7 +731,7 @@ def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
 
-    with pytest.raises(PersonaError, match="'calculator' is not available to you"):
+    with pytest.raises(_PersonaError, match="'calculator' is not available to you"):
         _child(runtime, ["filesystem", "calculator"])
 
 

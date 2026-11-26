@@ -16,7 +16,7 @@ from mindroom.terminal.session import TerminalError, TerminalLaunch, TerminalMan
 from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.terminal.session import TerminalEvent, TerminalSession, TerminalViewer
@@ -178,33 +178,40 @@ async def test_an_ended_session_is_kept_for_the_idle_time_after_its_shell_exits(
     assert loop.time() - ended_at >= 0.95
 
 
-async def test_closing_while_idle_waits_for_a_polled_exit_preserves_the_exit_state(
+async def test_idle_watcher_reaps_polled_exit_before_forgetting_session(
     tmp_path: Path,
     manager: TerminalManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelling an idle watcher cannot cancel the exit task it was waiting for."""
+    """Without pidfds, an idle check that wakes before the next poll reaps the exit and keeps the session for its idle time."""
     monkeypatch.delattr(os, "pidfd_open", raising=False)
-    monkeypatch.setattr(session_module, "_EXIT_POLL_SECONDS", 0.5)
-    monkeypatch.setattr(session_module, "_IDLE_SECONDS", 0.1)
+    monkeypatch.setattr(session_module, "_EXIT_POLL_SECONDS", 60.0)
+    monkeypatch.setattr(session_module, "_IDLE_SECONDS", 0.5)
+    loop = asyncio.get_running_loop()
     session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
-    shield_started = asyncio.Event()
-    original_shield = asyncio.shield
+    _, viewer = session.attach()
+    await asyncio.sleep(0)
+    session.write(b"exit 3\n")
+    async with asyncio.timeout(10):
+        while session._process.poll() is None:  # noqa: ASYNC110 - waiting for child exit without waking the poller
+            await asyncio.sleep(0.01)
 
-    def track_shield(awaitable: Awaitable[object]) -> asyncio.Future[object]:
-        if awaitable is session._exit_task:
-            shield_started.set()
-        return original_shield(awaitable)
+    assert session.alive
+    session.detach(viewer)
+    detached_at = session._last_active
 
-    monkeypatch.setattr(session_module.asyncio, "shield", track_shield)
-    session.write(b"sleep 0.05; exit 4\n")
+    await _ended(session)
+    reaped_at = session._last_active
+    assert session.exit_code == 3
+    assert reaped_at > detached_at
+    assert manager.sessions("owner") == [session]
 
     async with asyncio.timeout(10):
-        await shield_started.wait()
-        await manager.close("owner", session.id)
+        while manager.sessions("owner"):  # noqa: ASYNC110 - forgetting has no event to await
+            await asyncio.sleep(0.01)
 
-    assert session.exit_code == 4
-    assert session._master_fd is None
+    assert loop.time() - reaped_at >= 0.45
+    assert session._exit_task.done()
 
 
 async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(

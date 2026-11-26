@@ -1881,9 +1881,9 @@ def _real_workers_run(respond, **popen: object) -> Iterator[subprocess.Popen[byt
         "MINDROOM_AGENT_CLI_TOKEN": "private-capability",
     }
     command = "from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))"
-    proc = cast("subprocess.Popen[bytes]", subprocess.Popen([sys.executable, "-c", command], env=env, **popen))
+    proc = subprocess.Popen([sys.executable, "-c", command], env=env, **popen)
     try:
-        yield proc
+        yield cast("subprocess.Popen[bytes]", proc)
     finally:
         proc.kill()
         proc.wait()

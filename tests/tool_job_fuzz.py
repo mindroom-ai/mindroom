@@ -335,9 +335,9 @@ class JobFuzzRunner:
         if held.epoch != self._epoch:
             # A claim from an earlier process consumes nothing.
             with pytest.raises(ValueError, match="no longer belongs"):
-                await self.runtime._acknowledge_wait(job_id, held.claim)
+                await self.runtime.acknowledge_wait(job_id, held.claim)
             return
-        await self.runtime._acknowledge_wait(job_id, held.claim)
+        await self.runtime.acknowledge_wait(job_id, held.claim)
         self.jobs[job_id].consumed = True
 
     async def _drop(self, _action: Action, job_id: str) -> None:

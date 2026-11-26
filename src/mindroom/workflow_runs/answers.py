@@ -248,12 +248,9 @@ def _open(node: WorkflowNode | None) -> bool:
     return waits and node.kind == "ask" and "event_id" in node.links
 
 
-def _options(node: WorkflowNode) -> list[str] | None:
-    """Return validated options, or None when the question accepts free text."""
-    options = node.request.get("options")
-    if options is None:
-        return None
-    return options if isinstance(options, list) and all(isinstance(option, str) for option in options) else []
+def _options(node: WorkflowNode) -> list[str]:
+    raw = node.request.get("options")
+    return [str(option) for option in raw] if isinstance(raw, list | tuple) else []
 
 
 async def answer_question(
@@ -353,8 +350,8 @@ async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str
     """
     match = _ANSWER.fullmatch(text.strip())
     named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
-    unlabelled = _ANSWER.fullmatch(f"{answer} x")
-    if not answer or (named is None and unlabelled is not None and unlabelled.group(1)):
+    probe = _ANSWER.fullmatch(f"{answer} x") if named is None and answer else None
+    if not answer or (probe is not None and probe.group(1)):
         return "Use !answer <id> <answer>."
     matches = [
         (qid, run.run_id, node.key)
@@ -373,7 +370,7 @@ async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str
         )
     qid, run_id, key = matches[0]
     node = cast("WorkflowNode", engine.store.get_node(run_id, key))
-    options = _options(node) or []
+    options = _options(node)
     if options:
         number = int(answer) if len(answer) <= 6 and answer.isdecimal() else 0
         answer = options[number - 1] if 0 < number <= len(options) else answer

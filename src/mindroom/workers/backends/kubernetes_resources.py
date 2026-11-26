@@ -1544,20 +1544,19 @@ class KubernetesResourceManager:
             if sandbox is not None
             else worker_extra_env(self.config.extra_env)
         )
-        resource_limit_env: list[dict[str, object]] = []
-        for name, resource, divisor in _WORKER_RESOURCE_LIMIT_ENV_SPECS:
-            resource_limit_env.append(
-                {
-                    "name": name,
-                    "valueFrom": {
-                        "resourceFieldRef": {
-                            "containerName": _CONTAINER_NAME,
-                            "resource": resource,
-                            "divisor": divisor,
-                        },
+        resource_limit_env: list[dict[str, object]] = [
+            {
+                "name": name,
+                "valueFrom": {
+                    "resourceFieldRef": {
+                        "containerName": _CONTAINER_NAME,
+                        "resource": resource,
+                        "divisor": divisor,
                     },
                 },
-            )
+            }
+            for name, resource, divisor in _WORKER_RESOURCE_LIMIT_ENV_SPECS
+        ]
         env: list[dict[str, object]] = [
             *runner_env,
             {"name": "HOME", "value": layout.dedicated_root},

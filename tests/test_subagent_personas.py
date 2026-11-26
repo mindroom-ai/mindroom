@@ -11,11 +11,14 @@ import pytest
 
 import mindroom.tools  # noqa: F401 - registers built-in tool metadata, including function names
 from mindroom.delegation.personas import (
-    PersonaError,
-    PersonaRequest,
+    _inline_persona,
     _InvalidPersonaProfile,
+    _load_profile,
     _parse_profile,
+    _PersonaError,
     _PersonaProfile,
+    _PersonaRequest,
+    _validate_persona_tools,
     declared_function_names,
     list_profiles,
     persona_allows,
@@ -23,9 +26,6 @@ from mindroom.delegation.personas import (
     render_profile_listing,
     resolve_persona_request,
 )
-from mindroom.delegation.personas import _inline_persona as inline_persona
-from mindroom.delegation.personas import _load_profile as load_profile
-from mindroom.delegation.personas import _validate_persona_tools as validate_persona_tools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.tool_system.declarations import (
     ToolAuthoredOverrideValidator,
@@ -73,7 +73,7 @@ def _function(name: str, toolkit: str | None) -> ToolFunction:
 def test_inline_persona_keeps_prompt_bytes() -> None:
     """Braces and trailing whitespace survive validation and serialization unchanged."""
     prompt = "Use {braces} and {{x}}\n"
-    persona = inline_persona(prompt, ["filesystem"], None, None)
+    persona = _inline_persona(prompt, ["filesystem"], None, None)
     assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("filesystem",))
     assert SubagentPersona.from_dict(json.loads(json.dumps(asdict(persona)))) == persona
 
@@ -91,18 +91,18 @@ def test_inline_persona_keeps_prompt_bytes() -> None:
 )
 def test_inline_persona_rejects_empty_oversized_and_wrong_types(system_prompt: object, tools: object) -> None:
     """Invalid prompts and tool lists raise a user-facing persona error."""
-    with pytest.raises(PersonaError):
-        inline_persona(system_prompt, tools, None, None)
+    with pytest.raises(_PersonaError):
+        _inline_persona(system_prompt, tools, None, None)
 
 
 def test_inline_persona_accepts_prompt_at_size_limit() -> None:
     """A prompt of exactly 64 KiB is accepted."""
-    assert len(inline_persona("x" * (64 * 1024), None, None, None).system_prompt) == 64 * 1024
+    assert len(_inline_persona("x" * (64 * 1024), None, None, None).system_prompt) == 64 * 1024
 
 
 def test_empty_tool_list_means_no_tools() -> None:
     """An explicit empty tool list keeps no tools instead of falling back to all of them."""
-    persona = inline_persona("P", [], None, None)
+    persona = _inline_persona("P", [], None, None)
     assert persona.tools == ()
     assert not persona_allows((), "filesystem", "read_file")
     _, disabled = persona_tool_policy(persona.tools, lambda: ["filesystem", "shell"], None)
@@ -153,7 +153,7 @@ def test_parse_profile_defaults_optional_fields() -> None:
 )
 def test_parse_profile_rejects_bad_frontmatter(content: str) -> None:
     """Missing descriptions, unknown keys, bad modes, and empty bodies are invalid."""
-    with pytest.raises(PersonaError):
+    with pytest.raises(_PersonaError):
         _parse_profile("critic", content)
 
 
@@ -239,7 +239,7 @@ def test_list_profiles_stops_at_its_total_budget(tmp_path: Path) -> None:
 
     assert 0 < len(entries) < 20
     assert sum(len(entry.persona.system_prompt) for entry in entries if isinstance(entry, _PersonaProfile)) <= 1 << 20
-    assert load_profile(tmp_path, "p19").name == "p19"
+    assert _load_profile(tmp_path, "p19").name == "p19"
 
 
 def test_list_profiles_charges_unreadable_text_to_its_budget(tmp_path: Path) -> None:
@@ -255,7 +255,7 @@ def test_list_profiles_charges_unreadable_text_to_its_budget(tmp_path: Path) -> 
     assert all(isinstance(entry, _InvalidPersonaProfile) for entry in entries)
 
 
-def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
+def _resolve(workspace: Path, **arguments: object) -> _PersonaRequest | str:
     """Resolve one ``run_subagent`` call by ``leader`` for itself, with file and shell as its tools."""
     defaults: dict[str, Any] = {
         "caller_name": "leader",
@@ -284,12 +284,12 @@ def test_resolve_persona_request_mode_and_model_rules(tmp_path: Path) -> None:
     fast = _resolve(tmp_path, profile="fast")
     plain_minimal = _resolve(tmp_path, profile="plain", model="sonnet", minimal=True)
 
-    assert isinstance(fast, PersonaRequest)
+    assert isinstance(fast, _PersonaRequest)
     assert fast.persona is not None
     assert (fast.model, fast.agent_mode, fast.persona.system_prompt) == ("haiku", "minimal", "Be quick.")
-    assert isinstance(plain_minimal, PersonaRequest)
+    assert isinstance(plain_minimal, _PersonaRequest)
     assert (plain_minimal.model, plain_minimal.agent_mode) == ("sonnet", "minimal")
-    assert _resolve(tmp_path, minimal=True) == PersonaRequest(persona=None, model=None, agent_mode="minimal")
+    assert _resolve(tmp_path, minimal=True) == _PersonaRequest(persona=None, model=None, agent_mode="minimal")
 
 
 def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_path: Path) -> None:
@@ -299,8 +299,8 @@ def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_pa
     plain = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="")
     profiled = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="critic")
 
-    assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
-    assert isinstance(profiled, PersonaRequest)
+    assert plain == _PersonaRequest(persona=None, model=None, agent_mode="standard")
+    assert isinstance(profiled, _PersonaRequest)
     assert profiled.persona is not None
     assert (profiled.persona.source_name, profiled.persona.tools) == ("critic", ("filesystem",))
 
@@ -315,41 +315,41 @@ def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
     )
     assert isinstance(
         _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell"], minimal=True),
-        PersonaRequest,
+        _PersonaRequest,
     )
     assert isinstance(
         _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell.run_shell_command"], minimal=True),
-        PersonaRequest,
+        _PersonaRequest,
     )
-    assert isinstance(_resolve(tmp_path, system_prompt="P", minimal=True), PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", minimal=True), _PersonaRequest)
 
 
 def test_load_profile_reads_one_file(tmp_path: Path) -> None:
     """A named profile loads from subagents/<name>.md."""
     _profile_file(tmp_path, "critic.md", _CRITIC)
-    assert load_profile(tmp_path, "critic").persona.system_prompt.startswith("You are a hostile reviewer.")
+    assert _load_profile(tmp_path, "critic").persona.system_prompt.startswith("You are a hostile reviewer.")
 
 
 def test_load_profile_missing_raises(tmp_path: Path) -> None:
     """A missing profile names the subagents/ directory."""
-    with pytest.raises(PersonaError) as error:
-        load_profile(tmp_path, "absent")
+    with pytest.raises(_PersonaError) as error:
+        _load_profile(tmp_path, "absent")
     assert str(error.value) == "Cannot delegate: subagent profile 'absent' was not found in subagents/."
 
 
 def test_load_profile_invalid_reports_reason(tmp_path: Path) -> None:
     """An invalid profile names itself and the reason."""
     _profile_file(tmp_path, "broken.md", "---\ndescription: D\n---\n\n")
-    with pytest.raises(PersonaError) as error:
-        load_profile(tmp_path, "broken")
+    with pytest.raises(_PersonaError) as error:
+        _load_profile(tmp_path, "broken")
     assert str(error.value).startswith("Cannot delegate: subagent profile 'broken' is invalid: ")
 
 
 @pytest.mark.parametrize("name", ["Critic", "../escape", "", "a" * 65, "with space"])
 def test_load_profile_rejects_bad_names(tmp_path: Path, name: str) -> None:
     """Names outside the profile pattern are refused before any file access."""
-    with pytest.raises(PersonaError):
-        load_profile(tmp_path, name)
+    with pytest.raises(_PersonaError):
+        _load_profile(tmp_path, name)
 
 
 def test_render_profile_listing_shows_entries_and_errors() -> None:
@@ -380,16 +380,16 @@ def test_render_profile_listing_empty() -> None:
 
 def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
     """Toolkit and toolkit.function entries pass when the caller has the toolkit."""
-    validate_persona_tools(("filesystem", "gmail.search_emails"), _toolkits("filesystem", "gmail"), cap=None)
-    validate_persona_tools(None, _toolkits("filesystem"), cap=None)
-    validate_persona_tools((), _toolkits(), cap=None)
+    _validate_persona_tools(("filesystem", "gmail.search_emails"), _toolkits("filesystem", "gmail"), cap=None)
+    _validate_persona_tools(None, _toolkits("filesystem"), cap=None)
+    _validate_persona_tools((), _toolkits(), cap=None)
 
 
 @pytest.mark.parametrize("entry", ["shell", "gmail.send_email_x", "gmail.", ".search_emails"])
 def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str) -> None:
     """Entries outside the caller's toolkits, or unknown functions, fail with the available names."""
-    with pytest.raises(PersonaError) as error:
-        validate_persona_tools((entry,), _toolkits("filesystem", "gmail"), cap=None)
+    with pytest.raises(_PersonaError) as error:
+        _validate_persona_tools((entry,), _toolkits("filesystem", "gmail"), cap=None)
     assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: filesystem, gmail."
 
 
@@ -426,10 +426,10 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
 def test_function_level_cap_admits_only_named_functions() -> None:
     """A cap that names one function admits that function, not its whole toolkit or a sibling."""
     cap = ("gmail.search_emails", "filesystem")
-    validate_persona_tools(("gmail.search_emails", "filesystem"), _toolkits("gmail", "filesystem"), cap)
+    _validate_persona_tools(("gmail.search_emails", "filesystem"), _toolkits("gmail", "filesystem"), cap)
     for entry in ("gmail", "gmail.send_email", "calculator"):
-        with pytest.raises(PersonaError) as error:
-            validate_persona_tools((entry,), _toolkits("gmail", "filesystem", "calculator"), cap)
+        with pytest.raises(_PersonaError) as error:
+            _validate_persona_tools((entry,), _toolkits("gmail", "filesystem", "calculator"), cap)
         assert (
             str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, filesystem."
         )
@@ -450,18 +450,18 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata() -> None:
             ),
         },
     )
-    validate_persona_tools(("mcp_demo.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
-    with pytest.raises(PersonaError):
-        validate_persona_tools(("mcp_other.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
+    _validate_persona_tools(("mcp_demo.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
+    with pytest.raises(_PersonaError):
+        _validate_persona_tools(("mcp_other.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
 
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
     """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
-    cap = inline_persona("P", ["delegate", "filesystem"], None, None)
+    cap = _inline_persona("P", ["delegate", "filesystem"], None, None)
     at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("filesystem"))
     lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("delegate"))
 
-    assert isinstance(at_max_depth, PersonaRequest)
+    assert isinstance(at_max_depth, _PersonaRequest)
     assert at_max_depth.persona is not None
     assert at_max_depth.persona.tools == ("filesystem",)
     assert lost_file == "Cannot delegate: unknown tool 'filesystem'. Your tools: delegate."
@@ -469,12 +469,12 @@ def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path)
 
 def test_inline_persona_reads_skills() -> None:
     """Skills are optional, deduplicated names, and an empty list means no skills."""
-    assert inline_persona("P", None, None, None).skills is None
-    assert inline_persona("P", None, [" research ", "research", "writing"], None).skills == ("research", "writing")
-    assert inline_persona("P", None, [], None).skills == ()
+    assert _inline_persona("P", None, None, None).skills is None
+    assert _inline_persona("P", None, [" research ", "research", "writing"], None).skills == ("research", "writing")
+    assert _inline_persona("P", None, [], None).skills == ()
     for skills in ("research", [""], [1]):
-        with pytest.raises(PersonaError, match="skills must be a list of skill names"):
-            inline_persona("P", None, skills, None)
+        with pytest.raises(_PersonaError, match="skills must be a list of skill names"):
+            _inline_persona("P", None, skills, None)
 
 
 def test_authored_skills_must_be_caller_skills(tmp_path: Path) -> None:
@@ -486,12 +486,12 @@ def test_authored_skills_must_be_caller_skills(tmp_path: Path) -> None:
     subset = _resolve(tmp_path, system_prompt="P", skills=["writing"])
     unknown = _resolve(tmp_path, system_prompt="P", skills=["coding"])
 
-    assert isinstance(subset, PersonaRequest)
+    assert isinstance(subset, _PersonaRequest)
     assert subset.persona is not None
     assert subset.persona.skills == ("writing",)
     assert unknown == "Cannot delegate: unknown skill 'coding'. Your skills: research, writing."
-    assert isinstance(_resolve(tmp_path, system_prompt="P", available_skills=unread), PersonaRequest)
-    assert isinstance(_resolve(tmp_path, system_prompt="P", skills=[], available_skills=unread), PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", available_skills=unread), _PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", skills=[], available_skills=unread), _PersonaRequest)
 
 
 def test_profile_cannot_combine_with_inline_skills(tmp_path: Path) -> None:
@@ -505,13 +505,13 @@ def test_profile_cannot_combine_with_inline_skills(tmp_path: Path) -> None:
 
 def test_copy_without_skills_inherits_its_parents_skills(tmp_path: Path) -> None:
     """An authored subagent's skills cap the copies it authors, and a copy without skills inherits them."""
-    cap = inline_persona("P", None, ["research"], None)
+    cap = _inline_persona("P", None, ["research"], None)
 
     inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
     widened = _resolve(tmp_path, system_prompt="Q", skills=["writing"], cap=cap)
     plain = _resolve(tmp_path, cap=cap)
 
-    assert isinstance(inherited, PersonaRequest)
+    assert isinstance(inherited, _PersonaRequest)
     assert inherited.persona is not None
     assert (inherited.persona.tools, inherited.persona.skills) == (None, ("research",))
     assert widened == "Cannot delegate: unknown skill 'writing'. Your skills: research."
@@ -521,9 +521,9 @@ def test_copy_without_skills_inherits_its_parents_skills(tmp_path: Path) -> None
 
 def test_unrestricted_authored_subagent_may_start_a_configured_copy(tmp_path: Path) -> None:
     """An authored subagent that keeps every caller tool and skill may still start a configured copy."""
-    plain = _resolve(tmp_path, cap=inline_persona("P", None, None, None))
+    plain = _resolve(tmp_path, cap=_inline_persona("P", None, None, None))
 
-    assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
+    assert plain == _PersonaRequest(persona=None, model=None, agent_mode="standard")
 
 
 def test_persona_naming_tools_but_no_skills_gets_none(tmp_path: Path) -> None:
@@ -538,24 +538,24 @@ def test_persona_naming_tools_but_no_skills_gets_none(tmp_path: Path) -> None:
         tmp_path,
         system_prompt="Q",
         tools=["filesystem"],
-        cap=inline_persona("P", None, ["research"], None),
+        cap=_inline_persona("P", None, ["research"], None),
         available_skills=unread,
     )
 
     for request, skills in ((named_tools, ()), (neither, None), (copy_with_tools, ())):
-        assert isinstance(request, PersonaRequest)
+        assert isinstance(request, _PersonaRequest)
         assert request.persona is not None
         assert request.persona.skills == skills
 
 
 def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -> None:
     """A copy that inherits skills drops one its caller lost, as a follow-up would, while naming that skill refuses."""
-    cap = inline_persona("P", None, ["research", "retired"], None)
+    cap = _inline_persona("P", None, ["research", "retired"], None)
 
     inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
     named = _resolve(tmp_path, system_prompt="Q", skills=["retired"], cap=cap)
 
-    assert isinstance(inherited, PersonaRequest)
+    assert isinstance(inherited, _PersonaRequest)
     assert inherited.persona is not None
     assert inherited.persona.skills == ("research",)
     assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research."
@@ -592,7 +592,7 @@ def test_copy_that_omits_everything_inherits_its_parents_tools_skills_and_knowle
 
     request = _resolve(tmp_path, system_prompt="Q", cap=cap)
 
-    assert isinstance(request, PersonaRequest)
+    assert isinstance(request, _PersonaRequest)
     assert request.persona is not None
     assert (request.persona.tools, request.persona.skills, request.persona.knowledge) == (
         ("filesystem",),
@@ -607,7 +607,7 @@ def test_copy_of_a_parent_searching_no_knowledge_searches_none(tmp_path: Path) -
 
     request = _resolve(tmp_path, system_prompt="Q", cap=cap)
 
-    assert isinstance(request, PersonaRequest)
+    assert isinstance(request, _PersonaRequest)
     assert request.persona is not None
     assert request.persona.knowledge == ()
 
@@ -619,12 +619,12 @@ def test_knowledge_without_a_prompt_or_profile_is_refused(tmp_path: Path) -> Non
 
 def test_inline_persona_reads_knowledge() -> None:
     """Knowledge bases are optional, deduplicated names, and an empty list means no knowledge search."""
-    assert inline_persona("P", None, None, None).knowledge is None
-    assert inline_persona("P", None, None, [" docs ", "docs", "faq"]).knowledge == ("docs", "faq")
-    assert inline_persona("P", None, None, []).knowledge == ()
+    assert _inline_persona("P", None, None, None).knowledge is None
+    assert _inline_persona("P", None, None, [" docs ", "docs", "faq"]).knowledge == ("docs", "faq")
+    assert _inline_persona("P", None, None, []).knowledge == ()
     for knowledge in ("docs", [""], [1]):
-        with pytest.raises(PersonaError, match="knowledge must be a list of knowledge base names"):
-            inline_persona("P", None, None, knowledge)
+        with pytest.raises(_PersonaError, match="knowledge must be a list of knowledge base names"):
+            _inline_persona("P", None, None, knowledge)
 
 
 def test_knowledge_follows_an_explicit_tool_list() -> None:
@@ -651,22 +651,22 @@ def test_authored_knowledge_must_be_caller_knowledge(tmp_path: Path) -> None:
     subset = _resolve(tmp_path, system_prompt="P", tools=["filesystem"], knowledge=["faq"])
     unknown = _resolve(tmp_path, system_prompt="P", knowledge=["wiki"])
 
-    assert isinstance(subset, PersonaRequest)
+    assert isinstance(subset, _PersonaRequest)
     assert subset.persona is not None
     assert subset.persona.knowledge == ("faq",)
     assert unknown == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
-    assert isinstance(_resolve(tmp_path, system_prompt="P", available_knowledge=unread), PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", available_knowledge=unread), _PersonaRequest)
 
 
 def test_copy_inherits_its_parents_knowledge_and_stays_within_it(tmp_path: Path) -> None:
     """An authored subagent's knowledge bases cap the copies it authors, and a copy naming neither list inherits them."""
-    cap = inline_persona("P", None, None, ["docs"])
+    cap = _inline_persona("P", None, None, ["docs"])
 
     inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
     widened = _resolve(tmp_path, system_prompt="Q", knowledge=["faq"], cap=cap)
     plain = _resolve(tmp_path, cap=cap)
 
-    assert isinstance(inherited, PersonaRequest)
+    assert isinstance(inherited, _PersonaRequest)
     assert inherited.persona is not None
     assert inherited.persona.knowledge == ("docs",)
     assert widened == "Cannot delegate: unknown knowledge base 'faq'. Your knowledge bases: docs."

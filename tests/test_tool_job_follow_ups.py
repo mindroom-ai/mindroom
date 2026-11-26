@@ -389,7 +389,7 @@ async def test_a_job_a_finished_follow_up_started_gets_its_own_follow_up(tmp_pat
         first_key, first_id, *_ = bot.admit_job_follow_up.await_args.args
         await principal.admit(follow_up_event(first_key, first_id, sender_id="@mindroom_parent:test", now_ms=1))
         collected = await runtime.wait("first", owner=job_owner(), depth=0, timeout=0)
-        await runtime._acknowledge_wait("first", collected.claim)
+        await runtime.acknowledge_wait("first", collected.claim)
         await principal.settle(first_id)
         await _ended(runtime, "second", BackgroundOutcome("completed", "b"), source_event_id=first_id)
         await coordinator._admit_follow_ups(runtime)
@@ -551,7 +551,7 @@ async def test_a_human_reply_collects_held_jobs_and_ends_their_notice(tmp_path: 
             await coordinator._admit_follow_ups(runtime)
             send.assert_awaited_once()
             collected = await runtime.wait("capped", owner=job_owner(), depth=0, timeout=0)
-            await runtime._acknowledge_wait("capped", collected.claim)
+            await runtime.acknowledge_wait("capped", collected.claim)
             await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
             await coordinator._admit_follow_ups(runtime)
             send.assert_awaited_once()
@@ -630,7 +630,7 @@ async def test_the_admission_memo_forgets_follow_ups_whose_jobs_were_collected(t
         await coordinator._admit_follow_ups(runtime)
         assert coordinator._admitted_follow_ups
         collected = await runtime.wait("job_a", owner=job_owner(), depth=0, timeout=0)
-        await runtime._acknowledge_wait("job_a", collected.claim)
+        await runtime.acknowledge_wait("job_a", collected.claim)
         await coordinator._admit_follow_ups(runtime)
         assert coordinator._admitted_follow_ups == set()
     finally:
@@ -842,7 +842,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
         await _ended(runtime, "dropped", BackgroundOutcome("cancelled"), owner=owner)
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
-        await runtime._acknowledge_wait("work", collected.claim)
+        await runtime.acknowledge_wait("work", collected.claim)
         request = runner._job_follow_up_request(key, "job-follow-up:1")
         # Nothing claimed a reply for it, so its source settles.
         assert await runner._generate_job_follow_up(request) == Unclaimed(UnclaimedReason.NOT_DUE)
@@ -945,7 +945,7 @@ async def test_an_open_reply_holds_its_ended_jobs_until_it_ends(  # noqa: PLR091
                 await coordinator._admit_follow_ups(runtime)
                 admitting.admit_job_follow_up.assert_awaited_once_with(key, _follow_up_event_id(key, (orphan,), 1))
                 collected = await runtime.wait("orphan", owner=owner, depth=0, timeout=0)
-                await runtime._acknowledge_wait("orphan", collected.claim)
+                await runtime.acknowledge_wait("orphan", collected.claim)
 
             replay, live = await _claim_reply(principal, key, source, generation="gen-2")
             assert replay.reply_id == reply.reply_id
@@ -1117,7 +1117,7 @@ async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path, *, 
             )
         await _end_span_for_replay(principal, span)
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
-        await runtime._acknowledge_wait("work", collected.claim)
+        await runtime.acknowledge_wait("work", collected.claim)
         if waiting:
             _wait_for_next_turn(runner, key, requester_id=key.requester_id)
             assert await runtime.ended_jobs(key) == ()

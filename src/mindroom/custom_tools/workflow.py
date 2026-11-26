@@ -208,14 +208,11 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if outer is None:
             text = None
             origin = _inline_origin(context)
+            stopped = None
         else:
             text = await resolve_source(engine, context, arguments)
             origin = nested_key(outer, text, arguments.get("args"))
-        stopped = (
-            _resumable_child(engine, outer, text, arguments)
-            if outer is not None and text is not None and running_child_run() is None
-            else None
-        )
+            stopped = _resumable_child(engine, outer, text, arguments) if running_child_run() is None else None
         if stopped is not None and outer is not None:
             action = partial(self._continue_child, engine, context, origin, outer, stopped, arguments)
         else:
@@ -416,7 +413,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
                 return await _resume_job(engine, context, arguments, self.limits, job_id, runtime, after=after)
             run = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
 
-            async def refused() -> object:
+            async def refused() -> bool:
                 return await asyncio.to_thread(engine.store.delete_intent, run.run_id, job_id, run.epoch)
         except ValueError as exc:
             return str(exc)

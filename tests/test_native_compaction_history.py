@@ -20,7 +20,7 @@ from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
-    ScopeCompactionLifecycleResult,
+    _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
@@ -559,7 +559,7 @@ async def test_native_activation_respects_history_policy(
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     # A manual request must reach the portable text owner, which returns no outcome here.
-    text_compact = AsyncMock(return_value=ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
+    text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
     monkeypatch.setattr("mindroom.history.runtime.run_scope_compaction_with_lifecycle", text_compact)
 
     prepared = await _prepare(

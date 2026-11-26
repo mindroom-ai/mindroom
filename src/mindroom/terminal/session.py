@@ -23,7 +23,7 @@ import sys
 import termios
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from mindroom.logging_config import get_logger
 
@@ -56,12 +56,6 @@ class TerminalError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
-
-
-class _PidfdOs(Protocol):
-    """The Linux pidfd extension to ``os``."""
-
-    def pidfd_open(self, pid: int, flags: int = 0, /) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -246,30 +240,38 @@ class TerminalSession:
         self._publish(TerminalEvent("output", data=chunk))
 
     async def _wait_exit(self) -> None:
+        pidfd: int | None = None
         if sys.platform == "linux":
+            with contextlib.suppress(AttributeError, OSError):
+                pidfd = os.pidfd_open(self._process.pid)
+        if pidfd is None:
+            # No pidfds on this platform: poll, since no thread may sit in wait() while the loop shuts down.
+            while (code := self._process.poll()) is None:  # noqa: ASYNC110 - no event says a child exited
+                await asyncio.sleep(_EXIT_POLL_SECONDS)
+        else:
             try:
-                # Runtime reference prevents Vulture treating the protocol as dead code.
-                pidfd = cast(_PidfdOs, os).pidfd_open(self._process.pid)  # noqa: TC006
-            except (AttributeError, OSError):
-                pass
-            else:
+                exited = self._loop.create_future()
+                self._loop.add_reader(pidfd, lambda: exited.done() or exited.set_result(None))
                 try:
-                    exited = self._loop.create_future()
-                    self._loop.add_reader(pidfd, lambda: exited.done() or exited.set_result(None))
-                    try:
-                        await exited
-                    finally:
-                        self._loop.remove_reader(pidfd)
+                    await exited
                 finally:
-                    os.close(pidfd)
-                self._finish(self._process.wait())
-                return
-        # No pidfds on this platform: poll, since no thread may sit in wait() while the loop shuts down.
-        while (code := self._process.poll()) is None:  # noqa: ASYNC110 - no event says a child exited
-            await asyncio.sleep(_EXIT_POLL_SECONDS)
+                    self._loop.remove_reader(pidfd)
+            finally:
+                os.close(pidfd)
+            code = self._process.wait()
         self._finish(code)
 
+    def _reap_if_exited(self) -> bool:
+        """Record a shell exit that polling has not observed yet."""
+        if not self.alive or (code := self._process.poll()) is None:
+            return False
+        self._finish(code)
+        self._exit_task.cancel()
+        return True
+
     def _finish(self, code: int) -> None:
+        if not self.alive:
+            return
         if self._master_fd is not None:
             # What the shell wrote before it exited.
             with contextlib.suppress(OSError):
@@ -431,10 +433,7 @@ class TerminalManager:
         while True:
             while (idle := session.idle_seconds()) < _IDLE_SECONDS:  # noqa: ASYNC110 - idle time has no event to await
                 await asyncio.sleep(_IDLE_SECONDS - idle)
-            if session.alive and session._process.poll() is not None:
-                # A platform without pidfds can notice this exit only after its idle
-                # watcher wakes. Let _finish restart idle retention from that point.
-                await asyncio.shield(session._exit_task)
+            if session._reap_if_exited():
                 continue
             self._forget(session)
             logger.info("Terminal idle", session_id=session.id, alive=session.alive)

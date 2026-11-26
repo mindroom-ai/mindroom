@@ -115,7 +115,7 @@ async def test_expired_native_job_stays_unavailable_to_a_wait_after_restart(
     try:
         await start_delegation_job(runtime, child, owner=owner, operation=operation)
         waited = await runtime.wait(child.delegation_id, owner=owner, depth=0)
-        await runtime._acknowledge_wait(child.delegation_id, waited.claim)
+        await runtime.acknowledge_wait(child.delegation_id, waited.claim)
         async with execution_resources():
             with tool_runtime_context(delegation_context):
                 await runtime.expire_ended(

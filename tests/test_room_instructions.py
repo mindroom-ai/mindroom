@@ -205,7 +205,7 @@ async def test_read_room_text_setting_times_out_cleanly(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_read_room_text_setting_catches_transport_body_read_error() -> None:
-    """An exception raised by ``transport.text()`` inside ``_state_event_content`` logs and returns None."""
+    """An exception raised by ``transport.text()`` inside ``state_event_content`` logs and returns None."""
     transport = MagicMock(spec=aiohttp.ClientResponse)
     transport.status = 200
     transport.text = AsyncMock(side_effect=aiohttp.ClientError("body stream failed"))
