@@ -131,10 +131,10 @@ def test_redirect_is_refused_without_following_or_leaking_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A 307 redirect is never followed across transport, script SDK (indeterminate), and workflow SDK."""
+    """A 302 redirect is never followed across transport, script SDK (indeterminate), and workflow SDK."""
 
     def respond(handler: BaseHTTPRequestHandler) -> None:
-        _send(handler, 307, b"", headers={"Location": f"http://localhost:{handler.server.server_port}/stolen"})
+        _send(handler, 302, b"", headers={"Location": f"http://localhost:{handler.server.server_port}/stolen"})
 
     with _serve(respond) as (url, seen):
         _configure(monkeypatch, tmp_path, gateway_url=url)
@@ -144,7 +144,7 @@ def test_redirect_is_refused_without_following_or_leaking_token(
 
         with pytest.raises(GatewayHTTPError) as transport_err:
             ScriptGatewayTransport(timeout_seconds=5.0).request_json("POST", "calls", {"x": 1})
-        assert transport_err.value.status == 307
+        assert transport_err.value.status == 302
         assert _TOKEN not in str(transport_err.value)
 
         with pytest.raises(MindRoomToolCallError) as script_err:
@@ -156,7 +156,7 @@ def test_redirect_is_refused_without_following_or_leaking_token(
         )
         assert _TOKEN not in str(script_err.value)
 
-        with _workflow_lane(), pytest.raises(workflow_sdk.WorkflowError, match="307") as wf_err:
+        with _workflow_lane(), pytest.raises(workflow_sdk.WorkflowError, match="302") as wf_err:
             workflow_sdk.tool("files", "read", path="a.txt")
         assert _TOKEN not in str(wf_err.value)
 
@@ -332,7 +332,7 @@ def test_script_process_modules_import_only_stdlib_and_declared_closure(
     module_name: str,
     expected_non_stdlib: set[str],
 ) -> None:
-    """Every module loaded inside script processes stays within the stdlib-only import closure."""
+    """Each listed script-process module's direct imports stay within stdlib and the declared closure."""
     module = importlib.import_module(module_name)
     assert module.__file__ is not None
     tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
