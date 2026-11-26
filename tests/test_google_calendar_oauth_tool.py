@@ -122,9 +122,8 @@ def test_google_calendar_default_config_enables_write_methods(tmp_path: Path) ->
     assert "quick_add_event" in tool.functions
     assert "move_event" in tool.functions
     assert "respond_to_event" in tool.functions
-    # Agno validates its own broad scope marker during toolkit construction.
-    # MindRoom injects pre-authorized credentials carrying the granular provider scopes below.
-    assert "https://www.googleapis.com/auth/calendar" in tool.scopes
+    assert "https://www.googleapis.com/auth/calendar.events" in tool._oauth_provider.scopes
+    assert "https://www.googleapis.com/auth/calendar" not in tool._oauth_provider.scopes
 
 
 def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> None:
@@ -147,8 +146,8 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
     assert "quick_add_event" in tool.functions
     assert "move_event" in tool.functions
     assert "respond_to_event" in tool.functions
-    # This is Agno's construction-time marker, not the scopes requested by MindRoom OAuth.
-    assert "https://www.googleapis.com/auth/calendar" in tool.scopes
+    assert "https://www.googleapis.com/auth/calendar.events" in tool._oauth_provider.scopes
+    assert "https://www.googleapis.com/auth/calendar" not in tool._oauth_provider.scopes
 
 
 def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:
@@ -162,3 +161,23 @@ def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) 
     )
 
     assert tool._should_fallback_to_original_auth() is True
+
+
+def test_google_calendar_instructions_name_only_offered_functions(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_calendar",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"allow_update": False},
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
+
+    assert isinstance(tool, GoogleCalendarTools)
+    instructions = tool.instructions_for(tool.functions)
+    assert "get_event" in instructions
+    assert "list_events" in instructions
+    assert "update_event" not in instructions
+    assert "delete_event" not in instructions
+    assert "quick_add_event" not in instructions

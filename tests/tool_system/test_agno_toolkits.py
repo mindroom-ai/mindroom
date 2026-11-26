@@ -324,7 +324,6 @@ def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instruct
     [
         ("daytona", {}, {"exclude_tools": ["delete_file"]}),
         ("gmail", {}, {"send_email": False}),
-        ("google_calendar", {}, {"allow_update": False}),
         ("reasoning", {}, {"enable_think": False}),
         ("zep", {}, {"enable_add_zep_message": False}),
     ],
