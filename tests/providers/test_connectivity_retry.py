@@ -62,10 +62,10 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import drain
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.llm.provider import StreamEvent
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _CLOUD = "https://api.openai.com/v1"
 _FALLBACK = "https://api.anthropic.com"
@@ -110,6 +110,27 @@ def _runtime_paths(tmp_path: Path, homeserver: str = _REMOTE_HS, *, ssl_verify: 
 
 def _stage(runtime_paths: RuntimePaths) -> partial[AsyncIterator[StreamEvent]]:
     return partial(connectivity_retry_stream, runtime_paths=runtime_paths)
+
+
+def _chained(
+    primary: ModelProvider,
+    secondary: ModelProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    key: str,
+) -> WrappedProvider:
+    return WrappedProvider(
+        WrappedProvider(
+            primary,
+            partial(
+                fallback_stream,
+                model_name="p",
+                chain=(ChainModel("s", None, lambda: secondary, f"{key}-s"),),
+                cooldown_key=f"{key}-p",
+            ),
+        ),
+        _stage(runtime_paths),
+    )
 
 
 def _turn(text: str = "ok", *, inp: int = 10, out: int = 5) -> TurnCompleted:
@@ -191,45 +212,62 @@ async def test_homeserver_probe_coalesces_ssl_verify_and_classifies_responses(
 ) -> None:
     del real_connectivity_probe
     runtime_paths = _runtime_paths(tmp_path)
+    real_async_client = httpx.AsyncClient
     seen_verify: list[object] = []
 
-    class _FakeClient:
-        def __init__(self, outcome: object, *, verify: object = True, **_kw: object) -> None:
-            self._outcome = outcome
+    class _TruncatedStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            err = httpx.RemoteProtocolError("body closed early")
+            raise err
+            yield b""
+
+    def _mock_client(outcome: object) -> Callable[..., httpx.AsyncClient]:
+        def _factory(
+            *,
+            verify: object = True,
+            timeout: float = 3.0,
+            follow_redirects: bool = False,
+        ) -> httpx.AsyncClient:
             seen_verify.append(verify)
 
-        async def __aenter__(self) -> _FakeClient:
-            return self
+            def _handler(_request: httpx.Request) -> httpx.Response:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                assert isinstance(outcome, httpx.Response)
+                return outcome
 
-        async def __aexit__(self, *_a: object) -> None:
-            return None
+            return real_async_client(
+                transport=httpx.MockTransport(_handler),
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
 
-        async def get(self, _url: str) -> object:
-            if isinstance(self._outcome, BaseException):
-                raise self._outcome
-            return self._outcome
+        return _factory
 
-    # HTTP 200, HTTP 503, and SSLCertVerificationError all prove online; ConnectError proves offline.
-    for online_outcome in (httpx.Response(200), httpx.Response(503)):
-        monkeypatch.setattr(httpx, "AsyncClient", lambda outcome=online_outcome, **kw: _FakeClient(outcome, **kw))
+    # HTTP 200, HTTP 503 with truncated body, and SSLCertVerificationError all prove online; ConnectError proves offline.
+    truncated_503 = httpx.Response(503, stream=_TruncatedStream())
+    for online_outcome in (httpx.Response(200), truncated_503):
+        monkeypatch.setattr(httpx, "AsyncClient", _mock_client(online_outcome))
         assert await connectivity_stage._probe_homeserver_reachable(runtime_paths) is True
     assert isinstance(seen_verify[-1], ssl.SSLContext)
 
     cert_connect = httpx.ConnectError("cert failed")
     cert_connect.__context__ = ssl.SSLCertVerificationError(1, "untrusted")
     cert_connect.__suppress_context__ = True
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient(cert_connect, **kw))
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(cert_connect))
     assert await connectivity_stage._probe_homeserver_reachable(runtime_paths) is True
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient(httpx.ConnectError("unreachable"), **kw))
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(httpx.ConnectError("unreachable")))
     assert await connectivity_stage._probe_homeserver_reachable(runtime_paths) is False
 
-    # MATRIX_SSL_VERIFY=false passes verify=False; invalid/empty homeserver returns None (fast-fail).
+    # MATRIX_SSL_VERIFY=false passes verify=False; invalid homeserver returns None (fast-fail).
     insecure_paths = _runtime_paths(tmp_path, ssl_verify=False)
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient(httpx.Response(200), **kw))
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(httpx.Response(200)))
     assert await connectivity_stage._probe_homeserver_reachable(insecure_paths) is True
     assert seen_verify[-1] is False
-    assert await connectivity_stage._probe_homeserver_reachable(_runtime_paths(tmp_path, homeserver="not-a-url")) is None
+    assert (
+        await connectivity_stage._probe_homeserver_reachable(_runtime_paths(tmp_path, homeserver="not-a-url")) is None
+    )
 
     # Concurrent callers coalesce into one HTTP probe.
     gate = asyncio.Event()
@@ -356,19 +394,7 @@ async def test_fallback_chain_and_tls_failover(
     monkeypatch.setattr(connectivity_stage, "_http_probe_homeserver", _fail_probe)
     cloud = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[_net_err()]])
     local = _Scripted(ModelIdentity(id="llama", provider="ollama", endpoint=_LOCAL), [[_turn("local")]])
-    chained = WrappedProvider(
-        WrappedProvider(
-            cloud,
-            partial(
-                fallback_stream,
-                model_name="c",
-                chain=(ChainModel("l", None, lambda: local, "lk"),),
-                cooldown_key="ck",
-            ),
-        ),
-        _stage(runtime_paths),
-    )
-    events = await drain(chained, _req())
+    events = await drain(_chained(cloud, local, runtime_paths, key="c2l"), _req())
     assert isinstance(events[-1], TurnCompleted)
     assert events[-1].message.content == "local"
     assert probe_calls == 0
@@ -390,19 +416,7 @@ async def test_fallback_chain_and_tls_failover(
         ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK),
         [[_net_err(TRANSPORT_TIMEOUT, replay_stripped=True)]],
     )
-    chained_cloud = WrappedProvider(
-        WrappedProvider(
-            primary,
-            partial(
-                fallback_stream,
-                model_name="p",
-                chain=(ChainModel("s", None, lambda: secondary, "sk"),),
-                cooldown_key="pk",
-            ),
-        ),
-        _stage(runtime_paths),
-    )
-    events = await drain(chained_cloud, _req())
+    events = await drain(_chained(primary, secondary, runtime_paths, key="c2c"), _req())
     assert isinstance(events[-1], TurnCompleted)
     assert events[-1].message.content == "primary"
     assert (len(primary.requests), len(secondary.requests)) == (2, 1)
@@ -427,24 +441,12 @@ async def test_fallback_chain_and_tls_failover(
         partial(media_fallback_stream, fallback_prompt="no media"),
         media_fallback_projection("no media"),
     )
-    tls_chain = WrappedProvider(
-        WrappedProvider(
-            media_primary,
-            partial(
-                fallback_stream,
-                model_name="p",
-                chain=(ChainModel("s", None, lambda: healthy, "tls-s"),),
-                cooldown_key="tls-p",
-            ),
-        ),
-        _stage(runtime_paths),
-    )
     img = Image(id="att_img1", content=b"pngbytes", mime_type="image/png")
     img_req = ModelRequest(
         messages=(Message(role="user", content="describe", images=(img,)),),
         overrides=RequestOverrides(wait_for_connectivity=True),
     )
-    tls_events = await drain(tls_chain, img_req)
+    tls_events = await drain(_chained(media_primary, healthy, runtime_paths, key="tls"), img_req)
     assert isinstance(tls_events[-1], TurnCompleted)
     assert tls_events[-1].message.content == "backup ok"
     assert (len(bad_tls.requests), len(healthy.requests)) == (1, 1)
@@ -452,7 +454,7 @@ async def test_fallback_chain_and_tls_failover(
 
 
 @pytest.mark.asyncio
-async def test_deadline_expiry_reconnect_cap_and_immediate_cancellation(
+async def test_deadline_expiry_suspend_cap_and_immediate_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,8 +462,20 @@ async def test_deadline_expiry_reconnect_cap_and_immediate_cancellation(
     _fast_backoff(monkeypatch)
     monkeypatch.setattr(connectivity_stage, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
 
-    # 1. Deadline expiry re-raises original ProviderUnavailable.
-    monkeypatch.setattr(connectivity_stage, "_CONNECTIVITY_WAIT_LIMIT_SECONDS", 0.02)
+    # 1. Deadline expiry (including jump past deadline on suspend/wake before reissue) re-raises original error.
+    now = 100.0
+    monkeypatch.setattr(connectivity_stage, "_now", lambda: now)
+    monkeypatch.setattr(connectivity_stage, "_CONNECTIVITY_WAIT_LIMIT_SECONDS", 10.0)
+    probes = iter([False, True])
+
+    async def _probe_with_suspend(*_a: object, **_kw: object) -> bool:
+        nonlocal now
+        res = next(probes)
+        if res:
+            now += 20.0
+        return res
+
+    monkeypatch.setattr(connectivity_stage, "_http_probe_homeserver", _probe_with_suspend)
     original = _net_err()
     with capture_logs() as cap_logs, pytest.raises(ProviderUnavailable) as exc_info:
         await drain(
@@ -476,11 +490,11 @@ async def test_deadline_expiry_reconnect_cap_and_immediate_cancellation(
 
     # 2. Max reconnect cap (3 reconnects -> 4 total attempts).
     monkeypatch.setattr(connectivity_stage, "_CONNECTIVITY_WAIT_LIMIT_SECONDS", 1800.0)
-    probes = iter([False, True, False, True, False, True, False])
+    cap_probes = iter([False, True, False, True, False, True, False])
     monkeypatch.setattr(
         connectivity_stage,
         "_http_probe_homeserver",
-        lambda *_a, **_kw: asyncio.sleep(0, result=next(probes)),
+        lambda *_a, **_kw: asyncio.sleep(0, result=next(cap_probes)),
     )
     cap = _Scripted(ModelIdentity(id="m", provider="openai", endpoint=_CLOUD), [[_net_err()] for _ in range(6)])
     with pytest.raises(ProviderUnavailable):
@@ -513,12 +527,8 @@ async def test_deadline_expiry_reconnect_cap_and_immediate_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_opt_out_builders_and_usage_attribution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_opt_in_and_opt_out_builders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    _fast_backoff(monkeypatch)
     monkeypatch.setattr(connectivity_stage, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
 
     # Opt-out default (wait=False) and runtime_paths=None pass straight through.
@@ -539,6 +549,15 @@ async def test_opt_out_builders_and_usage_attribution(
     persist_entity_accounts(config, runtime_paths, usernames={"router": "router", "helper": "helper"})
     model = TurnModel(model_name="default", requested_model_name="default", context_window=None, overridden=False)
     plugins = current_plugins(config, runtime_paths)
+    mcp_identity = ToolExecutionIdentity(
+        channel="mcp",
+        agent_name="helper",
+        requester_id="@user:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="mcp-1",
+    )
     matrix_build = create_agent(
         "helper",
         config,
@@ -559,15 +578,6 @@ async def test_opt_out_builders_and_usage_attribution(
         plugins=plugins,
         outside_matrix=True,
     )
-    mcp_identity = ToolExecutionIdentity(
-        channel="mcp",
-        agent_name="helper",
-        requester_id="@user:example.org",
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="mcp-1",
-    )
     mcp_build = create_agent(
         "helper",
         config,
@@ -583,7 +593,11 @@ async def test_opt_out_builders_and_usage_attribution(
     assert mcp_build.request_template.overrides.wait_for_connectivity is False
     assert _spoken(matrix_build).request_template.overrides.wait_for_connectivity is False
 
-    # Usage attribution: single provider sums attempts; fallback chain does not double-count.
+
+@pytest.mark.asyncio
+async def test_usage_attribution_single_and_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    _fast_backoff(monkeypatch)
     probes = iter([False, True, False, True])
     monkeypatch.setattr(
         connectivity_stage,
@@ -592,6 +606,8 @@ async def test_opt_out_builders_and_usage_attribution(
     )
     u1 = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=0))
     u2 = MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=0))
+
+    # Single provider sums attempts and marks AGGREGATE_USAGE_KEY.
     single = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
         [[UsageReported(u1, final=False), _net_err()], [_turn("done", inp=100, out=20)]],
@@ -604,25 +620,14 @@ async def test_opt_out_builders_and_usage_attribution(
     )
     assert (single_turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
 
+    # Fallback chain attributes prior attempts per model without double-counting.
     fallback_stage._COOLDOWN_UNTIL.clear()
     p_id = ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD)
     s_id = ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK)
     primary = _Scripted(p_id, [[UsageReported(u1, final=False), _net_err()], [_turn("ok", inp=80, out=15)]])
     secondary = _Scripted(s_id, [[UsageReported(u2, final=False), _net_err()]])
-    chained = WrappedProvider(
-        WrappedProvider(
-            primary,
-            partial(
-                fallback_stream,
-                model_name="p",
-                chain=(ChainModel("s", None, lambda: secondary, "su"),),
-                cooldown_key="pu",
-            ),
-        ),
-        _stage(runtime_paths),
-    )
     tracker = StreamTracker(identity=p_id)
-    events = await drain(chained, _req())
+    events = await drain(_chained(primary, secondary, runtime_paths, key="usage"), _req())
     for ev in events:
         tracker.observe(ev)
     assert isinstance(events[-1], TurnCompleted)

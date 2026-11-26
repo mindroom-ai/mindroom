@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -45,6 +46,13 @@ _homeserver_probes: WeakKeyDictionary[
 ] = WeakKeyDictionary()
 
 
+def _now() -> float:
+    """Return monotonic seconds including host suspend time where supported."""
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic()
+
+
 def _is_cert_error(error: BaseException) -> bool:
     seen: set[int] = set()
     current: BaseException | None = error
@@ -58,11 +66,14 @@ def _is_cert_error(error: BaseException) -> bool:
 
 async def _http_probe_homeserver(url: str, verify: bool | ssl.SSLContext, timeout_seconds: float) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=timeout_seconds, verify=verify, follow_redirects=False) as client:
-            await client.get(f"{url}/_matrix/client/versions")
+        async with (
+            asyncio.timeout(timeout_seconds),
+            httpx.AsyncClient(timeout=timeout_seconds, verify=verify, follow_redirects=False) as client,
+            client.stream("GET", f"{url}/_matrix/client/versions"),
+        ):
+            return True
     except (httpx.TransportError, OSError, TimeoutError) as exc:
         return _is_cert_error(exc)
-    return True
 
 
 async def _probe_homeserver_reachable(
@@ -79,6 +90,7 @@ async def _probe_homeserver_reachable(
     loop_probes = _homeserver_probes.setdefault(loop, {})
     task = loop_probes.get(key)
     if task is None or task.done():
+        # httpcore mutates ALPN on the SSLContext, so never pass a shared context to httpx.
         verify: bool | ssl.SSLContext = (
             verifying_ssl_context(runtime_paths.process_env, shared=False)
             if url.startswith("https://") and verify_flag
@@ -128,7 +140,6 @@ async def _wait_for_reconnect(
     deadline: float,
     reconnect_attempts: int,
 ) -> bool:
-    loop = asyncio.get_running_loop()
     log_fields = {
         "provider": attempt.provider,
         "model_id": attempt.model_id,
@@ -136,20 +147,22 @@ async def _wait_for_reconnect(
         "attempt": reconnect_attempts + 1,
         "max_attempts": _MAX_RECONNECT_ATTEMPTS,
     }
-    if (remaining := deadline - loop.time()) <= 0:
+    if (remaining := deadline - _now()) <= 0:
         logger.warning("provider_connectivity_wait_expired", **log_fields)
         return False
     logger.warning("provider_connectivity_wait", **log_fields, remaining_seconds=round(remaining, 1))
     probe_attempt = 0
-    while (remaining := deadline - loop.time()) > 0:
+    while (remaining := deadline - _now()) > 0:
         delay = _PROBE_BACKOFF_SECONDS[min(probe_attempt, len(_PROBE_BACKOFF_SECONDS) - 1)]
         await asyncio.sleep(min(delay, remaining))
         probe_attempt += 1
-        if (remaining := deadline - loop.time()) <= 0:
+        if (remaining := deadline - _now()) <= 0:
             break
         if await _probe_homeserver_reachable(runtime_paths, timeout=min(_PROBE_TIMEOUT_SECONDS, remaining)) is True:
-            if (jitter := min(random.uniform(*_JITTER_RANGE_SECONDS), max(0.0, deadline - loop.time()))) > 0:  # noqa: S311
+            if (jitter := min(random.uniform(*_JITTER_RANGE_SECONDS), max(0.0, deadline - _now()))) > 0:  # noqa: S311
                 await asyncio.sleep(jitter)
+            if _now() >= deadline:
+                break
             logger.info("provider_connectivity_resumed", **log_fields)
             return True
     logger.warning("provider_connectivity_wait_expired", **log_fields)
@@ -177,7 +190,6 @@ async def _connectivity_retry_stream(
     request: ModelRequest,
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[StreamEvent]:
-    loop = asyncio.get_running_loop()
     deadline: float | None = None
     reconnect_attempts = 0
     carried: MessageMetrics | None = None
@@ -203,7 +215,7 @@ async def _connectivity_retry_stream(
             if not attempt.selected_count:
                 carried = add_usage(carried, attempt.usage.settled)
             if deadline is None:
-                deadline = loop.time() + _CONNECTIVITY_WAIT_LIMIT_SECONDS
+                deadline = _now() + _CONNECTIVITY_WAIT_LIMIT_SECONDS
             if not await _wait_for_reconnect(
                 attempt,
                 runtime_paths,
