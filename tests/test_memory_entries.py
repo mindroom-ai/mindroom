@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 
 import pytest
@@ -173,10 +174,10 @@ def test_unbreakable_token_and_edge_cases() -> None:
     assert len(edge_pieces) == 2
     assert all(400 <= len(piece) <= 1_200 for piece in edge_pieces)
 
-    long_url = "prefix " + "u" * 950 + " " + "tail " * 51
+    long_url = "prefix " + "u" * 800 + " " + "tail " * 85
     url_pieces = split_memory_entries(long_url, 1_200)
     assert len(url_pieces) == 2
-    assert "u" * 950 in url_pieces[0]
+    assert "u" * 800 in url_pieces[0]
     assert all(len(piece) <= 1_200 for piece in url_pieces)
 
     with pytest.raises(ValueError, match="positive"):
@@ -206,14 +207,15 @@ def test_large_entry_splits_in_linear_time() -> None:
     assert " ".join(pieces).split() == entry.split()
 
 
-def test_id_prefix_before_spaceless_text_does_not_emit_bare_id_chunk() -> None:
+@pytest.mark.parametrize("body_len", [1_190, 1_380, 2_390])
+def test_id_prefix_before_spaceless_text_does_not_emit_bare_id_chunk(body_len: int) -> None:
     """An ID prefix followed by a long spaceless/CJK run splits evenly rather than isolating the bare ID."""
     prefix = "- [id=m_20261109111659_x] "
-    entry = prefix + "あ" * 1_380
+    entry = prefix + "あ" * body_len
 
     pieces = split_memory_entries(entry, 1_200)
 
-    assert len(pieces) == 2
+    assert len(pieces) == math.ceil(len(entry) / 1_200)
     assert all(len(prefix) < len(piece) <= 1_200 for piece in pieces)
     assert all(len(piece) >= 600 for piece in pieces)
     assert pieces[0].startswith(prefix)

@@ -3943,7 +3943,7 @@ A `file` member of a team that uses Mem0 does not see that team's Mem0 memories 
 
 ## Backend: `mem0`
 
-Before each standard-mode reply, Mem0 retrieves memories relevant to the message and adds them to the prompt (in minimal mode, agents call the `memory` tool on demand instead).
+Before each standard-mode reply, Mem0 retrieves memories relevant to the message and adds them to the prompt (in minimal mode, automatic recall is skipped; on-demand recall uses the `memory` tool when configured).
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
@@ -4139,7 +4139,7 @@ With reranking on and a reranker configured, semantic searches fetch 20 hits, or
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every standard-mode reply.
-So with an `openai_decisions` or `typesafe` reranker, every standard-mode reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false` (minimal-mode turns only rerank when the agent calls `memory(action="search", ...)`).
+So with an `openai_decisions` or `typesafe` reranker, every standard-mode reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false` (minimal turns skip automatic recall; explicit memory and knowledge searches can still rerank).
 With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.

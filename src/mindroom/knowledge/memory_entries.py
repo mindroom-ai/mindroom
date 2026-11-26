@@ -95,8 +95,6 @@ def _split_once(text: str, start: int, max_chars: int) -> tuple[int, int]:
     for pattern, keep_left in _BOUNDARIES:
         if split := _best_boundary(text, start, pattern, keep_left, target, max_chars, max_right, min_side):
             return split
-    if min_side > 1 and (split := _best_boundary(text, start, _WHITESPACE_RE, 0, target, max_chars, max_right, 1)):
-        return split
     if split := _best_boundary(text, start, _WHITESPACE_RE, 0, target, max_chars, remaining_len - 1, min_side):
         return split
     hard_end = start + target
