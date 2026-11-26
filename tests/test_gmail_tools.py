@@ -11,6 +11,7 @@ from functools import partial
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -1290,3 +1291,138 @@ def test_gmail_constructor_rejects_retired_and_unknown_tool_filters(
             credentials_manager=mock_credentials_manager,
             **filter_kwargs,
         )
+
+
+@pytest.mark.parametrize("action", ["apply_label", "remove_label"])
+@pytest.mark.parametrize("query", [None, "from:alice@example.com"])
+def test_gmail_manage_label_actions_reject_message_id_without_api_call(
+    action: Literal["apply_label", "remove_label"],
+    query: str | None,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """apply_label and remove_label reject non-empty message_id before making any Gmail API call."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    gmail_tools.service = service
+
+    result = json.loads(
+        gmail_tools.gmail_manage(
+            action=action,
+            message_id="msg-123",
+            label_name="Work",
+            query=query,
+        ),
+    )
+
+    assert "message_id" in result["error"]
+    assert "query" in result["error"]
+    service.users.assert_not_called()
+
+
+def test_gmail_send_reply_rejects_bcc_without_api_call(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """gmail_send(action='reply') rejects non-empty bcc before calling Gmail."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    gmail_tools.service = service
+
+    result = json.loads(
+        gmail_tools.gmail_send(
+            action="reply",
+            thread_id="thread-1",
+            message_id="msg-1",
+            to="alice@example.com",
+            subject="Quarterly review",
+            body="Following up.",
+            bcc="secret@example.com",
+        ),
+    )
+
+    assert "bcc" in result["error"]
+    assert "reply" in result["error"]
+    service.users.assert_not_called()
+
+
+@pytest.mark.parametrize("draft_id", [None, "", "   "])
+def test_gmail_draft_update_rejects_missing_draft_id_without_api_call(
+    draft_id: str | None,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """gmail_draft(action='update') validates non-empty draft_id before calling Gmail."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    gmail_tools.service = service
+
+    result = json.loads(
+        gmail_tools.gmail_draft(
+            action="update",
+            draft_id=draft_id,
+            to="alice@example.com",
+            subject="Draft subject",
+            body="Draft body",
+        ),
+    )
+
+    assert "draft_id" in result["error"]
+    service.users.assert_not_called()
+
+
+def test_gmail_draft_update_with_valid_draft_id_updates_draft(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """gmail_draft(action='update') updates the targeted draft when draft_id is provided."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    gmail_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.drafts.return_value.update.return_value.execute.return_value = {"id": "draft-42"}
+    gmail_tools.service = service
+
+    result = json.loads(
+        gmail_tools.gmail_draft(
+            action="update",
+            draft_id="draft-42",
+            to="alice@example.com",
+            subject="Draft subject",
+            body="Draft body",
+        ),
+    )
+
+    assert result == {"draftId": "draft-42"}
+    update_kwargs = service.users.return_value.drafts.return_value.update.call_args.kwargs
+    assert update_kwargs["userId"] == "me"
+    assert update_kwargs["id"] == "draft-42"
+
+
+def test_gmail_default_max_results_caps_provider_requests_at_20(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """GmailTools defaults max_results to 20 and caps provider list page sizes accordingly."""
+    gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+    assert gmail_tools.max_results == 20
+
+    gmail_tools._authenticate()
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {"messages": []}
+    service.users.return_value.threads.return_value.list.return_value.execute.return_value = {"threads": []}
+    service.users.return_value.drafts.return_value.list.return_value.execute.return_value = {"drafts": []}
+    gmail_tools.service = service
+
+    latest_payload = json.loads(gmail_tools.gmail_read(action="latest", count=50))
+    threads_payload = json.loads(gmail_tools.gmail_read(action="search_threads", query="project", count=50))
+    drafts_payload = json.loads(gmail_tools.gmail_read(action="list_drafts", count=50))
+
+    assert service.users.return_value.messages.return_value.list.call_args.kwargs["maxResults"] == 20
+    assert service.users.return_value.threads.return_value.list.call_args.kwargs["maxResults"] == 20
+    assert service.users.return_value.drafts.return_value.list.call_args.kwargs["maxResults"] == 20
+    assert latest_payload["requested"] == 50
+    assert threads_payload["requested"] == 50
+    assert drafts_payload["requested"] == 50

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
@@ -431,3 +432,26 @@ def test_google_calendar_constructor_rejects_retired_and_unknown_tool_filters(
             creds=_write_capable_calendar_creds(),
             **filter_kwargs,
         )
+
+
+def test_google_calendar_default_max_results_caps_provider_requests_at_20(tmp_path: Path) -> None:
+    """GoogleCalendarTools defaults max_results to 20 and caps provider request sizes accordingly."""
+    tool = GoogleCalendarTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_write_capable_calendar_creds(),
+    )
+    assert tool.max_results == 20
+
+    service = MagicMock()
+    service.events.return_value.list.return_value.execute.return_value = {"items": []}
+    service.calendarList.return_value.list.return_value.execute.return_value = {"items": []}
+    tool.service = service
+
+    tool.google_calendar_read(action="list_events", limit=50)
+    tool.google_calendar_read(action="search_events", query="standup", limit=50)
+    tool.google_calendar_read(action="list_calendars")
+
+    event_max_results = [call.kwargs["maxResults"] for call in service.events.return_value.list.call_args_list]
+    assert event_max_results == [20, 20]
+    assert service.calendarList.return_value.list.call_args.kwargs["maxResults"] == 20

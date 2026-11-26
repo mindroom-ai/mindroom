@@ -7,6 +7,7 @@ import logging
 import threading
 from functools import wraps
 from html import unescape
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 from urllib.parse import quote
 
@@ -818,23 +819,32 @@ class GithubTools(Toolkit):
             indent=2,
         )
 
-    def _get_pull_requests(self, repo_name: str, state: str, sort: str, direction: str, limit: int) -> str:
+    def _get_pull_requests(
+        self,
+        repo_name: str,
+        state: str,
+        sort: str,
+        direction: str,
+        page: int,
+        per_page: int,
+    ) -> str:
+        resolved_page = max(1, page)
+        if per_page <= 0:
+            return json.dumps([], indent=2)
+        start = (resolved_page - 1) * per_page
         pulls = self.g.get_repo(repo_name).get_pulls(state=state, sort=sort, direction=direction)
-        pr_list: list[dict[str, Any]] = []
-        for pr in pulls:
-            if len(pr_list) >= limit:
-                break
-            pr_list.append(
-                {
-                    "number": pr.number,
-                    "title": pr.title,
-                    "user": pr.user.login,
-                    "created_at": pr.created_at.isoformat(),
-                    "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
-                    "state": pr.state,
-                    "url": pr.html_url,
-                },
-            )
+        pr_list = [
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "user": pr.user.login,
+                "created_at": pr.created_at.isoformat(),
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "state": pr.state,
+                "url": pr.html_url,
+            }
+            for pr in islice(pulls, start, start + per_page)
+        ]
         return json.dumps(pr_list, indent=2)
 
     def _get_pull_request(self, repo_name: str, pr_number: int) -> str:
@@ -1119,7 +1129,7 @@ class GithubTools(Toolkit):
         - `list_issues`: issues in `repo_name` (`state` default `open`, `page`, `per_page` default 20)
         - `get_issue`: issue details for `repo_name` and `number`
         - `list_issue_comments`: comments on issue `number` in `repo_name`
-        - `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `per_page` default 50)
+        - `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `page`, `per_page` default 50)
         - `get_pull_request`: PR metadata for `repo_name` and `number`
         - `get_pull_request_changes`: changed files and patches for PR `number` in `repo_name`
         - `get_pull_request_comments`: comments on PR `number` in `repo_name` (`include_issue_comments`)
@@ -1152,6 +1162,7 @@ class GithubTools(Toolkit):
                 state or "open",
                 sort,
                 order,
+                page,
                 50 if per_page is None else per_page,
             )
         if action == "get_pull_request_count":

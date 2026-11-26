@@ -1969,3 +1969,103 @@ def test_code_search_allows_qualifier_only_queries_and_rejects_empty_search(tmp_
     assert github.code_queries == ["repo:example/project filename:Dockerfile"]
     assert result["query"] == "repo:example/project filename:Dockerfile"
     assert missing_all == {"error": "query is required for search_code"}
+
+
+def test_get_pull_requests_honors_page_and_per_page(tmp_path: Path) -> None:
+    """get_pull_requests slices pull requests by page and per_page without over-iterating."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+
+    @dataclass(frozen=True)
+    class _FakeUser:
+        login: str
+
+    @dataclass(frozen=True)
+    class _FakePull:
+        number: int
+        title: str
+        user: _FakeUser
+        created_at: datetime
+        updated_at: datetime | None
+        state: str
+        html_url: str
+
+    pulls_data = [
+        _FakePull(
+            number=idx,
+            title=f"PR #{idx}",
+            user=_FakeUser(login="alice"),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            state="open",
+            html_url=f"https://github.com/example/project/pull/{idx}",
+        )
+        for idx in range(1, 26)
+    ]
+
+    class _TrackingPulls:
+        def __init__(self) -> None:
+            self.yielded = 0
+
+        def __iter__(self) -> Iterator[_FakePull]:
+            for pr in pulls_data:
+                self.yielded += 1
+                yield pr
+
+    tracking_pulls: list[_TrackingPulls] = []
+
+    class _PaginatedPullsRepo:
+        def get_pulls(self, *, state: str, sort: str, direction: str) -> _TrackingPulls:
+            assert state == "open"
+            assert sort == "created"
+            assert direction == "desc"
+            stream = _TrackingPulls()
+            tracking_pulls.append(stream)
+            return stream
+
+    class _PaginatedPullsGithub:
+        def __init__(self) -> None:
+            self.repo_calls = 0
+
+        def get_repo(self, repo_name: str) -> _PaginatedPullsRepo:
+            assert repo_name == "example/project"
+            self.repo_calls += 1
+            return _PaginatedPullsRepo()
+
+    github = _PaginatedPullsGithub()
+    tool.g = cast("Github", github)
+
+    page_one = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=1, per_page=10),
+    )
+    page_two = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=2, per_page=10),
+    )
+    page_three = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=3, per_page=10),
+    )
+    page_four = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=4, per_page=10),
+    )
+    clamped_page = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=0, per_page=10),
+    )
+    empty_per_page = json.loads(
+        tool.github_read_issues_prs(action="get_pull_requests", repo_name="example/project", page=2, per_page=0),
+    )
+
+    assert [pr["number"] for pr in page_one] == list(range(1, 11))
+    assert [pr["number"] for pr in page_two] == list(range(11, 21))
+    assert [pr["number"] for pr in page_three] == list(range(21, 26))
+    assert page_four == []
+    assert [pr["number"] for pr in clamped_page] == list(range(1, 11))
+    assert empty_per_page == []
+    assert tracking_pulls[0].yielded == 10
+    assert tracking_pulls[1].yielded == 20
+    assert github.repo_calls == 5

@@ -421,7 +421,7 @@ class GmailTools(GoogleApiToolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
         scopes: Sequence[str] | None = None,
-        max_results: int = 100,
+        max_results: int = 20,
         max_body_length: int | None = None,
         attachment_dir: str | None = None,
         include_html: bool = False,
@@ -1203,6 +1203,9 @@ class GmailTools(GoogleApiToolkit):
         """
         if action not in self._draft_actions:
             return json.dumps({"error": f"Gmail draft action {action!r} is disabled."})
+        resolved_draft_id = draft_id.strip() if draft_id else ""
+        if action == "update" and not resolved_draft_id:
+            return json.dumps({"error": "draft_id is required for Gmail draft action 'update'."})
         try:
             mime = self._prepare_outgoing_message(
                 to=to,
@@ -1219,9 +1222,12 @@ class GmailTools(GoogleApiToolkit):
             service = self._google_api_service()
             if action == "create":
                 draft = service.users().drafts().create(userId="me", body={"message": mime}).execute()
-                return json.dumps(draft)
-            updated = service.users().drafts().update(userId="me", id=draft_id or "", body={"message": mime}).execute()
-            return json.dumps({"draftId": updated["id"]})
+                result = json.dumps(draft)
+            else:
+                updated = (
+                    service.users().drafts().update(userId="me", id=resolved_draft_id, body={"message": mime}).execute()
+                )
+                result = json.dumps({"draftId": updated["id"]})
         except HttpError as exc:
             logger.warning(f"gmail_{action}_draft_failed", status=exc.resp.status)
             return (
@@ -1236,6 +1242,7 @@ class GmailTools(GoogleApiToolkit):
                 if action == "update"
                 else f"Error creating draft: {type(exc).__name__}: {exc}"
             )
+        return result
 
     def gmail_send(
         self,
@@ -1269,6 +1276,15 @@ class GmailTools(GoogleApiToolkit):
                 error_verb="sending email",
             )
         if action == "reply":
+            if bcc and bcc.strip():
+                return json.dumps(
+                    {
+                        "error": (
+                            "Gmail send action 'reply' does not support 'bcc'; "
+                            "use action='send' with 'thread_id' and 'message_id' if you need 'bcc'."
+                        ),
+                    },
+                )
             return self._send_email_impl(
                 to=to,
                 subject=subject,
@@ -1326,10 +1342,21 @@ class GmailTools(GoogleApiToolkit):
                 success_message=template.format(id=msg_id),
                 error_label=error_label,
             )
-        if action == "apply_label":
-            return self._apply_label(query or "", label_name or "", count)
-        if action == "remove_label":
-            return self._remove_label(query or "", label_name or "", count)
+        if action in ("apply_label", "remove_label"):
+            if message_id and message_id.strip():
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Gmail manage action {action!r} operates on 'query', not 'message_id'; "
+                            "omit 'message_id' and pass a Gmail search 'query' instead."
+                        ),
+                    },
+                )
+            return (
+                self._apply_label(query or "", label_name or "", count)
+                if action == "apply_label"
+                else self._remove_label(query or "", label_name or "", count)
+            )
         if action == "delete_custom_label":
             return self._delete_custom_label(label_name or "", confirm)
         return json.dumps({"error": f"Unsupported Gmail manage action {action!r}."})

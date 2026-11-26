@@ -309,7 +309,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
         calendar_id: str = "primary",
         allow_update: bool | None = True,
         scopes: Sequence[str] | None = None,
-        max_results: int = 100,
+        max_results: int = 20,
         expand_recurring: bool = True,
         list_events: bool | None = True,
         get_event: bool | None = True,
