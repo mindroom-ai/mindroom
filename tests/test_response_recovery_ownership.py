@@ -15,7 +15,8 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
@@ -27,6 +28,7 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from tests.conftest import (
+    make_ingress_facts,
     make_visible_message,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -39,6 +41,7 @@ from tests.matrix_room_events import (
 from tests.reply_span_helpers import no_reply_jobs
 from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing
+from tests.test_edit_regenerator import _edit_event, _harness, _turn_record
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTestHooks
 from tests.test_response_delivery_gateway import _gateway
@@ -491,3 +494,96 @@ async def test_supersede_replay_releases_deferred_sources_without_lost_owner_war
         if call.args and call.args[0] == "pending_event_deferral_owner_lost"
     ]
     assert lost_owner_warnings == []
+
+
+async def test_agent_bot_wires_reply_runtime_release_sources(tmp_path: Path) -> None:
+    """AgentBot wires ReplyRuntime.release_sources to JournalDispatcher.release_delivered_turn_sources."""
+    bot = _bot(tmp_path)
+    assert bot._reply_runtime.release_sources == bot._journal_dispatcher.release_delivered_turn_sources
+
+
+@pytest.mark.parametrize(
+    ("error", "retriable"),
+    [
+        (ReplyMembershipPendingError(), True),
+        (RevisionSnapshotChangedError("Conversation revision changed before locked response preparation"), True),
+        (RuntimeError("unexpected edit failure"), False),
+    ],
+    ids=["reply_membership_pending", "revision_snapshot_changed", "unexpected_runtime_error"],
+)
+async def test_edit_regeneration_retriable_handoff_keeps_edit_pending_and_logs_info(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+    error: Exception,
+    retriable: bool,
+) -> None:
+    """Pre-claim retriable handoff errors leave the edit pending in the journal and log info without failing."""
+    principal = journal_store.principal("assistant@alice")
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+    await principal.admit(
+        InboundEvent(
+            event_id=event.event_id,
+            room_id=harness.room.room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender=event.sender,
+            origin_server_ts=event.server_timestamp,
+            source=event.source,
+        ),
+    )
+    assert await principal.is_pending(event.event_id)
+
+    logger = MagicMock()
+    replies = MagicMock()
+    replies.waits_to_claim.return_value = False
+    retried: list[tuple[str, tuple[str, ...]]] = []
+    inbox = InboxResponses(
+        logger=logger,
+        replies=replies,
+        retry_approval_sources=lambda room_id, event_ids: retried.append((room_id, event_ids)),
+        runtime=MagicMock(phase=RunPhase.ACCEPTING),
+    )
+    settle_sources = AsyncMock(side_effect=principal.settle_many)
+    harness.regenerator.deps = replace(
+        harness.regenerator.deps,
+        response_runner=MagicMock(inbox=inbox),
+        settle_sources=settle_sources,
+    )
+
+    with patch.object(harness.regenerator, "_run_regeneration", AsyncMock(side_effect=error)):
+        assert (
+            await harness.regenerator.handle_message_edit(
+                harness.room,
+                event,
+                event_info,
+                make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=event.sender),
+            )
+            is True
+        )
+        (task,) = tuple(inbox._inbox_response_tasks)
+        results = await asyncio.gather(task, return_exceptions=True)
+
+    assert results == [error]
+    assert retried == [(harness.room.room_id, (event.event_id,))]
+    if retriable:
+        settle_sources.assert_not_awaited()
+        assert await principal.is_pending(event.event_id)
+        logger.info.assert_called_once_with(
+            "inbox_response_task_retrying",
+            task_name=f"edit_regeneration:{event.event_id}",
+            exception_type=error.__class__.__name__,
+            error=str(error),
+        )
+        logger.error.assert_not_called()
+    else:
+        settle_sources.assert_awaited_once_with((event.event_id,))
+        assert not await principal.is_pending(event.event_id)
+        logger.error.assert_called_once_with(
+            "inbox_response_task_failed",
+            task_name=f"edit_regeneration:{event.event_id}",
+            exception_type=error.__class__.__name__,
+            error=str(error),
+        )
+        logger.info.assert_not_called()
