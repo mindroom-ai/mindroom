@@ -193,6 +193,8 @@ def test_spotify_search_playlist_playback_and_validation(
 
     loaded = json.loads(toolkit.spotify_library(action="playlist", playlist_id="pl1", include_tracks=True))
     assert [t["id"] for t in loaded["tracks"]] == ["t1", "t2"]
+    assert loaded["total_tracks"] == 2
+    assert loaded["tracks_truncated"] is False
 
     removed = json.loads(
         toolkit.spotify_playlist_write(
@@ -295,6 +297,30 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
         ),
     )
     assert replied["reply"]["id"] == "r1"
+    title_only = json.loads(
+        toolkit.reddit_write(action="create_post", subreddit="python", title="Just a title", content="", is_self=True),
+    )
+    assert title_only["post"]["id"] == "p2"
+    assert fake_sub.submit.call_args.kwargs["selftext"] == ""
+
+    indented_md = "    def greet():\n        return 1\n"
+    indented = json.loads(
+        toolkit.reddit_write(
+            action="create_post",
+            subreddit="python",
+            title="Code",
+            content=indented_md,
+            is_self=True,
+        ),
+    )
+    assert indented["post"]["id"] == "p2"
+    assert fake_sub.submit.call_args.kwargs["selftext"] == indented_md
+
+    empty_link = json.loads(
+        toolkit.reddit_write(action="create_post", subreddit="python", title="Link", content="", is_self=False),
+    )
+    assert "content is required" in empty_link["error"]
+
     bad = json.loads(toolkit.reddit_read(action="user_info", username="../admin"))
     assert "Invalid username" in bad["error"]
 
@@ -468,3 +494,77 @@ def test_google_maps_sanitizes_transport_error_fixes_distance_matrix_avoid_and_p
     assert api_key not in routes_err
     assert "[REDACTED]" in routes_err
     assert api_key not in caplog.text
+
+
+def test_spotify_playlist_403_preserves_metadata_and_reports_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public non-owned playlist 403 on /items keeps metadata; paged /items reports total_tracks and truncation."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    manager = get_runtime_credentials_manager(paths)
+    toolkit = SpotifyTools(runtime_paths=paths, credentials_manager=manager, worker_target=None)
+    monkeypatch.setattr(toolkit, "_current_access_token", lambda: "tok-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/playlists/pub1":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "pub1",
+                    "name": "Today Top Hits",
+                    "description": "Public chart",
+                    "public": True,
+                    "owner": {"display_name": "Spotify"},
+                    "external_urls": {"spotify": "https://open.spotify.com/playlist/pub1"},
+                },
+            )
+        if request.url.path == "/v1/playlists/pub1/items":
+            return httpx.Response(403, json={"error": {"status": 403, "message": "Forbidden"}})
+        if request.url.path == "/v1/playlists/big1":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "big1",
+                    "name": "Big Owned",
+                    "description": "",
+                    "public": False,
+                    "owner": {"display_name": "Me"},
+                    "external_urls": {"spotify": "https://open.spotify.com/playlist/big1"},
+                },
+            )
+        if request.url.path == "/v1/playlists/big1/items":
+            return httpx.Response(
+                200,
+                json={
+                    "total": 150,
+                    "next": "https://api.spotify.com/v1/playlists/big1/items?offset=100&limit=100",
+                    "items": [
+                        {
+                            "item": {
+                                "id": "t1",
+                                "name": "Track One",
+                                "artists": [{"name": "Artist"}],
+                                "uri": "spotify:track:t1",
+                            },
+                        },
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": {"status": 404, "message": "Not found"}})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+
+    public_pl = json.loads(toolkit.spotify_library(action="playlist", playlist_id="pub1", include_tracks=True))
+    assert public_pl["id"] == "pub1"
+    assert public_pl["name"] == "Today Top Hits"
+    assert public_pl["owner"] == "Spotify"
+    assert public_pl["tracks"] == []
+    assert public_pl["tracks_unavailable"] is True
+    assert "permissions" in public_pl["tracks_note"] or "owned" in public_pl["tracks_note"]
+
+    big_pl = json.loads(toolkit.spotify_library(action="playlist", playlist_id="big1", include_tracks=True))
+    assert [t["id"] for t in big_pl["tracks"]] == ["t1"]
+    assert big_pl["total_tracks"] == 150
+    assert big_pl["tracks_truncated"] is True

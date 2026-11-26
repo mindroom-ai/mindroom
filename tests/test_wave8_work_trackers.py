@@ -257,3 +257,26 @@ def test_resolve_toggle_all_precedence_and_explicit_none_fail_closed() -> None:
     assert override_false._allow_update is True
     explicit_none = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=None, all=True)
     assert explicit_none._allow_update is False
+
+
+def test_trello_key_only_public_read_and_gated_write() -> None:
+    """Trello supports key-only public-board reads while gating write actions on full credentials."""
+    toolkit = trello_tools()(api_key="public-api-key")
+    assert toolkit.client is not None
+    assert toolkit.client.api_key == "public-api-key"
+    assert toolkit.client.public_only is True
+
+    fake_list = SimpleNamespace(id="l1", name="Public Todo", list_cards=list)
+    fake_board = SimpleNamespace(list_lists=lambda: [fake_list])
+    mock_client = MagicMock()
+    mock_client.get_board.return_value = fake_board
+    toolkit.client = mock_client
+
+    lists = json.loads(toolkit.trello_read(action="board_lists", board_id="pub-board"))
+    assert lists == {"lists": [{"id": "l1", "name": "Public Todo", "cards_count": 0}]}
+
+    denied = json.loads(
+        toolkit.trello_write(action="create_card", board_id="pub-board", list_name="Public Todo", name="Nope"),
+    )
+    assert "api_key, api_secret, and token" in denied["error"]
+    mock_client.add_board.assert_not_called()

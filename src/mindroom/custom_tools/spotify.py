@@ -150,8 +150,21 @@ class SpotifyTools(Toolkit):
             try:
                 payload = response.json()
             except ValueError:
+                if response.status_code >= 400:
+                    return {
+                        "error": {
+                            "status": response.status_code,
+                            "message": f"Failed to parse response: {response.text}",
+                        },
+                    }
                 return {"error": f"Failed to parse response: {response.text}"}
-            return payload if isinstance(payload, dict) else {"data": payload}
+            if isinstance(payload, dict):
+                if response.status_code >= 400 and isinstance(payload.get("error"), dict):
+                    payload["error"].setdefault("status", response.status_code)
+                elif response.status_code >= 400 and "error" not in payload:
+                    return {"error": {"status": response.status_code, "message": str(payload)}}
+                return payload
+            return {"data": payload}
 
     def _run_search(
         self,
@@ -356,9 +369,24 @@ class SpotifyTools(Toolkit):
         if include_tracks:
             items_res = self._make_request(f"playlists/{safe_id}/items")
             if "error" in items_res:
+                err = items_res["error"]
+                if isinstance(err, dict) and err.get("status") == 403:
+                    info["tracks"] = []
+                    info["tracks_unavailable"] = True
+                    info["tracks_note"] = (
+                        "Playlist track items are unavailable because Spotify restricts /playlists/{id}/items "
+                        "to playlists owned or collaborated on by the authenticated user."
+                    )
+                    return info
                 return items_res
             raw_items = items_res.get("items", [])
-            info["tracks"] = [parsed for entry in raw_items if (parsed := _extract_playlist_item(entry)) is not None]
+            tracks = [parsed for entry in raw_items if (parsed := _extract_playlist_item(entry)) is not None]
+            info["tracks"] = tracks
+            total_tracks = items_res.get("total")
+            info["total_tracks"] = total_tracks if isinstance(total_tracks, int) else len(tracks)
+            info["tracks_truncated"] = bool(items_res.get("next")) or (
+                isinstance(total_tracks, int) and total_tracks > len(raw_items)
+            )
         return info
 
     def spotify_library(

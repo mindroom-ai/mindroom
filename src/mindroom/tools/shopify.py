@@ -653,7 +653,13 @@ class _ShopifyTools(Toolkit):
         }
 
     @staticmethod
-    def _repeat_customers(orders: list[dict[str, Any]], min_orders: int, limit: int) -> list[dict[str, Any]]:
+    def _repeat_customers(
+        orders: list[dict[str, Any]],
+        min_orders: int,
+        limit: int,
+        created_after: str | None,
+        created_before: str | None,
+    ) -> dict[str, Any]:
         customers: dict[str, dict[str, Any]] = {}
         for order in orders:
             cust = order.get("customer") or {}
@@ -681,7 +687,12 @@ class _ShopifyTools(Toolkit):
             if row["orders_in_period"] >= min_orders
         ]
         repeat.sort(key=lambda row: (row["orders_in_period"], row["spent_in_period"]), reverse=True)
-        return repeat[:limit]
+        return {
+            "period": {"created_after": created_after, "created_before": created_before},
+            "min_orders_threshold": min_orders,
+            "repeat_customer_count": len(repeat),
+            "customers": repeat[:limit],
+        }
 
     def _dispatch_analytics(
         self,
@@ -731,7 +742,7 @@ class _ShopifyTools(Toolkit):
         elif action == "average_order_value":
             result = self._average_order_value(orders, group_by, created_after, created_before)
         else:
-            result = self._repeat_customers(orders, min_occurrences, limit)
+            result = self._repeat_customers(orders, min_occurrences, limit, created_after, created_before)
         return result
 
     def shopify_analytics(

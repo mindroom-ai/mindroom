@@ -78,11 +78,15 @@ def test_composio_tools_reapplies_vendor_telemetry_after_lazy_import(
 
     sentry_module.update_dsn = update_dsn
     composio_module = types.ModuleType("composio")
+    composio_module.__path__ = []
     composio_module.Action = FakeAction
     composio_module.ComposioToolSet = FakeComposioToolSet
+    constants_module = types.ModuleType("composio.constants")
+    constants_module.DEFAULT_BASE_URL = "https://backend.composio.dev/api"
     unregistered: list[object] = []
     for module in (
         composio_module,
+        constants_module,
         sentry_module,
     ):
         monkeypatch.setitem(sys.modules, module.__name__, module)

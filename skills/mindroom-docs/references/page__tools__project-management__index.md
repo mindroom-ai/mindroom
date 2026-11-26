@@ -240,7 +240,7 @@ agents:
 
 ## [`linear`]
 
-`linear` provides `linear_read()` (`viewer`, `teams`, `issue`, `assigned_issues`, `workflow_issues`, `high_priority_issues`) and `linear_write()` (`create_issue`, `update_issue`).
+`linear` provides `linear_read()` (`viewer`, `teams`, `issue`, `user_issues`, `workflow_issues`, `high_priority`) and `linear_write()` (`create_issue`, `update_issue`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -277,7 +277,7 @@ agents:
 
 - Spaces and lists are matched by name, case-insensitively.
 - `clickup_read(action="list_tasks")` returns tasks from every list in a space.
-- `clickup_write(action="create_task")` always creates the task in the first list of the matched space, so check `clickup_read(action="list_lists")` when placement matters.
+- `clickup_write(action="create_task")` uses `list_name` when given and falls back to the first list of the matched space, so check `clickup_read(action="list_lists")` when placement matters.
 - `clickup_write(action="update_task")` passes any field updates through to the ClickUp API.
 
 ## [`confluence`]
@@ -349,13 +349,13 @@ agents:
       - trello
 ```
 
-- All three credentials are needed; if any is missing, Trello rejects the calls with an authentication error.
+- `api_key` alone is enough to read public boards with `trello_read()`; private boards and all `trello_write()` actions require `api_key`, `api_secret`, and `token`.
 - `trello_write(action="create_card")` finds the target list by name, case-insensitively, while `trello_write(action="move_card")` needs the card ID and destination list ID from `trello_read(action="cards")` and `trello_read(action="board_lists")`.
 - `trello_read(action="list_boards")` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
 
 ## [`todoist`]
 
-`todoist` provides `todoist_read()` (`get_task`, `list_tasks`, `list_projects`) and `todoist_write()` (`create_task`, `update_task`, `close_task`, `delete_task`).
+`todoist` provides `todoist_read()` (`get_task`, `active_tasks`, `projects`) and `todoist_write()` (`create_task`, `update_task`, `close_task`, `delete_task`).
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -368,7 +368,7 @@ agents:
       - todoist
 ```
 
-- `todoist_write(action="create_task")` accepts an optional `project_id` from `todoist_read(action="list_projects")`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
+- `todoist_write(action="create_task")` accepts an optional `project_id` from `todoist_read(action="projects")`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
 - `todoist_write(action="update_task")` can also change the description, due date or time, due language, assignee, and section.
 - `priority` runs from `1` to `4`, where `4` is the highest.
 - `todoist_write(action="close_task")` marks a task complete, while `todoist_write(action="delete_task")` removes it permanently.

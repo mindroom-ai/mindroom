@@ -221,7 +221,12 @@ class _RedditTools(Toolkit):
         if scope_err := self._validate_allowed_subreddit(clean_sub):
             return scope_err
         clean_title = require_non_empty(title, "title")
-        clean_content = require_non_empty(content, "content")
+        if is_self:
+            selftext = "" if content is None else content
+            link_url: str | None = None
+        else:
+            selftext = ""
+            link_url = require_non_empty(content, "content")
         sub_obj = self.reddit.subreddit(clean_sub)
         resolved_flair_id: str | None = None
         if flair:
@@ -237,9 +242,9 @@ class _RedditTools(Toolkit):
             if resolved_flair_id is None:
                 return f"Flair '{flair}' does not have a valid template ID."
         submission = (
-            sub_obj.submit(title=clean_title, selftext=clean_content, flair_id=resolved_flair_id)
+            sub_obj.submit(title=clean_title, selftext=selftext, flair_id=resolved_flair_id)
             if is_self
-            else sub_obj.submit(title=clean_title, url=clean_content, flair_id=resolved_flair_id)
+            else sub_obj.submit(title=clean_title, url=link_url, flair_id=resolved_flair_id)
         )
         return json_dumps(
             {

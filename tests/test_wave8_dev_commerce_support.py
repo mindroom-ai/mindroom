@@ -393,3 +393,53 @@ def test_shopify_analytics_uses_minimal_report_specific_queries(monkeypatch: pyt
     repeat_query = queries_by_call[-1]
     assert "customer" in repeat_query
     assert "lineItems" not in repeat_query
+
+
+def test_shopify_repeat_customers_reports_total_count_before_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """repeat_customers reports repeat_customer_count before applying limit truncation."""
+
+    def make_order(cid: str, email: str, first: str, amount: str) -> dict[str, object]:
+        return {
+            "node": {
+                "totalPriceSet": {"shopMoney": {"amount": amount}},
+                "customer": {
+                    "id": cid,
+                    "email": email,
+                    "firstName": first,
+                    "lastName": "Example",
+                    "numberOfOrders": 5,
+                    "amountSpent": {"amount": "200.00", "currencyCode": "USD"},
+                },
+            },
+        }
+
+    orders = [
+        make_order("c1", "ada@example.com", "Ada", "50.00"),
+        make_order("c1", "ada@example.com", "Ada", "40.00"),
+        make_order("c1", "ada@example.com", "Ada", "30.00"),
+        make_order("c2", "grace@example.com", "Grace", "25.00"),
+        make_order("c2", "grace@example.com", "Grace", "25.00"),
+        make_order("c3", "bob@example.com", "Bob", "10.00"),
+    ]
+
+    def fake_post(url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(200, request=httpx.Request("POST", url), json={"data": {"orders": {"edges": orders}}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    toolkit = shopify_tools()(shop_name="acme", access_token="shpat_123")  # noqa: S106
+
+    result = json.loads(
+        toolkit.shopify_analytics(
+            action="repeat_customers",
+            min_occurrences=2,
+            limit=1,
+            created_after="2026-11-01",
+            created_before="2026-11-30",
+        ),
+    )
+    assert result["repeat_customer_count"] == 2
+    assert result["min_orders_threshold"] == 2
+    assert result["period"] == {"created_after": "2026-11-01", "created_before": "2026-11-30"}
+    assert len(result["customers"]) == 1
+    assert result["customers"][0]["email"] == "ada@example.com"
+    assert result["customers"][0]["orders_in_period"] == 3

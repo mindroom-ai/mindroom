@@ -27,21 +27,33 @@ class _TrelloTools(Toolkit):
         self.api_secret = api_secret.strip() if isinstance(api_secret, str) and api_secret.strip() else None
         self.token = token.strip() if isinstance(token, str) and token.strip() else None
         self.client: Any = None
-        if self.api_key and self.api_secret and self.token:
+        if self.api_key:
             from trello import TrelloClient
 
-            self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
+            if self._has_full_auth():
+                self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
+            else:
+                self.client = TrelloClient(api_key=self.api_key)
         super().__init__(name="trello", tools=[self.trello_read, self.trello_write])
 
-    def _require_client(self) -> Any:  # noqa: ANN401
+    def _has_full_auth(self) -> bool:
+        return bool(self.api_key and self.api_secret and self.token)
+
+    def _require_client(self, *, require_auth: bool = False) -> Any:  # noqa: ANN401
+        if require_auth and not self._has_full_auth():
+            msg = "Trello write operations require api_key, api_secret, and token."
+            raise ValueError(msg)
         if self.client is not None:
             return self.client
-        if not (self.api_key and self.api_secret and self.token):
-            msg = "Trello credentials (api_key, api_secret, token) are required."
+        if not self.api_key:
+            msg = "Trello api_key is required."
             raise ValueError(msg)
         from trello import TrelloClient
 
-        self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
+        if self._has_full_auth():
+            self.client = TrelloClient(api_key=self.api_key, api_secret=self.api_secret, token=self.token)
+        else:
+            self.client = TrelloClient(api_key=self.api_key)
         return self.client
 
     def trello_read(
@@ -119,7 +131,7 @@ class _TrelloTools(Toolkit):
         - `move_card`: Move `card_id` to `list_id`.
         """
         try:
-            client = self._require_client()
+            client = self._require_client(require_auth=True)
             if action == "create_board":
                 board_name = require_non_empty(name, "name")
                 board = client.add_board(board_name=board_name, default_lists=default_lists)
