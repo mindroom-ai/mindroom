@@ -20,7 +20,7 @@ _HEADING_RE = re.compile(r"^#{1,3}\s")
 # A fence may be indented, as inside a list item; a backtick fence's info string holds no backtick.
 _FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}(?=[^`]*$)|~{3,})(?P<info>.*)$")
 _FACT_SEPARATOR = " | "
-_WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
+_WHITESPACE_RE = re.compile(r"\s+")
 # Priority-ordered split boundaries: (pattern, characters kept on the left piece).
 _BOUNDARIES: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(re.escape(_FACT_SEPARATOR)), 0),
