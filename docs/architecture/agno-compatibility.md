@@ -1,6 +1,6 @@
 # Agno compatibility boundaries
 
-MindRoom uses Agno only for its vendor toolkits and the plugins written against Agno's toolkit API, through the toolkit adapter in `tool_system/agno_toolkits.py`, and for the knowledge readers and chunkers in `knowledge/readers.py`.
+MindRoom uses Agno only for its vendor toolkits and the plugins written against Agno's toolkit API, through the toolkit adapter in `tool_system/agno_toolkits.py`.
 This page maps each known weakness of that library to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
 The policy lives in the Agno Compatibility Policy in `AGENTS.md`.
 Each `# AGNO_COMPAT:` source comment owns its workaround's reason, exact upstream links, removal condition, and test coverage; `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists them.

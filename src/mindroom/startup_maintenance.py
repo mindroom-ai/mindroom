@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 type _SetupRooms = Callable[[list[AgentBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
+type _CleanupOrphanedBots = Callable[[Config], Awaitable[None]]
 type _RunningBots = Callable[[], list[AgentBot]]
 
 
@@ -37,6 +38,7 @@ class StartupMaintenanceController:
     setup_rooms_and_memberships: _SetupRooms
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
+    cleanup_orphaned_bots: _CleanupOrphanedBots | None = None
     task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def start(self, bots: list[AgentBot], config: Config) -> None:
@@ -61,16 +63,17 @@ class StartupMaintenanceController:
         *,
         config_provider: Callable[[], Config | None],
         running_bots: _RunningBots,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[bool]:
         """Cancel maintenance across a runtime replacement, then replay it with the bots running after it.
 
         Maintenance holds the bots it started with, so a replacement that
         interrupted it replays it with the replacements, even when the
-        replacement itself failed.
+        replacement itself failed. Yields whether unfinished maintenance was
+        interrupted and will replay on exit.
         """
         interrupted = await self.cancel()
         try:
-            yield
+            yield interrupted
         finally:
             config = config_provider()
             if interrupted and config is not None and self.task is None:
@@ -79,6 +82,13 @@ class StartupMaintenanceController:
                     self.start(bots, config)
 
     async def _run(self, bots: list[AgentBot], config: Config) -> None:
+        if self.cleanup_orphaned_bots is not None:
+            cleanup = self.cleanup_orphaned_bots
+            await self._run_phase(
+                "startup_maintenance.orphaned_bots",
+                lambda: cleanup(config),
+                failure_message="Startup orphaned bot cleanup failed",
+            )
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),

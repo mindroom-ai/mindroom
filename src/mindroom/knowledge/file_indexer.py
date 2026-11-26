@@ -11,12 +11,11 @@ import asyncio
 import json
 import tempfile
 import threading
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import cached_property, partial
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
@@ -31,15 +30,13 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
 )
 from mindroom.knowledge.chunk_context import chunk_contexts
-from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import KnowledgeChunk, write_file_rows
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.memory_entries import split_memory_entries
 from mindroom.knowledge.readers import (
     Document,
-    DocumentChunking,
-    FixedSizeChunking,
     JSONReader,
     MarkdownReader,
     Reader,
@@ -100,13 +97,6 @@ def max_concurrent_file_indexes(runtime_paths: RuntimePaths) -> int:
     return value
 
 
-# Agno 3.2's chunkers keep whitespace that every chunk indexed so far had collapsed; each maps to its legacy twin.
-_LEGACY_WHITESPACE_CHUNKING: dict[type, type[LegacyFixedSizeChunking | LegacyDocumentChunking]] = {
-    FixedSizeChunking: LegacyFixedSizeChunking,
-    DocumentChunking: LegacyDocumentChunking,
-}
-
-
 class _MalformedJSONSourceError(Exception):
     """A JSON parser failure carrying the already-read source text."""
 
@@ -120,26 +110,22 @@ class _MalformedJSONSourceError(Exception):
 class _FallbackAwareJSONReader(JSONReader):
     """Tag only JSON decoding failures raised inside the source reader."""
 
-    def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
+    def read(self, file: Path, name: str | None = None) -> list[Document]:
         try:
-            return super().read(path, name=name)
+            return super().read(file, name=name)
         except json.JSONDecodeError as error:
             raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
 
 
 class _InMemoryTextReader(TextReader):
-    """Chunk the malformed JSON text already retained by its parse error, with the base's text chunking.
-
-    Only ``read`` is overridden: indexing reads synchronously on a worker thread, and ``async_read`` would reread
-    the file instead of serving the retained text.
-    """
+    """Chunk the malformed JSON text already retained by its parse error, with the base's text chunking."""
 
     def __init__(self, source_text: str) -> None:
         super().__init__()
         self._source_text = source_text
 
-    def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
-        return self.chunk_document(Document(name=name or str(file), id=str(uuid.uuid4()), content=self._source_text))
+    def read(self, file: Path, name: str | None = None) -> list[Document]:
+        return self.chunk_document(Document(name=name or str(file), content=self._source_text))
 
 
 class _MemoryEntryChunking(SafeFixedSizeChunking):
@@ -157,9 +143,8 @@ class _MemoryEntryChunking(SafeFixedSizeChunking):
             content = self.clean_text(entry)
             chunks.append(
                 Document(
-                    id=self._generate_chunk_id(document, number, content),
                     name=document.name,
-                    meta_data={**(document.meta_data or {}), "chunk": number, "chunk_size": len(content)},
+                    meta_data={**document.meta_data, "chunk": number, "chunk_size": len(content)},
                     content=content,
                 ),
             )
@@ -184,7 +169,7 @@ class _SourceReadError(Exception):
 
 @contextmanager
 def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSignature]]:
-    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path.
+    """Copy one listed file into a primary-private directory, because document readers reopen sources by path.
 
     Yields the copy and the signature of the bytes copied into it.
     """
@@ -194,7 +179,7 @@ def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSign
 
 
 def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
-    """Turn the documents an Agno reader produced into owned chunks; reader output crosses into MindRoom only here."""
+    """Turn the documents a reader produced into owned chunks; reader output crosses into MindRoom only here."""
     return [
         KnowledgeChunk(text=document.content, name=document.name, metadata=dict(document.meta_data))
         for document in documents
@@ -300,7 +285,6 @@ class FileIndexer:
         base_config = self.config.get_knowledge_base_config(self.base_id)
         strategy = _MemoryEntryChunking if base_config.chunk_strategy == "memory_entries" else SafeFixedSizeChunking
         chunking_strategy = strategy(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
-        reader.chunk = True
         reader.chunk_size = chunking_strategy.chunk_size
         reader.chunking_strategy = chunking_strategy
         return reader
@@ -309,12 +293,6 @@ class FileIndexer:
         """Build a per-file reader with conservative chunking for text-like content."""
         # ReaderFactory builds a new reader for each call, so configuring it changes no other caller's reader.
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
-
-        strategy = reader.chunking_strategy
-        legacy = _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))
-        if legacy is not None and isinstance(strategy, FixedSizeChunking | DocumentChunking):
-            # JSON, PDF, DOCX, and PPTX readers keep Agno's split algorithm and its size, with the legacy whitespace.
-            reader.chunking_strategy = legacy(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
 
         if isinstance(reader, JSONReader):
             # Carry the factory reader's configuration (encoding, chunking) onto

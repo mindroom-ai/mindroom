@@ -918,7 +918,7 @@ async def test_threads_limit_clamping_end_to_end(limit: int | None, expected_lim
 
 @pytest.mark.asyncio
 async def test_state_specific_event_type() -> None:
-    """State with event_type should return specific state event content."""
+    """State with event_type and empty state_key should return specific state event content."""
     tool = MatrixRoomTools()
     ctx = _make_context()
 
@@ -927,11 +927,12 @@ async def test_state_specific_event_type() -> None:
     ctx.client.room_get_state_event = AsyncMock(return_value=state_resp)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name"))
+        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name", state_key=""))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "state"
     assert payload["event_type"] == "m.room.name"
+    assert payload["state_key"] == ""
     assert payload["content"] == {"name": "My Room"}
     ctx.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
 
@@ -1006,7 +1007,7 @@ async def test_state_specific_event_error() -> None:
     ctx.client.room_get_state_event = AsyncMock(return_value=MagicMock(spec=nio.RoomGetStateEventError))
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name"))
+        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name", state_key=""))
 
     assert payload["status"] == "error"
     assert "Failed to fetch state event" in payload["message"]
@@ -1020,11 +1021,113 @@ async def test_state_specific_event_transport_error_returns_structured_error() -
     ctx.client.room_get_state_event = AsyncMock(side_effect=ClientError("boom"))
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name"))
+        payload = json.loads(await tool.matrix_room(action="state", event_type="m.room.name", state_key=""))
 
     assert payload["status"] == "error"
     assert payload["action"] == "state"
     assert "Matrix request failed" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_state_event_type_without_state_key_lists_all_matching_events_with_full_content() -> None:
+    """State with event_type and omitted state_key lists all matching events with full content."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    long_notes = "x" * 400
+    state_resp = MagicMock(spec=nio.RoomGetStateResponse)
+    state_resp.events = [
+        {"type": "m.room.name", "state_key": "", "content": {"name": "Test"}},
+        {"type": "com.example.pr", "state_key": "repo#1", "content": {"title": "First", "notes": long_notes}},
+        {"type": "m.room.member", "state_key": "@alice:localhost", "content": {"membership": "join"}},
+        {"type": "com.example.pr", "state_key": "repo#2", "content": {"title": "Second"}},
+    ]
+    ctx.client.room_get_state = AsyncMock(return_value=state_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type=" com.example.pr "))
+
+    assert payload == {
+        "status": "ok",
+        "tool": "matrix_room",
+        "action": "state",
+        "room_id": "!room:localhost",
+        "event_type": "com.example.pr",
+        "count": 2,
+        "events": [
+            {"state_key": "repo#1", "content": {"title": "First", "notes": long_notes}},
+            {"state_key": "repo#2", "content": {"title": "Second"}},
+        ],
+    }
+    ctx.client.room_get_state.assert_awaited_once_with("!room:localhost")
+    ctx.client.room_get_state_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_state_event_type_without_state_key_is_not_capped_at_max() -> None:
+    """Type-filtered state queries return every matching event without the summary cap."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    total = MatrixRoomTools._MAX_STATE_EVENTS + 25
+    state_resp = MagicMock(spec=nio.RoomGetStateResponse)
+    state_resp.events = [
+        {"type": "com.example.item", "state_key": f"k{i}", "content": {"index": i}} for i in range(total)
+    ]
+    ctx.client.room_get_state = AsyncMock(return_value=state_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type="com.example.item"))
+
+    assert payload["status"] == "ok"
+    assert payload["event_type"] == "com.example.item"
+    assert payload["count"] == total
+    assert len(payload["events"]) == total
+    assert payload["events"][-1] == {"state_key": f"k{total - 1}", "content": {"index": total - 1}}
+
+
+@pytest.mark.asyncio
+async def test_state_event_type_without_state_key_zero_matches() -> None:
+    """Type-filtered state queries return an empty list when no events match."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    state_resp = MagicMock(spec=nio.RoomGetStateResponse)
+    state_resp.events = [{"type": "m.room.name", "state_key": "", "content": {"name": "Test"}}]
+    ctx.client.room_get_state = AsyncMock(return_value=state_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type="com.example.missing"))
+
+    assert payload["status"] == "ok"
+    assert payload["event_type"] == "com.example.missing"
+    assert payload["count"] == 0
+    assert payload["events"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mock_kwargs", "expected_fragment"),
+    [
+        ({"return_value": MagicMock(spec=nio.RoomGetStateError)}, "Failed to fetch room state"),
+        ({"side_effect": ClientError("boom")}, "Matrix request failed"),
+        ({"side_effect": TimeoutError()}, "Matrix request failed"),
+    ],
+)
+async def test_state_event_type_without_state_key_errors_include_event_type(
+    mock_kwargs: dict[str, object],
+    expected_fragment: str,
+) -> None:
+    """Type-filtered state query failures return structured errors carrying event_type."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.room_get_state = AsyncMock(**mock_kwargs)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type="com.example.pr"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "state"
+    assert payload["room_id"] == "!room:localhost"
+    assert payload["event_type"] == "com.example.pr"
+    assert expected_fragment in payload["message"]
 
 
 @pytest.mark.asyncio

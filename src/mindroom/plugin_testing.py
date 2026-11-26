@@ -265,23 +265,53 @@ class LoadedPlugin:
         self._memberships.invalidate(self.config, reason="plugin_testing_room_added")
         return room
 
-    def _bot_client(self, name: str, user_id: str) -> nio.AsyncClient:
-        """Return the client of the stand-in for the running bot of that entity name, which reads the rooms it is in."""
-        if name not in self._bots:
-            rooms: dict[str, nio.MatrixRoom] = {}
+    def _make_client(self, user_id: str, rooms: dict[str, nio.MatrixRoom]) -> nio.AsyncClient:
+        """Return a stand-in Matrix client that reads only the rooms in ``rooms``."""
 
-            async def joined_rooms() -> nio.JoinedRoomsResponse:
-                return nio.JoinedRoomsResponse(list(rooms))
+        async def joined_rooms() -> nio.JoinedRoomsResponse:
+            return nio.JoinedRoomsResponse(list(rooms))
 
-            client = _StandIn(
+        async def joined_members(room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
+            if room_id not in rooms:
+                return nio.JoinedMembersError("Not in this room", "M_FORBIDDEN")
+            return await self._joined_members(room_id)
+
+        async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+            if room_id not in rooms:
+                return nio.RoomGetStateError("Not in this room", "M_FORBIDDEN")
+            return await self._room_get_state(room_id)
+
+        async def room_get_state_event(
+            room_id: str,
+            event_type: str,
+            state_key: str = "",
+        ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+            if room_id not in rooms:
+                return nio.RoomGetStateEventError("Not in this room", "M_FORBIDDEN")
+            return await self._room_get_state_event(room_id, event_type, state_key)
+
+        async def room_resolve_alias(room_alias: str) -> nio.RoomResolveAliasError:
+            del room_alias
+            return nio.RoomResolveAliasError("Room alias not found", "M_NOT_FOUND")
+
+        return cast(
+            "nio.AsyncClient",
+            _StandIn(
                 "Matrix client",
                 user_id=user_id,
                 rooms=rooms,
                 joined_rooms=joined_rooms,
-                joined_members=self._joined_members,
-                room_get_state=self._room_get_state,
-                room_get_state_event=self._room_get_state_event,
-            )
+                joined_members=joined_members,
+                room_get_state=room_get_state,
+                room_get_state_event=room_get_state_event,
+                room_resolve_alias=room_resolve_alias,
+            ),
+        )
+
+    def _bot_client(self, name: str, user_id: str) -> nio.AsyncClient:
+        """Return the client of the stand-in for the running bot of that entity name, which reads the rooms it is in."""
+        if name not in self._bots:
+            client = self._make_client(user_id, {})
             bot = _StandIn(
                 "bot",
                 running=True,
@@ -294,6 +324,16 @@ class LoadedPlugin:
             )
             self._bots[name] = cast("AgentBot", bot)
         return cast("nio.AsyncClient", self._bots[name].client)
+
+    def _turn_client(self, agent: str) -> nio.AsyncClient:
+        """Return the invoking agent's Matrix client view, whose ``rooms`` are only the rooms it joined."""
+        if agent in self._bots:
+            return cast("nio.AsyncClient", self._bots[agent].client)
+        user_id = next(
+            (uid for uid, name in self._entity_names.items() if name == agent),
+            self._client.user_id,
+        )
+        return self._make_client(user_id, {})
 
     def client(self, user_id: str | None = None) -> TestClient:
         """Return a test client of the plugin's routes, signed in as ``user_id`` with a client session when given."""
@@ -457,7 +497,7 @@ class LoadedPlugin:
             target=MessageTarget.resolve(room_id, None, event_id, event_id, room_mode=room_mode),
             correlation_id=event_id,
             requester_id=resolve_human_requester_alias(sender, self.config, self.runtime_paths),
-            client=self._client,
+            client=self._turn_client(agent),
             config=self.config,
             runtime_paths=self.runtime_paths,
             plugins=plugins,

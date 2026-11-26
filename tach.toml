@@ -35,11 +35,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.knowledge.readers"
-depends_on = []
+depends_on = ["mindroom.knowledge.chunking"]
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
-depends_on = ["mindroom.knowledge.readers"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.bounded_bytes"
@@ -3179,6 +3179,7 @@ depends_on = [
     "mindroom.thread_summary",
     "mindroom.thread_workflow",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.plugin_room_access",
 ]
 
 [[modules]]
@@ -3937,6 +3938,7 @@ depends_on = [
     "mindroom.integrations",
     "mindroom.knowledge.watch",
     "mindroom.matrix.provisioning_heartbeat",
+    "mindroom.matrix.room_cleanup",
     "mindroom.matrix.users",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
@@ -6450,6 +6452,7 @@ depends_on = [
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugin_imports",
+    "mindroom.tool_system.plugin_room_access",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
     "mindroom.tool_system.runtime_context",
@@ -6531,6 +6534,11 @@ depends_on = [
     "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.registry",
 ]
+
+[[modules]]
+path = "mindroom.tool_system.plugin_room_access"
+depends_on = ["mindroom.custom_tools.attachment_helpers"]
+visibility = ["mindroom.custom_tools.matrix_room", "mindroom.plugin_api"]
 
 [[modules]]
 path = "mindroom.tool_system.plugin_identity"
@@ -7101,6 +7109,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.turns.interactive_selection"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.hooks",

@@ -51,7 +51,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
 | `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads, unless a foreground approval asked after the resolve still waits), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
-| `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
+| `state` | Without `event_type`, a summary of up to 100 non-member state events; with `event_type` alone, all matching state events with full `content`; with `event_type` and `state_key` (including `""`), that single state event |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](matrix-message.md#agent-conversations) to address that agent.
 The list covers conversation targets only; the `run_subagent` tool describes the caller's allowed subagents.
@@ -61,7 +61,7 @@ Each agent, requester, and room combination may make 20 calls per 30 seconds.
 matrix_room(action="agents")
 matrix_room(action="threads", limit=10)
 matrix_room(action="threads", page_token="next-page-token")
-matrix_room(action="state", event_type="m.room.topic")
+matrix_room(action="state", event_type="m.room.topic", state_key="")
 ```
 
 ## [`matrix_voice_message`]
@@ -109,7 +109,7 @@ matrix_voice_message(
 - `list_thread_tags(thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
 
 Without `thread_id`, `tag_thread()` and `untag_thread()` use the current thread; outside a thread, pass `thread_id`.
-Without `thread_id`, `list_thread_tags()` lists the current thread, or the whole room when called outside a thread or with `room_id`.
+Without `thread_id`, `list_thread_tags()` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
 
 Tag names that are already valid IDs of up to 50 characters are kept; other input is lowercased and hyphenated into a tag of at most 25 characters.
 The `tag_thread()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.
@@ -403,7 +403,7 @@ It only does so when the first threshold below is 1 or 2, so the first reply wou
 MindRoom checks a thread's title after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`), and posts a summary notice when the title changes.
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 ordinary messages with non-empty text after tool-marker removal, the summary model sees the first 5, 12 evenly spaced messages from the middle, and the last 5 (with omission notes for each gap), and overlong message bodies in that sample are clipped to 600 characters while keeping both head and tail.
-A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, up to 3 attempts in all, and posts no title if every attempt is too long. The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
+A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, accumulating prior rejections across up to 3 attempts; if no attempt passes validation on an untitled thread's post-reply pass, it uses the shortest complete title within 80 characters instead of leaving the thread untitled, while a provisional title or an already-titled thread posts nothing (keeping its current title). The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
 Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
 A check shows the model the current title, and the model keeps it unless the thread moved to a different subject or goal outside the current title's scope and persisted on it for a large share of the thread (same-domain goal changes count, while follow-up steps like PRs, reviews, deploys, and related fixes do not): a kept title usually posts nothing, and the next check is a full interval later.
 Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
@@ -430,14 +430,14 @@ These models always use their provider's default: Vertex AI Claude, Claude Opus 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
 They are the room's `thread_summary_instructions` [room setting](../configuration/threads.md#room-settings), which moderators and admins change and agent tools cannot write.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
-Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, up to 3 attempts, with no title posted if all fail.
+Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, accumulating prior rejections across up to 3 attempts, with the same untitled fallback or already-titled skip if all fail.
 A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.
 Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
 Values are trimmed and cut to 2,000 characters.
 To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags; when that refresh keeps the title, it posts the title again unchanged with the tags.
-Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model. An override's own length rules still meet the six-word limit: an overlong title is sent back with the reason, up to 3 attempts, and no title is posted if all fail.
+Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model. An override's own length rules still meet the six-word limit: retries accumulate prior rejections across up to 3 attempts, and for an untitled thread if no attempt passes validation the shortest complete title within 80 characters is used instead of leaving the thread untitled (while an already-titled thread keeps its current title and posts nothing).
 Later summaries never change tags, so tags someone removed are not re-added.
 These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 

@@ -17,7 +17,7 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     MISSING_API_KEY,
@@ -1619,7 +1619,7 @@ async def test_a_gemini_api_model_without_any_key_fails_as_a_missing_key(
         await anext(adapter.stream(_request()))
 
     assert (raised.value.code, raised.value.provider) == (MISSING_API_KEY, "Google")
-    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
+    assert "Connect your AI provider" in describe_reply_error(raised.value).plain_text
 
 
 @pytest.mark.asyncio
