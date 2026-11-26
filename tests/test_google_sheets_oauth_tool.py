@@ -145,11 +145,11 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert [registered.__name__ for registered in tool.tools] == [
+    assert list(tool.functions) == [
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
     ]
-    assert "batch_update_sheet" in tool.functions
 
 
 def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
@@ -178,12 +178,12 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
     )
 
     assert isinstance(tool, GoogleSheetsTools)
-    assert {registered.__name__ for registered in tool.tools} == {
+    assert set(tool.functions) == {
         "read_sheet",
         "create_sheet",
         "update_sheet",
+        "batch_update_sheet",
     }
-    assert "batch_update_sheet" in tool.functions
 
 
 class _FakeSheetsRequest:
