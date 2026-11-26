@@ -39,6 +39,10 @@ Microsoft's Work IQ MCP server can read most Microsoft 365 data, but its writes 
   Reading and updating worksheet ranges uses the same `Files.ReadWrite.All` grant, so those functions live in the files toolkit instead of a separate provider that would need its own connection.
 - **Optimistic concurrency for replaces.**
   Replacing a file requires the eTag the edit started from and sends it as `If-Match`, so an edit someone made since fails instead of being overwritten; a new upload never overwrites an existing name.
+- **Range writes check the cells they replace.**
+  Graph has no conditional range write, and the workbook's eTag would refuse an edit after any unrelated change elsewhere in it, so a range write carries the formulas it was read with, rereads the range, and writes nothing when they differ.
+  Formulas rather than values are compared, so recalculation elsewhere does not count as a change, and a cell's formula cannot be replaced with its computed value unseen.
+  Graph parses written text as if it were typed, so text Excel would convert is refused before writing unless the cell is text-formatted, and the written range is compared with what Excel stored.
 - **No approval rule by default.**
   Like Gmail and Google Drive, these tools run without approval unless the operator adds `tool_approval` rules; the docs give rules for sending and writing.
   Each tool's `write` setting registers or removes its write functions, but scopes stay read-write, because separate read-only providers would double the consent and connection surface.

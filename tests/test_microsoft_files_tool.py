@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 import httpx
@@ -63,11 +63,43 @@ class _Graph:
         self.content = content
         self.write = httpx.Response(200, json=_item())
         self.answer_first: Callable[[httpx.Request], httpx.Response | None] = lambda _request: None
+        # The worksheet range every Excel request reads or writes, whatever its address.
+        self.range_address = "Budget!A1"
+        self.formulas: list[list[object]] = [[""]]
+        # What computed cells show; None shows the formulas grid, as for cells without a formula.
+        self.values: list[list[object]] | None = None
+        self.formats: list[list[str]] = [["General"]]
+        # How Excel stores a written value, such as text it parses as a number.
+        self.store: Callable[[object], object] = lambda value: value
+
+    def range_response(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            body = json.loads(request.content)
+            if "numberFormat" in body:
+                self.formats = [
+                    [old if new is None else new for old, new in zip(old_row, new_row, strict=True)]
+                    for old_row, new_row in zip(self.formats, body["numberFormat"], strict=True)
+                ]
+            if "values" in body:
+                self.values = None
+                self.formulas = [
+                    [old if new is None else self.store(new) for old, new in zip(old_row, new_row, strict=True)]
+                    for old_row, new_row in zip(self.formulas, body["values"], strict=True)
+                ]
+        payload = {
+            "address": self.range_address,
+            "formulas": self.formulas,
+            "numberFormat": self.formats,
+            "values": self.formulas if self.values is None else self.values,
+        }
+        return httpx.Response(200, json=payload)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if (answer := self.answer_first(request)) is not None:
             return answer
         path = unquote(request.url.path)
+        if "/workbook/worksheets/" in path and "/range(address=" in path:
+            return self.range_response(request)
         if request.method == "GET" and path == f"/v1.0{ITEM_PATH}":
             return httpx.Response(200, json=self.item)
         if request.method == "GET" and path == f"/v1.0{ITEM_PATH}/content":
@@ -222,7 +254,14 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
         (lambda tools: tools.microsoft_files_excel_list_worksheets("report.docx"), "invalid_file"),
         (lambda tools: tools.microsoft_files_excel_read_range("report.docx", "Budget"), "invalid_file"),
         (
-            lambda tools: tools.microsoft_files_excel_update_range("report.docx", "Budget", "A1", [[1]], WEB_URL),
+            lambda tools: tools.microsoft_files_excel_update_range(
+                "report.docx",
+                "Budget",
+                "A1",
+                [[1]],
+                [[""]],
+                WEB_URL,
+            ),
             "invalid_file",
         ),
         (lambda tools: tools.microsoft_files_search(" "), "invalid_argument"),
@@ -238,6 +277,7 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
                 "Budget",
                 "A1:CV101",
                 [[0] * 100] * 101,
+                [[""] * 100] * 101,
                 WEB_URL,
             ),
             "too_large",
@@ -562,7 +602,14 @@ def test_upload_refuses_names_onedrive_rejects(tmp_path: Path, monkeypatch: pyte
 _BOUND_WRITES: dict[str, Callable[[MicrosoftFilesTools, str], str]] = {
     "replace": lambda tools, url: tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", ETAG, url),
     "upload": lambda tools, url: tools.microsoft_files_upload_file("new.docx", ITEM_PATH, expected_web_url=url),
-    "excel": lambda tools, url: tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1", [["x"]], url),
+    "excel": lambda tools, url: tools.microsoft_files_excel_update_range(
+        ITEM_PATH,
+        "Budget",
+        "A1",
+        [["x"]],
+        [[""]],
+        url,
+    ),
 }
 
 
@@ -583,7 +630,7 @@ def test_writes_run_only_on_the_target_whose_web_url_was_passed(
     assert (refused["code"], refused["web_url"]) == ("target_mismatch", WEB_URL)
     assert [request.method for request in graph.requests] == ["GET"]
     assert json.loads(call(tools, WEB_URL))["status"] == "ok"
-    assert graph.requests[-1].method in {"PUT", "PATCH"}
+    assert {"PUT", "PATCH"} & {request.method for request in graph.requests}
 
 
 def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -603,7 +650,15 @@ def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_excel_read_range_escapes_the_worksheet_and_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
     files.answer_first = lambda request: (
-        httpx.Response(200, json={"address": "'Q3 Budget'!A1:B2", "values": [[1, 2], [3, 4]], "rowCount": 2})
+        httpx.Response(
+            200,
+            json={
+                "address": "'Q3 Budget'!A1:B2",
+                "values": [[1, 2], [3, 3]],
+                "formulas": [[1, 2], [3, "=A2"]],
+                "rowCount": 2,
+            },
+        )
         if "/workbook/worksheets/" in request.url.path
         else None
     )
@@ -611,7 +666,9 @@ def test_excel_read_range_escapes_the_worksheet_and_address(tmp_path: Path, monk
 
     result = json.loads(tools.microsoft_files_excel_read_range(ITEM_PATH, "Q3 Budget", "A1:B2"))
 
-    assert result["range"]["values"] == [[1, 2], [3, 4]]
+    assert result["range"]["values"] == [[1, 2], [3, 3]]
+    assert result["range"]["formulas"] == [[1, 2], [3, "=A2"]]
+    assert "formulas" in graph.requests[0].url.params["$select"].split(",")
     assert (
         unquote(graph.requests[0].url.path) == f"/v1.0{ITEM_PATH}/workbook/worksheets/Q3 Budget/range(address='A1:B2')"
     )
@@ -646,17 +703,420 @@ def test_excel_read_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypa
     assert (result["code"], result["address"]) == ("too_large", "A1:GR100")
 
 
-def test_excel_update_range_patches_the_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _workbook(
+    formulas: list[list[object]],
+    formats: list[list[str]] | None = None,
+    values: list[list[object]] | None = None,
+) -> _Graph:
     files = _Graph()
-    files.write = httpx.Response(200, json={"address": "Budget!A1:B1", "values": [["x", 2]]})
+    files.range_address = "Budget!A1:B1"
+    files.formulas = formulas
+    files.values = values
+    files.formats = formats or [["General"] * len(row) for row in formulas]
+    return files
+
+
+def _update(
+    tools: MicrosoftFilesTools,
+    values: list[list[str | int | float | bool | None]],
+    before: list[list[str | int | float | bool]],
+    number_formats: list[list[str | None]] | None = None,
+) -> dict[str, Any]:
+    return json.loads(
+        tools.microsoft_files_excel_update_range(
+            ITEM_PATH,
+            "Budget",
+            "A1:B1",
+            values,
+            before,
+            WEB_URL,
+            number_formats,
+        ),
+    )
+
+
+def _patches(graph: FakeGraph) -> list[dict[str, object]]:
+    return [json.loads(request.content) for request in graph.requests if request.method == "PATCH"]
+
+
+def test_excel_update_writes_cells_that_still_hold_what_was_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["old", "=SUM(C1:C2)"]], values=[["old", 3]])
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = json.loads(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:B1", [["x", 2]], WEB_URL))
+    result = _update(tools, [["x", 2]], [["old", "=SUM(C1:C2)"]])
 
-    patch = graph.requests[-1]
-    assert patch.method == "PATCH"
-    assert json.loads(patch.content) == {"values": [["x", 2]]}
+    assert _patches(graph) == [{"values": [["x", 2]]}]
+    assert (result["status"], result["verified"]) == ("ok", True)
+    assert result["range"]["formulas"] == [["x", 2]]
     assert result["range"]["address"] == "Budget!A1:B1"
+
+
+def test_excel_update_refuses_cells_someone_changed_since_they_were_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["edited by Alex", "=SUM(C1:C2)"]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["x", 2]], [["old", "=SUM(C1:C2)"]])
+
+    assert result["code"] == "cells_changed"
+    assert result["current_formulas"] == [["edited by Alex", "=SUM(C1:C2)"]]
+    assert _patches(graph) == []
+
+
+def test_excel_update_verifies_formulas_as_excel_stores_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["=SUM(C1:C2)", 1.5]])
+    files.store = lambda value: value.upper() if isinstance(value, str) else value
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["=sum(c1:c3)", 0.3]], [["=SUM(C1:C2)", 1.5]])
+
+    assert _patches(graph) == [{"values": [["=sum(c1:c3)", 0.3]]}]
+    assert result["verified"] is True
+
+
+def test_excel_update_tolerates_only_last_digit_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    files.store = lambda value: {0.3: 0.30000000000000004, 999999999999999: 1e15}.get(value, value)
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[0.3, 999999999999999]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "B1", "written": 999999999999999, "stored": 1e15}]
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [([["=ABC", 1]], [["=abc", 1]]), ([["x", True]], [["x", 1]]), ([["x", 1]], [["x", True]])],
+)
+def test_excel_update_compares_what_was_read_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current: list[list[str | int | float | bool]],
+    expected: list[list[str | int | float | bool]],
+) -> None:
+    """A case-only edit to text and a TRUE where 1 was read are both edits someone made."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook(current, [["@", "General"]]))
+
+    assert _update(tools, [["y", 2]], expected)["code"] == "cells_changed"
+    assert _patches(graph) == []
+
+
+def test_excel_update_refuses_a_formula_a_text_cell_would_keep_as_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]], [["General", "@"]]))
+
+    result = _update(tools, [["=1+1", "=1+1"]], [["", ""]])
+
+    assert (result["code"], result["cell"]) == ("formula_as_text", "B1")
+    assert _patches(graph) == []
+    assert _update(tools, [["=1+1", "=1+1"]], [["", ""]], number_formats=[[None, "General"]])["verified"] is True
+
+
+def test_excel_update_writes_iso_dates_as_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 46328 + 9.5 / 24}.get(value, value)
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [["", ""]])
+
+    assert (result["verified"], files.formulas) == (True, [[46328, 46328 + 9.5 / 24]])
+    assert len(_patches(graph)) == 1
+
+
+def test_excel_update_reports_an_iso_date_excel_kept_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+
+    result = _update(tools, [["2026-11-02", None]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "A1", "written": "2026-11-02", "stored": "2026-11-02"}]
+
+
+def test_excel_update_reports_a_formula_whose_text_excel_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case is folded only outside a formula's string literals, so a changed literal is a difference."""
+    files = _workbook([["", ""]])
+    files.store = lambda value: '=A1&"X"' if value == '=A1&"x"' else value
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [['=A1&"x"', None]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "A1", "written": '=A1&"x"', "stored": '=A1&"X"'}]
+
+
+@pytest.mark.parametrize(
+    ("held", "written"),
+    [(1.5, "1.5"), ("1.5", 1.5), ("9007199254740993", 9007199254740993), (9007199254740993, "9007199254740993")],
+)
+def test_excel_update_refuses_a_change_the_approval_card_shows_as_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str | float,
+    written: str | float,
+) -> None:
+    """Approval cards carry floats and integers past 2**53 - 1 as text, so such a number and its text look alike."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([[held, ""]], [["@", "General"]]))
+
+    result = _update(tools, [[written, "x"]], [[held, ""]])
+
+    assert (result["code"], result["cell"]) == ("ambiguous_change", "A1")
+    assert _patches(graph) == []
+
+
+def test_excel_update_counts_early_1900_dates_as_excel_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Excel's serials skip its fictitious 1900-02-29 only from 1900-03-01 on."""
+    files = _workbook([["", ""]])
+    files.store = lambda value: {"1900-01-01": 1, "1900-03-01": 61}.get(value, value)
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [["1900-01-01", "1900-03-01"]], [["", ""]])["verified"] is True
+
+
+def test_excel_update_compares_iso_dates_with_their_serial_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another date already in the cell is not this write, and a wrong stored date is a difference."""
+    files = _workbook([[46296, ""]])
+    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 7}.get(value, value)
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [[46296, ""]])
+
+    assert _patches(graph) == [{"values": [["2026-11-02", "2026-11-02 09:30"]]}]
+    assert result["differences"] == [{"cell": "B1", "written": "2026-11-02 09:30", "stored": 7}]
+
+
+@pytest.mark.parametrize(
+    ("held", "formats"),
+    [("0042", ["General", "General"]), ("2026-11-02", ["General", "General"]), ("=abc", ["@", "General"])],
+)
+def test_excel_update_leaves_cells_given_what_they_held_unwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str,
+    formats: list[str],
+) -> None:
+    """Rewriting a cell makes Excel parse it again, so a row written back changes only its edited cells."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([[held, ""]], [formats]))
+
+    result = _update(tools, [[held, "x"]], [[held, ""]])
+
+    assert _patches(graph) == [{"values": [[None, "x"]]}]
+    assert result["verified"] is True
+
+
+def test_excel_update_verifies_by_reading_the_range_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PATCH response without the written properties does not decide verification."""
+    files = _workbook([["", ""]])
+    partial = httpx.Response(200, json={"address": "Budget!A1:B1"})
+    files.answer_first = lambda request: (
+        (files.range_response(request), partial)[1] if request.method == "PATCH" else None
+    )
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [["x", 2]], [["", ""]])["verified"] is True
+
+
+def test_excel_update_verifies_number_formats_regardless_of_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["", ""]])
+
+    def normalize(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PATCH" and b"numberFormat" in request.content:
+            files.formats = [["General", "General"]]
+            return httpx.Response(200, json={"address": "Budget!A1:B1"})
+        return None
+
+    files.answer_first = normalize
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [[1, None]], [["", ""]], number_formats=[["general", None]])["verified"] is True
+
+
+def test_excel_update_reports_a_format_whose_quoted_text_changed_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["", ""]])
+
+    def lowercase(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PATCH" and b"numberFormat" in request.content:
+            files.formats = [['0"usd"', "General"]]
+            return httpx.Response(200, json={"address": "Budget!A1:B1"})
+        return None
+
+    files.answer_first = lowercase
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[1, None]], [["", ""]], number_formats=[['0"USD"', None]])
+
+    assert result["differences"] == [{"cell": "A1", "number_format": '0"USD"', "stored_number_format": '0"usd"'}]
+
+
+def test_excel_update_rewrites_an_unchanged_cell_whose_format_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A formula typed into a text cell becomes live when the cell is reformatted and written again."""
+    files = _workbook([["=A1", "=A1"]], [["@", "@"]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["=A1", "=A1"]], [["=A1", "=A1"]], number_formats=[["General", None]])
+
+    assert _patches(graph) == [{"numberFormat": [["General", None]]}, {"values": [["=A1", None]]}]
+    assert result["verified"] is True
+
+
+def test_excel_update_sends_no_format_patch_for_formats_that_are_all_null(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+
+    _update(tools, [["x", None]], [["", ""]], number_formats=[[None, None]])
+
+    assert _patches(graph) == [{"values": [["x", None]]}]
+
+
+def test_excel_update_sets_only_formats_when_no_value_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([[0.25, 3]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[None, None]], [[0.25, 3]], number_formats=[["0%", None]])
+
+    assert _patches(graph) == [{"numberFormat": [["0%", None]]}]
+    assert (result["verified"], files.formats) == (True, [["0%", "General"]])
+
+
+@pytest.mark.parametrize(
+    ("held", "formats", "values", "before"),
+    [
+        # The same write repeated after it landed.
+        ([["x", 2]], ["General", "General"], [["x", 2]], [["old", 1]]),
+        # Someone typed the formula's text into a text-formatted cell meanwhile.
+        ([["=1+1", ""]], ["@", "General"], [["=1+1", None]], [["", ""]]),
+        # Someone edited a cell this write leaves alone.
+        ([["x", "edited"]], ["General", "General"], [["y", None]], [["x", ""]]),
+    ],
+)
+def test_excel_update_writes_only_over_what_was_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: list[list[str | int | float | bool]],
+    formats: list[str],
+    values: list[list[str | int | float | bool | None]],
+    before: list[list[str | int | float | bool]],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook(held, [formats]))
+
+    assert _update(tools, values, before)["code"] == "cells_changed"
+    assert _patches(graph) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        *["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x", "2026-13-45"],
+        *["16:9", "3:1", "1:2:3", "1:23.5", "100:00", "5 pm", "5 a", "Jan 5 2026 10:30", "10:30 1/2/2026"],
+    ],
+)
+def test_excel_update_refuses_text_excel_would_convert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    files = _workbook([["", ""]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["label", text]], [["", ""]])
+
+    assert (result["code"], result["cell"]) == ("converted_text", "B1")
+    assert _patches(graph) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Q3 plan", "SKU-0042", '=A1&"x"', "", "-", "1/2/3/4", "v1.2.3", "101A", "1.0a", "John 3:16", "16:9 ratio"],
+)
+def test_excel_update_writes_text_excel_keeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", "old"]]))
+
+    assert _update(tools, [["label", text]], [["", "old"]])["status"] == "ok"
+    assert _patches(graph) == [{"values": [["label", text]]}]
+
+
+def test_excel_update_keeps_text_in_a_text_formatted_cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]], [["General", "@"]]))
+
+    assert _update(tools, [["label", "0042"]], [["", ""]])["verified"] is True
+    assert _patches(graph) == [{"values": [["label", "0042"]]}]
+
+
+def test_excel_update_sets_number_formats_before_the_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[0.25, "0042"]], [["", ""]], number_formats=[["0%", "@"]])
+
+    assert _patches(graph) == [{"numberFormat": [["0%", "@"]]}, {"values": [[0.25, "0042"]]}]
+    assert result["verified"] is True
+    assert files.formats == [["0%", "@"]]
+
+
+def test_excel_update_reports_cells_excel_stored_differently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    files.store = lambda value: 45000 if value == "5 mars" else value
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["label", "5 mars"]], [["", ""]])
+
+    assert (result["status"], result["verified"]) == ("ok", False)
+    assert result["differences"] == [{"cell": "B1", "written": "5 mars", "stored": 45000}]
+
+
+def test_excel_update_reports_a_number_format_excel_did_not_keep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["", ""]])
+    files.answer_first = lambda request: (
+        httpx.Response(200, json={"address": "Budget!A1:B1"})
+        if request.method == "PATCH" and b"numberFormat" in request.content
+        else None
+    )
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[1, 2]], [["", ""]], number_formats=[[None, "0.0"]])
+
+    assert result["verified"] is False
+    assert result["differences"] == [{"cell": "B1", "number_format": "0.0", "stored_number_format": "General"}]
+
+
+@pytest.mark.parametrize(
+    ("before", "number_formats"),
+    [([["", ""], ["", ""]], None), ([[""]], None), ([["", ""]], [["@"]]), ([["", ""]], [["@", ""]])],
+)
+def test_excel_update_refuses_grids_that_do_not_match_the_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: list[list[str | int | float | bool]],
+    number_formats: list[list[str | None]] | None,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+
+    assert _update(tools, [["x", "y"]], before, number_formats=number_formats)["code"] == "invalid_argument"
+    assert graph.requests == []
 
 
 @pytest.mark.parametrize(
@@ -681,7 +1141,10 @@ def test_excel_update_refuses_malformed_input(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = json.loads(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values, WEB_URL))
+    before = [[""] * len(values[0])] * len(values) if values and values[0] else [[""]]
+    result = json.loads(
+        tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values, before, WEB_URL),
+    )
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -760,13 +1223,20 @@ def test_excel_refuses_impossible_worksheet_names(
 
 
 def test_excel_update_accepts_values_matching_the_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    files = _Graph()
-    files.write = httpx.Response(200, json={"address": "Budget!B2:C3", "values": [[1, 2], [3, 4]]})
+    files = _workbook([["", ""], ["", ""]])
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
     result = json.loads(
-        tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "$B$2:C3", [[1, 2], [3, 4]], WEB_URL),
+        tools.microsoft_files_excel_update_range(
+            ITEM_PATH,
+            "Budget",
+            "$B$2:C3",
+            [[1, 2], [3, 4]],
+            [["", ""], ["", ""]],
+            WEB_URL,
+        ),
     )
 
     assert result["status"] == "ok"
-    assert json.loads(graph.requests[-1].content) == {"values": [[1, 2], [3, 4]]}
+    assert unquote(graph.requests[-1].url.path).endswith("/worksheets/Budget/range(address='$B$2:C3')")
+    assert _patches(graph) == [{"values": [[1, 2], [3, 4]]}]
