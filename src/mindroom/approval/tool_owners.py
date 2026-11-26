@@ -218,10 +218,13 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     """Return the config inputs this agent's catalog depends on, or None once the agent is gone.
 
     Other agents' and teams' entries are excluded; calls re-authorize the requester live.
-    ``models``, ``room_models``, ``room_thread_summary_models``, ``defaults.thread_summary_model``, and
-    ``router.model`` pick models only. The agent's own ``rooms`` are checked as a subset on reload.
-    ``calls`` configures no prepared CLI tool (call manager and transcripts read it); ``personal_agents`` keeps only
-    this agent's own template; ``tool_approval`` is checked per called key.
+    ``models``, ``room_models``, ``room_thread_summary_models``, ``budgets``, ``defaults.thread_summary_model``,
+    and ``router.model`` pick models or spend caps only. ``prompts`` and ``debug`` shape prompts or diagnostic logs
+    only. The agent's own ``rooms`` are checked as a subset on reload. ``calls``, ``voice``, ``matrix_space``,
+    ``server_emoji``, ``event_journal``, ``slack``, ``tailnet_ssh``, and ``scheduler_catch_up_grace_seconds``
+    configure no prepared CLI tool (runtime services, ingress, or gateway code read them; per-agent ``slack`` tool
+    overrides and ``tailnet_ssh`` opt-ins stay on the agent entry). ``personal_agents`` keeps only this agent's own
+    template; ``tool_approval`` is checked per called key.
     """
     agent = config.agents.get(agent_name)
     if agent is None:
@@ -234,7 +237,17 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
             "models": True,
             "room_models": True,
             "room_thread_summary_models": True,
+            "budgets": True,
+            "debug": True,
+            "prompts": True,
+            "voice": True,
             "calls": True,
+            "matrix_space": True,
+            "server_emoji": True,
+            "event_journal": True,
+            "slack": True,
+            "tailnet_ssh": True,
+            "scheduler_catch_up_grace_seconds": True,
             "personal_agents": True,
             "tool_approval": True,
             "defaults": {"thread_summary_model"},
