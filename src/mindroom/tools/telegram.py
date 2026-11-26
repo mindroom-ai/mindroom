@@ -71,6 +71,10 @@ def _decode_media(media_base64: str | None, *, action: str) -> bytes | str:
         return "Invalid base64 media content."
 
 
+class _MissingChatIDError(ValueError):
+    """A chat operation is missing the configured destination."""
+
+
 class _TelegramTools(Toolkit):
     """Send messages/media, manage messages, and read chat or file details via a Telegram bot."""
 
@@ -181,7 +185,7 @@ class _TelegramTools(Toolkit):
     def _chat_id(self) -> str:
         if not self.chat_id:
             msg = "chat_id is required. Set it in the constructor or set the TELEGRAM_CHAT_ID environment variable."
-            raise ValueError(msg)
+            raise _MissingChatIDError(msg)
         return self.chat_id
 
     def _error_json(self, message: str) -> str:
@@ -247,7 +251,7 @@ class _TelegramTools(Toolkit):
             if not file_id or not file_id.strip():
                 return self._error_json("`file_id` is required for action 'get_file'.")
             return self._get_file(file_id.strip())
-        except ValueError:
+        except _MissingChatIDError:
             raise
         except Exception as exc:
             return self._exception_json(exc)
@@ -329,7 +333,7 @@ class _TelegramTools(Toolkit):
                 title=title,
             )
             return self._error_json(outcome) if isinstance(outcome, str) else json.dumps(outcome)
-        except ValueError:
+        except _MissingChatIDError:
             raise
         except Exception as exc:
             return self._exception_json(exc)
@@ -398,7 +402,7 @@ class _TelegramTools(Toolkit):
                 disable_notification=disable_notification,
             )
             return self._error_json(outcome) if isinstance(outcome, str) else json.dumps(outcome)
-        except ValueError:
+        except _MissingChatIDError:
             raise
         except Exception as exc:
             return self._exception_json(exc)

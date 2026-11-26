@@ -41,13 +41,13 @@ class _ResendTools(Toolkit):
             return "Configure the Resend API key and sender first."
         if not to_email.strip():
             return "Provide a recipient email address."
-        from resend import RequestsClient
+        from resend import RequestsClient, api_url
 
         # Emails.send reads a process-global API key. Keep credentials scoped to this request.
         try:
             _, status, _ = RequestsClient().request(
                 "POST",
-                "https://api.resend.com/emails",
+                f"{api_url.rstrip('/')}/emails",
                 headers={"Authorization": f"Bearer {self._api_key}", "User-Agent": "MindRoom"},
                 json={"from": self._from_email, "to": to_email, "subject": subject, "html": body},
             )

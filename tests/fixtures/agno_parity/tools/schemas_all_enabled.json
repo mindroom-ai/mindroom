@@ -6640,7 +6640,7 @@
       },
       {
         "name": "twilio_read",
-        "description": "Read Twilio calls or recent SMS.\n- get_call_details: requires call_sid.\n- list_messages: no required arguments.",
+        "description": "Read Twilio calls or recent SMS.\n- `get_call_details`: `call_sid`\n- `list_messages`: no required arguments.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -7837,7 +7837,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Reaction emoji (`reaction`)."
+              "description": "Reaction emoji; an empty string removes the reaction."
             },
             "mindroom_output_path": {
               "anyOf": [

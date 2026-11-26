@@ -299,9 +299,12 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
     return None
 
 
-# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
-# Legacy format: the names below were offered individually and could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 for scheduler, searxng, memory, and todo; messaging names retired in Wave 7.
+# LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
+# Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
+#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
+#   function taking an `action` parameter.
 # Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
 #   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
 #   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
@@ -325,12 +328,10 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
-# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
-#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
-#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
-#   and todo respectively.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
+# Legacy format: scheduler, searxng, memory, todo, and comms exposed the individual function names below,
+#   which could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.623; replacement: unreleased. Earlier consolidations use v2026.11.610.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).

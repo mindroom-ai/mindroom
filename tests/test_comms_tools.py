@@ -45,13 +45,16 @@ def test_smtp_sends_only_to_configured_recipient() -> None:
 
 def test_resend_uses_each_toolkits_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Sending for one toolkit does not change the next toolkit's bearer key."""
-    pytest.importorskip("resend")
+    resend = pytest.importorskip("resend")
+    monkeypatch.setattr(resend, "api_url", "https://mail.example.test/proxy/")
     monkeypatch.setenv("RESEND_API_KEY", "environment-example")
     first = resend_tools()(api_key="explicit-example", from_email="sender@example.test")
     second = resend_tools()(from_email="other@example.test")
     with patch("resend.RequestsClient.request", return_value=(b"{}", 200, {})) as request:
         assert first.send_email("reader@example.test", "Status", "<b>Ready</b>") == "Email sent."
         assert second.send_email("reader@example.test", "Status", "Hello") == "Email sent."
+    endpoint = "https://mail.example.test/proxy/emails"
+    assert [args.args[:2] for args in request.call_args_list] == [("POST", endpoint)] * 2
     assert [args.kwargs["headers"]["Authorization"] for args in request.call_args_list] == [
         "Bearer explicit-example",
         "Bearer environment-example",
@@ -78,6 +81,10 @@ def test_twilio_separates_sms_from_reads() -> None:
         api_secret=_CREDENTIAL,
         enable_list_messages=False,
     )
+    read = next(function for function in adapt_toolkit(tools).functions if function.name == "twilio_read")
+    assert read.description is not None
+    assert "`get_call_details`" in read.description
+    assert "list_messages" not in read.description
     with patch("twilio.rest.Client") as client:
         assert "error" in tools.twilio_read("list_messages")
         client.assert_not_called()
@@ -134,6 +141,30 @@ def test_telegram_opt_in_media_is_absent_from_default_schema() -> None:
         bot.return_value.send_document.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("sdk_method", "function", "arguments"),
+    [
+        ("get_chat", "telegram_read", {"action": "get_chat"}),
+        ("send_message", "telegram_send", {"action": "message", "message": "Hello"}),
+        ("delete_message", "telegram_manage", {"action": "delete", "message_id": 8}),
+    ],
+)
+def test_telegram_turns_invalid_json_into_an_error_result(
+    sdk_method: str,
+    function: str,
+    arguments: dict[str, object],
+) -> None:
+    """Broken provider responses return a tool error without echoing the response body."""
+    pytest.importorskip("telebot")
+    with patch("telebot.TeleBot") as bot:
+        tools = telegram_tools()(token=_TELEGRAM_KEY, chat_id="1234", all=True)
+        error = json.JSONDecodeError("Invalid JSON", _TELEGRAM_KEY, 0)
+        with patch.object(bot.return_value, sdk_method, side_effect=error):
+            result = tools.functions[function](**arguments)
+    assert json.loads(result)["status"] == "error"
+    assert _TELEGRAM_KEY not in result
+
+
 def test_telegram_download_stays_in_configured_directory(tmp_path: Path) -> None:
     """An untrusted remote path cannot overwrite a local file or expose the bot token."""
     pytest.importorskip("telebot")
@@ -175,6 +206,21 @@ def test_whatsapp_enabled_actions_constrain_schema_and_send() -> None:
         assert post.call_args.kwargs["json"]["to"] == "12025550101"
 
 
+def test_whatsapp_removes_a_reaction_with_empty_emoji() -> None:
+    """WhatsApp uses an empty emoji, distinct from a missing one, to remove a reaction."""
+    tools = whatsapp_tools()(
+        access_token=_CREDENTIAL,
+        phone_number_id="123",
+        recipient_waid="12025550101",
+        enable_send_reaction=True,
+    )
+    response = httpx.Response(200, json={}, request=httpx.Request("POST", "https://graph.facebook.com"))
+    with patch.object(httpx, "post", return_value=response) as post:
+        result = tools.whatsapp_send("reaction", message_id="wamid.example", emoji="")
+    assert json.loads(result)["ok"] is True
+    assert post.call_args.kwargs["json"]["reaction"] == {"message_id": "wamid.example", "emoji": ""}
+
+
 def test_webex_read_and_send_use_separate_functions() -> None:
     """Listing room IDs does not send a message."""
     pytest.importorskip("webexpythonsdk")
@@ -190,7 +236,8 @@ def test_webex_read_and_send_use_separate_functions() -> None:
         api.return_value.messages.create.assert_called_once_with(roomId="room-id", text="Ready")
 
 
-def test_zoom_mints_private_token_and_reuses_it_for_meetings() -> None:
+@pytest.mark.parametrize("expires_in", [3600, None])
+def test_zoom_mints_private_token_and_reuses_it_for_meetings(expires_in: int | None) -> None:
     """Zoom OAuth never appears as a callable or in a successful tool result."""
     tools = zoom_tools()("account-id", "client-id", "fake-secret")
     hosts: list[str] = []
@@ -200,7 +247,7 @@ def test_zoom_mints_private_token_and_reuses_it_for_meetings() -> None:
         if request.url.path == "/oauth/token":
             assert request.headers["Authorization"].startswith("Basic ")
             assert b"account_id=account-id" in request.content
-            return httpx.Response(200, json={"access_token": "fake-zoom-bearer", "expires_in": 3600})
+            return httpx.Response(200, json={"access_token": "fake-zoom-bearer", "expires_in": expires_in})
         assert request.headers["Authorization"] == "Bearer fake-zoom-bearer"
         if request.method == "DELETE":
             return httpx.Response(204)
@@ -218,6 +265,28 @@ def test_zoom_mints_private_token_and_reuses_it_for_meetings() -> None:
     assert "fake-zoom-bearer" not in meeting + deleted
     assert hosts == ["zoom.us", "api.zoom.us", "api.zoom.us"]
     assert set(tools.functions) == {"zoom_read", "zoom_manage"}
+
+
+def test_zoom_list_accepts_and_sends_previous_meetings_filter() -> None:
+    """Zoom's exact previous-meetings filter survives schema validation and reaches the API."""
+    tools = zoom_tools()("account-id", "client-id", _CREDENTIAL)
+    read = next(function for function in adapt_toolkit(tools).functions if function.name == "zoom_read")
+    assert "previous_meetings" in read.parameters["properties"]["meeting_type"]["enum"]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return httpx.Response(200, json={"access_token": "fake-zoom-bearer", "expires_in": 3600})
+        assert request.url.path == "/v2/users/me/meetings"
+        assert request.url.params["type"] == "previous_meetings"
+        return httpx.Response(200, json={"meetings": [{"id": 12}]})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handle)) as client,
+        patch.object(httpx, "post", client.post),
+        patch.object(httpx, "request", client.request),
+    ):
+        result = read.entrypoint(action="list_meetings", meeting_type="previous_meetings")
+    assert json.loads(result)["meetings"] == [{"id": 12}]
 
 
 def test_x_acknowledges_post_and_direct_message() -> None:

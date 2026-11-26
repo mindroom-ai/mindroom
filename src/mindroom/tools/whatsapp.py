@@ -231,7 +231,7 @@ def _build_location_payload(
 
 
 def _build_reaction_payload(to: str, *, message_id: str | None, emoji: str | None) -> dict[str, Any] | str:
-    if not message_id or not emoji:
+    if not message_id or emoji is None:
         return "`message_id` and `emoji` are required for action 'reaction'."
     return {
         "messaging_product": "whatsapp",
@@ -391,7 +391,7 @@ class _WhatsAppTools(Toolkit):
             name: Optional location name (`location`).
             address: Optional location address (`location`).
             message_id: Target WhatsApp message ID (`reaction`).
-            emoji: Reaction emoji (`reaction`).
+            emoji: Reaction emoji; an empty string removes the reaction.
 
         """
         if action not in self._enabled_actions:

@@ -18,7 +18,7 @@ _ZOOM_OAUTH_URL = "https://zoom.us/oauth/token"
 _ZOOM_API_BASE = "https://api.zoom.us/v2"
 _ZoomReadAction = Literal["get_meeting", "list_meetings", "get_upcoming_meetings", "get_meeting_recordings"]
 _ZoomManageAction = Literal["schedule_meeting", "delete_meeting"]
-_ZoomMeetingType = Literal["scheduled", "live", "upcoming", "previous"]
+_ZoomMeetingType = Literal["scheduled", "live", "upcoming", "upcoming_meetings", "previous_meetings"]
 
 
 class _ZoomTools(Toolkit):
@@ -65,7 +65,8 @@ class _ZoomTools(Toolkit):
             access_token = token_data.get("access_token") if isinstance(token_data, dict) else None
             if not isinstance(access_token, str) or not access_token:
                 return None
-            expires_in = int(token_data.get("expires_in", 3600))
+            raw_expires_in = token_data.get("expires_in")
+            expires_in = int(3600 if raw_expires_in is None else raw_expires_in)
         except (httpx.HTTPError, ValueError):
             self.__access_token = None
             self.__token_expiry = None

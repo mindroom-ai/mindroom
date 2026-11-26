@@ -28545,7 +28545,7 @@
       },
       {
         "name": "twilio_read",
-        "description": "Read Twilio calls or recent SMS.\n- get_call_details: requires call_sid.\n- list_messages: no required arguments.",
+        "description": "Read Twilio calls or recent SMS.\n- `get_call_details`: `call_sid`\n- `list_messages`: no required arguments.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -30309,7 +30309,8 @@
                 "scheduled",
                 "live",
                 "upcoming",
-                "previous"
+                "upcoming_meetings",
+                "previous_meetings"
               ],
               "description": "Meeting filter for `list_meetings`."
             },
