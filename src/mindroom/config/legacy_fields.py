@@ -393,6 +393,27 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_fts_index": "duckdb_manage",
         "get_table_name_from_path": "duckdb_manage",
     },
+    "sql": {
+        "list_tables": "sql_inspect",
+        "describe_table": "sql_inspect",
+    },
+    "postgres": {
+        "show_tables": "postgres_inspect",
+        "describe_table": "postgres_inspect",
+        "summarize_table": "postgres_inspect",
+        "inspect_query": "postgres_inspect",
+    },
+    "redshift": {
+        "show_tables": "redshift_inspect",
+        "describe_table": "redshift_inspect",
+        "summarize_table": "redshift_inspect",
+        "inspect_query": "redshift_inspect",
+    },
+    "neo4j": {
+        "list_labels": "neo4j_inspect",
+        "list_relationship_types": "neo4j_inspect",
+        "get_schema": "neo4j_inspect",
+    },
 }
 
 

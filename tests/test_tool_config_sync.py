@@ -147,7 +147,7 @@ def test_a_saved_value_for_an_object_valued_setting_is_ignored(tmp_path: Path) -
         worker_target=None,
     )
 
-    assert json.loads(blocking_entrypoint(tool, "list_tables")()) == ["orders"]
+    assert json.loads(blocking_entrypoint(tool, "sql_inspect")(action="list_tables")) == ["orders"]
     tool.db_engine.dispose()
 
 
