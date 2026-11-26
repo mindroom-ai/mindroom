@@ -155,7 +155,7 @@ class ScopedOAuthClientMixin:
     _consume_google_authorization_rejected: Callable[[], bool]
 
     if TYPE_CHECKING:
-        # Provided by ThreadLocalGoogleServiceMixin; a method stub so the inherited signatures match.
+        # Provided by _ThreadLocalGoogleServiceMixin; a method stub so the inherited signatures match.
         def _adopt_google_credential_revision(self, value: object) -> None: ...
 
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:

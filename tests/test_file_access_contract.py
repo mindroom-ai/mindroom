@@ -141,19 +141,17 @@ async def _view_file(
 
 
 async def _stage_gmail_attachment(
-    tmp_path: Path,
+    _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
     workspace: Path | None,
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    staging = tmp_path / "gmail-staging"
-    staging.mkdir(exist_ok=True)
     try:
-        staged = gmail_module._stage_attachments(workspace, [raw_path], staging, file_access=file_access)
+        loaded = gmail_module._read_attachments(workspace, [raw_path], file_access=file_access)
     except ValueError:
         return False
-    return [Path(path).read_bytes() for path in staged] == [_PNG]
+    return [data for _name, data in loaded] == [_PNG]
 
 
 async def _upload_to_google_drive(

@@ -91,7 +91,7 @@ def test_workspace_tool_uses_its_own_chat_login_link(tmp_path: Path) -> None:
     assert "secondary_get_latest_emails" in tool.functions
     assert "get_latest_emails" not in tool.functions
     assert "get_latest_emails" in existing.functions
-    result = json.loads(tool.functions["secondary_get_latest_emails"].entrypoint())
+    result = json.loads(tool.functions["secondary_get_latest_emails"]())
     assert result["provider"] == "secondary_google_gmail"
     assert "/api/oauth/secondary_google_gmail/authorize" in result["connect_url"]
 
