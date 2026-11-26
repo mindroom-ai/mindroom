@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 import regex
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationInfo, field_validator, model_validator
 
 TRIGGER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -16,6 +16,7 @@ SourceType = Literal["room_message", "thread_tag", "external_event", "github_pr"
 FiringStatus = Literal["pending", "triaged_no", "claimed", "delivered", "failed", "skipped"]
 DisabledReason = Literal["manual", "once_consumed", "pr_closed"]
 GitHubPREventType = Literal["activity", "ci", "merge", "close"]
+_DEFAULT_GH_PR_EVENTS: tuple[GitHubPREventType, ...] = ("activity", "ci", "merge", "close")
 
 
 def generate_trigger_id() -> str:
@@ -119,68 +120,34 @@ class ExternalEventSourceSpec(BaseModel):
         return _strip_non_empty(value, field_name=str(info.field_name))
 
 
-def _default_github_pr_events() -> list[GitHubPREventType]:
-    return ["activity", "ci", "merge", "close"]
-
-
 class GitHubPRSourceSpec(BaseModel):
-    """Watch one GitHub pull request via shared webhook source or ETag REST polling."""
+    """Watch one GitHub pull request via ETag REST polling (with optional webhook nudge)."""
 
     model_config = ConfigDict(extra="forbid")
-
     source_type: Literal["github_pr"] = "github_pr"
     repo: str
-    number: int = Field(ge=1)
-    events: list[GitHubPREventType] = Field(default_factory=_default_github_pr_events)
+    number: StrictInt = Field(ge=1)
+    events: list[GitHubPREventType] = Field(default_factory=lambda: list(_DEFAULT_GH_PR_EVENTS))
     webhook_source_id: str | None = None
     ignore_actors: list[str] = Field(default_factory=list)
     ignore_bots: bool = True
     auto_disable_on_close: bool = True
-    poll_interval_seconds: int = Field(default=300, ge=30, le=86400)
+    poll_interval_seconds: StrictInt = Field(default=300, ge=30, le=86400)
 
-    @field_validator("repo")
-    @classmethod
-    def validate_repo(cls, value: str) -> str:
-        """Require a well-formed owner/repo specification without dot path segments."""
-        stripped = _strip_non_empty(value, field_name="repo")
-        if _GITHUB_REPO_PATTERN.fullmatch(stripped) is None:
-            msg = f"Invalid GitHub repository specification: {value!r}"
+    @model_validator(mode="after")
+    def _validate_spec(self) -> GitHubPRSourceSpec:
+        self.repo = _strip_non_empty(self.repo, field_name="repo")
+        owner, _, name = self.repo.partition("/")
+        if _GITHUB_REPO_PATTERN.fullmatch(self.repo) is None or owner in {".", ".."} or name in {".", ".."}:
+            msg = f"Invalid GitHub repository specification: {self.repo!r}"
             raise ValueError(msg)
-        owner, name = stripped.split("/", 1)
-        if owner in {".", ".."} or name in {".", ".."}:
-            msg = f"Invalid GitHub repository specification: {value!r}"
-            raise ValueError(msg)
-        return stripped
-
-    @field_validator("number", "poll_interval_seconds", mode="before")
-    @classmethod
-    def reject_bool_int(cls, value: object, info: ValidationInfo) -> object:
-        """Reject booleans where integer PR numbers or poll intervals are required."""
-        if isinstance(value, bool):
-            msg = f"{info.field_name} must be an integer"
-            raise TypeError(msg)
-        return value
-
-    @field_validator("events")
-    @classmethod
-    def validate_events(cls, values: list[GitHubPREventType]) -> list[GitHubPREventType]:
-        """Require at least one event category and deduplicate preserving order."""
-        if not values:
+        if not self.events:
             msg = "events must not be empty"
             raise ValueError(msg)
-        return list(dict.fromkeys(values))
-
-    @field_validator("webhook_source_id")
-    @classmethod
-    def validate_webhook_source_id(cls, value: str | None) -> str | None:
-        """Strip optional webhook_source_id and reject empty strings."""
-        return _strip_optional_non_empty(value, field_name="webhook_source_id")
-
-    @field_validator("ignore_actors")
-    @classmethod
-    def validate_ignore_actors(cls, values: list[str]) -> list[str]:
-        """Strip and reject empty ignore_actors entries."""
-        return [_strip_non_empty(actor, field_name="ignore_actors entry") for actor in values]
+        self.events = list(dict.fromkeys(self.events))
+        self.webhook_source_id = _strip_optional_non_empty(self.webhook_source_id, field_name="webhook_source_id")
+        self.ignore_actors = [_strip_non_empty(a, field_name="ignore_actors entry") for a in self.ignore_actors]
+        return self
 
 
 TriggerSourceSpec = Annotated[
@@ -368,11 +335,10 @@ class GitHubPRCheckpoint(BaseModel):
     """Durable state checkpoint for a github_pr reactive trigger."""
 
     model_config = ConfigDict(extra="forbid")
-
     head_sha: str | None = None
     pr_state: Literal["open", "closed", "merged"] = "open"
     seeded: bool = False
-    next_poll_at: float = Field(default=0.0, allow_inf_nan=False)
+    next_poll_at: float | None = Field(default=None, allow_inf_nan=False)
     consecutive_errors: int = Field(default=0, ge=0)
     state: dict[str, Any] = Field(default_factory=dict)
     updated_at: float = Field(allow_inf_nan=False)

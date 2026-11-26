@@ -148,14 +148,9 @@ async def check_reactive_source_access(
         return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
     if isinstance(source, GitHubPRSourceSpec):
-        reason = check_github_pr_source_access(
-            owner_user_id=rule.owner_user_id,
-            source_spec=source,
-            event=event,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
+        fn = check_github_pr_source_access
+        r = fn(owner_user_id=rule.owner_user_id, source_spec=source, config=config, runtime_paths=runtime_paths)
+        return DispatchResult(status="skipped", reason=r) if r is not None else None
 
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
         return await _check_room_source_access(

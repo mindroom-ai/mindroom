@@ -24,27 +24,11 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from mindroom import github_client as ghc
 from mindroom.api import config_lifecycle
 from mindroom.api.client_sessions import presented_session
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.manager import CredentialsUnreadableError, credential_layers
-from mindroom.github_client import (
-    GITHUB_API_BASE,
-    GITHUB_API_VERSION,
-    GITHUB_DEFAULT_ACCEPT,
-    GITHUB_LOGIN_SHAPE,
-    GITHUB_TOKEN_SHAPE,
-    GITHUB_USER_TOKEN_SERVICE,
-    build_user_github_oauth_context,
-    github_redirect_next,
-    github_user_token_store,
-    is_github_rate_limited,
-    load_usable_github_oauth_credentials,
-    matches_github_shape,
-    read_bounded_body,
-    read_saved_github_token,
-    refresh_github_oauth_access_token,
-)
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_status,
@@ -124,7 +108,7 @@ class GitHubRequest(BaseModel):
         "application/vnd.github.full+json",
         "application/vnd.github.diff",
         "application/vnd.github.raw+json",
-    ] = GITHUB_DEFAULT_ACCEPT
+    ] = ghc.GITHUB_DEFAULT_ACCEPT
     max_bytes: int = Field(default=_MAX_RESPONSE_BYTES, ge=1, le=_MAX_RESPONSE_BYTES, strict=True)
 
 
@@ -133,7 +117,7 @@ class GitHubToken(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    token: str = Field(pattern=rf"^{GITHUB_TOKEN_SHAPE.pattern}$")
+    token: str = Field(pattern=rf"^{ghc.GITHUB_TOKEN_SHAPE.pattern}$")
 
 
 def _path_kind(path: str) -> str | None:
@@ -157,7 +141,7 @@ def _path_kind(path: str) -> str | None:
 
 
 def _github_client() -> httpx.AsyncClient:
-    """Build the client for one request; it follows no redirect itself, since only `github_redirect_next` may."""
+    """Build the client for one request; it follows no redirect itself, since only `ghc.github_redirect_next` may."""
     return httpx.AsyncClient(timeout=_TIMEOUT_SECONDS, follow_redirects=False)
 
 
@@ -169,30 +153,24 @@ def _credential_context(request: Request) -> OAuthCredentialContext | None:
     """Return the session user's own GitHub connection, the one the `github` tool uses for them with any agent."""
     user_id = presented_session(request).user_id
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    return build_user_github_oauth_context(user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    return ghc.build_user_github_oauth_context(user_id, snapshot.runtime_config, snapshot.runtime_paths)
 
 
 async def _usable_credentials(context: OAuthCredentialContext | None) -> dict[str, Any] | None:
     """Return the stored connection while it can authenticate, without refreshing it or creating a store."""
-    return await load_usable_github_oauth_credentials(
-        context,
-        load_status=load_oauth_credentials_status,
-        is_usable=oauth_credentials_usable,
-    )
+    fn = ghc.load_usable_github_oauth_credentials
+    return await fn(context, load_status=load_oauth_credentials_status, is_usable=oauth_credentials_usable)
 
 
 async def _access_token(context: OAuthCredentialContext | None) -> str | None:
     """Return a current access token, refreshing one about to expire, or None while the user is not connected."""
-    return await refresh_github_oauth_access_token(
-        context,
-        load_status=load_oauth_credentials_status,
-        is_usable=oauth_credentials_usable,
-    )
+    fn = ghc.refresh_github_oauth_access_token
+    return await fn(context, load_status=load_oauth_credentials_status, is_usable=oauth_credentials_usable)
 
 
 def _token_store(context: OAuthCredentialContext) -> CredentialsManager:
     """Return the user's primary-only store, the one their GitHub App connection is in, without any shared layer."""
-    return github_user_token_store(context, get_layers=credential_layers)
+    return ghc.github_user_token_store(context, get_layers=credential_layers)
 
 
 async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str] | None:
@@ -204,7 +182,7 @@ async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str
     if context is None:
         return None
     try:
-        return await asyncio.to_thread(read_saved_github_token, context, get_layers=credential_layers)
+        return await asyncio.to_thread(ghc.read_saved_github_token, context, get_layers=credential_layers)
     except CredentialsUnreadableError:
         logger.warning("github_token_unreadable")
         raise
@@ -220,7 +198,7 @@ def _token_lock(user_id: str) -> asyncio.Lock:
 
 def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
     """Save ``document`` as the user's token, replacing even one that cannot be read; blocks on the filesystem."""
-    _token_store(context).save_credentials(GITHUB_USER_TOKEN_SERVICE, document, replace_unreadable=True)
+    _token_store(context).save_credentials(ghc.GITHUB_USER_TOKEN_SERVICE, document, replace_unreadable=True)
 
 
 async def _status(context: OAuthCredentialContext | None) -> dict[str, object] | JSONResponse:
@@ -248,31 +226,31 @@ async def _token_login(token: str) -> str | JSONResponse:
     """Return the login GitHub names for ``token``, or the error to answer when it refuses or fails to name one."""
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": GITHUB_DEFAULT_ACCEPT,
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "Accept": ghc.GITHUB_DEFAULT_ACCEPT,
+        "X-GitHub-Api-Version": ghc.GITHUB_API_VERSION,
     }
     body = None
     try:
         async with (
             asyncio.timeout(_TOKEN_CHECK_TIMEOUT_SECONDS),
             _github_client() as client,
-            client.stream("GET", f"{GITHUB_API_BASE}/user", headers=headers) as response,
+            client.stream("GET", f"{ghc.GITHUB_API_BASE}/user", headers=headers) as response,
         ):
             # GitHub's status alone decides a failed check, so its body is never downloaded.
             if response.status_code == 200:
-                content = await read_bounded_body(response, _MAX_TOKEN_CHECK_BYTES)
+                content = await ghc.read_bounded_body(response, _MAX_TOKEN_CHECK_BYTES)
                 body = None if content is None else _answer_body(content, response.headers.get("content-type", ""))
     except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("github_token_check_failed", error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
-    if is_github_rate_limited(response):
+    if ghc.is_github_rate_limited(response):
         logger.warning("github_token_check_rate_limited", status=response.status_code)
         return _error(502, "github_rate_limited")
     if response.status_code in {401, 403}:
         logger.info("github_token_rejected", status=response.status_code)
         return _error(400, "github_token_rejected")
     login = body.get("login") if isinstance(body, dict) else None
-    if not matches_github_shape(login, GITHUB_LOGIN_SHAPE):
+    if not ghc.matches_github_shape(login, ghc.GITHUB_LOGIN_SHAPE):
         logger.warning("github_token_check_failed", status=response.status_code)
         return _error(502, "github_unreachable")
     return login
@@ -314,7 +292,7 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
         async with _token_lock(presented_session(request).user_id):
             try:
                 await run_blocking_until_complete(
-                    lambda: _token_store(context).delete_credentials(GITHUB_USER_TOKEN_SERVICE),
+                    lambda: _token_store(context).delete_credentials(ghc.GITHUB_USER_TOKEN_SERVICE),
                 )
             except (OSError, ValueError) as exc:
                 # As on save, the store may refuse with `ValueError`; the answer names neither path nor error.
@@ -344,10 +322,10 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": payload.accept,
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "X-GitHub-Api-Version": ghc.GITHUB_API_VERSION,
     }
     method: str = payload.method
-    url = httpx.URL(GITHUB_API_BASE + payload.path)
+    url = httpx.URL(ghc.GITHUB_API_BASE + payload.path)
     content = None if payload.body is None else json.dumps(payload.body).encode()
     body: bytes | None = None
     response: httpx.Response | None = None
@@ -357,9 +335,9 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
             for redirects in range(_MAX_REDIRECTS + 1):
                 typed = {"Content-Type": "application/json"} if content is not None else {}
                 async with client.stream(method, url, headers=headers | typed, content=content) as response:
-                    hop = github_redirect_next(response, method, content) if redirects < _MAX_REDIRECTS else None
+                    hop = ghc.github_redirect_next(response, method, content) if redirects < _MAX_REDIRECTS else None
                     if hop is None:
-                        body = await read_bounded_body(response, payload.max_bytes)
+                        body = await ghc.read_bounded_body(response, payload.max_bytes)
                         break
                 method, url, content = hop
     except (httpx.HTTPError, TimeoutError) as exc:

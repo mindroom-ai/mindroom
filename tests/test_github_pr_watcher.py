@@ -1,4 +1,4 @@
-"""Tests for native github_pr watcher: watch_pr tool, webhook fan-out, access checks, and ETag poller."""
+"""End-to-end tests for unified GitHub PR watching (ETag poller + webhook nudge)."""
 
 from __future__ import annotations
 
@@ -15,40 +15,29 @@ import httpx
 import nio
 import pytest
 
+from mindroom import github_client as ghc
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.approval.tool_approval import (
-    evaluate_tool_approval,
-    tool_may_require_approval,
-    toolkit_approval_alias,
-)
+from mindroom.approval.tool_approval import evaluate_tool_approval, tool_may_require_approval, toolkit_approval_alias
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig, GitHubEventSourceConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import CredentialsUnreadableError
 from mindroom.custom_tools.triggers import TriggersTools
-from mindroom.github_client import github_get_json
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.reactive_triggers import (
+from mindroom.reactive_triggers.dispatch import check_reactive_source_access
+from mindroom.reactive_triggers.external_sources import fan_out_external_event, verify_and_normalize_github_webhook
+from mindroom.reactive_triggers.github_pr import GitHubPRPoller
+from mindroom.reactive_triggers.models import (
     GitHubPRCheckpoint,
-    GitHubPREventType,
-    GitHubPRPoller,
     GitHubPRSourceSpec,
-    ReactiveTriggerLimitError,
     ReactiveTriggerRecord,
-    ReactiveTriggerService,
-    ReactiveTriggerStore,
-    TriggerEvent,
     TriggerTargetSpec,
-    check_reactive_source_access,
-    fan_out_external_event,
-    verify_and_normalize_github_webhook,
 )
-from mindroom.reactive_triggers.github_pr import match_github_webhook_to_pr_rule
-from mindroom.reactive_triggers.github_pr_poller import seed_github_pr_watch
-from mindroom.reactive_triggers.management import set_trigger_enabled_sync
+from mindroom.reactive_triggers.service import ReactiveTriggerService
+from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -57,36 +46,17 @@ from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, ma
 from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-_OWNER = "@alice:example.org"
-_OTHER = "@bob:example.org"
-_ROOM = "!lobby:example.org"
-_THREAD = "$thread_root"
-_SECRET_VALUE = "gh-webhook-secret"  # noqa: S105
-_SECRET_ENV_NAME = "GH_SECRET"  # noqa: S105
-_ALL_GH_EVENTS = [
-    "pull_request",
-    "issue_comment",
-    "pull_request_review",
-    "pull_request_review_comment",
-    "check_run",
-    "check_suite",
-]
+_OWNER, _OTHER = "@owner:example.org", "@other:example.org"
+_ROOM, _THREAD = "!lobby:example.org", "$thread_root"
+_GH_ENV_NAME, _GH_HMAC_KEY = "TEST_GH_WEBHOOK_SECRET", "super-secret-webhook-key"
 
 
-def _gh_source(
-    allowed_repos: list[str],
-    allowed_events: list[str] | None = None,
-    subscribers: list[str] | None = None,
-) -> GitHubEventSourceConfig:
-    return GitHubEventSourceConfig(
-        secret_env=_SECRET_ENV_NAME,
-        allowed_repos=allowed_repos,
-        allowed_events=list(_ALL_GH_EVENTS) if allowed_events is None else allowed_events,
-        subscribers=[_OWNER] if subscribers is None else subscribers,
-    )
+def _gh_source(allowed_repos: list[str], *, subscribers: list[str] | None = None) -> GitHubEventSourceConfig:
+    subs = [_OWNER] if subscribers is None else subscribers
+    return GitHubEventSourceConfig(secret_env=_GH_ENV_NAME, allowed_repos=allowed_repos, subscribers=subs)
 
 
 def _config(
@@ -94,14 +64,13 @@ def _config(
     *,
     event_sources: dict[str, Any] | None = None,
     github_pr_polling_enabled: bool = True,
-    min_github_pr_poll_interval_seconds: int = 60,
-    max_github_pr_watches_per_owner: int = 20,
-    env_values: dict[str, str] | None = None,
+    min_poll: int = 60,
+    max_watches: int = 20,
 ) -> tuple[Config, RuntimePaths]:
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
-        process_env=env_values if env_values is not None else {_SECRET_ENV_NAME: _SECRET_VALUE},
+        process_env={_GH_ENV_NAME: _GH_HMAC_KEY},
     )
     state = MatrixState.load(runtime_paths=paths)
     state.add_room("lobby", _ROOM, "#lobby:example.org", "Lobby")
@@ -109,63 +78,52 @@ def _config(
     policy = ExternalTriggerPolicyConfig(
         event_sources=event_sources or {},
         github_pr_polling_enabled=github_pr_polling_enabled,
-        min_github_pr_poll_interval_seconds=min_github_pr_poll_interval_seconds,
-        max_github_pr_watches_per_owner=max_github_pr_watches_per_owner,
+        min_github_pr_poll_interval_seconds=min_poll,
+        max_github_pr_watches_per_owner=max_watches,
     )
-    cfg = bind_runtime_paths(
-        Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-test"}},
-                "agents": {
-                    "dev": {
-                        "display_name": "Dev",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                        "access": {"users": [_OWNER, _OTHER]},
-                    },
-                },
-                "rooms": {"lobby": {"display_name": "Lobby"}},
-                "external_trigger_policy": policy.model_dump(mode="json"),
-            },
-        ),
-        paths,
-    )
-    return cfg, paths
+    dev = {"display_name": "Dev", "model": "default", "rooms": ["lobby"], "access": {"users": [_OWNER, _OTHER]}}
+    raw = {
+        "models": {"default": {"provider": "openai", "id": "gpt-test"}},
+        "agents": {"dev": dev},
+        "rooms": {"lobby": {"display_name": "Lobby"}},
+        "external_trigger_policy": policy.model_dump(mode="json"),
+    }
+    return bind_runtime_paths(Config.model_validate(raw), paths), paths
 
 
 def _room_client(*, resolved_thread: bool = False) -> SimpleNamespace:
     rooms = {_ROOM: SimpleNamespace(room_id=_ROOM, users={_OWNER: SimpleNamespace(user_id=_OWNER)})}
     tag_state = {"resolved": resolved_thread}
-    resolved_key = json.dumps([_THREAD, "resolved"], separators=(",", ":"))
-    tag_content = {"set_by": _OWNER, "set_at": "2026-11-25T10:00:00Z"}
+    rkey = json.dumps([_THREAD, "resolved"], separators=(",", ":"))
+    tag_c = {"set_by": _OWNER, "set_at": "2026-11-25T10:00:00Z"}
 
-    async def room_get_state(room_id: str) -> object:
-        events: list[dict[str, Any]] = [
+    async def get_state(room_id: str) -> object:
+        evs = [
             {
                 "type": "m.room.member",
                 "state_key": _OWNER,
                 "sender": _OWNER,
                 "event_id": "$m1",
-                "origin_server_ts": 1_000,
+                "origin_server_ts": 1000,
                 "content": {"membership": "join"},
             },
         ]
         if tag_state["resolved"]:
-            events.append(
+            evs.append(
                 {
                     "type": THREAD_TAGS_EVENT_TYPE,
-                    "state_key": resolved_key,
+                    "state_key": rkey,
                     "sender": _OWNER,
-                    "event_id": "$tag1",
-                    "origin_server_ts": 1_001,
-                    "content": tag_content,
+                    "event_id": "$t1",
+                    "origin_server_ts": 1001,
+                    "content": tag_c,
                 },
             )
-        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+        return nio.RoomGetStateResponse(events=evs, room_id=room_id)
 
-    async def room_get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
-        if tag_state["resolved"] and event_type == THREAD_TAGS_EVENT_TYPE and state_key == resolved_key:
-            return nio.RoomGetStateEventResponse(tag_content, event_type, state_key, room_id)
+    async def get_ev(room_id: str, event_type: str, state_key: str = "") -> object:
+        if tag_state["resolved"] and event_type == THREAD_TAGS_EVENT_TYPE and state_key == rkey:
+            return nio.RoomGetStateEventResponse(tag_c, event_type, state_key, room_id)
         if event_type == "m.room.power_levels":
             pl = {"users": {_OWNER: 100, "@mindroom_dev:example.org": 100}, "events_default": 0, "state_default": 50}
             return nio.RoomGetStateEventResponse(pl, event_type, "", room_id)
@@ -173,24 +131,24 @@ def _room_client(*, resolved_thread: bool = False) -> SimpleNamespace:
             return nio.RoomGetStateEventResponse({"creator": _OWNER, "room_version": "10"}, event_type, "", room_id)
         return nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
 
-    async def room_put_state(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
-        if event_type == THREAD_TAGS_EVENT_TYPE and state_key == resolved_key and not content:
+    async def put_state(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if event_type == THREAD_TAGS_EVENT_TYPE and state_key == rkey and not content:
             tag_state["resolved"] = False
         return nio.RoomPutStateResponse(event_id="$reopen_tag", room_id=room_id)
 
+    members = nio.JoinedMembersResponse(members=[nio.RoomMember(_OWNER, None, None)], room_id=_ROOM)
     return SimpleNamespace(
-        user_id="@mindroom_dev:example.org",
         rooms=rooms,
-        room_get_state=AsyncMock(side_effect=room_get_state),
-        room_get_state_event=AsyncMock(side_effect=room_get_state_event),
-        room_put_state=AsyncMock(side_effect=room_put_state),
-        joined_members=AsyncMock(
-            return_value=nio.JoinedMembersResponse(members=[nio.RoomMember(_OWNER, None, None)], room_id=_ROOM),
-        ),
+        user_id="@mindroom_dev:example.org",
+        tag_state=tag_state,
+        room_get_state=AsyncMock(side_effect=get_state),
+        room_get_state_event=AsyncMock(side_effect=get_ev),
+        room_put_state=AsyncMock(side_effect=put_state),
+        joined_members=AsyncMock(return_value=members),
     )
 
 
-def _tool_ctx(config: Config, paths: RuntimePaths, *, thread_id: str | None = _THREAD) -> ToolRuntimeContext:
+def _tool_ctx(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
     client = _room_client()
     orch = SimpleNamespace(
         agent_bots={"dev": SimpleNamespace(running=True, client=client, agent_name="dev")},
@@ -199,7 +157,7 @@ def _tool_ctx(config: Config, paths: RuntimePaths, *, thread_id: str | None = _T
     )
     return make_test_tool_runtime_context(
         agent_name="dev",
-        target=MessageTarget.resolve(room_id=_ROOM, thread_id=thread_id, reply_to_event_id=None),
+        target=MessageTarget.resolve(room_id=_ROOM, thread_id=_THREAD, reply_to_event_id=None),
         requester_id=_OWNER,
         client=client,
         config=config,
@@ -210,1850 +168,671 @@ def _tool_ctx(config: Config, paths: RuntimePaths, *, thread_id: str | None = _T
     )
 
 
-def _mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+async def _watch(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads(await cast("Any", tool).watch_pr(**kwargs)))
 
 
-def _patch_github_http(
+async def _trig(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads(await cast("Any", tool).triggers(**kwargs)))
+
+
+def _cp(store: ReactiveTriggerStore, tid: str) -> GitHubPRCheckpoint:
+    cp = store.get_github_pr_checkpoint(tid)
+    assert cp is not None
+    return cp
+
+
+def _rule(store: ReactiveTriggerStore, tid: str) -> ReactiveTriggerRecord:
+    rec = store.get_trigger(tid)
+    assert rec is not None
+    return rec
+
+
+def _pr(repo: str, number: int, *, state: str = "open", merged: bool = False, sha: str = "sha1") -> dict[str, Any]:
+    return {
+        "state": "closed" if merged else state,
+        "merged": merged,
+        "merged_at": "2026-11-25T12:00:00Z" if merged else None,
+        "title": f"PR {number}",
+        "html_url": f"https://github.com/{repo}/pull/{number}",
+        "head": {"sha": sha},
+    }
+
+
+def _chk(cid: int, name: str, conclusion: str | None, *, status: str = "completed") -> dict[str, Any]:
+    return {"id": cid, "name": name, "status": status, "conclusion": conclusion}
+
+
+def _cmt(cid: int, body: str, login: str = "alice", *, user_type: str = "User") -> dict[str, Any]:
+    return {"id": cid, "event": "commented", "body": body, "user": {"login": login, "type": user_type}}
+
+
+def _rc(cid: int, rid: int | None, path: str, body: str, login: str = "alice") -> dict[str, Any]:
+    return {"id": cid, "pull_request_review_id": rid, "path": path, "body": body, "user": {"login": login}}
+
+
+class _FakeGitHub:
+    """In-memory GitHub REST handler exercising real github_get_json ETag, Link, and rate-limit parsing."""
+
+    def __init__(self) -> None:
+        self.routes: dict[str, tuple[int, object, dict[str, str]]] = {}
+        self.calls: list[tuple[str, str | None, str | None]] = []
+        self.on_request: Callable[[str], Awaitable[None]] | None = None
+
+    def set_json(
+        self,
+        path: str,
+        payload: object,
+        *,
+        status: int = 200,
+        etag: str | None = None,
+        headers: dict[str, str] | None = None,
+        next_path: str | None = None,
+        last_path: str | None = None,
+    ) -> None:
+        hdrs = dict(headers or {})
+        if etag is not None:
+            hdrs["ETag"] = etag
+        links = [
+            f'<https://api.github.com{p}>; rel="{rel}"' for rel, p in (("next", next_path), ("last", last_path)) if p
+        ]
+        if links:
+            hdrs["Link"] = ", ".join(links)
+        self.routes[path] = (status, payload, hdrs)
+
+    def seed_open(self, repo: str, number: int, *, sha: str = "sha1", tag: str = "e") -> None:
+        self.set_json(f"/repos/{repo}/pulls/{number}", _pr(repo, number, sha=sha), etag=f'"{tag}p"')
+        self.set_json(f"/repos/{repo}/issues/{number}/timeline?per_page=100&page=1", [], etag=f'"{tag}t"')
+        rc_p = f"/repos/{repo}/pulls/{number}/comments?sort=created&direction=desc&per_page=100"
+        self.set_json(rc_p, [], etag=f'"{tag}c"')
+        chk_p = f"/repos/{repo}/commits/{sha}/check-runs?per_page=100&page=1"
+        self.set_json(chk_p, {"check_runs": []}, etag=f'"{tag}k"')
+
+    def client(self) -> httpx.AsyncClient:
+        async def _handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.raw_path.decode("ascii")
+            if self.on_request is not None:
+                await self.on_request(path)
+            inm = request.headers.get("if-none-match")
+            self.calls.append((path, inm, request.headers.get("authorization")))
+            status, payload, hdrs = self.routes.get(path, (404, {"message": "Not Found"}, {}))
+            if status == 200 and inm and hdrs.get("ETag") == inm:
+                return httpx.Response(304, headers=hdrs, request=request)
+            return httpx.Response(status, json=payload, headers=hdrs, request=request)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+
+
+def _patch_github(
     monkeypatch: pytest.MonkeyPatch,
-    routes: dict[str, httpx.Response],
+    fake: _FakeGitHub,
     *,
-    token_result: tuple[str | None, str] = ("ghp_alice", "token"),
-) -> None:
-    mock_client = _mock_client(lambda req: routes.get(req.url.path, httpx.Response(404)))
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=token_result),
-    )
+    token_fn: Callable[..., Awaitable[tuple[str | None, ghc.GitHubAuthMode]]] | None = None,
+) -> httpx.AsyncClient:
+    http, orig_get = fake.client(), ghc.github_get_json
 
-    async def _wrapped_get(
+    async def _get(
         path: str,
         *,
         token: str | None,
         etag: str | None = None,
-        timeout_seconds: float = 20.0,
-        max_bytes: int = 2 * 1024 * 1024,
         client: httpx.AsyncClient | None = None,  # noqa: ARG001
-    ) -> object:
-        return await github_get_json(
-            path,
-            token=token,
-            etag=etag,
-            timeout_seconds=timeout_seconds,
-            max_bytes=max_bytes,
-            client=mock_client,
-        )
+        timeout_seconds: float = 20.0,
+    ) -> ghc.GitHubGetResult:
+        return await orig_get(path, token=token, etag=etag, client=http, timeout_seconds=timeout_seconds)
 
-    monkeypatch.setattr("mindroom.reactive_triggers.github_pr_poller.github_get_json", _wrapped_get)
+    async def _default_tok(*_args: object) -> tuple[str | None, ghc.GitHubAuthMode]:
+        return ("tok-owner", "token")
 
-
-def _seeded_rule(
-    store: ReactiveTriggerStore,
-    trigger_id: str,
-    *,
-    repo: str = "mindroom-ai/mindroom",
-    number: int = 10,
-    events: list[GitHubPREventType] | None = None,
-    webhook_source_id: str | None = "gh",
-    owner_user_id: str = _OWNER,
-    ignore_actors: list[str] | None = None,
-    head_sha: str | None = "sha_v1",
-    state: dict[str, Any] | None = None,
-    poll_interval_seconds: int = 60,
-    max_fires_per_hour: int = 10,
-    auto_disable_on_close: bool = True,
-) -> ReactiveTriggerRecord:
-    rec = ReactiveTriggerRecord(
-        trigger_id=trigger_id,
-        owner_user_id=owner_user_id,
-        source=GitHubPRSourceSpec(
-            repo=repo,
-            number=number,
-            events=list(events) if events is not None else ["activity", "ci", "merge", "close"],
-            webhook_source_id=webhook_source_id,
-            ignore_actors=list(ignore_actors or ()),
-            auto_disable_on_close=auto_disable_on_close,
-            poll_interval_seconds=poll_interval_seconds,
-        ),
-        target=TriggerTargetSpec(agent="dev", room_id=_ROOM, thread_id=_THREAD, reopen_on_fire=True, prompt="Watch"),
-        max_fires_per_hour=max_fires_per_hour,
-        created_at=1000.0,
-        updated_at=1000.0,
-    )
-    cp = GitHubPRCheckpoint(
-        head_sha=head_sha,
-        seeded=True,
-        next_poll_at=1000.0,
-        state=state or {},
-        updated_at=1000.0,
-    )
-    store.create_trigger(rec, initial_github_pr_checkpoint=cp)
-    return rec
+    monkeypatch.setattr(ghc, "github_get_json", _get)
+    monkeypatch.setattr(ghc, "resolve_owner_github_token", token_fn or _default_tok)
+    return http
 
 
-def _send_webhook(
-    store: ReactiveTriggerStore,
-    config: Config,
+def _deliver_gh(
+    src_cfg: GitHubEventSourceConfig,
+    cfg: Config,
     paths: RuntimePaths,
-    *,
-    source_id: str = "gh",
-    source: GitHubEventSourceConfig,
+    store: ReactiveTriggerStore,
     gh_event: str,
+    repo: str,
     delivery_id: str,
-    payload: dict[str, Any],
-    now: float = 1100.0,
-) -> int:
+    now: float,
+) -> tuple[list[str], int]:
+    payload: dict[str, Any] = {"repository": {"full_name": repo}}
+    if gh_event == "pull_request":
+        pr = {"number": 5, "title": "Fix", "head": {"ref": "f", "sha": "sha1"}, "base": {"ref": "main"}}
+        payload |= {"action": "synchronize", "pull_request": pr}
     body = json.dumps(payload).encode("utf-8")
-    sig = "sha256=" + hmac.new(_SECRET_VALUE.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    sig = "sha256=" + hmac.new(_GH_HMAC_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    hdrs = {"X-GitHub-Delivery": delivery_id, "X-GitHub-Event": gh_event, "X-Hub-Signature-256": sig}
     ev = verify_and_normalize_github_webhook(
-        source_id=source_id,
-        source=source,
-        headers={"X-GitHub-Event": gh_event, "X-GitHub-Delivery": delivery_id, "X-Hub-Signature-256": sig},
+        source_id="gh",
+        source=src_cfg,
+        headers=hdrs,
         body=body,
         runtime_paths=paths,
         now=now,
     )
-    return fan_out_external_event(
-        source_id=source_id,
-        source=source,
+    n = fan_out_external_event(
+        source_id="gh",
+        source=src_cfg,
         event=ev,
         store=store,
-        config=config,
+        config=cfg,
         runtime_paths=paths,
         now=now,
     )
-
-
-def _gh_payload(
-    gh_event: str,
-    *,
-    repo: str = "mindroom-ai/mindroom",
-    number: int = 10,
-    action: str = "created",
-    actor: str = "bob",
-    actor_type: str = "User",
-    body: str = "LGTM",
-    is_pr: bool = True,
-    state: str = "approved",
-    sha: str = "sha_v1",
-    conclusion: str = "failure",
-    pr_numbers: list[int] | None = None,
-    merged: bool = False,
-) -> dict[str, Any]:
-    base: dict[str, Any] = {
-        "action": action,
-        "repository": {"full_name": repo},
-        "sender": {"login": actor, "type": actor_type},
-    }
-    user = {"login": actor, "type": actor_type}
-    if gh_event == "issue_comment":
-        issue: dict[str, Any] = {"number": number, "title": f"PR {number}"}
-        if is_pr:
-            issue["pull_request"] = {}
-        return {**base, "issue": issue, "comment": {"id": 1, "body": body, "user": user}}
-    if gh_event == "pull_request_review":
-        return {
-            **base,
-            "action": "submitted",
-            "pull_request": {"number": number, "title": f"PR {number}"},
-            "review": {"id": 10, "state": state, "body": body, "user": user},
-        }
-    if gh_event == "pull_request_review_comment":
-        return {
-            **base,
-            "pull_request": {"number": number, "title": f"PR {number}"},
-            "comment": {"id": 12, "pull_request_review_id": 10, "path": "a.py", "body": body, "user": user},
-        }
-    if gh_event == "pull_request":
-        return {
-            **base,
-            "pull_request": {"number": number, "merged": merged, "head": {"sha": sha}, "base": {"ref": "main"}},
-        }
-    prs = [{"number": n} for n in ([] if pr_numbers is None else pr_numbers)]
-    if gh_event == "check_run":
-        return {
-            **base,
-            "action": action,
-            "check_run": {
-                "id": 50,
-                "name": "pytest",
-                "status": "completed",
-                "conclusion": conclusion,
-                "head_sha": sha,
-                "pull_requests": prs,
-            },
-        }
-    return {
-        **base,
-        "action": action,
-        "check_suite": {
-            "id": 60,
-            "status": "completed",
-            "conclusion": conclusion,
-            "head_sha": sha,
-            "pull_requests": prs,
-        },
-    }
-
-
-def _watch_pr_routes() -> dict[str, httpx.Response]:
-    return {
-        "/repos/mindroom-ai/mindroom/pulls/10": httpx.Response(
-            200,
-            json={"state": "open", "merged": False, "head": {"sha": "sha10"}, "title": "PR 10"},
-        ),
-        "/repos/mindroom-ai/private-repo/pulls/7": httpx.Response(404, json={"message": "Not Found"}),
-        "/repos/matrix-org/synapse/pulls/99": httpx.Response(
-            200,
-            json={"state": "closed", "merged": True, "head": {"sha": "sha99"}, "title": "Merged"},
-        ),
-        "/repos/matrix-org/synapse/pulls/42": httpx.Response(
-            200,
-            json={"state": "open", "merged": False, "head": {"sha": "sha42"}, "title": "External PR"},
-            headers={"ETag": '"pr-42"'},
-        ),
-        "/repos/matrix-org/synapse/issues/42/timeline": httpx.Response(
-            200,
-            json=[{"id": 1, "event": "commented", "user": {"login": "bob"}, "body": "old"}],
-            headers={"ETag": '"tl-1"'},
-        ),
-        "/repos/matrix-org/synapse/pulls/42/comments": httpx.Response(
-            200,
-            json=[{"id": 5, "user": {"login": "bob"}, "body": "old inline"}],
-        ),
-        "/repos/matrix-org/synapse/commits/sha42/check-runs": httpx.Response(
-            200,
-            json={"check_runs": [{"id": 100, "name": "lint", "status": "completed", "conclusion": "success"}]},
-            headers={"ETag": '"ci-1"'},
-        ),
-        "/repos/mindroom-ai/no-ci/pulls/3": httpx.Response(
-            200,
-            json={"state": "open", "merged": False, "head": {"sha": "sha3"}},
-        ),
-        "/repos/mindroom-ai/no-ci/commits/sha3/check-runs": httpx.Response(200, json={"check_runs": []}),
-    }
+    return [r.trigger_id for r, _ in store.list_due_github_pr_triggers(now=now)], n
 
 
 @pytest.mark.asyncio
-async def test_watch_pr_transport_selection_validation_and_limits(
+async def test_watch_pr_delivery_mode_validation_limits_and_unreadable_pat(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """watch_pr picks webhook vs poll, rejects closed PRs, and enforces polling kill switch & owner quota."""
-    gh_org = _gh_source(
-        ["mindroom-ai/mindroom", "mindroom-ai/private-repo"],
-        ["pull_request", "issue_comment", "pull_request_review", "check_run", "check_suite"],
-    )
-    gh_partial = _gh_source(["mindroom-ai/no-ci"], ["pull_request"])
-    config, paths = _config(
-        tmp_path,
-        event_sources={"gh_org": gh_org, "gh_partial": gh_partial},
-        min_github_pr_poll_interval_seconds=90,
-        max_github_pr_watches_per_owner=3,
-    )
-    _patch_github_http(monkeypatch, _watch_pr_routes())
-    tool = TriggersTools()
+    """watch_pr binds covering webhooks with zero idle polling, falls back to polling, and enforces policy/quotas."""
+    fake = _FakeGitHub()
+    fake.seed_open("org/owned", 1, tag="o1")
+    fake.set_json("/repos/org/owned/issues/1/timeline?per_page=100&page=1", [_cmt(1, "old")])
+    fake.seed_open("ext/repo", 2, tag="e2")
+    fake.set_json("/repos/ext/repo/pulls/3", _pr("ext/repo", 3, merged=True))
+    _patch_github(monkeypatch, fake)
 
-    with tool_runtime_context(_tool_ctx(config, paths)):
-        wh = json.loads(await tool.watch_pr(repo="mindroom-ai/mindroom", number=10, trigger_id="pr_wh"))
-        assert (wh["status"], wh["delivery_mode"], wh["webhook_source_id"], wh["head_sha"]) == (
+    cfg, paths = _config(tmp_path, event_sources={"gh": _gh_source(["org/owned"])}, min_poll=120, max_watches=2)
+    tool, store = TriggersTools(), ReactiveTriggerStore(paths)
+
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        wh = await _watch(tool, repo="org/owned", number=1, trigger_id="pr-wh")
+        assert (wh["status"], wh["delivery_mode"], wh["webhook_source_id"], wh["auth_mode"]) == (
             "ok",
             "webhook",
-            "gh_org",
-            "sha10",
+            "gh",
+            "token",
         )
-        assert (wh["trigger"]["target"]["thread_id"], wh["trigger"]["target"]["reopen_on_fire"]) == (_THREAD, True)
-        assert any("pull_request_review_comment" in note for note in wh["coverage_notes"])
+        assert (wh["trigger"]["target"]["reopen_on_fire"], wh["trigger"]["target"]["thread_id"]) == (True, _THREAD)
+        assert (_cp(store, "pr-wh").seeded, _cp(store, "pr-wh").next_poll_at) == (True, None)
+        assert store.list_due_github_pr_triggers(now=time.time() + 1_000) == []
 
-        priv = json.loads(
-            await tool.watch_pr(repo="mindroom-ai/private-repo", number=7, target_thread_id="room", trigger_id="pr_p"),
-        )
-        assert (priv["status"], priv["delivery_mode"], priv["head_sha"], priv["trigger"]["target"]["thread_id"]) == (
-            "ok",
-            "webhook",
-            None,
-            None,
-        )
-        assert priv["coverage_notes"]
+        polled = await _watch(tool, repo="ext/repo", number=2, poll_interval_seconds=30, trigger_id="pr-poll")
+        assert (polled["status"], polled["delivery_mode"], polled["webhook_source_id"]) == ("ok", "poll", None)
+        assert polled["trigger"]["source"]["poll_interval_seconds"] == 120
+        assert _cp(store, "pr-poll").next_poll_at is not None
 
-        closed = json.loads(await tool.watch_pr(repo="matrix-org/synapse", number=99))
-        assert closed["status"] == "error"
-        assert "already merged" in closed["message"]
+        assert (await _watch(tool, repo="bad-repo", number=1))["status"] == "error"
+        assert (await _watch(tool, repo="ext/repo", number=True))["status"] == "error"
+        assert (await _watch(tool, repo="ext/repo", number=2, poll_interval_seconds=True))["status"] == "error"
+        merged_err = await _watch(tool, repo="ext/repo", number=3)
+        assert (merged_err["status"], "already merged" in merged_err["message"]) == ("error", True)
+        quota_err = await _watch(tool, repo="ext/repo", number=2, trigger_id="pr-over")
+        assert (quota_err["status"], "GitHub PR watch limit" in quota_err["message"]) == ("error", True)
 
-        polled = json.loads(
-            await tool.watch_pr(repo="matrix-org/synapse", number=42, poll_interval_seconds=30, trigger_id="pr_poll"),
-        )
-        assert (polled["status"], polled["delivery_mode"], polled["auth_mode"]) == ("ok", "poll", "token")
-        assert polled["trigger"]["source"]["poll_interval_seconds"] == 90
+        assert (await _trig(tool, action="set_enabled", enabled=False, trigger_id="pr-poll"))["status"] == "ok"
+        assert (await _watch(tool, repo="ext/repo", number=2, trigger_id="pr-2b"))["status"] == "ok"
+        reen_err = await _trig(tool, action="set_enabled", enabled=True, trigger_id="pr-poll")
+        assert (reen_err["status"], "GitHub PR watch limit" in reen_err["message"]) == ("error", True)
 
-        over_quota = json.loads(await tool.watch_pr(repo="mindroom-ai/no-ci", number=3, events=["ci"]))
-        assert over_quota["status"] == "error"
-        assert "limit" in over_quota["message"].lower()
-
-        assert json.loads(await tool.triggers(action="delete", trigger_id="pr_p"))["status"] == "ok"
-        fallback = json.loads(await tool.watch_pr(repo="mindroom-ai/no-ci", number=3, events=["ci"], trigger_id="fb"))
-        assert fallback["delivery_mode"] == "poll"
-        assert any("falling back to polling" in n for n in fallback["coverage_notes"])
-
-    no_poll_cfg, no_poll_paths = _config(
+    np_cfg, np_paths = _config(
         tmp_path / "nopoll",
-        event_sources={"gh_org": gh_org},
+        event_sources={"gh": _gh_source(["org/owned"])},
         github_pr_polling_enabled=False,
     )
-    with tool_runtime_context(_tool_ctx(no_poll_cfg, no_poll_paths)):
-        blocked = json.loads(await tool.watch_pr(repo="matrix-org/synapse", number=42))
-        assert blocked["status"] == "error"
-        assert "polling is disabled" in blocked["message"].lower()
-        allowed = json.loads(await tool.watch_pr(repo="mindroom-ai/mindroom", number=10))
-        assert (allowed["status"], allowed["delivery_mode"]) == ("ok", "webhook")
+    with tool_runtime_context(_tool_ctx(np_cfg, np_paths)):
+        assert (await _watch(tool, repo="ext/repo", number=2))["status"] == "error"
+        assert (await _watch(tool, repo="org/owned", number=1))["delivery_mode"] == "webhook"
+
+    fake.calls.clear()
+
+    async def _unreadable(*_args: object) -> tuple[str | None, ghc.GitHubAuthMode]:
+        msg = "corrupt credentials.json"
+        raise CredentialsUnreadableError(msg)
+
+    monkeypatch.setattr(ghc, "resolve_owner_github_token", _unreadable)
+    with tool_runtime_context(_tool_ctx(np_cfg, np_paths)):
+        err = await _watch(tool, repo="org/owned", number=1, trigger_id="pr-unreadable")
+        assert (err["status"], "Unable to resolve GitHub credentials" in err["message"]) == ("error", True)
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
-async def test_webhook_seeding_skips_pr_get_on_unreadable_pat(
+async def test_webhook_nudge_end_to_end_concurrent_nudge_and_revocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unreadable PAT during webhook-only watch_pr fails closed without anonymous PR GET fallback."""
-    gh_org = _gh_source(["mindroom-ai/mindroom"])
-    config, paths = _config(tmp_path, event_sources={"gh_org": gh_org})
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(side_effect=CredentialsUnreadableError("corrupt PAT")),
-    )
-    get_mock = AsyncMock(side_effect=AssertionError("github_get_json must not be called"))
-    monkeypatch.setattr("mindroom.reactive_triggers.github_pr_poller.github_get_json", get_mock)
+    """Signed GitHub webhooks nudge matching watches, preserve concurrent nudges, and fail closed on revocation."""
+    fake = _FakeGitHub()
+    fake.seed_open("org/owned", 5, tag="w5")
+    http = _patch_github(monkeypatch, fake)
 
-    with tool_runtime_context(_tool_ctx(config, paths)):
-        res = json.loads(await TriggersTools().watch_pr(repo="mindroom-ai/mindroom", number=10, trigger_id="pr_badpat"))
-
-    assert (res["status"], res["delivery_mode"], res["head_sha"], res["pr_state"]) == ("ok", "webhook", None, "open")
-    assert any("could not be read" in note.lower() for note in res["coverage_notes"])
-    assert get_mock.await_count == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kind", "actor", "text", "sample_data", "expected"),
-    [
-        ("activity", "dep[bot]", "cov", None, False),
-        ("activity", "bob", "hi", {"number": 999}, False),
-        ("activity", "bob", "hi", {"repo": "other/repo"}, False),
-        ("ci", "actions[bot]", None, None, True),
-        ("check_run.created", "actions[bot]", None, {"conclusion": "failure"}, False),
-        ("check_run.completed", "actions[bot]", None, {"conclusion": "failure"}, True),
-        ("check_run.completed", "actions[bot]", None, {"conclusion": "cancelled"}, False),
-        ("check_run.completed", "actions[bot]", None, {"conclusion": "failure", "number": 999}, False),
-        ("check_run.completed", "actions[bot]", None, {"conclusion": "failure", "sha": "stale_sha"}, False),
-        ("check_suite.completed", "actions[bot]", None, {"conclusion": "success"}, False),
-        ("issue_comment.created", "bob", "LGTM", None, True),
-        ("issue_comment.created", "bob", "LGTM", {"number": 999}, False),
-        ("issue_comment.created", "bob", "LGTM", {"is_pull_request": False}, False),
-        ("pull_request.synchronize", "bob", None, {"head_sha": "sha_new"}, False),
-        ("pull_request.merged", "mergify[bot]", None, {"merged": True}, True),
-        ("github_pr.merged", "mergify[bot]", None, None, True),
-        ("github_pr.closed", "alice", None, None, True),
-    ],
-)
-async def test_triggers_management_and_accurate_dry_run_for_github_pr(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    kind: str,
-    actor: str | None,
-    text: str | None,
-    sample_data: dict[str, Any] | None,
-    expected: bool,
-) -> None:
-    """triggers(action='test') dry-run matches live github_pr rules for webhook kinds, numbers, SHAs, and categories."""
-    config, paths = _config(tmp_path)
-    _patch_github_http(monkeypatch, _watch_pr_routes())
-    tool = TriggersTools()
-
-    with tool_runtime_context(_tool_ctx(config, paths)):
-        created = json.loads(
-            await tool.watch_pr(repo="matrix-org/synapse", number=42, ignore_actors=["Alice"], trigger_id="pr_42"),
-        )
-        assert created["status"] == "ok"
-        if kind == "activity" and actor == "dep[bot]":
-            listed = json.loads(await tool.triggers(action="list"))
-            assert [t["trigger_id"] for t in listed["reactive_triggers"]] == ["pr_42"]
-            updated = json.loads(
-                await tool.triggers(action="update", trigger_id="pr_42", prompt="New prompt", reopen_on_fire=False),
-            )
-            assert (updated["trigger"]["target"]["prompt"], updated["trigger"]["target"]["reopen_on_fire"]) == (
-                "New prompt",
-                False,
-            )
-            assert json.loads(await tool.triggers(action="history", trigger_id="pr_42"))["status"] == "ok"
-
-        res = json.loads(
-            await tool.triggers(
-                action="test",
-                trigger_id="pr_42",
-                kind=kind,
-                actor=actor,
-                text=text,
-                sample_data=sample_data,
-            ),
-        )
-        assert res["status"] == "ok"
-        assert res["matched"] is expected
-        assert res["would_fire"] is expected
-
-
-@pytest.mark.asyncio
-async def test_webhook_activity_reviews_and_terminal_disable(tmp_path: Path) -> None:
-    """Webhook fan-out filters comments/bots/review wrappers, tracks head_sha, and disables unsubscribed closes."""
-    gh = _gh_source(["mindroom-ai/mindroom", "mindroom-ai/other"])
-    config, paths = _config(tmp_path, event_sources={"gh": gh})
+    src_cfg = _gh_source(["org/owned", "org/other"])
+    cfg, paths = _config(tmp_path, event_sources={"gh": src_cfg})
     store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_10", ignore_actors=["MutedUser"])
-    _seeded_rule(store, "pr_other", repo="mindroom-ai/other", head_sha="sha_v2")
-    _seeded_rule(store, "pr_act_only", number=11, events=["activity"], head_sha="sha11")
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        assert (await _watch(TriggersTools(), repo="org/owned", number=5, trigger_id="pr-wh-5"))[
+            "delivery_mode"
+        ] == "webhook"
 
-    def send(ev: str, did: str, payload: dict[str, Any]) -> int:
-        return _send_webhook(store, config, paths, source=gh, gh_event=ev, delivery_id=did, payload=payload)
-
-    assert send("issue_comment", "d1", _gh_payload("issue_comment", body="LGTM!")) == 1
-    assert send("issue_comment", "d2", _gh_payload("issue_comment", is_pr=False)) == 0
-    assert send("issue_comment", "d3", _gh_payload("issue_comment", actor="codecov[bot]", actor_type="Bot")) == 0
-    assert send("issue_comment", "d4", _gh_payload("issue_comment", actor="muteduser")) == 0
-    assert send("pull_request_review", "d5", _gh_payload("pull_request_review", state="commented", body="")) == 0
-    assert send("pull_request_review", "d6", _gh_payload("pull_request_review", state="approved", body="")) == 1
-    assert send("pull_request_review_comment", "d7", _gh_payload("pull_request_review_comment", body="nit")) == 1
-    assert send("pull_request", "d8", _gh_payload("pull_request", action="synchronize", sha="sha_v2")) == 0
-    cp = store.get_github_pr_checkpoint("pr_10")
-    assert cp is not None
-    assert cp.head_sha == "sha_v2"
-    close_payload = _gh_payload(
-        "pull_request",
-        action="closed",
-        actor="mergify[bot]",
-        actor_type="Bot",
-        merged=True,
-        sha="sha_v2",
-    )
-    assert send("pull_request", "d9", close_payload) == 1
-    latest = store.list_firings(trigger_id="pr_10", limit=1)[0]
-    assert (latest.event.kind, latest.event.data["terminal"], latest.event.data["github_event"]) == (
-        "github_pr.merged",
-        True,
-        "pull_request",
-    )
-    assert store.list_firings(trigger_id="pr_other") == []
-
-    # Unsubscribed terminal close disables immediately; review wrapper without inline event fires
-    unsub_close = _gh_payload("pull_request", number=11, action="closed", merged=False, sha="sha11")
-    assert send("pull_request", "d10", unsub_close) == 0
-    disabled = store.get_trigger("pr_act_only")
-    assert disabled is not None
-    assert (disabled.enabled, disabled.disabled_reason) == (False, "pr_closed")
-
-    gh_no_inline = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "pull_request_review"])
-    _seeded_rule(store, "pr_wrap", number=20, webhook_source_id="gh_ni", head_sha="sha20")
-    cfg_ni, _ = _config(tmp_path, event_sources={"gh_ni": gh_no_inline})
-    assert (
-        _send_webhook(
-            store,
-            cfg_ni,
-            paths,
-            source_id="gh_ni",
-            source=gh_no_inline,
-            gh_event="pull_request_review",
-            delivery_id="d_wrap",
-            payload=_gh_payload("pull_request_review", number=20, state="commented", body=""),
+    for tid, owner, enabled in (("pr-dis", _OWNER, False), ("pr-unauth", _OTHER, True)):
+        rec = ReactiveTriggerRecord(
+            trigger_id=tid,
+            owner_user_id=owner,
+            enabled=enabled,
+            source=GitHubPRSourceSpec(repo="org/owned", number=9, webhook_source_id="gh"),
+            target=TriggerTargetSpec(agent="dev", room_id=_ROOM, prompt="Watch"),
+            created_at=1000.0,
+            updated_at=1000.0,
         )
-        == 1
-    )
+        store.create_trigger(rec, initial_github_pr_checkpoint=GitHubPRCheckpoint(seeded=True, updated_at=1000.0))
 
+    assert _deliver_gh(src_cfg, cfg, paths, store, "ping", "org/owned", "d-ping", 2000.0) == ([], 0)
+    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/other", "d-other", 2001.0) == ([], 0)
 
-@pytest.mark.asyncio
-async def test_webhook_ci_stale_sha_cancelled_dedup_and_no_per_suite_all_green(tmp_path: Path) -> None:
-    """Webhook CI rejects stale SHAs and cancelled runs, avoids duplicate check_suite failures, and never emits ci_passing."""
-    gh_both = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "check_run", "check_suite"])
-    gh_suite_only = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "check_suite"])
-    config, paths = _config(tmp_path, event_sources={"gh": gh_both, "gh_suite": gh_suite_only})
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_10", webhook_source_id="gh", head_sha="sha_v2")
-    _seeded_rule(store, "pr_no_sha", number=12, webhook_source_id="gh", head_sha=None)
-    _seeded_rule(store, "pr_suite", number=13, webhook_source_id="gh_suite", head_sha="sha_s")
+    fake.set_json("/repos/org/owned/issues/5/timeline?per_page=100&page=1", [_cmt(50, "LGTM!")], etag='"w5t-2"')
+    assert _deliver_gh(src_cfg, cfg, paths, store, "pull_request", "org/owned", "d-hit1", 2010.0) == (["pr-wh-5"], 1)
 
-    def send(
-        ev: str,
-        did: str,
-        *,
-        source_id: str = "gh",
-        source: GitHubEventSourceConfig = gh_both,
-        sha: str = "sha_v1",
-        conclusion: str = "failure",
-        pr_numbers: list[int] | None = None,
-    ) -> int:
-        payload = _gh_payload(
-            ev,
-            action="completed",
-            actor="actions[bot]",
-            actor_type="Bot",
-            sha=sha,
-            conclusion=conclusion,
-            pr_numbers=pr_numbers,
-        )
-        return _send_webhook(
-            store,
-            config,
-            paths,
-            source_id=source_id,
-            source=source,
-            gh_event=ev,
-            delivery_id=did,
-            payload=payload,
-        )
+    nudged = False
 
-    # Stale SHA rejected even when pr_numbers includes 10; number matching still works when head_sha is None
-    assert send("check_run", "c_stale_cr", sha="sha_v1", pr_numbers=[10], conclusion="failure") == 0
-    assert (
-        send("check_suite", "c_stale_cs", source_id="gh_suite", source=gh_suite_only, sha="old", pr_numbers=[13]) == 0
-    )
-    assert send("check_run", "c_no_sha", sha="any_sha", pr_numbers=[12], conclusion="failure") == 1
+    async def _inject_nudge(path: str) -> None:
+        nonlocal nudged
+        if not nudged and "/timeline" in path:
+            nudged = True
+            store.nudge_github_pr_checkpoints(["pr-wh-5"], now=2015.0)
 
-    # Fork PR current SHA fires on failure; cancelled ignored; no duplicate check_suite failure when check_run allowed
-    assert send("check_run", "c_fork_fail", sha="sha_v2", pr_numbers=[], conclusion="failure") == 1
-    assert send("check_run", "c_cancelled", sha="sha_v2", pr_numbers=[10], conclusion="cancelled") == 0
-    assert send("check_suite", "c_dup_fail", sha="sha_v2", pr_numbers=[10], conclusion="failure") == 0
-    assert send("check_suite", "c_green", sha="sha_v2", pr_numbers=[10], conclusion="success") == 0
+    fake.on_request = _inject_nudge
+    active_cfg = cfg
+    poller = GitHubPRPoller(store=store, config_provider=lambda: active_cfg, runtime_paths=paths, client=http)
+    assert await poller.poll_due_once(now=2010.0) == 1
+    firings = store.list_firings(trigger_id="pr-wh-5")
+    assert [f.event.summary for f in firings] == ["Comment by alice: LGTM!"]
+    assert _cp(store, "pr-wh-5").next_poll_at == 2015.0
 
-    # check_suite-only source fires on failure, ignores cancelled and success (no per-suite ci_passing)
-    assert send("check_suite", "cs_fail", source_id="gh_suite", source=gh_suite_only, sha="sha_s", pr_numbers=[13]) == 1
-    assert (
-        send(
-            "check_suite",
-            "cs_cancel",
-            source_id="gh_suite",
-            source=gh_suite_only,
-            sha="sha_s",
-            pr_numbers=[13],
-            conclusion="cancelled",
-        )
-        == 0
-    )
-    assert (
-        send(
-            "check_suite",
-            "cs_ok",
-            source_id="gh_suite",
-            source=gh_suite_only,
-            sha="sha_s",
-            pr_numbers=[13],
-            conclusion="success",
-        )
-        == 0
-    )
+    fake.on_request = None
+    assert await poller.poll_due_once(now=2015.0) == 0
+    assert _cp(store, "pr-wh-5").next_poll_at is None
+    assert store.list_due_github_pr_triggers(now=time.time() + 1_000) == []
 
-
-@pytest.mark.asyncio
-async def test_webhook_allowed_events_and_subscriber_revocation(tmp_path: Path) -> None:
-    """Revoking allowed_events blocks queued dispatch and hides history; subscriber/source revocation fails closed."""
-    gh = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "issue_comment", "pull_request_review"])
-    config, paths = _config(tmp_path, event_sources={"gh": gh})
-    store = ReactiveTriggerStore(paths)
-    rule = _seeded_rule(store, "pr_10")
-
-    assert (
-        _send_webhook(
-            store,
-            config,
-            paths,
-            source=gh,
-            gh_event="issue_comment",
-            delivery_id="d_c",
-            payload=_gh_payload("issue_comment"),
-        )
-        == 1
-    )
-    assert (
-        _send_webhook(
-            store,
-            config,
-            paths,
-            source=gh,
-            gh_event="pull_request_review",
-            delivery_id="d_r",
-            payload=_gh_payload("pull_request_review", state="approved", body="ship it"),
-        )
-        == 1
-    )
-    firings = {f.dedupe_key: f for f in store.list_firings(trigger_id="pr_10")}
-
-    # Revoke issue_comment from allowed_events while keeping pull_request_review
-    gh_no_comment = gh.model_copy(update={"allowed_events": ["pull_request", "pull_request_review"]})
-    cfg_no_comment, _ = _config(tmp_path, event_sources={"gh": gh_no_comment})
-    blocked = await check_reactive_source_access(
-        rule=rule,
-        event=firings["d_c"].event,
-        source_bot=None,
-        config=cfg_no_comment,
-        runtime_paths=paths,
-        memberships=AgentReplyMembershipIndex(),
-    )
-    assert blocked is not None
-    assert (blocked.status, blocked.reason) == ("skipped", "source_grant_revoked")
-    assert (
-        await check_reactive_source_access(
-            rule=rule,
-            event=firings["d_r"].event,
+    for expected, sources in (
+        ("source_grant_revoked", {"gh": _gh_source(["org/other"])}),
+        ("source_subscriber_revoked", {"gh": _gh_source(["org/owned"], subscribers=[_OTHER])}),
+        ("source_removed", {}),
+    ):
+        store.nudge_github_pr_checkpoints(["pr-wh-5"], now=2020.0)
+        active_cfg, _ = _config(tmp_path, event_sources=sources)
+        rev_cfg = active_cfg
+        fake.calls.clear()
+        assert await poller.poll_due_once(now=2020.0) == 0
+        assert fake.calls == []
+        assert _cp(store, "pr-wh-5").next_poll_at is None
+        access = await check_reactive_source_access(
+            rule=_rule(store, "pr-wh-5"),
+            event=firings[0].event,
             source_bot=None,
-            config=cfg_no_comment,
+            config=rev_cfg,
             runtime_paths=paths,
             memberships=AgentReplyMembershipIndex(),
         )
-        is None
-    )
-    with tool_runtime_context(_tool_ctx(cfg_no_comment, paths)):
-        hist = json.loads(await TriggersTools().triggers(action="history", trigger_id="pr_10"))
-    assert hist["status"] == "ok"
-    assert [f["dedupe_key"] for f in hist["firings"]] == ["d_r"]
-
-    # Revoke subscriber -> fan-out blocked, dispatch skipped, never falls back to polling
-    gh_no_sub = gh.model_copy(update={"subscribers": []})
-    cfg_no_sub, _ = _config(tmp_path, event_sources={"gh": gh_no_sub})
-    assert (
-        _send_webhook(
-            store,
-            cfg_no_sub,
-            paths,
-            source=gh_no_sub,
-            gh_event="issue_comment",
-            delivery_id="d_after",
-            payload=_gh_payload("issue_comment"),
-        )
-        == 0
-    )
-    sub_blocked = await check_reactive_source_access(
-        rule=rule,
-        event=firings["d_r"].event,
-        source_bot=None,
-        config=cfg_no_sub,
-        runtime_paths=paths,
-        memberships=AgentReplyMembershipIndex(),
-    )
-    assert sub_blocked is not None
-    assert (sub_blocked.status, sub_blocked.reason) == ("skipped", "source_subscriber_revoked")
-    assert store.list_due_github_pr_triggers(now=9_999_999.0) == []
-
-    # Removed source denies history
-    cfg_removed, _ = _config(tmp_path, event_sources={})
-    with tool_runtime_context(_tool_ctx(cfg_removed, paths)):
-        denied = json.loads(await TriggersTools().triggers(action="history", trigger_id="pr_10"))
-    assert denied["status"] == "error"
-    assert "no longer have access" in denied["message"]
+        assert access is not None
+        assert (access.status, access.reason) == ("skipped", expected)
 
 
-def test_terminal_pr_close_auto_disables_on_skip_and_triage_no_not_retry(tmp_path: Path) -> None:
-    """Busy webhook watch auto-disables on terminal mark_skipped, rate-limited claim, and mark_triaged_no, not defer."""
-    _, paths = _config(tmp_path)
+@pytest.mark.asyncio
+async def test_poller_etag_304_timeline_pagination_and_grouped_review_comments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seeding jumps directly to rel='last', 304 PR still polls collections, and timeline/review pagination advances cleanly."""
+    fake = _FakeGitHub()
+    tl = "/repos/ext/repo/issues/10/timeline?per_page=100&page="
+    rc1 = "/repos/ext/repo/pulls/10/comments?sort=created&direction=desc&per_page=100"
+    rc2 = f"{rc1}&page=2"
+    fake.set_json("/repos/ext/repo/pulls/10", _pr("ext/repo", 10), etag='"pr10"')
+    fake.set_json(f"{tl}1", [_cmt(1, "old")], last_path=f"{tl}10")
+    fake.set_json(f"{tl}10", [_cmt(100, "seed tail")], etag='"tl10"')
+    fake.set_json(rc1, [_rc(500, None, "a.py", "old inline", "bob")], etag='"rc1"')
+    http = _patch_github(monkeypatch, fake)
+
+    cfg, paths = _config(tmp_path)
     store = ReactiveTriggerStore(paths)
-
-    def _terminal_event(did: str) -> TriggerEvent:
-        return TriggerEvent(
-            source_type="github_pr",
-            source_id="mindroom-ai/mindroom",
-            kind="github_pr.merged",
-            event_id=did,
-            timestamp=1100.0,
-            data={"repo": "mindroom-ai/mindroom", "number": 10, "terminal": True},
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        created = await _watch(
+            TriggersTools(),
+            repo="ext/repo",
+            number=10,
+            events=["activity"],
+            ignore_actors=["muted"],
+            ignore_bots=True,
+            trigger_id="pr-10",
         )
+        assert created["status"] == "ok"
 
-    # 1. defer_pending_firing must NOT disable prematurely; mark_skipped DOES disable atomically
-    _seeded_rule(store, "pr_skip")
-    assert store.enqueue_firing("pr_skip", "d_term_skip", _terminal_event("d_term_skip"))
-    fid_skip = store.list_firings(trigger_id="pr_skip")[0].id
-    assert store.defer_pending_firing(fid_skip, "target_bot_unavailable", now=1101.0) == "retrying"
-    still_on = store.get_trigger("pr_skip")
-    assert still_on is not None
-    assert still_on.enabled is True
+    assert [p for p, _, _ in fake.calls if "/timeline" in p] == [f"{tl}1", f"{tl}10"]
+    assert store.list_firings(trigger_id="pr-10") == []
 
-    assert store.mark_skipped(fid_skip, "rate_limited", now=1102.0) is True
-    after_skip = store.get_trigger("pr_skip")
-    assert after_skip is not None
-    assert (after_skip.enabled, after_skip.disabled_reason) == (False, "pr_closed")
-
-    # 2. mark_triaged_no on terminal firing disables with pr_closed
-    _seeded_rule(store, "pr_triage")
-    assert store.enqueue_firing("pr_triage", "d_term_tr", _terminal_event("d_term_tr"))
-    fid_tr = store.list_firings(trigger_id="pr_triage")[0].id
-    assert store.mark_triaged_no(fid_tr, "not actionable") is True
-    after_tr = store.get_trigger("pr_triage")
-    assert after_tr is not None
-    assert (after_tr.enabled, after_tr.disabled_reason) == (False, "pr_closed")
-
-    # 3. claim_firing blocked by rate limit still disables terminal watch
-    _seeded_rule(store, "pr_rl", max_fires_per_hour=1)
-    normal_ev = TriggerEvent(
-        source_type="github_pr",
-        source_id="mindroom-ai/mindroom",
-        kind="github_pr.update",
-        event_id="d_norm",
-        timestamp=1100.0,
-        data={"repo": "mindroom-ai/mindroom", "number": 10, "terminal": False},
-    )
-    assert store.enqueue_firing("pr_rl", "d_norm", normal_ev)
-    assert store.claim_firing(store.list_firings(trigger_id="pr_rl")[0].id, now=1100.0) == "claimed"
-    assert store.enqueue_firing("pr_rl", "d_merge", _terminal_event("d_merge"))
-    fid_merge = store.list_firings(trigger_id="pr_rl", limit=1)[0].id
-    assert store.claim_firing(fid_merge, now=1105.0) == "rate_limited"
-    after_rl = store.get_trigger("pr_rl")
-    assert after_rl is not None
-    assert (after_rl.enabled, after_rl.disabled_reason) == (False, "pr_closed")
-
-
-def _synapse_timeline_response(step: int, page: int) -> httpx.Response:
-    if step == 1 and page == 1:
-        entries = [{"id": i, "event": "commented", "user": {"login": "old"}, "body": "old"} for i in range(1, 101)]
-        link = '<https://api.github.com/repos/matrix-org/synapse/issues/42/timeline?per_page=100&page=2>; rel="next"'
-        return httpx.Response(200, json=entries, headers={"ETag": '"tl-p1-full"', "Link": link})
-    if step == 1:
-        return httpx.Response(
-            200,
-            json=[
-                {"id": 101, "event": "commented", "user": {"login": "reviewer", "type": "User"}, "body": "Fix"},
-                {"id": 102, "event": "commented", "user": {"login": "bot[bot]", "type": "Bot"}, "body": "bot"},
-                {"id": 103, "event": "commented", "user": {"login": "quiethuman", "type": "User"}, "body": "no"},
-                {"id": 104, "event": "committed", "actor": {"login": "reviewer"}},
-            ],
-            headers={"ETag": '"tl-p2"'},
-        )
-    return httpx.Response(304, headers={"ETag": '"tl-p2"'})
-
-
-def _synapse_check_runs_response(path: str, step: int) -> httpx.Response:
-    if path.endswith("/sha_b/check-runs"):
-        return httpx.Response(
-            200,
-            json={"check_runs": [{"id": 3, "name": "pytest", "status": "completed", "conclusion": "success"}]},
-        )
-    runs_by_step = {
-        1: [
-            {"id": 1, "name": "pytest", "status": "completed", "conclusion": "failure"},
-            {"id": 2, "name": "lint", "status": "in_progress"},
-            {"id": 9, "name": "old_job", "status": "completed", "conclusion": "cancelled"},
-        ],
-        2: [
-            {"id": 1, "name": "pytest", "status": "completed", "conclusion": "failure"},
-            {"id": 2, "name": "lint", "status": "completed", "conclusion": "success"},
-        ],
-    }
-    default_runs = [
-        {"id": 1, "name": "pytest", "status": "completed", "conclusion": "success"},
-        {"id": 2, "name": "lint", "status": "completed", "conclusion": "success"},
+    tl10 = [
+        _cmt(100, "seed tail"),
+        _cmt(101, "bot", "ci[bot]", user_type="Bot"),
+        _cmt(102, "muted", "muted"),
+        {"id": 103, "event": "reviewed", "state": "approved", "body": "Ship it", "user": {"login": "alice"}},
     ]
-    return httpx.Response(
-        200,
-        json={"check_runs": runs_by_step.get(step, default_runs)},
-        headers={"ETag": f'"ci-{step}"'},
+    fake.set_json(f"{tl}10", tl10, etag='"tl10-new"', next_path=f"{tl}11")
+    fake.set_json(
+        f"{tl}11",
+        [{"id": 104, "event": "labeled", "label": {"name": "ready"}, "actor": {"login": "alice"}}],
+        next_path=f"{tl}12",
     )
+    fake.set_json(f"{tl}12", [_cmt(105, "page 12", "carol")], next_path=f"{tl}13")
+    fake.set_json(f"{tl}13", [_cmt(106, "page 13", "dave")], etag='"tl13"')
+    fake.set_json(rc1, [_rc(503, 77, "b.py", "Second"), _rc(502, 77, "a.py", "First")], etag='"rc-new"', next_path=rc2)
+    fake.set_json(rc2, [_rc(501, None, "c.py", "Solo", "erin"), _rc(500, None, "a.py", "old inline", "bob")])
+
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    t0 = time.time() + 1_000
+    assert await poller.poll_due_once(now=t0) == 1
+    items = store.list_firings(trigger_id="pr-10")[0].event.data["items"]
+    assert [it["type"] for it in items] == ["review", "labeled", "comment", "review_comment", "review_comments"]
+    grouped = next(it for it in items if it["type"] == "review_comments")
+    assert (grouped["count"], [c["id"] for c in grouped["comments"]]) == (2, [502, 503])
+    assert (_cp(store, "pr-10").state["timeline_page"], _cp(store, "pr-10").state["timeline_etag"]) == (13, None)
+
+    assert await poller.poll_due_once(now=t0 + 10_000) == 1
+    assert any(f.event.summary == "Comment by dave: page 13" for f in store.list_firings(trigger_id="pr-10"))
+    assert (_cp(store, "pr-10").state["timeline_page"], _cp(store, "pr-10").state["timeline_etag"]) == (13, '"tl13"')
 
 
 @pytest.mark.asyncio
-async def test_etag_poller_pagination_review_comments_and_ci_transitions(
+async def test_poller_ci_check_runs_transitions_cancelled_truncation_and_sha_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR 304 polls timeline + single-page desc comments + CI; cancelled ignored; SHA resets CI."""
-    config, paths = _config(tmp_path)
+    """CI check-runs fail fast, keep cancelled silent, suppress truncated all-green, emit all-green once, and reset on new SHA."""
+    fake = _FakeGitHub()
+    fake.seed_open("ext/repo", 20, sha="shaA", tag="c20")
+    http = _patch_github(monkeypatch, fake)
+
+    cfg, paths = _config(tmp_path)
     store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_ext",
-        repo="matrix-org/synapse",
-        number=42,
-        events=["activity", "ci"],
-        webhook_source_id=None,
-        ignore_actors=["quiethuman"],
-        head_sha="sha_a",
-        state={
-            "pr_etag": '"pr-1"',
-            "pr_title": "Synapse fix",
-            "timeline_page": 1,
-            "timeline_etag": '"tl-p1"',
-            "seen_timeline_ids": [f"commented:{i}" for i in range(1, 101)],
-            "max_review_comment_id": 10,
-            "review_comments_etag": '"rc-0"',
-            "ci_head_sha": "sha_a",
-            "checks_etag": '"ci-a"',
-            "notified_failed_checks": [],
-            "last_ci_overall": "pending",
-        },
-    )
-    phase = {"step": 1}
-    rc_queries: list[str] = []
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        assert (await _watch(TriggersTools(), repo="ext/repo", number=20, events=["ci"], trigger_id="pr-ci"))[
+            "status"
+        ] == "ok"
 
-    def handler(req: httpx.Request) -> httpx.Response:
-        path, step = req.url.path, phase["step"]
-        if path == "/repos/matrix-org/synapse/pulls/42":
-            if step in {1, 2, 3}:
-                assert req.headers.get("if-none-match") == '"pr-1"'
-                return httpx.Response(304, headers={"ETag": '"pr-1"'})
-            return httpx.Response(
-                200,
-                json={"state": "open", "merged": False, "head": {"sha": "sha_b"}, "title": "Synapse fix"},
-                headers={"ETag": f'"pr-{step}"'},
-            )
-        if path == "/repos/matrix-org/synapse/issues/42/timeline":
-            return _synapse_timeline_response(step, int(req.url.params.get("page", "1")))
-        if path == "/repos/matrix-org/synapse/pulls/42/comments":
-            rc_queries.append(req.url.query.decode())
-            if step == 1:
-                comments = [
-                    {
-                        "id": 13,
-                        "pull_request_review_id": 78,
-                        "path": "c.py",
-                        "body": "bot",
-                        "user": {"login": "l", "type": "Bot"},
-                    },
-                    {
-                        "id": 12,
-                        "pull_request_review_id": 77,
-                        "path": "b.py",
-                        "body": "c2",
-                        "user": {"login": "reviewer", "type": "User"},
-                    },
-                    {
-                        "id": 11,
-                        "pull_request_review_id": 77,
-                        "path": "a.py",
-                        "body": "c1",
-                        "user": {"login": "reviewer", "type": "User"},
-                    },
-                ]
-                return httpx.Response(200, json=comments, headers={"ETag": '"rc-1"'})
-            return httpx.Response(304, headers={"ETag": '"rc-1"'})
-        return _synapse_check_runs_response(path, step)
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    t0 = time.time() + 1_000
+    c_a = "/repos/ext/repo/commits/shaA/check-runs?per_page=100&page="
+    runs_a1 = [
+        _chk(1, "pytest", "failure"),
+        _chk(2, "cancel", "cancelled"),
+        _chk(3, "lint", None, status="in_progress"),
+    ]
+    fake.set_json(f"{c_a}1", {"check_runs": runs_a1}, etag='"k1"')
+    assert await poller.poll_due_once(now=t0) == 1
+    assert [it["type"] for it in store.list_firings(trigger_id="pr-ci")[0].event.data["items"]] == ["ci_failure"]
+    runs_a2 = [_chk(1, "pytest", "failure"), _chk(2, "cancel", "cancelled"), _chk(3, "lint", "success")]
+    fake.set_json(f"{c_a}1", {"check_runs": runs_a2}, etag='"k2"')
+    assert await poller.poll_due_once(now=t0 + 10_000) == 0
 
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
+    fake.set_json("/repos/ext/repo/pulls/20", _pr("ext/repo", 20, sha="shaB"), etag='"pB"')
+    c_b = "/repos/ext/repo/commits/shaB/check-runs?per_page=100&page="
+    for idx in (1, 2, 3):
+        fake.set_json(f"{c_b}{idx}", {"check_runs": [_chk(idx, f"ok-{idx}", "success")]}, next_path=f"{c_b}{idx + 1}")
+    assert await poller.poll_due_once(now=t0 + 20_000) == 0
+    fake.set_json(f"{c_b}2", {"check_runs": [_chk(22, "build", "timed_out")]}, next_path=f"{c_b}3")
+    assert await poller.poll_due_once(now=t0 + 30_000) == 1
+    assert store.list_firings(trigger_id="pr-ci")[0].event.data["items"][0]["conclusion"] == "timed_out"
 
-    # Step 1: PR 304 + page-2 comment + grouped desc review comments (reversed to chronological) + fail-fast (not cancelled)
-    assert await poller.poll_due_once(now=1100.0) == 1
-    assert rc_queries[0] == "sort=created&direction=desc&per_page=100"
-    items = store.list_firings(trigger_id="pr_ext")[0].event.data["items"]
-    assert [it["type"] for it in items] == ["comment", "review_comments", "ci_failure"]
-    assert [c["id"] for c in items[1]["comments"]] == [11, 12]
-    cp_after_step1 = store.get_github_pr_checkpoint("pr_ext")
-    assert cp_after_step1 is not None
-    assert "checks_by_id" not in cp_after_step1.state
-
-    # Step 2: unchanged failure across fresh poller -> 0; Step 3: all green -> 1 then 0; Step 4: sha_b -> 1
-    phase["step"] = 2
-    poller2 = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-    assert await poller2.poll_due_once(now=1300.0) == 0
-    phase["step"] = 3
-    assert await poller2.poll_due_once(now=1500.0) == 1
-    assert store.list_firings(trigger_id="pr_ext", limit=1)[0].event.data["items"][0]["type"] == "ci_passing"
-    assert await poller2.poll_due_once(now=1700.0) == 0
-    phase["step"] = 4
-    assert await poller2.poll_due_once(now=1900.0) == 1
-    assert store.list_firings(trigger_id="pr_ext", limit=1)[0].event.data["head_sha"] == "sha_b"
+    fake.set_json("/repos/ext/repo/pulls/20", _pr("ext/repo", 20, sha="shaC"), etag='"pC"')
+    c_c = "/repos/ext/repo/commits/shaC/check-runs?per_page=100&page=1"
+    fake.set_json(c_c, {"check_runs": [_chk(31, "unit", "success"), _chk(32, "opt", "cancelled")]}, etag='"kC1"')
+    assert await poller.poll_due_once(now=t0 + 40_000) == 0
+    fake.set_json(c_c, {"check_runs": [_chk(31, "unit", "success"), _chk(32, "opt", "skipped")]}, etag='"kC2"')
+    assert await poller.poll_due_once(now=t0 + 50_000) == 1
+    assert store.list_firings(trigger_id="pr-ci")[0].event.data["items"][0]["type"] == "ci_passing"
+    assert await poller.poll_due_once(now=t0 + 60_000) == 0
 
 
 @pytest.mark.asyncio
-async def test_poller_disable_reenable_reseeds_silently(
+async def test_poller_rate_limit_buckets_adaptive_backoff_and_unreadable_pat(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Disabling and re-enabling a polled PR watch resets seeded=False so the next poll reseeds silently."""
-    config, paths = _config(tmp_path)
+    """Rate limits pause only the affected bucket, low remaining doubles delay, and unreadable PATs fail closed."""
+    fake = _FakeGitHub()
+    fake.set_json("/repos/ext/r1/pulls/1", {}, status=429, headers={"Retry-After": "180"})
+    fake.set_json("/repos/ext/r2/pulls/2", _pr("ext/r2", 2), headers={"x-ratelimit-remaining": "5"})
+    fake.set_json("/repos/ext/r2/issues/2/timeline?per_page=100&page=1", [])
+    fake.set_json("/repos/ext/r2/pulls/2/comments?sort=created&direction=desc&per_page=100", [])
+
+    async def _tok(owner: str, _cfg: Config, _paths: RuntimePaths) -> tuple[str | None, ghc.GitHubAuthMode]:
+        if owner == "@broken:example.org":
+            msg = "bad creds"
+            raise CredentialsUnreadableError(msg)
+        return ("tok1", "token") if owner == _OWNER else (None, "anonymous")
+
+    http = _patch_github(monkeypatch, fake, token_fn=_tok)
+    cfg, paths = _config(tmp_path)
     store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_reseed",
-        repo="matrix-org/synapse",
-        number=42,
-        events=["activity"],
-        webhook_source_id=None,
-        head_sha="sha_b",
-    )
-    phase = {"step": 1}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        path, step = req.url.path, phase["step"]
-        if path == "/repos/matrix-org/synapse/pulls/42":
-            return httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": "sha_b"}})
-        if path == "/repos/matrix-org/synapse/issues/42/timeline":
-            entries = [{"id": 200, "event": "commented", "user": {"login": "reviewer"}, "body": "paused"}]
-            if step == 2:
-                entries.append({"id": 201, "event": "commented", "user": {"login": "reviewer"}, "body": "resumed"})
-            return httpx.Response(200, json=entries, headers={"ETag": f'"tl-{step}"'})
-        if step == 1:
-            return httpx.Response(200, json=[{"id": 20, "user": {"login": "reviewer"}, "body": "paused inline"}])
-        return httpx.Response(304)
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-
-    set_trigger_enabled_sync(
-        paths,
-        config,
-        "pr_reseed",
-        enabled=False,
-        actor_user_id=_OWNER,
-        authorize_reactive=lambda _r: None,
-    )
-    set_trigger_enabled_sync(
-        paths,
-        config,
-        "pr_reseed",
-        enabled=True,
-        actor_user_id=_OWNER,
-        authorize_reactive=lambda _r: None,
-    )
-    cp_paused = store.get_github_pr_checkpoint("pr_reseed")
-    assert cp_paused is not None
-    assert cp_paused.seeded is False
-
-    assert await poller.poll_due_once(now=cp_paused.next_poll_at + 1.0) == 0
-    cp_reseeded = store.get_github_pr_checkpoint("pr_reseed")
-    assert cp_reseeded is not None
-    assert cp_reseeded.seeded is True
-
-    phase["step"] = 2
-    assert await poller.poll_due_once(now=cp_reseeded.next_poll_at + 1.0) == 1
-    assert [it["id"] for it in store.list_firings(trigger_id="pr_reseed", limit=1)[0].event.data["items"]] == [201]
-
-
-@pytest.mark.asyncio
-async def test_poller_truncated_check_runs_suppresses_all_green_but_emits_failures(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Check-runs pagination capped at 3 pages suppresses false ci_passing while still emitting observed ci_failure."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_trunc", repo="org/big", number=5, events=["ci"], webhook_source_id=None, head_sha="sha5")
-    fail_page2 = {"fail": False}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/big/pulls/5":
-            return httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": "sha5"}})
-        page = int(req.url.params.get("page", "1"))
-        conc = "failure" if (page == 2 and fail_page2["fail"]) else "success"
-        headers = (
-            {
-                "Link": f'<https://api.github.com/repos/org/big/commits/sha5/check-runs?per_page=100&page={page + 1}>; rel="next"',
-            }
-            if page <= 3
-            else {}
+    base_cp = GitHubPRCheckpoint(head_sha="sha1", seeded=True, next_poll_at=1000.0, updated_at=900.0)
+    for tid, owner, repo, num in (
+        ("r-rl", _OWNER, "ext/r1", 1),
+        ("r-anon", _OTHER, "ext/r2", 2),
+        ("r-bad", "@broken:example.org", "ext/r3", 3),
+    ):
+        rec = ReactiveTriggerRecord(
+            trigger_id=tid,
+            owner_user_id=owner,
+            source=GitHubPRSourceSpec(repo=repo, number=num, events=["activity"], poll_interval_seconds=100),
+            target=TriggerTargetSpec(agent="dev", room_id=_ROOM, prompt="Watch"),
+            created_at=900.0,
+            updated_at=900.0,
         )
-        return httpx.Response(
-            200,
-            json={"check_runs": [{"id": page, "name": f"job-{page}", "status": "completed", "conclusion": conc}]},
-            headers=headers,
-        )
+        store.create_trigger(rec, initial_github_pr_checkpoint=base_cp)
 
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-
-    # All 3 fetched pages green, but page 4 still advertised -> truncated, MUST NOT emit ci_passing
-    assert await poller.poll_due_once(now=1100.0) == 0
-    cp = store.get_github_pr_checkpoint("pr_trunc")
-    assert cp is not None
-    assert cp.state["last_ci_overall"] == "pending"
-
-    # Failure observed on page 2 while still truncated -> fail-fast ci_failure fires, no ci_passing
-    fail_page2["fail"] = True
-    assert await poller.poll_due_once(now=cp.next_poll_at + 1.0) == 1
-    items = store.list_firings(trigger_id="pr_trunc", limit=1)[0].event.data["items"]
-    assert [it["type"] for it in items] == ["ci_failure"]
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    assert await poller.poll_due_once(now=1000.0) == 0
+    assert _cp(store, "r-rl").next_poll_at == 1180.0
+    anon_nxt = _cp(store, "r-anon").next_poll_at
+    assert anon_nxt is not None
+    assert anon_nxt >= 1180.0
+    assert (_cp(store, "r-bad").consecutive_errors, _cp(store, "r-bad").next_poll_at) == (1, 1200.0)
+    assert all("/ext/r3/" not in p for p, _, _ in fake.calls)
 
 
 @pytest.mark.asyncio
-async def test_poller_rate_limit_buckets_and_unreadable_pat_backoff(
+async def test_terminal_pr_close_lifecycle_reopen_thread_and_auto_disable_false(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """429 pauses the shared owner/token bucket, unreadable PAT backs off, and 403 isolates anonymous from authed."""
-    config, paths = _config(tmp_path)
+    """Terminal PR events survive retries, reopen resolved threads, auto-disable on settle, and honor auto_disable_on_close=False."""
+    fake = _FakeGitHub()
+    for n in (30, 31, 32, 33, 34):
+        fake.seed_open("ext/repo", n, tag=f"p{n}")
+    http = _patch_github(monkeypatch, fake)
+
+    cfg, paths = _config(tmp_path)
     store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_rl_1", repo="org/repo", number=1, webhook_source_id=None, head_sha="s1")
-    _seeded_rule(store, "pr_rl_2", repo="org/repo", number=2, webhook_source_id=None, head_sha="s2")
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        tools = TriggersTools()
+        for kwargs in (
+            {"number": 30, "events": ["merge"], "trigger_id": "pr-merge"},
+            {"number": 31, "events": ["activity"], "trigger_id": "pr-unsub"},
+            {"number": 32, "events": ["close"], "auto_disable_on_close": False, "trigger_id": "pr-keep"},
+            {"number": 33, "events": ["close"], "trigger_id": "pr-skip"},
+            {"number": 34, "events": ["close"], "trigger_id": "pr-exhaust"},
+        ):
+            assert (await _watch(tools, repo="ext/repo", **kwargs))["status"] == "ok"
 
-    # 1. 429 pauses the owner/token bucket for both rules after 1 request
-    calls: list[str] = []
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    fake.set_json("/repos/ext/repo/pulls/30", _pr("ext/repo", 30, merged=True), etag='"p30-m"')
+    for n in (31, 32, 33, 34):
+        fake.set_json(f"/repos/ext/repo/pulls/{n}", _pr("ext/repo", n, state="closed"), etag=f'"p{n}-c"')
+    t0 = time.time() + 1_000
+    assert await poller.poll_due_once(now=t0) == 4
 
-    def _rate_limit_handler(req: httpx.Request) -> httpx.Response:
-        calls.append(req.url.path)
-        return httpx.Response(429, headers={"Retry-After": "120"})
+    assert (_rule(store, "pr-unsub").enabled, _rule(store, "pr-unsub").disabled_reason) == (False, "pr_closed")
+    assert store.list_firings(trigger_id="pr-unsub") == []
+    assert store.mark_skipped(store.list_firings(trigger_id="pr-skip")[0].id, "triage_no", now=t0 + 1)
+    assert (_rule(store, "pr-skip").enabled, _rule(store, "pr-skip").disabled_reason) == (False, "pr_closed")
+    ex_id = store.list_firings(trigger_id="pr-exhaust")[0].id
+    assert store.defer_pending_firing(ex_id, "err", now=t0 + 1, max_attempts=2) == "retrying"
+    assert _rule(store, "pr-exhaust").enabled is True
+    assert store.defer_pending_firing(ex_id, "err", now=t0 + 2, max_attempts=2) == "failed"
+    assert (_rule(store, "pr-exhaust").enabled, _rule(store, "pr-exhaust").disabled_reason) == (False, "pr_closed")
 
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(_rate_limit_handler),
-        max_concurrency=1,
-    )
-    assert await poller.poll_due_once(now=2000.0) == 0
-    assert len(calls) == 1
-    for tid in ("pr_rl_1", "pr_rl_2"):
-        cp = store.get_github_pr_checkpoint(tid)
-        assert cp is not None
-        assert cp.next_poll_at == pytest.approx(2120.0)
+    keep_f = store.list_firings(trigger_id="pr-keep")[0]
+    assert store.claim_firing(keep_f.id, now=1.0) == "claimed"
+    assert store.mark_delivered(keep_f.id, "$k_del", now=2.0)
 
-    # 2. Unreadable PAT backs off with consecutive_errors incremented
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(side_effect=CredentialsUnreadableError("corrupt PAT")),
-    )
-    assert await poller.poll_due_once(now=2200.0) == 0
-    cp1_err = store.get_github_pr_checkpoint("pr_rl_1")
-    assert cp1_err is not None
-    assert cp1_err.consecutive_errors == 1
-    assert cp1_err.next_poll_at == pytest.approx(2320.0)
-
-    # 3. 403 pauses anonymous bucket only, leaving authenticated user unblocked
-    store.delete_trigger("pr_rl_1")
-    store.delete_trigger("pr_rl_2")
-    _seeded_rule(
-        store,
-        "pr_anon",
-        repo="ext/anon",
-        number=1,
-        events=["merge"],
-        webhook_source_id=None,
-        owner_user_id=_OWNER,
-    )
-    _seeded_rule(
-        store,
-        "pr_authed",
-        repo="ext/authed",
-        number=2,
-        events=["merge"],
-        webhook_source_id=None,
-        owner_user_id=_OTHER,
-    )
-
-    async def _token_by_owner(owner: str, _cfg: object, _rp: object) -> tuple[str | None, str]:
-        return (None, "anonymous") if owner == _OWNER else ("ghp_other", "token")
-
-    monkeypatch.setattr("mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token", _token_by_owner)
-    hit_paths: list[str] = []
-    poll_now = time.time()
-    reset_epoch = int(poll_now) + 300
-
-    def _bucket_handler(req: httpx.Request) -> httpx.Response:
-        hit_paths.append(req.url.path)
-        if req.url.path == "/repos/ext/anon/pulls/1":
-            return httpx.Response(403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(reset_epoch)})
-        return httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": "s"}})
-
-    bucket_poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(_bucket_handler),
-        max_concurrency=1,
-    )
-    assert await bucket_poller.poll_due_once(now=poll_now) == 0
-    assert hit_paths == ["/repos/ext/anon/pulls/1", "/repos/ext/authed/pulls/2"]
-    cp_anon = store.get_github_pr_checkpoint("pr_anon")
-    assert cp_anon is not None
-    assert cp_anon.next_poll_at >= poll_now + 250.0
-
-
-@pytest.mark.asyncio
-async def test_poller_terminal_merge_survives_retry_reopens_thread_and_respects_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Terminal merge survives pr_closed across transient Matrix failure + retry, reopens thread, and respects policy."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_merge", repo="org/repo", number=1, webhook_source_id=None, head_sha="s1")
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    merge_poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(
-            lambda req: (
-                httpx.Response(
-                    200,
-                    json={"state": "closed", "merged": True, "head": {"sha": "s1"}, "title": "Merged PR"},
-                    headers={"X-RateLimit-Remaining": "50"},
-                )
-                if req.url.path == "/repos/org/repo/pulls/1"
-                else httpx.Response(200, json=[])
-            ),
-        ),
-    )
-    assert await merge_poller.poll_due_once(now=3000.0) == 1
-    cp_merged = store.get_github_pr_checkpoint("pr_merge")
-    assert cp_merged is not None
-    assert 3100.0 <= cp_merged.next_poll_at <= 3140.0
-
-    client = _room_client(resolved_thread=True)
-    bot = SimpleNamespace(
-        running=True,
-        client=client,
-        agent_name="dev",
-        conversation_reader=SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest")),
-    )
+    room_cli = _room_client(resolved_thread=True)
+    reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest"))
+    bot = SimpleNamespace(running=True, client=room_cli, agent_name="dev", conversation_reader=reader)
     send_mock = AsyncMock(side_effect=[None, DeliveredMatrixEvent(event_id="$delivered_merge", content_sent={})])
     monkeypatch.setattr("mindroom.reactive_triggers.dispatch.send_matrix_message", send_mock)
     service = ReactiveTriggerService(
         runtime_paths=paths,
-        config_provider=lambda: config,
+        config_provider=lambda: cfg,
         bots=lambda: {"dev": cast("Any", bot)},
         memberships=AgentReplyMembershipIndex(),
         store=store,
     )
     await service.drain_due_firings_once()
-    rule_after_claim = store.get_trigger("pr_merge")
-    assert rule_after_claim is not None
-    assert (rule_after_claim.enabled, rule_after_claim.disabled_reason) == (False, "pr_closed")
-
-    firing = store.list_firings(trigger_id="pr_merge")[0]
-    assert firing.status == "claimed"
+    assert (_rule(store, "pr-merge").enabled, _rule(store, "pr-merge").disabled_reason) == (False, "pr_closed")
+    merge_f = store.list_firings(trigger_id="pr-merge")[0]
+    assert merge_f.status == "claimed"
     with store._write_transaction() as conn:
-        conn.execute("UPDATE trigger_firings SET next_retry_at = 0.0 WHERE id = ?", (firing.id,))
+        conn.execute("UPDATE trigger_firings SET next_retry_at = 0.0 WHERE id = ?", (merge_f.id,))
     await service.drain_due_firings_once()
-    delivered = store.list_firings(trigger_id="pr_merge")[0]
-    assert (delivered.status, delivered.matrix_event_id) == ("delivered", "$delivered_merge")
-    assert client.room_put_state.await_count >= 1
-
-    no_poll_cfg, _ = _config(tmp_path / "np2", github_pr_polling_enabled=False)
-    blocked = await check_reactive_source_access(
-        rule=rule_after_claim,
-        event=delivered.event,
-        source_bot=None,
-        config=no_poll_cfg,
-        runtime_paths=paths,
-        memberships=AgentReplyMembershipIndex(),
+    delivered = store.list_firings(trigger_id="pr-merge")[0]
+    assert (delivered.status, delivered.matrix_event_id, room_cli.tag_state["resolved"]) == (
+        "delivered",
+        "$delivered_merge",
+        False,
     )
-    assert blocked is not None
-    assert (blocked.status, blocked.reason) == ("skipped", "github_pr_polling_disabled")
+
+    assert _rule(store, "pr-keep").enabled is True
+    fake.set_json("/repos/ext/repo/pulls/32", _pr("ext/repo", 32, state="open"), etag='"p32-o"')
+    assert await poller.poll_due_once(now=t0 + 10_000) == 0
+    fake.set_json("/repos/ext/repo/pulls/32", _pr("ext/repo", 32, state="closed", sha="sha2"), etag='"p32-c2"')
+    assert await poller.poll_due_once(now=t0 + 20_000) == 1
 
 
 @pytest.mark.asyncio
-async def test_service_stop_cancels_inflight_github_pr_poll(
+async def test_disable_reenable_reseeds_silently_and_dry_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Service stop() cancels an in-flight background GitHub PR poll task cleanly."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    service = ReactiveTriggerService(
-        runtime_paths=paths,
-        config_provider=lambda: config,
-        bots=dict,
-        memberships=AgentReplyMembershipIndex(),
-        store=store,
-    )
-    started, cancelled = asyncio.Event(), False
+    """Re-enable resets checkpoint to silently reseed back to idle, and dry-run filters actors/categories."""
+    fake = _FakeGitHub()
+    fake.seed_open("org/owned", 40, tag="r40")
+    http = _patch_github(monkeypatch, fake)
 
-    async def _slow_poll() -> int:
-        nonlocal cancelled
-        started.set()
-        try:
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
-        return 0
-
-    monkeypatch.setattr(service, "poll_github_prs_once", _slow_poll)
-    service._schedule_github_pr_poll()
-    await started.wait()
-    await service.stop()
-    assert cancelled is True
-    assert service._github_pr_poll_task is None
-
-
-@pytest.mark.asyncio
-async def test_round2_webhook_sha_fallback_and_reenable_clears_stale_sha(tmp_path: Path) -> None:
-    """Explicit mismatched PR number never falls back to head_sha; webhook re-enable clears stale head_sha."""
-    gh = _gh_source(["mindroom-ai/mindroom"], ["pull_request", "check_run", "check_suite"])
-    config, paths = _config(tmp_path, event_sources={"gh": gh})
-    store = ReactiveTriggerStore(paths)
-    rule = _seeded_rule(store, "pr_42", number=42, webhook_source_id="gh", head_sha="sha_old")
-    cp = store.get_github_pr_checkpoint("pr_42")
-
-    # Explicit number=43 + matching head_sha must NOT match watched PR #42.
-    other_pr_check = TriggerEvent(
-        source_type="external_event",
-        source_id="gh",
-        kind="check_run.completed",
-        event_id="ev_other_pr",
-        timestamp=1100.0,
-        actor="actions[bot]",
-        data={
-            "repo": "mindroom-ai/mindroom",
-            "number": 43,
-            "pr_numbers": [],
-            "sha": "sha_old",
-            "name": "pytest",
-            "conclusion": "failure",
-        },
-    )
-    assert match_github_webhook_to_pr_rule(rule, cp, other_pr_check, allowed_events=gh.allowed_events).matched is False
-
-    # Disabling and re-enabling a webhook watch clears stale head_sha so commits pushed while paused match by PR number.
-    set_trigger_enabled_sync(
-        paths,
-        config,
-        "pr_42",
-        enabled=False,
-        actor_user_id=_OWNER,
-        authorize_reactive=lambda _r: None,
-    )
-    set_trigger_enabled_sync(
-        paths,
-        config,
-        "pr_42",
-        enabled=True,
-        actor_user_id=_OWNER,
-        authorize_reactive=lambda _r: None,
-    )
-    refreshed_cp = store.get_github_pr_checkpoint("pr_42")
-    assert refreshed_cp is not None
-    assert (refreshed_cp.head_sha, refreshed_cp.pr_state, refreshed_cp.seeded) == (None, "open", True)
-
-    payload = _gh_payload(
-        "check_run",
-        action="completed",
-        actor="actions[bot]",
-        actor_type="Bot",
-        sha="sha_pushed_while_paused",
-        conclusion="failure",
-        pr_numbers=[42],
-    )
-    assert (
-        _send_webhook(
-            store,
-            config,
-            paths,
-            source=gh,
-            gh_event="check_run",
-            delivery_id="d_resumed_sha",
-            payload=payload,
+    cfg, paths = _config(tmp_path, event_sources={"gh": _gh_source(["org/owned"])})
+    store, tools = ReactiveTriggerStore(paths), TriggersTools()
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        created = await _watch(
+            tools,
+            repo="org/owned",
+            number=40,
+            events=["activity", "merge"],
+            ignore_actors=["noisy"],
+            trigger_id="pr-40",
         )
-        == 1
-    )
-    assert store.list_firings(trigger_id="pr_42", limit=1)[0].event.data["items"][0]["type"] == "ci_failure"
+        assert created["status"] == "ok"
+        assert (await _trig(tools, action="test", trigger_id="pr-40", kind="merge"))["matched"] is True
+        assert (await _trig(tools, action="test", trigger_id="pr-40", kind="ci"))["matched"] is False
+        ign_dry = await _trig(tools, action="test", trigger_id="pr-40", kind="activity", actor="noisy")
+        assert (ign_dry["matched"], "ignored" in ign_dry["note"]) == (False, True)
 
+        assert (await _trig(tools, action="set_enabled", enabled=False, trigger_id="pr-40"))["status"] == "ok"
+        fake.set_json("/repos/org/owned/issues/40/timeline?per_page=100&page=1", [_cmt(999, "paused")], etag='"r40t-p"')
+        assert (await _trig(tools, action="set_enabled", enabled=True, trigger_id="pr-40"))["status"] == "ok"
 
-@pytest.mark.asyncio
-async def test_round2_poller_cancelled_ci_never_reports_all_green(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A check run transitioning pending -> completed/cancelled emits 0 firings (neither ci_passing nor ci_failure)."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_cancel_ci",
-        repo="org/repo",
-        number=7,
-        events=["ci"],
-        webhook_source_id=None,
-        head_sha="sha_c1",
-        state={"ci_head_sha": "sha_c1", "last_ci_overall": "pending"},
-    )
-    phase = {"step": 1}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/repo/pulls/7":
-            return httpx.Response(304)
-        if phase["step"] == 1:
-            runs = [{"id": 1, "name": "pytest", "status": "completed", "conclusion": "cancelled"}]
-        else:
-            runs = [{"id": 2, "name": "pytest", "status": "completed", "conclusion": "success"}]
-        return httpx.Response(200, json={"check_runs": runs}, headers={"ETag": f'"c-{phase["step"]}"'})
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-
-    assert await poller.poll_due_once(now=2000.0) == 0
-    assert store.list_firings(trigger_id="pr_cancel_ci") == []
-    cp1 = store.get_github_pr_checkpoint("pr_cancel_ci")
-    assert cp1 is not None
-    assert cp1.state["last_ci_overall"] == "non_passing"
-
-    # Once a subsequent run succeeds, ci_passing emits normally.
-    phase["step"] = 2
-    assert await poller.poll_due_once(now=cp1.next_poll_at + 1.0) == 1
-    assert store.list_firings(trigger_id="pr_cancel_ci", limit=1)[0].event.data["items"][0]["type"] == "ci_passing"
-
-
-@pytest.mark.asyncio
-async def test_round2_poller_pending_merge_survives_subsequent_poll_tick(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pending terminal merge firing survives another poll_due_once() tick before delivery."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_merge_survive", repo="org/repo", number=9, webhook_source_id=None, head_sha="s9")
-    hits = {"pr": 0}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/repo/pulls/9":
-            hits["pr"] += 1
-            return httpx.Response(200, json={"state": "closed", "merged": True, "head": {"sha": "s9"}})
-        return httpx.Response(200, json=[])
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    client = _mock_client(handler)
-    poller = GitHubPRPoller(store=store, config_provider=lambda: config, runtime_paths=paths, client=client)
-
-    assert await poller.poll_due_once(now=3000.0) == 1
-    cp_merged = store.get_github_pr_checkpoint("pr_merge_survive")
-    assert cp_merged is not None
-    assert cp_merged.pr_state == "merged"
-
-    # Second poll tick before delivery must not re-poll or disable the watch.
-    assert await poller.poll_due_once(now=cp_merged.next_poll_at + 10.0) == 0
-    assert hits["pr"] == 1
-    rule_still_enabled = store.get_trigger("pr_merge_survive")
-    assert rule_still_enabled is not None
-    assert rule_still_enabled.enabled is True
-
-    # Even if _poll_rule is invoked directly on the already-merged checkpoint, it must not disable the rule.
-    assert (
-        await poller._poll_rule(rule_still_enabled, cp_merged, config, client, cp_merged.next_poll_at + 20.0) is False
-    )
-    rule_after_direct = store.get_trigger("pr_merge_survive")
-    assert rule_after_direct is not None
-    assert rule_after_direct.enabled is True
-
-    # Pending merge firing remains claimable and disables the watch only upon claim.
-    firing = store.list_due_firings(now=3000.0)[0]
-    assert store.claim_firing(firing.id, now=3050.0) == "claimed"
-    rule_after_claim = store.get_trigger("pr_merge_survive")
-    assert rule_after_claim is not None
-    assert (rule_after_claim.enabled, rule_after_claim.disabled_reason) == (False, "pr_closed")
-
-
-@pytest.mark.asyncio
-async def test_round2_poller_timeline_advances_past_page_cap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Timeline polling advances past _MAX_POLL_PAGES=3 without looping on page 3 304."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_tl4",
-        repo="org/repo",
-        number=4,
-        events=["activity"],
-        webhook_source_id=None,
-        head_sha="sha4",
-        state={"timeline_page": 1, "seen_timeline_ids": []},
-    )
-    pages_fetched: list[int] = []
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/repo/pulls/4":
-            return httpx.Response(304)
-        if req.url.path == "/repos/org/repo/pulls/4/comments":
-            return httpx.Response(304)
-        page = int(req.url.params.get("page", "1"))
-        pages_fetched.append(page)
-        if req.headers.get("If-None-Match") == f'"tl-{page}"':
-            return httpx.Response(304)
-        headers: dict[str, str] = {"ETag": f'"tl-{page}"'}
-        if page < 4:
-            headers["Link"] = (
-                f'<https://api.github.com/repos/org/repo/issues/4/timeline?per_page=100&page={page + 1}>; rel="next"'
-            )
-        return httpx.Response(
-            200,
-            json=[{"id": page * 10, "event": "commented", "user": {"login": "alice"}, "body": f"page {page}"}],
-            headers=headers,
-        )
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-
-    # Tick 1 fetches pages 1..3 and persists timeline_page=4, timeline_etag=None.
-    assert await poller.poll_due_once(now=2000.0) == 1
-    cp1 = store.get_github_pr_checkpoint("pr_tl4")
-    assert cp1 is not None
-    assert (cp1.state["timeline_page"], cp1.state["timeline_etag"]) == (4, None)
-    assert pages_fetched == [1, 2, 3]
-
-    # Tick 2 fetches page 4 cleanly instead of looping on page 3's 304.
-    assert await poller.poll_due_once(now=cp1.next_poll_at + 1.0) == 1
-    assert pages_fetched == [1, 2, 3, 4]
-    latest_items = store.list_firings(trigger_id="pr_tl4", limit=1)[0].event.data["items"]
-    assert [it["id"] for it in latest_items] == [40]
-
-
-@pytest.mark.asyncio
-async def test_round2_poller_timeline_seed_tail_drains_silently(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When seeding hits _MAX_SEED_PAGES, remaining tail pages drain silently and then normal polling resumes."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    monkeypatch.setattr("mindroom.reactive_triggers.github_pr_poller._MAX_SEED_PAGES", 2)
-    extra_tail = {"added": False}
-
-    def seed_handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/repo/pulls/5":
-            return httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": "sha5"}})
-        if req.url.path == "/repos/org/repo/pulls/5/comments":
-            return httpx.Response(200, json=[])
-        page = int(req.url.params.get("page", "1"))
-        headers: dict[str, str] = {"ETag": f'"st-{page}"'}
-        if page < 3:
-            headers["Link"] = (
-                f'<https://api.github.com/repos/org/repo/issues/5/timeline?per_page=100&page={page + 1}>; rel="next"'
-            )
-        entries = [{"id": page * 100, "event": "commented", "user": {"login": "alice"}, "body": f"hist {page}"}]
-        if page == 3 and extra_tail["added"]:
-            entries.append({"id": 301, "event": "commented", "user": {"login": "alice"}, "body": "brand new"})
-        return httpx.Response(200, json=entries, headers=headers)
-
-    seed_client = _mock_client(seed_handler)
-    seeded = await seed_github_pr_watch(
-        "org/repo",
-        5,
-        ["activity"],
-        owner_user_id=_OWNER,
-        config=config,
-        runtime_paths=paths,
-        poll_interval_seconds=60,
-        now=1000.0,
-        client=seed_client,
-    )
-    assert (seeded.checkpoint.state["timeline_page"], seeded.checkpoint.state["seed_tail_pending"]) == (3, True)
-    seed_rule = ReactiveTriggerRecord(
-        trigger_id="pr_tl_seed",
-        owner_user_id=_OWNER,
-        source=GitHubPRSourceSpec(repo="org/repo", number=5, events=["activity"], webhook_source_id=None),
-        target=TriggerTargetSpec(agent="dev", room_id="!room:example.org", prompt="Watch"),
-        created_at=1000.0,
-        updated_at=1000.0,
-    )
-    store.create_trigger(seed_rule, initial_github_pr_checkpoint=seeded.checkpoint)
-    seed_poller = GitHubPRPoller(store=store, config_provider=lambda: config, runtime_paths=paths, client=seed_client)
-
-    assert await seed_poller.poll_due_once(now=seeded.checkpoint.next_poll_at + 1.0) == 0
-    cp_drained = store.get_github_pr_checkpoint("pr_tl_seed")
-    assert cp_drained is not None
-    assert cp_drained.state["seed_tail_pending"] is False
-
-    extra_tail["added"] = True
-    assert await seed_poller.poll_due_once(now=cp_drained.next_poll_at + 1.0) == 1
-    assert [it["id"] for it in store.list_firings(trigger_id="pr_tl_seed", limit=1)[0].event.data["items"]] == [301]
-
-
-@pytest.mark.asyncio
-async def test_round2_poller_multipage_review_comments_and_error_isolation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Multi-page inline review comments deliver page 2 without skipping; one failing rule does not abort others."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_rc_multi",
-        repo="org/repo",
-        number=42,
-        events=["activity"],
-        webhook_source_id=None,
-        head_sha="sha42",
-        state={"max_review_comment_id": 100, "review_comments_etag": '"rc-old"'},
-    )
-    _seeded_rule(
-        store,
-        "pr_broken",
-        repo="org/broken",
-        number=99,
-        events=["activity"],
-        webhook_source_id=None,
-        head_sha="sha99",
-    )
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/repos/org/repo/pulls/42":
-            return httpx.Response(304)
-        if req.url.path == "/repos/org/repo/issues/42/timeline":
-            return httpx.Response(304)
-        if req.url.path == "/repos/org/repo/pulls/42/comments":
-            page = int(req.url.params.get("page", "1"))
-            if page == 1:
-                return httpx.Response(
-                    200,
-                    json=[
-                        {
-                            "id": 203,
-                            "pull_request_review_id": 7,
-                            "path": "c.py",
-                            "body": "c3",
-                            "user": {"login": "bob"},
-                        },
-                        {
-                            "id": 202,
-                            "pull_request_review_id": 7,
-                            "path": "b.py",
-                            "body": "c2",
-                            "user": {"login": "bob"},
-                        },
-                    ],
-                    headers={
-                        "ETag": '"rc-p1"',
-                        "Link": '<https://api.github.com/repos/org/repo/pulls/42/comments?sort=created&direction=desc&per_page=100&page=2>; rel="next"',
-                    },
-                )
-            return httpx.Response(
-                200,
-                json=[
-                    {"id": 201, "pull_request_review_id": 7, "path": "a.py", "body": "c1", "user": {"login": "bob"}},
-                    {"id": 100, "pull_request_review_id": 6, "path": "old.py", "body": "old", "user": {"login": "bob"}},
-                ],
-                headers={"ETag": '"rc-p2"'},
-            )
-        return httpx.Response(200, json=[])
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
-        runtime_paths=paths,
-        client=_mock_client(handler),
-    )
-
-    orig_poll_rule = poller._poll_rule
-
-    async def _poll_with_one_crash(
-        rule: ReactiveTriggerRecord,
-        cp: GitHubPRCheckpoint | None,
-        cfg: Config,
-        client: httpx.AsyncClient,
-        now: float,
-    ) -> bool:
-        if rule.trigger_id == "pr_broken":
-            msg = "unexpected boom"
-            raise RuntimeError(msg)
-        return await orig_poll_rule(rule, cp, cfg, client, now)
-
-    monkeypatch.setattr(poller, "_poll_rule", _poll_with_one_crash)
-
-    assert await poller.poll_due_once(now=2500.0) == 1
-    cp_after = store.get_github_pr_checkpoint("pr_rc_multi")
-    assert cp_after is not None
-    assert (cp_after.state["max_review_comment_id"], cp_after.state["review_comments_etag"]) == (203, '"rc-p1"')
-    items = store.list_firings(trigger_id="pr_rc_multi", limit=1)[0].event.data["items"]
-    assert len(items) == 1
-    assert [c["id"] for c in items[0]["comments"]] == [201, 202, 203]
+    assert _cp(store, "pr-40").seeded is False
+    assert _cp(store, "pr-40").next_poll_at is not None
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    assert await poller.poll_due_once(now=time.time() + 1_000) == 0
+    assert store.list_firings(trigger_id="pr-40") == []
+    assert (_cp(store, "pr-40").seeded, _cp(store, "pr-40").next_poll_at) == (True, None)
 
 
 @pytest.mark.asyncio
 async def test_watch_pr_approval_alias_governed_by_triggers_rules(tmp_path: Path) -> None:
-    """A tool_approval rule matching `triggers` also requires approval for `watch_pr` via its ApprovalAlias."""
-    base_cfg, paths = _config(tmp_path)
-    require_cfg = bind_runtime_paths(
-        base_cfg.model_copy(
-            update={
-                "tool_approval": ToolApprovalConfig(
-                    rules=[ApprovalRuleConfig(match="triggers", action="require_approval")],
-                ),
-            },
-        ),
-        paths,
-    )
-    auto_cfg = bind_runtime_paths(
-        base_cfg.model_copy(
-            update={
-                "tool_approval": ToolApprovalConfig(
-                    rules=[ApprovalRuleConfig(match="triggers", action="auto_approve")],
-                ),
-            },
-        ),
-        paths,
-    )
+    """Approval alias `match: triggers` governs `watch_pr` for both require_approval and auto_approve."""
+    cfg, paths = _config(tmp_path)
+    req_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="require_approval")])
+    auto_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="auto_approve")])
+    req_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": req_rules}), paths)
+    auto_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": auto_rules}), paths)
 
-    alias = toolkit_approval_alias(require_cfg, builtin_tool_registry(), "triggers", "watch_pr")
+    alias = toolkit_approval_alias(req_cfg, builtin_tool_registry(), "triggers", "watch_pr")
     assert alias is not None
     assert alias.judged_as == "triggers"
-    assert tool_may_require_approval(require_cfg, "watch_pr", alias) is True
-    requires, _timeout = await evaluate_tool_approval(
-        require_cfg,
-        paths,
-        "watch_pr",
-        {"repo": "mindroom-ai/mindroom", "number": 42},
-        "dev",
-        alias,
-    )
-    assert requires is True
-
+    assert tool_may_require_approval(req_cfg, "watch_pr", alias) is True
+    assert (
+        await evaluate_tool_approval(req_cfg, paths, "watch_pr", {"repo": "org/owned", "number": 40}, "dev", alias)
+    )[0] is True
     assert tool_may_require_approval(auto_cfg, "watch_pr", alias) is False
-    auto_requires, _ = await evaluate_tool_approval(
-        auto_cfg,
-        paths,
-        "watch_pr",
-        {"repo": "mindroom-ai/mindroom", "number": 42},
-        "dev",
-        alias,
-    )
-    assert auto_requires is False
+    assert (
+        await evaluate_tool_approval(auto_cfg, paths, "watch_pr", {"repo": "org/owned", "number": 40}, "dev", alias)
+    )[0] is False
 
 
 @pytest.mark.asyncio
-async def test_auto_disable_on_close_false_stays_due_and_observes_reopen(
+async def test_service_notify_work_repoll_and_stop_cancels_inflight_poll(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A poll-backed watch with auto_disable_on_close=False stays due after close and observes reopen/activity."""
-    config, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(
-        store,
-        "pr_keep_polling",
-        repo="org/repo",
-        number=77,
-        events=["activity", "ci", "close"],
-        webhook_source_id=None,
-        auto_disable_on_close=False,
-        head_sha="sha_v1",
-        state={"pr_etag": '"pr-1"', "timeline_etag": '"tl-1"', "review_comments_etag": '"rc-1"'},
-    )
-    _seeded_rule(
-        store,
-        "pr_stop_polling",
-        repo="org/repo",
-        number=78,
-        events=["activity", "close"],
-        webhook_source_id=None,
-        auto_disable_on_close=True,
-        head_sha="sha_v1",
-        state={"pr_etag": '"pr-1"', "timeline_etag": '"tl-1"', "review_comments_etag": '"rc-1"'},
-    )
-
-    phase = {"step": 1}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path in {"/repos/org/repo/pulls/77", "/repos/org/repo/pulls/78"}:
-            if phase["step"] == 1:
-                return httpx.Response(
-                    200,
-                    json={
-                        "state": "closed",
-                        "merged": False,
-                        "head": {"sha": "sha_v1"},
-                        "title": "T",
-                        "html_url": "https://gh/77",
-                    },
-                    headers={"ETag": '"pr-closed"'},
-                )
-            return httpx.Response(
-                200,
-                json={
-                    "state": "open",
-                    "merged": False,
-                    "head": {"sha": "sha_v2"},
-                    "title": "T",
-                    "html_url": "https://gh/77",
-                },
-                headers={"ETag": '"pr-reopened"'},
-            )
-        if req.url.path == "/repos/org/repo/issues/77/timeline":
-            if phase["step"] == 1:
-                return httpx.Response(304)
-            return httpx.Response(
-                200,
-                json=[
-                    {"id": 901, "event": "reopened", "actor": {"login": "bob", "type": "User"}},
-                    {"id": 902, "event": "commented", "user": {"login": "bob", "type": "User"}, "body": "Back open"},
-                ],
-                headers={"ETag": '"tl-2"'},
-            )
-        if req.url.path == "/repos/org/repo/commits/sha_v2/check-runs":
-            return httpx.Response(
-                200,
-                json={"check_runs": [{"id": 50, "name": "ci", "status": "completed", "conclusion": "success"}]},
-                headers={"ETag": '"ci-2"'},
-            )
-        return httpx.Response(304)
-
-    monkeypatch.setattr(
-        "mindroom.reactive_triggers.github_pr_poller.resolve_owner_github_token",
-        AsyncMock(return_value=("ghp_tok", "token")),
-    )
-    poller = GitHubPRPoller(
-        store=store,
-        config_provider=lambda: config,
+    """notify_work queues a repoll only when poll_github_prs=True, and stop() cancels in-flight PR polls."""
+    cfg, paths = _config(tmp_path)
+    service = ReactiveTriggerService(
         runtime_paths=paths,
-        client=_mock_client(handler),
+        config_provider=lambda: cfg,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=ReactiveTriggerStore(paths),
     )
+    started1, release1, done2, calls = asyncio.Event(), asyncio.Event(), asyncio.Event(), 0
 
-    # Phase 1: both PRs close; keep_polling remains due while stop_polling is excluded as seeded closed.
-    assert await poller.poll_due_once(now=2000.0) == 2
-    keep_close_firing = store.list_firings(trigger_id="pr_keep_polling", limit=1)[0]
-    assert keep_close_firing.event.kind == "github_pr.closed"
-    assert store.claim_firing(keep_close_firing.id, now=2005.0) == "claimed"
-    keep_rule = store.get_trigger("pr_keep_polling")
-    assert keep_rule is not None
-    assert keep_rule.enabled is True
+    async def _controlled_poll() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started1.set()
+            await release1.wait()
+        else:
+            done2.set()
+        return 0
 
-    due_ids = [rule.trigger_id for rule, _ in store.list_due_github_pr_triggers(now=3000.0)]
-    assert due_ids == ["pr_keep_polling"]
+    monkeypatch.setattr(service, "poll_github_prs_once", _controlled_poll)
+    monkeypatch.setattr(service, "poll_room_messages_once", AsyncMock(return_value=0))
+    service.start()
+    try:
+        await asyncio.wait_for(started1.wait(), timeout=5.0)
+        service.notify_work(poll_github_prs=False)
+        await asyncio.sleep(0.05)
+        assert service._pr_poll_requested is False
+        service.notify_work(poll_github_prs=True)
+        await asyncio.sleep(0.05)
+        assert service._pr_poll_requested is True
+        release1.set()
+        await asyncio.wait_for(done2.wait(), timeout=5.0)
+        assert calls == 2
 
-    # Phase 2: PR reopens with new activity + passing CI -> checkpoint returns to "open" and firing enqueues.
-    phase["step"] = 2
-    assert await poller.poll_due_once(now=3000.0) == 1
-    cp_reopened = store.get_github_pr_checkpoint("pr_keep_polling")
-    assert cp_reopened is not None
-    assert (cp_reopened.pr_state, cp_reopened.head_sha) == ("open", "sha_v2")
-    latest = store.list_firings(trigger_id="pr_keep_polling", limit=1)[0]
-    assert latest.event.kind == "github_pr.update"
-    item_types = {item["type"] for item in latest.event.data["items"]}
-    assert {"reopened", "comment", "ci_passing"} <= item_types
+        started2, cancelled = asyncio.Event(), False
 
+        async def _slow_poll() -> int:
+            nonlocal cancelled
+            started2.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            return 0
 
-def test_defer_pending_firing_retires_pr_closed_only_when_retries_exhausted(tmp_path: Path) -> None:
-    """Pending terminal merge firing stays enabled on retryable defers and disables with pr_closed on failure."""
-    _, paths = _config(tmp_path)
-    store = ReactiveTriggerStore(paths)
-    _seeded_rule(store, "pr_defer_exhaust")
-    terminal_ev = TriggerEvent(
-        source_type="github_pr",
-        source_id="mindroom-ai/mindroom",
-        kind="github_pr.merged",
-        event_id="d_merge_exhaust",
-        timestamp=1100.0,
-        data={"repo": "mindroom-ai/mindroom", "number": 10, "terminal": True},
-    )
-    assert store.enqueue_firing("pr_defer_exhaust", "d_merge_exhaust", terminal_ev)
-    fid = store.list_firings(trigger_id="pr_defer_exhaust")[0].id
-
-    # Retryable attempts keep the firing pending and the watch enabled.
-    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1101.0, max_attempts=3) == "retrying"
-    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1110.0, max_attempts=3) == "retrying"
-    still_on = store.get_trigger("pr_defer_exhaust")
-    still_pending = store.get_firing(fid)
-    assert still_on is not None
-    assert (still_on.enabled, still_on.disabled_reason) == (True, None)
-    assert still_pending is not None
-    assert still_pending.status == "pending"
-
-    # Exhausting max_attempts transitions the firing to failed and retires the watch with pr_closed.
-    assert store.defer_pending_firing(fid, "target_bot_unavailable", now=1130.0, max_attempts=3) == "failed"
-    retired = store.get_trigger("pr_defer_exhaust")
-    failed = store.get_firing(fid)
-    assert retired is not None
-    assert (retired.enabled, retired.disabled_reason) == (False, "pr_closed")
-    assert failed is not None
-    assert failed.status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_reenabling_github_pr_watch_enforces_max_watches_per_owner(tmp_path: Path) -> None:
-    """Re-enabling a paused github_pr watch via set_enabled or update enforces max_github_pr_watches_per_owner."""
-    config, paths = _config(tmp_path, max_github_pr_watches_per_owner=1)
-    store = ReactiveTriggerStore(paths)
-    watch_a = _seeded_rule(store, "pr_a", repo="org/repo", number=1, webhook_source_id=None)
-
-    # Pause watch A, then create watch B to fill the owner's 1-watch quota.
-    paused_a = store.set_enabled("pr_a", False, expected_rule_uid=watch_a.rule_uid)
-    assert paused_a is not None
-    assert paused_a.enabled is False
-    watch_b = _seeded_rule(store, "pr_b", repo="org/repo", number=2, webhook_source_id=None)
-
-    # Store-level set_enabled and update_trigger both reject re-enabling A.
-    with pytest.raises(ReactiveTriggerLimitError, match="GitHub PR watch limit"):
-        store.set_enabled("pr_a", True, expected_rule_uid=watch_a.rule_uid, max_github_pr_per_owner=1)
-    with pytest.raises(ReactiveTriggerLimitError, match="GitHub PR watch limit"):
-        store.update_trigger(
-            paused_a.model_copy(update={"enabled": True, "disabled_reason": None, "updated_at": time.time()}),
-            expected_rule_uid=watch_a.rule_uid,
-            update_enabled=True,
-            max_github_pr_per_owner=1,
-        )
-
-    # Tool-level set_enabled and update also return structured error payloads and keep A disabled.
-    with tool_runtime_context(_tool_ctx(config, paths)):
-        tool = TriggersTools()
-        err_enable = json.loads(await tool.triggers(action="set_enabled", trigger_id="pr_a", enabled=True))
-        err_update = json.loads(await tool.triggers(action="update", trigger_id="pr_a", enabled=True))
-        assert err_enable["status"] == "error"
-        assert "GitHub PR watch limit" in err_enable["message"]
-        assert err_update["status"] == "error"
-        assert "GitHub PR watch limit" in err_update["message"]
-
-        still_disabled = store.get_trigger("pr_a")
-        assert still_disabled is not None
-        assert still_disabled.enabled is False
-
-        # Once watch B is paused, re-enabling watch A succeeds.
-        paused_b = json.loads(await tool.triggers(action="set_enabled", trigger_id=watch_b.trigger_id, enabled=False))
-        assert paused_b["status"] == "ok"
-        reenabled_a = json.loads(await tool.triggers(action="set_enabled", trigger_id="pr_a", enabled=True))
-        assert reenabled_a["status"] == "ok"
-        assert reenabled_a["trigger"]["enabled"] is True
+        monkeypatch.setattr(service, "poll_github_prs_once", _slow_poll)
+        service.notify_work(poll_github_prs=True)
+        await asyncio.wait_for(started2.wait(), timeout=5.0)
+    finally:
+        await service.stop()
+    assert cancelled is True
+    assert service._github_pr_poll_task is None

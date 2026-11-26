@@ -169,13 +169,17 @@ async def test_github_get_json_200_304_and_link_next_page() -> None:
             return httpx.Response(
                 200,
                 json={"ok": True},
-                headers={"Link": '<https://evil.example/api?page=2>; rel="next"'},
+                headers={
+                    "Link": '<https://evil.example/api?page=2>; rel="next", <https://evil.example/api?page=9>; rel="last"',
+                },
             )
         if request.url.path.endswith("/bad-page"):
             return httpx.Response(
                 200,
                 json={"ok": True},
-                headers={"Link": '<https://api.github.com/repos/o/r/issues?page=0>; rel="next"'},
+                headers={
+                    "Link": '<https://api.github.com/repos/o/r/issues?page=0>; rel="next", <https://api.github.com/repos/o/r/issues?page=0>; rel="last"',
+                },
             )
         return httpx.Response(
             200,
@@ -196,6 +200,7 @@ async def test_github_get_json_200_304_and_link_next_page() -> None:
         assert res_200.data == {"number": 42}
         assert res_200.rate_limited is False
         assert res_200.next_page == 3
+        assert res_200.last_page == 5
         first_headers = seen_requests[0].headers
         assert first_headers["accept"] == GITHUB_DEFAULT_ACCEPT
         assert first_headers["x-github-api-version"] == GITHUB_API_VERSION
@@ -208,14 +213,17 @@ async def test_github_get_json_200_304_and_link_next_page() -> None:
         assert res_304.etag == '"etag-1"'
         assert res_304.data is None
         assert res_304.next_page is None
+        assert res_304.last_page is None
         assert "authorization" not in seen_requests[1].headers
         assert seen_requests[1].headers["if-none-match"] == '"etag-1"'
 
         res_evil = await github_get_json("/repos/o/r/evil-link", token=None, client=client)
         assert res_evil.next_page is None
+        assert res_evil.last_page is None
 
         res_bad_page = await github_get_json("/repos/o/r/bad-page", token=None, client=client)
         assert res_bad_page.next_page is None
+        assert res_bad_page.last_page is None
 
 
 @pytest.mark.asyncio

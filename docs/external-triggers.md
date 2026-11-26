@@ -256,7 +256,7 @@ external_trigger_policy:
 | `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
 | `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
 | `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
-| `allowed_events` | `["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
 | `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 

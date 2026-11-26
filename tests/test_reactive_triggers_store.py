@@ -179,9 +179,6 @@ def test_github_and_ed25519_event_source_configs_and_yaml_roundtrip() -> None:
     assert github.allowed_events == [
         "pull_request",
         "pull_request_review",
-        "pull_request_review_comment",
-        "issue_comment",
-        "check_run",
         "check_suite",
         "release",
         "issues",
@@ -1190,7 +1187,7 @@ def test_schema_v1_migrates_to_v2_preserving_rows_and_rejects_unknown_version(tm
 
 
 def test_github_pr_checkpoint_terminal_claim_and_owner_quota(tmp_path: Path) -> None:
-    """Terminal github_pr claim sets disabled_reason='pr_closed' in columns and spec_json; quota enforces limit."""
+    """Terminal github_pr claim sets disabled_reason='pr_closed'; quota enforces limit and nudges preserve order."""
     store = ReactiveTriggerStore(_runtime_paths(tmp_path))
     source = GitHubPRSourceSpec(repo="MindRoom-AI/mindroom", number=42)
     rec = ReactiveTriggerRecord(
@@ -1239,14 +1236,28 @@ def test_github_pr_checkpoint_terminal_claim_and_owner_quota(tmp_path: Path) -> 
     after_claim = store.get_trigger("gh_pr_42")
     assert after_claim is not None
     assert (after_claim.enabled, after_claim.disabled_reason) == (False, "pr_closed")
-    with store._read_connection() as conn:
-        raw_spec = conn.execute(
-            "SELECT spec_json FROM reactive_triggers WHERE trigger_id = ?",
-            ("gh_pr_42",),
-        ).fetchone()
-    assert raw_spec is not None
-    parsed_spec = ReactiveTriggerRecord.model_validate_json(str(raw_spec["spec_json"]))
-    assert (parsed_spec.enabled, parsed_spec.disabled_reason) == (False, "pr_closed")
+
+    wh_rec = rec.model_copy(
+        update={
+            "trigger_id": "gh_pr_wh",
+            "source": GitHubPRSourceSpec(repo="MindRoom-AI/mindroom", number=99, webhook_source_id="github"),
+        },
+    )
+    wh_cp = GitHubPRCheckpoint(head_sha="sha99", seeded=True, next_poll_at=None, updated_at=1000.0)
+    store.create_trigger(wh_rec, initial_github_pr_checkpoint=wh_cp, max_github_pr_per_owner=1)
+    assert store.list_due_github_pr_triggers(now=1500.0) == []
+    assert store.nudge_github_pr_checkpoints(["gh_pr_wh"], now=1500.0) == 1
+    assert [r.trigger_id for r, _ in store.list_due_github_pr_triggers(now=1500.0)] == ["gh_pr_wh"]
+    assert store.nudge_github_pr_checkpoints(["gh_pr_wh"], now=1505.0) == 1
+    store.update_github_pr_checkpoint_and_enqueue(
+        "gh_pr_wh",
+        wh_cp.model_copy(update={"next_poll_at": None, "updated_at": 1500.0}),
+        expected_rule_uid=wh_rec.rule_uid,
+        poll_started_at=1500.0,
+    )
+    preserved = store.get_github_pr_checkpoint("gh_pr_wh")
+    assert preserved is not None
+    assert preserved.next_poll_at == 1505.0
 
 
 def test_pr_closed_and_expired_watches_do_not_consume_owner_quotas(tmp_path: Path) -> None:

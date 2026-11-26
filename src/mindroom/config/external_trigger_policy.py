@@ -191,9 +191,6 @@ class GitHubEventSourceConfig(BaseModel):
         default_factory=lambda: [
             "pull_request",
             "pull_request_review",
-            "pull_request_review_comment",
-            "issue_comment",
-            "check_run",
             "check_suite",
             "release",
             "issues",
@@ -462,22 +459,9 @@ class ExternalTriggerPolicyConfig(BaseModel):
         default_factory=dict,
         description="Named shared external event sources keyed by source_id",
     )
-    github_pr_polling_enabled: bool = Field(
-        default=True,
-        description="Whether outbound GitHub REST polling is enabled for github_pr triggers",
-    )
-    min_github_pr_poll_interval_seconds: int = Field(
-        default=60,
-        ge=30,
-        le=3600,
-        description="Minimum allowed poll interval in seconds for poll-backed github_pr triggers",
-    )
-    max_github_pr_watches_per_owner: int = Field(
-        default=20,
-        ge=1,
-        le=200,
-        description="Maximum github_pr trigger records one owner may create",
-    )
+    github_pr_polling_enabled: bool = Field(default=True, description="Enable polling for github_pr watches")
+    min_github_pr_poll_interval_seconds: int = Field(default=60, ge=30, le=3600, description="Min PR poll interval (s)")
+    max_github_pr_watches_per_owner: int = Field(default=20, ge=1, le=200, description="Max github_pr watches/owner")
 
     @field_validator("event_sources")
     @classmethod

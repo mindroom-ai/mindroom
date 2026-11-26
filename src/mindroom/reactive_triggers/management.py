@@ -84,31 +84,8 @@ def refresh_reactive_state_on_reenable(
             expected_rule_uid=record.rule_uid,
         )
     elif isinstance(record.source, GitHubPRSourceSpec):
-        base = reactive_store.get_github_pr_checkpoint(record.trigger_id) or GitHubPRCheckpoint(updated_at=now)
-        if record.source.webhook_source_id is not None:
-            refreshed = base.model_copy(
-                update={
-                    "head_sha": None,
-                    "pr_state": "open",
-                    "seeded": True,
-                    "consecutive_errors": 0,
-                    "updated_at": now,
-                },
-            )
-        else:
-            refreshed = base.model_copy(
-                update={
-                    "seeded": False,
-                    "next_poll_at": now,
-                    "consecutive_errors": 0,
-                    "updated_at": now,
-                },
-            )
-        reactive_store.upsert_github_pr_checkpoint(
-            record.trigger_id,
-            refreshed,
-            expected_rule_uid=record.rule_uid,
-        )
+        refreshed = GitHubPRCheckpoint(next_poll_at=now, updated_at=now)
+        reactive_store.upsert_github_pr_checkpoint(record.trigger_id, refreshed, expected_rule_uid=record.rule_uid)
 
 
 def _not_found(trigger_id: str) -> ExternalTriggerStoreError:
@@ -153,12 +130,9 @@ def set_trigger_enabled_sync(
             now=time.time(),
             refreshed_tag_present=refreshed_tag_present,
         )
-    updated = reactive_store.set_enabled(
-        trigger_id,
-        enabled,
-        expected_rule_uid=record.rule_uid,
-        max_github_pr_per_owner=config.external_trigger_policy.max_github_pr_watches_per_owner,
-    )
+    cap = config.external_trigger_policy.max_github_pr_watches_per_owner
+    fn = reactive_store.set_enabled
+    updated = fn(trigger_id, enabled, expected_rule_uid=record.rule_uid, max_github_pr_per_owner=cap)
     if updated is None:
         raise _not_found(trigger_id)
     return updated

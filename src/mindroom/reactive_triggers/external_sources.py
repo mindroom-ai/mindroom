@@ -26,9 +26,9 @@ from mindroom.external_triggers.auth import (
 )
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.external_triggers.policy import is_source_subscriber_allowed
-from mindroom.reactive_triggers.github_pr import match_github_webhook_to_pr_rule
+from mindroom.reactive_triggers.github_pr import nudge_github_pr_watches_for_webhook
 from mindroom.reactive_triggers.matching import lookup_data_key, matches_external_event
-from mindroom.reactive_triggers.models import ExternalEventSourceSpec, GitHubPRSourceSpec, TriggerEvent
+from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -375,61 +375,17 @@ def fan_out_external_event(
             continue
         if store.enqueue_firing(rule.trigger_id, event.event_id, event, expected_rule_uid=rule.rule_uid):
             matched_count += 1
-
-    if isinstance(source, GitHubEventSourceConfig) and event.kind != "ping":
-        matched_count += _fan_out_github_pr_event(
+    repo = event.data.get("repo") if event.kind != "ping" else None
+    if isinstance(source, GitHubEventSourceConfig) and isinstance(repo, str) and repo:
+        matched_count += nudge_github_pr_watches_for_webhook(
             source_id=source_id,
             source=source,
-            event=event,
+            repo=repo,
             store=store,
             config=config,
             runtime_paths=runtime_paths,
-            current_time=current_time,
-        )
-    return matched_count
-
-
-def _fan_out_github_pr_event(
-    *,
-    source_id: str,
-    source: GitHubEventSourceConfig,
-    event: TriggerEvent,
-    store: ReactiveTriggerStore,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    current_time: float,
-) -> int:
-    repo = event.data.get("repo")
-    if not isinstance(repo, str) or not repo:
-        return 0
-    pr_rules = store.list_triggers(include_disabled=False, source_type="github_pr", source_id=repo.lower())
-    allowed_events = frozenset(source.allowed_events)
-    matched_count = 0
-    for rule in pr_rules:
-        if rule.expires_at is not None and rule.expires_at <= current_time:
-            continue
-        if not isinstance(rule.source, GitHubPRSourceSpec) or rule.source.webhook_source_id != source_id:
-            continue
-        if not is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths):
-            continue
-        match_result = match_github_webhook_to_pr_rule(
-            rule,
-            store.get_github_pr_checkpoint(rule.trigger_id),
-            event,
-            allowed_events=allowed_events,
-        )
-        if not match_result.matched or match_result.checkpoint is None:
-            continue
-        if store.update_github_pr_checkpoint_and_enqueue(
-            rule.trigger_id,
-            match_result.checkpoint,
-            dedupe_key=match_result.dedupe_key,
-            event=match_result.event,
-            disable_reason="pr_closed" if match_result.disable_immediately else None,
-            expected_rule_uid=rule.rule_uid,
             now=current_time,
-        ):
-            matched_count += 1
+        )
     return matched_count
 
 
@@ -513,15 +469,12 @@ def _extract_allowed_github_repo(payload: Mapping[str, Any], source: GitHubEvent
     return canonical_repo
 
 
-_REQUIRED_GITHUB_OBJECT_KEYS: dict[str, tuple[str, ...]] = {
-    "pull_request": ("pull_request",),
-    "pull_request_review": ("review",),
-    "pull_request_review_comment": ("pull_request", "comment"),
-    "issue_comment": ("issue", "comment"),
-    "issues": ("issue",),
-    "release": ("release",),
-    "check_run": ("check_run",),
-    "check_suite": ("check_suite",),
+_REQUIRED_GITHUB_OBJECT_KEYS: dict[str, str] = {
+    "pull_request": "pull_request",
+    "pull_request_review": "review",
+    "issues": "issue",
+    "release": "release",
+    "check_suite": "check_suite",
 }
 
 
@@ -529,11 +482,11 @@ def _normalize_github_payload(
     gh_event: str,
     repo: str,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
-    for required_key in _REQUIRED_GITHUB_OBJECT_KEYS.get(gh_event, ()):
-        if not isinstance(payload.get(required_key), dict):
-            msg = f"Missing or invalid {required_key!r} object for GitHub {gh_event!r} webhook"
-            raise ExternalSourceBadRequestError(msg)
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
+    required_key = _REQUIRED_GITHUB_OBJECT_KEYS.get(gh_event)
+    if required_key is not None and not isinstance(payload.get(required_key), dict):
+        msg = f"Missing or invalid {required_key!r} object for GitHub {gh_event!r} webhook"
+        raise ExternalSourceBadRequestError(msg)
     action = _optional_str(payload.get("action"))
     normalizer = _GITHUB_EVENT_NORMALIZERS.get(gh_event)
     if normalizer is not None:
@@ -547,7 +500,7 @@ def _normalize_pull_request(
     repo: str,
     action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     pr = _mapping(payload.get("pull_request"))
     merged = pr.get("merged") is True
     if action == "closed" and merged:
@@ -568,9 +521,7 @@ def _normalize_pull_request(
             "branch": head.get("ref"),
             "base_branch": base.get("ref"),
             "author": user.get("login"),
-            "actor_type": _actor_type(payload),
             "sha": pr.get("merge_commit_sha") or head.get("sha"),
-            "head_sha": head.get("sha"),
             "url": pr.get("html_url"),
         },
     )
@@ -579,41 +530,13 @@ def _normalize_pull_request(
     return kind, data, title, summary
 
 
-def _normalize_issue_comment(
-    repo: str,
-    action: str | None,
-    payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
-    issue = _mapping(payload.get("issue"))
-    comment = _mapping(payload.get("comment"))
-    comment_user = _mapping(comment.get("user"))
-    kind = f"issue_comment.{action}" if action else "issue_comment"
-    data = _clean_data(
-        {
-            "repo": repo,
-            "number": issue.get("number"),
-            "action": action,
-            "author": comment_user.get("login"),
-            "author_type": _optional_str(comment_user.get("type")),
-            "actor_type": _actor_type(payload),
-            "comment_id": comment.get("id"),
-            "is_pull_request": isinstance(issue.get("pull_request"), dict),
-            "url": comment.get("html_url") or issue.get("html_url"),
-        },
-    )
-    title = _clip_text(issue.get("title"), _MAX_TITLE_CHARS)
-    summary = _clip_text(comment.get("body"), _MAX_SUMMARY_CHARS)
-    return kind, data, title, summary
-
-
 def _normalize_pull_request_review(
     repo: str,
     action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     pr = _mapping(payload.get("pull_request"))
     review = _mapping(payload.get("review"))
-    review_user = _mapping(review.get("user"))
     kind = f"pull_request_review.{action}" if action else "pull_request_review"
     data = _clean_data(
         {
@@ -621,10 +544,7 @@ def _normalize_pull_request_review(
             "number": pr.get("number"),
             "action": action,
             "state": review.get("state"),
-            "author": review_user.get("login"),
-            "author_type": _optional_str(review_user.get("type")),
-            "actor_type": _actor_type(payload),
-            "review_id": review.get("id"),
+            "author": _mapping(review.get("user")).get("login"),
             "url": review.get("html_url"),
         },
     )
@@ -633,39 +553,11 @@ def _normalize_pull_request_review(
     return kind, data, title, summary
 
 
-def _normalize_pull_request_review_comment(
-    repo: str,
-    action: str | None,
-    payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
-    pr = _mapping(payload.get("pull_request"))
-    comment = _mapping(payload.get("comment"))
-    comment_user = _mapping(comment.get("user"))
-    kind = f"pull_request_review_comment.{action}" if action else "pull_request_review_comment"
-    data = _clean_data(
-        {
-            "repo": repo,
-            "number": pr.get("number"),
-            "action": action,
-            "author": comment_user.get("login"),
-            "author_type": _optional_str(comment_user.get("type")),
-            "actor_type": _actor_type(payload),
-            "comment_id": comment.get("id"),
-            "review_id": comment.get("pull_request_review_id"),
-            "path": comment.get("path"),
-            "url": comment.get("html_url"),
-        },
-    )
-    title = _clip_text(pr.get("title"), _MAX_TITLE_CHARS)
-    summary = _clip_text(comment.get("body"), _MAX_SUMMARY_CHARS)
-    return kind, data, title, summary
-
-
 def _normalize_issues(
     repo: str,
     action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     issue = _mapping(payload.get("issue"))
     kind = f"issues.{action}" if action else "issues"
     data = _clean_data(
@@ -686,7 +578,7 @@ def _normalize_release(
     repo: str,
     action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     rel = _mapping(payload.get("release"))
     kind = f"release.{action}" if action else "release"
     data = _clean_data(
@@ -704,42 +596,13 @@ def _normalize_release(
     return kind, data, title, summary
 
 
-def _normalize_check_run(
-    repo: str,
-    action: str | None,
-    payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
-    cr = _mapping(payload.get("check_run"))
-    kind = f"check_run.{action}" if action else "check_run"
-    pr_numbers = _extract_pr_numbers(cr.get("pull_requests"))
-    data = _clean_data(
-        {
-            "repo": repo,
-            "id": cr.get("id"),
-            "action": action,
-            "name": cr.get("name"),
-            "status": cr.get("status"),
-            "conclusion": cr.get("conclusion"),
-            "sha": cr.get("head_sha"),
-            "number": pr_numbers[0] if pr_numbers else None,
-            "url": cr.get("html_url") or cr.get("url"),
-        },
-    )
-    data["pr_numbers"] = pr_numbers
-    output = _mapping(cr.get("output"))
-    title = _clip_text(output.get("title") or cr.get("name"), _MAX_TITLE_CHARS)
-    summary = _clip_text(output.get("summary"), _MAX_SUMMARY_CHARS)
-    return kind, data, title, summary
-
-
 def _normalize_check_suite(
     repo: str,
     action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     cs = _mapping(payload.get("check_suite"))
     kind = f"check_suite.{action}" if action else "check_suite"
-    pr_numbers = _extract_pr_numbers(cs.get("pull_requests"))
     data = _clean_data(
         {
             "repo": repo,
@@ -749,11 +612,9 @@ def _normalize_check_suite(
             "conclusion": cs.get("conclusion"),
             "branch": cs.get("head_branch"),
             "sha": cs.get("head_sha"),
-            "number": pr_numbers[0] if pr_numbers else None,
             "url": cs.get("url"),
         },
     )
-    data["pr_numbers"] = pr_numbers
     title = _clip_text(_mapping(cs.get("head_commit")).get("message"), _MAX_TITLE_CHARS)
     return kind, data, title, None
 
@@ -762,7 +623,7 @@ def _normalize_push(
     repo: str,
     _action: str | None,
     payload: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str | None, str | None]:
+) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
     ref = payload.get("ref")
     branch = ref.removeprefix("refs/heads/") if isinstance(ref, str) and ref.startswith("refs/heads/") else None
     data = _clean_data(
@@ -790,43 +651,24 @@ def _optional_str(value: object) -> str | None:
     return stripped or None
 
 
-def _actor_type(payload: Mapping[str, Any]) -> str | None:
-    return _optional_str(_mapping(payload.get("sender")).get("type"))
-
-
-def _extract_pr_numbers(value: object) -> list[int]:
-    if not isinstance(value, list):
-        return []
-    return [
-        int(entry["number"])
-        for entry in value
-        if isinstance(entry, Mapping)
-        and isinstance(entry.get("number"), int)
-        and not isinstance(entry.get("number"), bool)
-    ]
-
-
 def _clip_text(value: object, max_chars: int) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value[:max_chars]
 
 
-def _clean_data(values: Mapping[str, object]) -> dict[str, Any]:
+def _clean_data(values: Mapping[str, object]) -> dict[str, str | int | bool]:
     return {key: value for key, value in values.items() if isinstance(value, str | int | bool)}
 
 
 _GITHUB_EVENT_NORMALIZERS: dict[
     str,
-    Callable[[str, str | None, Mapping[str, Any]], tuple[str, dict[str, Any], str | None, str | None]],
+    Callable[[str, str | None, Mapping[str, Any]], tuple[str, dict[str, str | int | bool], str | None, str | None]],
 ] = {
     "pull_request": _normalize_pull_request,
-    "issue_comment": _normalize_issue_comment,
     "pull_request_review": _normalize_pull_request_review,
-    "pull_request_review_comment": _normalize_pull_request_review_comment,
     "issues": _normalize_issues,
     "release": _normalize_release,
-    "check_run": _normalize_check_run,
     "check_suite": _normalize_check_suite,
     "push": _normalize_push,
 }

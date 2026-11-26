@@ -29094,7 +29094,7 @@
       },
       {
         "name": "watch_pr",
-        "description": "Watch one open GitHub PR for activity, CI failures/all-green, merge, or close.\nAutomatically binds to an authorized shared GitHub webhook event source when one covers `repo` and `events`,\nor falls back to ETag-backed GitHub REST polling (using the requester's connected GitHub credentials if any).\nAuto-reopens resolved target threads by default (`reopen_on_fire=True`) and auto-disables on PR merge/close.",
+        "description": "Watch one open GitHub PR for activity, CI failures/all-green, merge, or close.\nUses ETag-backed GitHub REST polling (nudged immediately by an authorized shared GitHub webhook source covering\n`repo` with zero idle polling). Auto-reopens resolved target threads (`reopen_on_fire=True`) and auto-disables\non PR merge/close.",
         "parameters": {
           "type": "object",
           "properties": {

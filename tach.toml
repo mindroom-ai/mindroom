@@ -11460,8 +11460,6 @@ path = "mindroom.reactive_triggers"
 depends_on = [
     "mindroom.reactive_triggers.dispatch",
     "mindroom.reactive_triggers.external_sources",
-    "mindroom.reactive_triggers.github_pr",
-    "mindroom.reactive_triggers.github_pr_poller",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.service",
@@ -11519,14 +11517,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.reactive_triggers.github_pr"
 depends_on = [
-    "mindroom.reactive_triggers.models",
-]
-
-[[modules]]
-path = "mindroom.reactive_triggers.github_pr_poller"
-depends_on = [
     "mindroom.github_client",
-    "mindroom.reactive_triggers.github_pr",
     "mindroom.reactive_triggers.models",
 ]
 
@@ -11548,7 +11539,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.transport_progress",
     "mindroom.reactive_triggers.dispatch",
-    "mindroom.reactive_triggers.github_pr_poller",
+    "mindroom.reactive_triggers.github_pr",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
@@ -11565,7 +11556,6 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.github_pr",
-    "mindroom.reactive_triggers.github_pr_poller",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",

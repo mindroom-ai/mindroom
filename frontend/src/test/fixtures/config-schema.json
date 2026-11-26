@@ -2757,13 +2757,13 @@
         },
         "github_pr_polling_enabled": {
           "default": true,
-          "description": "Whether outbound GitHub REST polling is enabled for github_pr triggers",
+          "description": "Enable polling for github_pr watches",
           "title": "Github Pr Polling Enabled",
           "type": "boolean"
         },
         "min_github_pr_poll_interval_seconds": {
           "default": 60,
-          "description": "Minimum allowed poll interval in seconds for poll-backed github_pr triggers",
+          "description": "Min PR poll interval (s)",
           "maximum": 3600,
           "minimum": 30,
           "title": "Min Github Pr Poll Interval Seconds",
@@ -2771,7 +2771,7 @@
         },
         "max_github_pr_watches_per_owner": {
           "default": 20,
-          "description": "Maximum github_pr trigger records one owner may create",
+          "description": "Max github_pr watches/owner",
           "maximum": 200,
           "minimum": 1,
           "title": "Max Github Pr Watches Per Owner",
@@ -2809,9 +2809,6 @@
           "default": [
             "pull_request",
             "pull_request_review",
-            "pull_request_review_comment",
-            "issue_comment",
-            "check_run",
             "check_suite",
             "release",
             "issues",
