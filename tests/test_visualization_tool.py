@@ -1,4 +1,4 @@
-"""Tests for where the Visualization toolkit saves charts."""
+"""Tests for the native Visualization toolkit and workspace-confined saving."""
 
 from __future__ import annotations
 
@@ -34,19 +34,21 @@ def test_visualization_saves_only_inside_the_workspace(tmp_path: Path, monkeypat
     toolkit = visualization_tools()(tool_output_workspace_root=workspace)
 
     for filename in ("../../app/config.yaml", str(working_directory / "config.yaml"), "..", ""):
-        result = json.loads(toolkit.create_bar_chart({"a": 1}, filename=filename))
+        result = json.loads(toolkit.create_chart("bar", data={"a": 1}, filename=filename))
         assert result["status"] == "error", filename
         assert "without directories" in result["error"]
-    saved = json.loads(toolkit.create_pie_chart({"a": 1, "b": 2}, filename="planted.png"))
-    default = json.loads(toolkit.create_line_chart({"Jan": 1, "Feb": 3}))
-    extensionless = json.loads(toolkit.create_histogram([1, 2, 2, 3], filename="spread"))
+    saved = json.loads(toolkit.create_chart("pie", data={"a": 1, "b": 2}, filename="planted.png"))
+    default = json.loads(toolkit.create_chart("line", data={"Jan": 1, "Feb": 3}))
+    extensionless = json.loads(toolkit.create_chart("histogram", data=[1, 2, 2, 3], filename="spread"))
+    scatter = json.loads(toolkit.create_chart("scatter", x_data=[1, 2], y_data=[3, 4], filename="points.png"))
 
     assert saved["file_path"] == str(workspace / "charts" / "planted.png")
     assert default["file_path"] == str(workspace / "charts" / "line_chart_2.png")
     assert extensionless["file_path"] == str(workspace / "charts" / "spread.png")
+    assert scatter["file_path"] == str(workspace / "charts" / "points.png")
     assert outside.read_bytes() == b"untouched"
     assert not (workspace / "charts" / "planted.png").is_symlink()
-    for name in ("planted.png", "line_chart_2.png", "spread.png"):
+    for name in ("planted.png", "line_chart_2.png", "spread.png", "points.png"):
         assert (workspace / "charts" / name).read_bytes().startswith(_PNG_SIGNATURE)
     assert sorted(path.name for path in working_directory.iterdir()) == ["config.yaml"]
     assert (working_directory / "config.yaml").read_text(encoding="utf-8") == "agents: {}\n"
@@ -65,7 +67,7 @@ def test_visualization_refuses_an_output_directory_replaced_by_a_link(
     (workspace / "charts").symlink_to(outside)
     toolkit = visualization_tools()(tool_output_workspace_root=workspace)
 
-    result = json.loads(toolkit.create_scatter_plot(x=[1, 2], y=[3, 4], filename="plot.png"))
+    result = json.loads(toolkit.create_chart("scatter", x_data=[1, 2], y_data=[3, 4], filename="plot.png"))
 
     assert result["status"] == "error"
     assert list(outside.iterdir()) == []
@@ -78,7 +80,6 @@ def test_visualization_refuses_output_dir_outside_the_workspace(
     output_dir: str,
 ) -> None:
     """An authored output directory must stay inside the workspace."""
-    # A nested working directory keeps even "../outside" under tmp_path if the refusal regresses.
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
@@ -86,11 +87,11 @@ def test_visualization_refuses_output_dir_outside_the_workspace(
         visualization_tools()(tool_output_workspace_root=tmp_path, output_dir=output_dir)
 
 
-def test_registry_injects_the_workspace_and_keeps_chart_schemas(
+def test_registry_injects_the_workspace_and_exposes_create_chart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The registered toolkit receives the agent workspace and still advertises the upstream chart parameters."""
+    """The registered toolkit receives the agent workspace and offers the consolidated create_chart tool."""
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -103,12 +104,13 @@ def test_registry_injects_the_workspace_and_keeps_chart_schemas(
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    function = toolkit_offers(toolkit, "create_bar_chart")
+    function = toolkit_offers(toolkit, "create_chart")
 
-    result = json.loads(function.entrypoint(data={"a": 1}, filename="bar.png"))
+    result = json.loads(function.entrypoint(chart_type="bar", data={"a": 1}, filename="bar.png"))
 
-    assert function.description == "Create a bar chart from the provided data."
-    assert {"data", "title", "x_label", "y_label", "filename"} <= set(function.parameters["properties"])
+    assert {"chart_type", "data", "x_data", "y_data", "title", "x_label", "y_label", "bins", "filename"} <= set(
+        function.parameters["properties"],
+    )
     assert result["file_path"] == str(workspace / "charts" / "bar.png")
     assert (workspace / "charts" / "bar.png").read_bytes().startswith(_PNG_SIGNATURE)
 
@@ -118,7 +120,7 @@ def test_visualization_without_a_workspace_reports_an_error(tmp_path: Path, monk
     monkeypatch.chdir(tmp_path)
     toolkit = visualization_tools()()
 
-    result = json.loads(toolkit.create_bar_chart({"a": 1}))
+    result = json.loads(toolkit.create_chart("bar", data={"a": 1}))
 
     assert result == {
         "chart_type": "bar_chart",
@@ -126,3 +128,13 @@ def test_visualization_without_a_workspace_reports_an_error(tmp_path: Path, monk
         "status": "error",
     }
     assert list(tmp_path.iterdir()) == []
+
+
+def test_visualization_honors_enable_flags(tmp_path: Path) -> None:
+    """Disabling a chart type via config flag prevents creating that chart type."""
+    toolkit = visualization_tools()(tool_output_workspace_root=tmp_path, enable_create_pie_chart=False)
+
+    result = json.loads(toolkit.create_chart("pie", data={"a": 1}))
+
+    assert result["status"] == "error"
+    assert "disabled" in result["error"]

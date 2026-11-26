@@ -15,7 +15,7 @@ from moviepy import ColorClip, CompositeVideoClip
 from moviepy.tools import compute_position
 from PIL import Image, ImageDraw, ImageFont
 
-from mindroom.custom_tools import agno_compat_moviepy as adapter
+from mindroom.custom_tools import moviepy_video as adapter
 
 if TYPE_CHECKING:
     from moviepy import TextClip
@@ -155,9 +155,9 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     output = tmp_path / "captioned.mp4"
     rendered_frames: list[NDArray[np.uint8]] = []
     rendered_words: list[list[TextClip]] = []
-    create_caption_clips = adapter.MindRoomMoviePyVideoTools.create_caption_clips
+    create_caption_clips = adapter.MoviePyVideoTools.create_caption_clips
 
-    def record_words(toolkit: adapter.MindRoomMoviePyVideoTools, *args: object, **kwargs: object) -> list[TextClip]:
+    def record_words(toolkit: adapter.MoviePyVideoTools, *args: object, **kwargs: object) -> list[TextClip]:
         rendered_words.append(create_caption_clips(toolkit, *args, **kwargs))
         return rendered_words[-1]
 
@@ -188,11 +188,11 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
         rendered_frames.append(frame)
         Path(path).write_bytes(b"rendered frame")
 
-    monkeypatch.setattr(adapter.MindRoomMoviePyVideoTools, "create_caption_clips", record_words)
+    monkeypatch.setattr(adapter.MoviePyVideoTools, "create_caption_clips", record_words)
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", inspect_frame)
     (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
+    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -227,7 +227,7 @@ def _captioned_render_peak(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line
         Path(path).write_bytes(b"rendered")
 
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", render_every_line)
-    toolkit = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path)
+    toolkit = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path)
     tracemalloc.start()
     try:
         result = toolkit.embed_captions("input.mp4", srt_path.name, f"captioned-{line_count}.mp4")
@@ -277,7 +277,7 @@ def test_word_rasters_preserve_complete_bounds_and_shared_baseline(
             {"word": word, "start": index * 0.5, "end": (index + 1) * 0.5} for index, word in enumerate(words)
         ],
     }
-    clips = adapter.MindRoomMoviePyVideoTools().create_caption_clips(
+    clips = adapter.MoviePyVideoTools().create_caption_clips(
         text_json,
         (1280, 720),
         font=font_path,
@@ -310,7 +310,7 @@ def test_wrapped_words_advance_without_overlapping_glyphs() -> None:
             {"word": word, "start": index * 0.5, "end": (index + 1) * 0.5} for index, word in enumerate(words)
         ],
     }
-    clips = adapter.MindRoomMoviePyVideoTools().create_caption_clips(text_json, (320, 140), font_size=42)
+    clips = adapter.MoviePyVideoTools().create_caption_clips(text_json, (320, 140), font_size=42)
     try:
         base_words = clips[::3]
         assert len(base_words) == 4
@@ -361,7 +361,7 @@ def test_oversized_captions_preserve_existing_output(
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", unexpected_render)
     (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
+    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),

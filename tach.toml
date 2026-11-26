@@ -9869,29 +9869,39 @@ expose = ["TimeLimitedTrafilaturaTools", "install_server_fetch_guard"]
 
 [[modules]]
 path = "mindroom.tools.file_generation"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_file_generation"]
+depends_on = ["mindroom.custom_tools.file_generation", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 [[modules]]
-path = "mindroom.tools.agno_compat_file_generation"
-depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+path = "mindroom.custom_tools.file_generation"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.llm",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+]
 visibility = ["mindroom.tools.file_generation"]
 
 [[interfaces]]
-from = ["mindroom.tools.agno_compat_file_generation"]
-expose = ["WorkspaceFileGenerationTools"]
+from = ["mindroom.custom_tools.file_generation"]
+expose = ["FileGenerationTools"]
 
 [[modules]]
 path = "mindroom.tools.visualization"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_visualization"]
+depends_on = ["mindroom.custom_tools.visualization", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 [[modules]]
-path = "mindroom.tools.agno_compat_visualization"
-depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+path = "mindroom.custom_tools.visualization"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+]
 visibility = ["mindroom.tools.visualization"]
 
 [[interfaces]]
-from = ["mindroom.tools.agno_compat_visualization"]
-expose = ["WorkspaceVisualizationTools"]
+from = ["mindroom.custom_tools.visualization"]
+expose = ["VisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.mem0"
@@ -10741,19 +10751,22 @@ visibility = ["mindroom.routing"]
 [[modules]]
 path = "mindroom.tools.moviepy_video_tools"
 depends_on = [
-    "mindroom.custom_tools.agno_compat_moviepy",
+    "mindroom.custom_tools.moviepy_video",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
 ]
 
 [[modules]]
-path = "mindroom.custom_tools.agno_compat_moviepy"
-depends_on = ["mindroom.file_access"]
+path = "mindroom.custom_tools.moviepy_video"
+depends_on = [
+    "mindroom.file_access",
+    "mindroom.tool_system.authoring",
+]
 visibility = ["mindroom.tools.moviepy_video_tools"]
 
 [[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_moviepy"]
-expose = ["MindRoomMoviePyVideoTools"]
+from = ["mindroom.custom_tools.moviepy_video"]
+expose = ["MoviePyVideoTools"]
 
 [[modules]]
 path = "mindroom.tools.openai"

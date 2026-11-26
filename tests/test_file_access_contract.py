@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, BinaryIO, Self
 import httpx
 import pytest
 
-import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.chat_ui as chat_ui_module
@@ -28,6 +27,7 @@ import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
+import mindroom.custom_tools.moviepy_video as moviepy_module
 import mindroom.file_access as file_access_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.path_safety as path_safety_module
@@ -36,13 +36,13 @@ import mindroom.tools.agno_compat_groq as groq_module
 import mindroom.tools.agno_compat_openai as openai_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
-from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
+from mindroom.custom_tools.moviepy_video import MoviePyVideoTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.path_confinement import MAX_READ_BYTES
@@ -268,7 +268,7 @@ async def _extract_audio_with_moviepy(
 
     monkeypatch.setattr(moviepy_module, "VideoFileClip", open_video)
     monkeypatch.setattr(moviepy_module, "_require_plain_media", lambda _path: None)
-    tool = MindRoomMoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
+    tool = MoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
     tool.extract_audio(raw_path, "audio.wav")
     return videos == [_PNG]
 

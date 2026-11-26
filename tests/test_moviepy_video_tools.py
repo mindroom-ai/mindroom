@@ -19,7 +19,7 @@ from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
+    from mindroom.custom_tools.moviepy_video import MoviePyVideoTools
 
 
 def _clip(**kwargs: object) -> MagicMock:
@@ -45,9 +45,9 @@ def _clip(**kwargs: object) -> MagicMock:
 def caption_renderer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]]:
+) -> tuple[MoviePyVideoTools, dict[str, MagicMock]]:
     """Patch captured factories only after real modules have finished importing; ``tmp_path`` is the workspace."""
-    from mindroom.custom_tools import agno_compat_moviepy as adapter  # noqa: PLC0415
+    from mindroom.custom_tools import moviepy_video as adapter  # noqa: PLC0415
 
     toolkit_class = moviepy_video_tools()
     factories = {
@@ -77,7 +77,7 @@ def caption_renderer(
     ids=["default-font-size", "font-size", "text-color", "outline-color", "outline-width", "no-outline"],
 )
 def test_embed_captions_applies_styles_to_text_clips(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     styles: dict[str, object],
     base_style: dict[str, object],
@@ -108,7 +108,7 @@ def test_embed_captions_applies_styles_to_text_clips(
 
 @pytest.mark.parametrize("failure", [None, "render", "publish"], ids=["success", "render-failure", "publish-failure"])
 def test_embed_captions_publishes_complete_output_and_closes_media(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
@@ -168,7 +168,7 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
 
 
 def test_embed_captions_keeps_styles_independent_between_calls(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
 ) -> None:
     """One toolkit applies each call's full style and restores defaults on a later call."""
@@ -208,7 +208,7 @@ def test_embed_captions_keeps_styles_independent_between_calls(
 
 
 def test_create_caption_clips_preserves_explicit_font(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicit font path reaches words, spaces, and highlighted words."""
@@ -228,7 +228,7 @@ def test_create_caption_clips_preserves_explicit_font(
 
 
 def test_media_paths_follow_file_access(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -265,7 +265,7 @@ def test_media_paths_follow_file_access(
     ],
 )
 def test_default_caption_output_lands_next_to_the_input(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     video_path: str,
     expected_output: str,
@@ -285,12 +285,12 @@ def test_default_caption_output_lands_next_to_the_input(
 
 
 def test_oversized_inputs_fail_before_staging_past_the_limit(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sparse worker-written inputs far above the staging caps are refused instead of copied to their full size."""
-    from mindroom.custom_tools import agno_compat_moviepy as adapter  # noqa: PLC0415
+    from mindroom.custom_tools import moviepy_video as adapter  # noqa: PLC0415
 
     toolkit, factories = caption_renderer
     monkeypatch.setattr(adapter, "_MAX_STAGED_VIDEO_BYTES", 1 << 20)
@@ -306,7 +306,7 @@ def test_oversized_inputs_fail_before_staging_past_the_limit(
 
 
 def test_outputs_publish_without_buffering_the_rendered_file(
-    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    caption_renderer: tuple[MoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
 ) -> None:
     """Rendered audio and video reach the workspace in chunks instead of being read into memory whole."""
@@ -371,7 +371,7 @@ def _encode_clip(path: Path) -> None:
 @pytest.mark.parametrize("suffix", [".mpg", ".vob", ".flv", ".wmv", ".gif"])
 def test_video_inputs_accept_self_contained_formats(tmp_path: Path, suffix: str) -> None:
     """Common formats whose FFmpeg demuxers read only the opened file stay accepted, as before the plain-media check."""
-    from mindroom.custom_tools.agno_compat_moviepy import _require_plain_media  # noqa: PLC0415
+    from mindroom.custom_tools.moviepy_video import _require_plain_media  # noqa: PLC0415
 
     clip = tmp_path / f"clip{suffix}"
     _encode_clip(clip)
