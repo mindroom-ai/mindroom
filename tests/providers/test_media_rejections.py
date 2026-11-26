@@ -11,6 +11,9 @@ without any of the media.
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +25,7 @@ import pytest
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
-from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video, image_format
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
@@ -32,6 +35,7 @@ from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini.wire import rejected_media as gemini_rejected_media
 from mindroom.providers.openai import chat as chat_adapter
 from mindroom.providers.openai import responses as responses_adapter
+from mindroom.providers.openai.errors import provider_error as openai_provider_error
 from mindroom.providers.openai.errors import rejected_media as openai_rejected_media
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.pipeline import retry as retry_stage
@@ -311,6 +315,92 @@ async def test_openrouter_404_video_rejection_preserves_other_media_and_learns_g
     assert not sends(second, b"mp4 video")
 
 
+def _webp_photo() -> Image:
+    from PIL import Image as PILImage  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", (10, 8), (30, 140, 220)).save(buf, format="WEBP")
+    return Image(id="att_webp", content=buf.getvalue(), mime_type="image/webp")
+
+
+@pytest.mark.asyncio
+async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactively(tmp_path: Path) -> None:
+    """OpenRouter's ``metadata.raw`` upstream MIME rejection triggers WebP transcoding and per-route learning."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "x-ai/grok-4", "api_key": "test-key"},
+    )
+    webp = _webp_photo()
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}}),
+                "provider_name": "xAI",
+            },
+        },
+    )
+    wire = Wire(rejection, spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp])
+
+    turn_1 = await complete(provider, ModelRequest(messages=[message]))
+    turn_2 = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    for idx in (1, 2):
+        url = user_parts(wire.body(idx))[1]["image_url"]["url"]
+        assert prompt_text(wire.body(idx)) == _PROMPT
+        assert url.startswith("data:image/png;base64,")
+        assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+
+
+@pytest.mark.asyncio
+async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode_webp(tmp_path: Path) -> None:
+    """A file-only MIME rejection beside a WebP image drops only the file and leaves the WebP bytes untouched."""
+    webp = _webp_photo()
+    notes = File(id="att_notes", content=b"# notes", filename="notes.md", mime_type="text/markdown")
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[notes])
+
+    _first, retry = await _sent_after("openai_chat", tmp_path, _rejected(_CHAT_MARKDOWN_FILE), message)
+
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url"]
+    assert (
+        user_parts(retry)[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(webp.content or b'').decode()}"
+    )
+    assert not sends(retry, b"# notes")
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            {"raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}})},
+            "Provider returned error: Unsupported MIME type: image/webp",
+        ),
+        (
+            {"raw": json.dumps({"message": "Only JPEG and PNG are supported"})},
+            "Provider returned error: Only JPEG and PNG are supported",
+        ),
+        ({"raw": "  Upstream rejected image/webp  "}, "Provider returned error: Upstream rejected image/webp"),
+        ({"raw": "x" * 700}, f"Provider returned error: {'x' * 500}"),
+        ({"raw": "   "}, "Provider returned error"),
+        (None, "Provider returned error"),
+    ],
+    ids=["json-error-message", "json-message", "plain-text", "capped", "blank", "absent"],
+)
+def test_openrouter_upstream_error_detail_is_surfaced(metadata: dict[str, Any] | None, expected: str) -> None:
+    """OpenRouter's ``metadata.raw`` detail augments ``Provider returned error`` without changing absent metadata."""
+    body: dict[str, Any] = {"message": "Provider returned error", "code": 400}
+    if metadata is not None:
+        body["metadata"] = metadata
+    failure = openai_provider_error(_sdk_rejection(body), provider="OpenRouter")
+    assert str(failure) == expected
+
+
 # --- OpenAI Responses ---------------------------------------------------------------------------------------------
 
 
@@ -499,6 +589,23 @@ async def test_gemini_rejecting_an_invalid_argument_retries_without_any_media(tm
     _first, retry = await _sent_after("gemini", tmp_path, _rejected(_GEMINI_INVALID_ARGUMENT), message)
 
     assert user_parts(retry) == [{"text": f"{_PROMPT}\n\n{_NOTE}"}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_webp_mime_rejection_transcodes_inline_image(tmp_path: Path) -> None:
+    """Gemini's ``Unsupported MIME type: image/webp`` retries with transcoded PNG while preserving other media."""
+    webp = _webp_photo()
+    rejection = _rejected({"code": 400, "message": "Unsupported MIME type: image/webp", "status": "INVALID_ARGUMENT"})
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    first, retry = await _sent_after("gemini", tmp_path, rejection, message)
+
+    assert user_parts(first)[1]["inlineData"]["mime_type"] == "image/webp"
+    assert prompt_text(retry) == _PROMPT
+    inline = user_parts(retry)[1]["inlineData"]
+    assert inline["mime_type"] == "image/png"
+    assert image_format(base64.b64decode(inline["data"])) == "png"
+    assert sends(retry, b"%PDF-1.4 report")
 
 
 # --- A wrong naming -------------------------------------------------------------------------------------------------

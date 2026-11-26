@@ -6,6 +6,7 @@ codes are preserved so user-facing messages and compaction can still tell failur
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Mapping
@@ -61,6 +62,9 @@ _FILE_WORDING = ("you uploaded an invalid file", "the file type you uploaded is 
 # Responses' reported rejection of a file by its extension: "Expected file type to be a supported format: .pdf but got
 # .md."
 _REJECTED_EXTENSION = re.compile(r"but got (\.[a-z0-9]{1,16})(?![a-z0-9])")
+# OpenRouter wraps upstream 400s in this generic message and puts the upstream payload in ``metadata.raw``.
+_OPENROUTER_PROVIDER_ERROR = "Provider returned error"
+_MAX_UPSTREAM_DETAIL_CHARS = 500
 
 
 def sdk_failures() -> type[Exception]:
@@ -73,14 +77,38 @@ def sdk_failures() -> type[Exception]:
     return openai.OpenAIError
 
 
+def _upstream_error_detail(metadata: object) -> str | None:
+    """Extract a concise upstream error detail from OpenRouter's ``metadata.raw`` payload."""
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(raw := metadata.get("raw"), str)
+        or not (detail := raw.strip())
+    ):
+        return None
+    try:
+        parsed = json.loads(detail)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, Mapping):
+        nested = parsed.get("error")
+        for candidate in (nested.get("message") if isinstance(nested, Mapping) else None, parsed.get("message")):
+            if isinstance(candidate, str) and candidate.strip():
+                detail = candidate.strip()
+                break
+    return detail[:_MAX_UPSTREAM_DETAIL_CHARS]
+
+
 def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
     """Return the message, code, and type of an error body the SDK already unwrapped from its ``error`` envelope."""
     if not isinstance(body, Mapping):
         return (body if isinstance(body, str) and body else None), None, None
     fields = cast("Mapping[str, Any]", body)
     message, code, error_type = fields.get("message"), fields.get("code"), fields.get("type")
+    text = message if isinstance(message, str) else None
+    if text == _OPENROUTER_PROVIDER_ERROR and (detail := _upstream_error_detail(fields.get("metadata"))):
+        text = f"{text}: {detail}"
     return (
-        message if isinstance(message, str) else None,
+        text,
         str(code) if code is not None else None,
         error_type if isinstance(error_type, str) else None,
     )

@@ -4416,6 +4416,7 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_model_media_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep process-local learned media support isolated per test."""
     monkeypatch.setattr(media_pipeline, "_LEARNED_UNSUPPORTED", {})
+    monkeypatch.setattr(media_pipeline, "_LEARNED_WEBP_UNSUPPORTED", set())
 
 
 @pytest.fixture(autouse=True)

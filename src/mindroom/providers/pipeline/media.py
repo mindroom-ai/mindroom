@@ -3,21 +3,30 @@
 Media a route never accepts (``Capabilities.omitted_media``) and media a route rejected earlier in this
 process are replaced up front by a note telling the model the attachment was not inspected. On routes that
 accept audio, inline audio on any message followed by an assistant message is also replaced up front by a
-byte-stable note so later requests of a turn do not resend audio the model already heard. When the
-provider then rejects the request before the attempt committed (no visible output and no hosted tool that acts),
-the request is sent again without the rejected media. Item-specific rejections (``ProviderError.rejected_media``)
-remove only those items where possible; otherwise an error naming media kinds removes only those kinds present.
-Untyped rejections and failed narrowed retries use the all-media-free backstop. Explicitly named unsupported kinds
-are remembered for the route only after a successful retry sends no items of those kinds. Input size/type errors
-never teach route capabilities, nor do failed, cancelled, or partially visible attempts.
+byte-stable note so later requests of a turn do not resend audio the model already heard. Routes that earlier
+accepted transcoded WebP after an image format/MIME rejection also transcode local WebP images to PNG/JPEG up
+front. When the provider then rejects the request before the attempt committed (no visible output and no hosted
+tool that acts), an image format/MIME rejection first retries once after transcoding local WebP images to
+PNG/JPEG; if that does not apply or still fails, the request is sent again without the rejected media.
+Item-specific rejections (``ProviderError.rejected_media``) remove only those items where possible; otherwise
+an error naming media kinds removes only those kinds present. Untyped rejections and failed narrowed retries
+use the all-media-free backstop. Explicitly named unsupported kinds are remembered for the route only after a
+successful retry sends no items of those kinds, and WebP incompatibility is remembered only after a transcoded
+retry succeeds without stripping images. Input size/type errors never teach route media-kind capabilities, nor
+do failed, cancelled, or partially visible attempts.
 """
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
+import os
 import re
+import warnings
 from dataclasses import dataclass, replace
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import (
@@ -29,7 +38,7 @@ from mindroom.llm.errors import (
     InvalidRequest,
     ProviderError,
 )
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, rendered_label
+from mindroom.llm.media import IMAGE_HEADER_BYTES, VIEWED_IMAGE_ID_PREFIX, File, image_format, rendered_label
 from mindroom.llm.messages import media_items
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import RequestProjection, Retry, attempts
@@ -37,7 +46,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from mindroom.llm.media import Audio, Image, Video
     from mindroom.llm.messages import Message
@@ -68,7 +77,24 @@ _PAYLOAD_TOO_LARGE_STATUS = 413
 # Provider errors naming a capability are short; capping the scan keeps the list patterns cheap on huge errors.
 _MAX_SCANNED_ERROR_CHARS = 2000
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
-_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime")
+_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime", "webp")
+_MAX_WEBP_SOURCE_BYTES = 20 * 1024 * 1024
+_MAX_WEBP_DECODED_PIXELS = 40_000_000
+_MAX_WEBP_PNG_BYTES = 5 * 1024 * 1024
+_WEBP_TRANSCODE_ERROR_CODES = frozenset({"invalid_image_format", "image_parse_error", "invalid_image"})
+_WEBP_TRANSCODE_ERROR_MARKERS = (
+    "mime",
+    "media_type",
+    "media type",
+    "format",
+    "unsupported image",
+    "invalid image",
+    "decode image",
+    "parse image",
+    "png",
+    "jpeg",
+    "jpg",
+)
 _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
     "audio": r"audio",
     "image": r"(?:images?|vision)",
@@ -96,6 +122,7 @@ class _Route:
 
 # Learned limits live for the process only; a provider may add a capability at any time.
 _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
+_LEARNED_WEBP_UNSUPPORTED: set[_Route] = set()
 
 
 def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
@@ -257,6 +284,109 @@ def _names_capability_gap(error: ProviderError, removed: frozenset[MediaKind]) -
     return _named_capability_gaps(error) & removed
 
 
+def _read_local_webp_bytes(image: Image) -> bytes | None:
+    """Return local WebP bytes within the source cap, else None for non-WebP, remote, or unreadable items."""
+    if image.content is not None:
+        return (
+            image.content
+            if 0 < len(image.content) <= _MAX_WEBP_SOURCE_BYTES and image_format(image.content) == "webp"
+            else None
+        )
+    if not image.filepath:
+        return None
+    try:
+        with Path(image.filepath).open("rb") as handle:
+            header = handle.read(IMAGE_HEADER_BYTES)
+            if image_format(header) != "webp" or os.fstat(handle.fileno()).st_size > _MAX_WEBP_SOURCE_BYTES:
+                return None
+            data = header + handle.read(_MAX_WEBP_SOURCE_BYTES - len(header) + 1)
+    except OSError:
+        return None
+    return data if len(data) <= _MAX_WEBP_SOURCE_BYTES else None
+
+
+def _transcode_webp_bytes(data: bytes) -> tuple[bytes, str] | None:
+    """Safely decode WebP bytes and encode as PNG, or JPEG when opaque and over the inline PNG cap."""
+    from PIL import Image as PILImage  # noqa: PLC0415 - keep Pillow out of module import time
+    from PIL import ImageOps, UnidentifiedImageError  # noqa: PLC0415
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+            with PILImage.open(io.BytesIO(data)) as source:
+                width, height = source.size
+                if source.format != "WEBP" or width * height > _MAX_WEBP_DECODED_PIXELS:
+                    return None
+                source.seek(0)
+                oriented = ImageOps.exif_transpose(source)
+                if oriented is None:
+                    return None
+                if oriented.mode == "CMYK":
+                    oriented = oriented.convert("RGB")
+                output = io.BytesIO()
+                oriented.save(output, format="PNG")
+                encoded = output.getvalue()
+                if len(encoded) <= _MAX_WEBP_PNG_BYTES or "A" in oriented.getbands() or "transparency" in oriented.info:
+                    return encoded, "image/png"
+                jpeg_output = io.BytesIO()
+                oriented.convert("RGB").save(jpeg_output, format="JPEG", quality=85)
+                return jpeg_output.getvalue(), "image/jpeg"
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        UnidentifiedImageError,
+        PILImage.DecompressionBombError,
+        PILImage.DecompressionBombWarning,
+    ):
+        return None
+
+
+def _transcode_webp_messages(messages: Sequence[Message]) -> list[Message] | None:
+    """Transcode local WebP images in ``messages`` to PNG/JPEG; return None when no image was transcoded."""
+    rewritten: list[Message] = []
+    changed = False
+    for message in messages:
+        if not message.images:
+            rewritten.append(message)
+            continue
+        replaced = [
+            replace(image, content=encoded[0], filepath=None, url=None, mime_type=encoded[1], format=None)
+            if (raw := _read_local_webp_bytes(image)) is not None
+            and (encoded := _transcode_webp_bytes(raw)) is not None
+            else image
+            for image in message.images
+        ]
+        if any(new is not old for old, new in zip(message.images, replaced)):
+            changed = True
+            rewritten.append(replace(message, images=replaced))
+        else:
+            rewritten.append(message)
+    return rewritten if changed else None
+
+
+def _is_webp_transcode_candidate(
+    error: ProviderError,
+    remaining: frozenset[MediaKind],
+    sent: dict[str, MediaKind],
+) -> bool:
+    """Return whether ``error`` looks like an image format/MIME rejection worth retrying with transcoded WebP."""
+    if (
+        "image" not in remaining
+        or not isinstance(error, InvalidRequest)
+        or error.status_code == _PAYLOAD_TOO_LARGE_STATUS
+        or "image" in _names_capability_gap(error, _IMAGES)
+    ):
+        return False
+    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
+    if "webp" in text:
+        return True
+    rejected_image = any(sent.get(mid) == "image" for mid in error.rejected_media)
+    if not rejected_image and "image" not in _named_media_kinds(error):
+        return False
+    return error.code in _WEBP_TRANSCODE_ERROR_CODES or any(marker in text for marker in _WEBP_TRANSCODE_ERROR_MARKERS)
+
+
 def _selective_removal(
     rejected: frozenset[str],
     sent: dict[str, MediaKind],
@@ -306,24 +436,64 @@ def media_fallback_projection(fallback_prompt: str) -> RequestProjection:
     )
 
 
+def _sent_media(messages: Sequence[Message]) -> dict[str, MediaKind]:
+    return {item.id: kind for message in messages for kind, item in media_items(message)}
+
+
+async def _transcode_webp_if(should_check: bool, base: Sequence[Message]) -> tuple[Sequence[Message], bool]:
+    if not should_check or (transcoded := await asyncio.to_thread(_transcode_webp_messages, base)) is None:
+        return base, False
+    return transcoded, True
+
+
+def _narrowed_removal(
+    error: ProviderError,
+    base: Sequence[Message],
+    sent: dict[str, MediaKind],
+    known: frozenset[MediaKind],
+    remaining: frozenset[MediaKind],
+    fallback_prompt: str,
+    log: Callable[..., Any],
+) -> tuple[list[Message], frozenset[MediaKind], bool] | None:
+    if not isinstance(error, InvalidRequest):
+        return None
+    # Only a rejected request body can name its parts; a request too large for the window shrinks as a whole.
+    named = error.rejected_media
+    if (selective := _selective_removal(named, sent, known)) is not None:
+        removed, ids = selective
+        log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
+        messages = _without_media(base, removed, ids, fallback_prompt)
+        stripped = "image" in removed or any(sent.get(mid) == "image" for mid in ids)
+        return messages, remaining - _media_kinds(messages), stripped
+    kinds = _named_media_kinds(error) & remaining
+    if kinds and kinds != remaining and not (named & sent.keys()):
+        log("Retrying model request without the inline media kinds its failure names", media_kinds=sorted(kinds))
+        return _without_media(base, known | kinds, frozenset(), fallback_prompt), kinds, "image" in kinds
+    return None
+
+
 async def media_fallback_stream(
     inner: ModelProvider,
     request: ModelRequest,
     *,
     fallback_prompt: str,
 ) -> AsyncIterator[StreamEvent]:
-    """Stream ``request`` with unsupported media replaced, retrying without what a rejection names, then media-free."""
+    """Stream ``request`` with unsupported media replaced, transcoding WebP on format rejection, then stripping."""
     identity = inner.identity
+    route = _route(inner)
     base, present, known = _prepared_messages(inner, request.messages)
     remaining = present - known
+    checked_webp = route in _LEARNED_WEBP_UNSUPPORTED and "image" in remaining
+    base, transcoded_webp = await _transcode_webp_if(checked_webp, base)
     first = replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
-    sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
+    sent = _sent_media(first.messages)
     failure: ProviderError | None = None
     sent_broad = False
+    stripped_image = False
     removed_kinds: frozenset[MediaKind] = frozenset()
 
-    def without_rejected_media(error: ProviderError) -> Retry | None:
-        nonlocal failure, sent_broad, removed_kinds
+    async def without_rejected_media(error: ProviderError) -> Retry | None:
+        nonlocal base, checked_webp, transcoded_webp, failure, sent_broad, stripped_image, removed_kinds
         if (
             request.overrides.transient_retries != "pipeline"
             or sent_broad
@@ -340,31 +510,21 @@ async def media_fallback_stream(
             status_code=error.status_code,
             error=redact_sensitive_text(str(error), max_length=500),
         )
+        if not checked_webp and failure is None and _is_webp_transcode_candidate(error, remaining, sent):
+            checked_webp = True
+            base, transcoded_webp = await _transcode_webp_if(True, base)
+            if transcoded_webp:
+                log("Retrying model request after transcoding WebP images")
+                return Retry(replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt)))
         if failure is None:
             failure = error
-            # Only a rejected request body can name its parts; a request too large for the window shrinks as a whole.
-            named = error.rejected_media if isinstance(error, InvalidRequest) else frozenset()
-            if (selective := _selective_removal(named, sent, known)) is not None:
-                removed, ids = selective
-                log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
-                messages = _without_media(base, removed, ids, fallback_prompt)
-                removed_kinds = remaining - _media_kinds(messages)
+            if (narrowed := _narrowed_removal(error, base, sent, known, remaining, fallback_prompt, log)) is not None:
+                messages, removed_kinds, narrowed_stripped = narrowed
+                stripped_image = stripped_image or narrowed_stripped
                 return Retry(replace(request, messages=messages))
-            kinds = _named_media_kinds(error) & remaining if isinstance(error, InvalidRequest) else frozenset()
-            if kinds and kinds != remaining and not (named & sent.keys()):
-                removed_kinds = kinds
-                log(
-                    "Retrying model request without the inline media kinds its failure names",
-                    media_kinds=sorted(kinds),
-                )
-                return Retry(
-                    replace(
-                        request,
-                        messages=_without_media(base, known | kinds, frozenset(), fallback_prompt),
-                    ),
-                )
         sent_broad = True
         removed_kinds = remaining
+        stripped_image = stripped_image or "image" in remaining
         log("Retrying model request without inline media")
         return Retry(replace(request, messages=_without_media(base, present, frozenset(), fallback_prompt)))
 
@@ -372,6 +532,8 @@ async def media_fallback_stream(
     async with closing_async_stream(events):
         async for event in events:
             yield event
+    if transcoded_webp and not stripped_image:
+        _LEARNED_WEBP_UNSUPPORTED.add(route)
     # Successful removal of a whole named kind can teach the route; partial item removal cannot.
     if failure is not None and (learned := _names_capability_gap(failure, removed_kinds)):
-        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(learned)
+        _LEARNED_UNSUPPORTED.setdefault(route, set()).update(learned)
