@@ -734,6 +734,7 @@ class TriggersTools(Toolkit):
 
         Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. Omitting `target_thread_id` defaults to the current thread in the current room (same-room `watch_room`: `'origin'`); pass `'room'` for the room timeline; `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
         Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
+        Only pass parameters for the chosen action (omit others; `enabled` is only for `set_enabled`/`update`).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
         try:
