@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import math
-import os
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 
-from mindroom.script_runs.launch_contract import (
-    GATEWAY_URL_ENV,
-    MAX_TOKEN_BYTES,
-    RUN_ID_ENV,
-    TOKEN_PATH_ENV,
-    digest_arguments,
+from mindroom.script_runs.launch_contract import digest_arguments
+from mindroom.script_runs.transport import (
+    GatewayDecodeError,
+    GatewayHTTPError,
+    GatewayTransportError,
+    ScriptGatewayTransport,
 )
 
 __all__ = ["MindRoomToolCallError", "MindRoomTools"]
@@ -31,8 +26,6 @@ _TRANSPORT_ERROR = "The background tool gateway transport failed after dispatch 
 _INVALID_RECEIPT_ERROR = "The background tool gateway returned an invalid receipt."
 _CONFLICTING_RECEIPT_ERROR = "The stable call ID belongs to a different tool request."
 _INVALID_ARGUMENTS_ERROR = "Background tool arguments must have an unambiguous JSON representation."
-_CAPABILITY_UNAVAILABLE_MESSAGE = "The MindRoom script capability token is unavailable."
-_CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
 
 class MindRoomToolCallError(RuntimeError):
@@ -94,14 +87,7 @@ class MindRoomTools:
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             msg = "poll_interval_seconds must be positive."
             raise ValueError(msg)
-        self._gateway_url = _required_env(GATEWAY_URL_ENV).rstrip("/")
-        parsed_gateway = urllib.parse.urlsplit(self._gateway_url)
-        if parsed_gateway.scheme not in {"http", "https"} or not parsed_gateway.netloc:
-            msg = f"{GATEWAY_URL_ENV} must be an HTTP(S) URL."
-            raise RuntimeError(msg)
-        self._run_id = _required_env(RUN_ID_ENV)
-        self._token = _read_token(Path(_required_env(TOKEN_PATH_ENV)))
-        self._http_timeout_seconds = http_timeout_seconds
+        self._transport = ScriptGatewayTransport(timeout_seconds=http_timeout_seconds)
         self._poll_interval_seconds = poll_interval_seconds
 
     def call(self, toolkit_name: str, function_name: str, /, **arguments: object) -> object:
@@ -156,19 +142,16 @@ class MindRoomTools:
         arguments_digest: str,
     ) -> _Receipt:
         payload = {
-            "run_id": self._run_id,
+            "run_id": self._transport.run_id,
             "call_id": call_id,
             "toolkit_name": toolkit_name,
             "function_name": function_name,
             "arguments": arguments,
         }
         return self._request(
-            urllib.request.Request(  # noqa: S310 - the constructor restricts the gateway to HTTP(S).
-                f"{self._gateway_url}/calls",
-                data=json.dumps(payload, allow_nan=False, separators=(",", ":")).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self._token}"},
-                method="POST",
-            ),
+            "POST",
+            "calls",
+            payload,
             call_id=call_id,
             toolkit_name=toolkit_name,
             function_name=function_name,
@@ -183,14 +166,11 @@ class MindRoomTools:
         function_name: str,
         arguments_digest: str,
     ) -> _Receipt:
-        run_id = urllib.parse.quote(self._run_id, safe="")
+        run_id = urllib.parse.quote(self._transport.run_id, safe="")
         encoded_call_id = urllib.parse.quote(call_id, safe="")
         return self._request(
-            urllib.request.Request(  # noqa: S310 - the constructor restricts the gateway to HTTP(S).
-                f"{self._gateway_url}/runs/{run_id}/calls/{encoded_call_id}",
-                headers={"Authorization": f"Bearer {self._token}"},
-                method="GET",
-            ),
+            "GET",
+            f"runs/{run_id}/calls/{encoded_call_id}",
             call_id=call_id,
             toolkit_name=toolkit_name,
             function_name=function_name,
@@ -199,7 +179,9 @@ class MindRoomTools:
 
     def _request(
         self,
-        request: urllib.request.Request,
+        method: str,
+        path: str,
+        body: object = None,
         *,
         call_id: str,
         toolkit_name: str,
@@ -207,46 +189,26 @@ class MindRoomTools:
         arguments_digest: str,
     ) -> _Receipt:
         try:
-            with urllib.request.urlopen(request, timeout=self._http_timeout_seconds) as response:  # noqa: S310
-                payload = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
+            payload = self._transport.request_json(method, path, body)
+        except GatewayHTTPError as exc:
             raise _http_error(exc, call_id=call_id) from exc
-        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        except GatewayTransportError as exc:
             raise MindRoomToolCallError(
                 _TRANSPORT_ERROR,
                 kind="transport",
                 retryable=True,
                 call_id=call_id,
             ) from exc
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except GatewayDecodeError as exc:
             raise _invalid_receipt(call_id) from exc
         return _parse_receipt(
             payload,
-            expected_run_id=self._run_id,
+            expected_run_id=self._transport.run_id,
             expected_call_id=call_id,
             expected_toolkit_name=toolkit_name,
             expected_function_name=function_name,
             expected_arguments_digest=arguments_digest,
         )
-
-
-def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        msg = f"{name} is required inside a MindRoom background script."
-        raise RuntimeError(msg)
-    return value
-
-
-def _read_token(path: Path) -> str:
-    if not path.is_file():
-        raise RuntimeError(_CAPABILITY_UNAVAILABLE_MESSAGE)
-    if path.stat().st_size > MAX_TOKEN_BYTES:
-        raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
-    token = path.read_text(encoding="utf-8").strip()
-    if not token:
-        raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
-    return token
 
 
 def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[str, object]:
@@ -341,17 +303,18 @@ def _invalid_receipt(call_id: str) -> MindRoomToolCallError:
     )
 
 
-def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCallError:
-    rate_limited = exc.code == 429
-    retryable = rate_limited or exc.code >= 500
-    try:
-        payload = json.loads(exc.read())
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
-        payload = {}
-    detail = payload.get("detail") if isinstance(payload, dict) else None
+def _http_error(exc: GatewayHTTPError, *, call_id: str) -> MindRoomToolCallError:
+    if exc.status == 429:
+        kind, retryable = "rate_limited", True
+    elif exc.status >= 500:
+        kind, retryable = "gateway_unavailable", True
+    elif 400 <= exc.status < 500:
+        kind, retryable = "request_rejected", False
+    else:
+        kind, retryable = "unexpected_redirect", False
     return MindRoomToolCallError(
-        str(detail or f"Background tool gateway request failed with status {exc.code}."),
-        kind="rate_limited" if rate_limited else ("gateway_unavailable" if retryable else "request_rejected"),
+        exc.detail or f"Background tool gateway request failed with status {exc.status}.",
+        kind=kind,
         retryable=retryable,
         call_id=call_id,
     )

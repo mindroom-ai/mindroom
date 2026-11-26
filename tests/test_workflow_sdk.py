@@ -383,7 +383,7 @@ def test_superseded_attempt_exits_with_code_3(gateway: FakeWorkflowGateway, sdk:
     assert raised.value.code == 3
 
 
-def test_sdk_imports_only_stdlib_and_launch_contract() -> None:
+def test_sdk_imports_only_stdlib_and_transport() -> None:
     """The SDK runs in the script's process, where only the standard library is promised."""
     tree = ast.parse(Path(workflow_sdk.__file__).read_text(encoding="utf-8"))
     imported: set[str] = set()
@@ -394,7 +394,7 @@ def test_sdk_imports_only_stdlib_and_launch_contract() -> None:
             assert node.level == 0
             imported.add(node.module or "")
     foreign = {name for name in imported if name.partition(".")[0] not in sys.stdlib_module_names}
-    assert foreign == {"mindroom.script_runs.launch_contract"}
+    assert foreign == {"mindroom.script_runs.transport"}
 
 
 @pytest.mark.usefixtures("in_main")

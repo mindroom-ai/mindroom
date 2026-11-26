@@ -337,6 +337,7 @@ depends_on = [
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.json_io",
     "mindroom.script_runs.launch_contract",
+    "mindroom.script_sdk",
 ]
 
 [[modules]]
@@ -2475,10 +2476,24 @@ depends_on = ["mindroom.path_confinement", "mindroom.workflow", "mindroom.script
 path = "mindroom.script_runs.launch_contract"
 depends_on = []
 
+# Shared stdlib-only HTTP/auth transport for the script and workflow SDKs inside script processes.
+[[modules]]
+path = "mindroom.script_runs.transport"
+depends_on = ["mindroom.script_runs.launch_contract"]
+visibility = ["mindroom.script_sdk", "mindroom.workflow"]
+
+# Public stdlib-only background-script SDK (documented plugin API in plugin_check.py).
+[[modules]]
+path = "mindroom.script_sdk"
+depends_on = [
+    "mindroom.script_runs.launch_contract",
+    "mindroom.script_runs.transport",
+]
+
 # The workflow SDK runs inside script processes too, under the same rule.
 [[modules]]
 path = "mindroom.workflow"
-depends_on = ["mindroom.script_runs.launch_contract"]
+depends_on = ["mindroom.script_runs.transport"]
 
 [[modules]]
 path = "mindroom.script_runs.supervised"

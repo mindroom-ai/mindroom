@@ -16,6 +16,7 @@ import pytest
 from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 from mindroom.script_runs.launch_contract import digest_arguments
+from mindroom.script_runs.transport import ScriptGatewayTransport
 from mindroom.shell.output_capture import format_shell_completion
 from tests.workers_run_frames import command_frames
 
@@ -155,13 +156,21 @@ def _in_background_script(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "call-1"})())
 
 
-def _script_gateway(monkeypatch, state: str, *, result=None, error=None) -> list[dict[str, object]]:
+def _script_gateway(
+    monkeypatch,
+    state: str,
+    *,
+    result=None,
+    error=None,
+    on_poll=None,
+) -> list[dict[str, object]]:
     """Answer every submission with one receipt in *state*, and return the submissions."""
     submitted: list[dict[str, object]] = []
 
-    def urlopen(request, *, timeout) -> BytesIO:
-        del timeout
+    def open_request(_self, request) -> BytesIO:
         assert request.headers["Authorization"] == "Bearer script-token"
+        if request.method != "POST" and on_poll is not None:
+            return on_poll(request)
         payload = json.loads(request.data)
         submitted.append(payload)
         receipt = {
@@ -178,7 +187,7 @@ def _script_gateway(monkeypatch, state: str, *, result=None, error=None) -> list
         }
         return BytesIO(json.dumps(receipt).encode())
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
     return submitted
 
 
@@ -256,16 +265,12 @@ def test_a_background_script_prints_a_result_at_the_gateway_limit(capsys, monkey
 def test_a_refused_receipt_lookup_leaves_the_accepted_call_indeterminate(capsys, monkeypatch, tmp_path) -> None:
 
     _in_background_script(monkeypatch, tmp_path)
-    pending = _script_gateway(monkeypatch, "pending")
-    accept = urllib.request.urlopen
 
-    def urlopen(request, *, timeout) -> BytesIO:
-        if request.method == "POST":
-            return accept(request, timeout=timeout)
+    def refuse_poll(request) -> BytesIO:
         # The requester lost access after the call was accepted, so the gateway refuses to show its receipt.
         raise HTTPError(request.full_url, 404, "Not Found", Message(), BytesIO(b'{"detail":"unavailable"}'))
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    pending = _script_gateway(monkeypatch, "pending", on_poll=refuse_poll)
     monkeypatch.setattr("mindroom.script_sdk.time.sleep", lambda _seconds: None)
 
     assert main(["tools", "call", "matrix_message.matrix_message", "{}"]) == 4
@@ -287,12 +292,11 @@ def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch
 
     _in_background_script(monkeypatch, tmp_path)
 
-    def urlopen(request, *, timeout) -> BytesIO:
-        del timeout
+    def open_request(_self, request) -> BytesIO:
         # A tool outside the run's grants is refused before the gateway records the call.
         raise HTTPError(request.full_url, 404, "Not Found", Message(), BytesIO(b'{"detail":"unavailable"}'))
 
-    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(ScriptGatewayTransport, "_open", open_request)
 
     assert main(["tools", "call", "memory.memory", "{}"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
