@@ -1092,7 +1092,7 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
     "event_journal_backend": (lambda config: setattr(config.event_journal, "backend", "postgres"), True),
     "budgets": (
         lambda config: setattr(config, "budgets", BudgetsConfig(monthly_limit_usd=25.0, fallback_model="spare")),
-        True,
+        False,
     ),
     "slack_identity_mapping": (
         lambda config: setattr(

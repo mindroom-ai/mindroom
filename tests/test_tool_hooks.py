@@ -1068,6 +1068,25 @@ async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_tool_success_logging_follows_live_debug_flag(tmp_path: Path) -> None:
+    """Disabling debug.log_llm_requests on a live reload immediately stops logging successful tool calls."""
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    reloaded = runtime_context.config.model_copy(deep=True)
+    reloaded.debug.log_llm_requests = False
+    runtime_context = replace(runtime_context, config_provider=lambda: reloaded)
+    bridge = tool_policy(HookRegistry.empty())
+
+    async def next_func(**_kwargs: object) -> str:
+        return "ok"
+
+    with tool_runtime_context(runtime_context):
+        assert await bridge("echo", next_func, {}) == "ok"
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    assert not log_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_path: Path) -> None:
     """After-call hooks should still get an isolated snapshot when deepcopy() fails."""
     seen: list[object | None] = []
