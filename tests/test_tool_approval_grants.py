@@ -15,7 +15,7 @@ import pytest
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.approval.response import plan_approval_calls, publish_generation
+from mindroom.approval.response import plan_approval_calls, publish_generation, timed_grant_operation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
@@ -1119,28 +1119,35 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
     ]
 
 
-def _write_consolidated_plugin(tmp_path: Path) -> Path:
-    plugin_root = tmp_path / "plugins" / "demo_consolidated"
+def _write_consolidated_plugin(
+    tmp_path: Path,
+    *,
+    plugin_name: str = "demo_consolidated",
+    function_name: str = "demo_action_tool",
+    retired_name: str | None = "unlink_demo",
+) -> Path:
+    plugin_root = tmp_path / "plugins" / plugin_name
     plugin_root.mkdir(parents=True)
-    manifest = {"name": "demo_consolidated", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}
+    manifest = {"name": plugin_name, "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}
     (plugin_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    retired_arg = f", retired_functions={{{retired_name!r}: {function_name!r}}}" if retired_name is not None else ""
     (plugin_root / "tools.py").write_text(
-        """from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+        f"""from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
 
-class DemoConsolidatedTools(Toolkit):
-    name = "demo_consolidated"
+class ConsolidatedTools(Toolkit):
+    name = {plugin_name!r}
     @tool
-    def demo_action_tool(self, action: str) -> str:
+    def {function_name}(self, action: str) -> str:
         \"\"\"Run an action-dispatched demo operation.\"\"\"
         return action
 
 @register_tool_with_metadata(
-    name="demo_consolidated", display_name="Demo Consolidated", description="Demo consolidated plugin tool",
-    category=ToolCategory.DEVELOPMENT, file_access=ToolFileAccess.NONE, function_names=("demo_action_tool",),
-    action_scoped_grants=("demo_action_tool",), retired_functions={"unlink_demo": "demo_action_tool"},
+    name={plugin_name!r}, display_name="Demo Consolidated", description="Demo consolidated plugin tool",
+    category=ToolCategory.DEVELOPMENT, file_access=ToolFileAccess.NONE, function_names=({function_name!r},),
+    action_scoped_grants=({function_name!r},){retired_arg},
 )
-def demo_consolidated_tools() -> type[DemoConsolidatedTools]:
-    return DemoConsolidatedTools
+def consolidated_tools() -> type[ConsolidatedTools]:
+    return ConsolidatedTools
 """,
         encoding="utf-8",
     )
@@ -1170,16 +1177,44 @@ async def test_plugin_action_scoped_grants_scope_timed_approvals_per_action(
         runtime_paths,
     )
     plugins = refresh_plugins(config, runtime_paths)
+    registry = plugins.tools
 
-    list_op = grant_operation(config, "demo_action_tool", {"action": "list"})
-    unlink_op = grant_operation(config, "demo_action_tool", {"action": "unlink"})
+    list_op = grant_operation(
+        config,
+        "demo_action_tool",
+        {"action": "list"},
+        tools=registry,
+        toolkit_name="demo_consolidated",
+    )
+    unlink_op = grant_operation(
+        config,
+        "demo_action_tool",
+        {"action": "unlink"},
+        tools=registry,
+        toolkit_name="demo_consolidated",
+    )
     assert list_op is not None
     assert unlink_op is not None
-    assert list_op == grant_operation(config, "demo_action_tool", {"action": " list "})
-    assert list_op == grant_operation(config, "demo_action_tool", {"action": "list"}, tools=plugins.tools)
+    assert list_op == grant_operation(
+        config,
+        "demo_action_tool",
+        {"action": " list "},
+        tools=registry,
+        toolkit_name="demo_consolidated",
+    )
+    assert list_op == grant_operation(config, "demo_action_tool", {"action": "list"}, tools=registry)
     assert list_op.key != unlink_op.key
     for bad_args in ({}, {"action": ""}, {"action": "   "}, {"action": 123}):
-        assert grant_operation(config, "demo_action_tool", bad_args) is None
+        assert (
+            grant_operation(
+                config,
+                "demo_action_tool",
+                bad_args,
+                tools=registry,
+                toolkit_name="demo_consolidated",
+            )
+            is None
+        )
     assert not scheduled_call_offers_any_arguments(
         config,
         "demo_action_tool",
@@ -1187,11 +1222,23 @@ async def test_plugin_action_scoped_grants_scope_timed_approvals_per_action(
         requester_id="@human:test",
         approver_id="@human:test",
         authored_confirmation=False,
-        tools=plugins.tools,
+        tools=registry,
+        toolkit_name="demo_consolidated",
     )
-    unrelated = grant_operation(Config(), "demo_action_tool", {})
-    assert unrelated is not None
-    assert unrelated.mcp_server_id is None
+    # tools=None must never consult process-wide plugins, even for configs with plugins loaded.
+    for target_config in (config, Config()):
+        without_tools = grant_operation(target_config, "demo_action_tool", {}, tools=None)
+        assert without_tools is not None
+        assert without_tools.mcp_server_id is None
+        without_tools_named = grant_operation(
+            target_config,
+            "demo_action_tool",
+            {},
+            tools=None,
+            toolkit_name="demo_consolidated",
+        )
+        assert without_tools_named is not None
+        assert without_tools_named.mcp_server_id is None
 
     # A timed grant on list auto-approves another list call but leaves unlink gated.
     journal = journal_database()
@@ -1205,6 +1252,115 @@ async def test_plugin_action_scoped_grants_scope_timed_approvals_per_action(
         assert await _call_row(journal, "unlink-1") == (None, None)
     finally:
         await manager.shutdown()
+
+
+def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: Path) -> None:
+    """A plugin's action_scoped_grants must not affect a same-named tool owned by another toolkit."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+
+    plugin_root = _write_consolidated_plugin(
+        tmp_path,
+        plugin_name="custom_plugin",
+        function_name="search_web",
+        retired_name=None,
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [{"path": str(plugin_root)}],
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "tools": ["serper", "custom_plugin"],
+                    "include_default_tools": False,
+                },
+            },
+            "tool_approval": {"scheduled_any_arguments": True},
+        },
+        runtime_paths,
+    )
+    registry = refresh_plugins(config, runtime_paths).tools
+    assert "serper" in registry.entries
+    assert "custom_plugin" in registry.entries
+    assert "search_web" not in registry.entries["serper"].action_scoped_grants
+    assert "search_web" in registry.entries["custom_plugin"].action_scoped_grants
+
+    # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
+    serper_op = grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="serper")
+    assert serper_op is not None
+    assert serper_op.tool_name == "search_web"
+    assert serper_op.mcp_server_id is None
+    assert serper_op.mcp_tool_name is None
+    assert scheduled_call_offers_any_arguments(
+        config,
+        "search_web",
+        {"query": "x"},
+        requester_id="@human:test",
+        approver_id="@human:test",
+        authored_confirmation=False,
+        tools=registry,
+        toolkit_name="serper",
+    )
+
+    # The owning plugin gets per-action scoping and fails closed when action is missing.
+    plugin_op = grant_operation(
+        config,
+        "search_web",
+        {"action": "read"},
+        tools=registry,
+        toolkit_name="custom_plugin",
+    )
+    assert plugin_op is not None
+    assert plugin_op.tool_name == "search_web"
+    assert plugin_op.mcp_server_id == "search_web"
+    assert plugin_op.mcp_tool_name == "read"
+    assert grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+    assert not scheduled_call_offers_any_arguments(
+        config,
+        "search_web",
+        {"action": "read"},
+        requester_id="@human:test",
+        approver_id="@human:test",
+        authored_confirmation=False,
+        tools=registry,
+        toolkit_name="custom_plugin",
+    )
+
+    # timed_grant_operation threads call.toolkit_name into grant_operation.
+    serper_tool = ToolExecution(
+        tool_call_id="call-serper",
+        tool_name="search_web",
+        tool_args={"query": "x"},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    serper_call = ApprovalCall(
+        tool_call_id="call-serper",
+        tool_name="search_web",
+        invoking_agent="code",
+        expires_at_ns=9_000_000_000_000_000_000,
+        toolkit_name="serper",
+    )
+    assert timed_grant_operation(config, serper_tool, serper_call, tools=registry) == serper_op
+
+    plugin_tool = ToolExecution(
+        tool_call_id="call-plugin",
+        tool_name="search_web",
+        tool_args={"action": "read"},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    plugin_call = ApprovalCall(
+        tool_call_id="call-plugin",
+        tool_name="search_web",
+        invoking_agent="code",
+        expires_at_ns=9_000_000_000_000_000_000,
+        toolkit_name="custom_plugin",
+    )
+    assert timed_grant_operation(config, plugin_tool, plugin_call, tools=registry) == plugin_op
+    assert timed_grant_operation(config, serper_tool, plugin_call, tools=registry) is None
 
 
 def test_plugin_retired_functions_fail_closed_in_config_validation(tmp_path: Path) -> None:

@@ -77,15 +77,20 @@ class ApprovalGrantScope:
 _ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler"})
 
 
-def _is_action_scoped_tool(config: Config, tool_name: str, tools: ToolRegistry | None = None) -> bool:
+def _is_action_scoped_tool(
+    tool_name: str,
+    *,
+    tools: ToolRegistry | None,
+    toolkit_name: str | None,
+) -> bool:
     if tool_name in _ACTION_SCOPED_TOOLS:
         return True
-    if tools is not None:
-        return any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values())
-    # why-lazy: keep tool_approval_grants a leaf module; event_journal and approval modules import it early.
-    from mindroom.tool_system.plugins import is_action_scoped_grant_tool  # noqa: PLC0415
-
-    return is_action_scoped_grant_tool(config, tool_name)
+    if tools is None:
+        return False
+    if toolkit_name is not None:
+        metadata = tools.entries.get(toolkit_name)
+        return metadata is not None and tool_name in metadata.action_scoped_grants
+    return any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values())
 
 
 def grant_operation(
@@ -94,6 +99,7 @@ def grant_operation(
     arguments: dict[str, object],
     *,
     tools: ToolRegistry | None = None,
+    toolkit_name: str | None = None,
 ) -> ApprovalOperation | None:
     """Bind a concrete tool operation, including generic MCP dispatch targets and action-dispatched tools."""
     for server_id, server in config.mcp_servers.items():
@@ -103,7 +109,7 @@ def grant_operation(
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
-    if _is_action_scoped_tool(config, tool_name, tools):
+    if _is_action_scoped_tool(tool_name, tools=tools, toolkit_name=toolkit_name):
         action = arguments.get("action")
         if not isinstance(action, str) or not action.strip():
             return None

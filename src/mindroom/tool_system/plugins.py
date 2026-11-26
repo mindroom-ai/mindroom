@@ -35,7 +35,6 @@ from mindroom.tool_system.registry import (
     PLUGIN_MODULE_PREFIX,
     ToolMetadataValidationError,
     ToolRegistry,
-    builtin_tool_registry,
     compose_tool_registry,
     plugin_module_registrations,
 )
@@ -349,24 +348,6 @@ def config_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins
             config_ref = cached.config
         _CONFIG_PLUGINS[config_id] = _CachedConfigPlugins(config_ref, plugins)
         return plugins
-
-
-def is_action_scoped_grant_tool(config: Config, tool_name: str) -> bool:
-    """Return whether any tool registered for ``config`` declares ``tool_name`` in ``action_scoped_grants``."""
-    generation = _PUBLISHED
-    with _CONFIG_PLUGINS_LOCK:
-        cached = _CONFIG_PLUGINS.get(id(config))
-    if cached is not None and cached.config() is config and cached.plugins.generation is generation:
-        return any(tool_name in metadata.action_scoped_grants for metadata in cached.plugins.tools.entries.values())
-    if any(tool_name in metadata.action_scoped_grants for metadata in builtin_tool_registry().entries.values()):
-        return True
-    if any(entry.enabled for entry in config.plugins):
-        return any(
-            tool_name in metadata.action_scoped_grants
-            for loaded in generation.plugins.values()
-            for metadata in loaded.tools.values()
-        )
-    return False
 
 
 def _declared_plugin_tools(plugin: _ConfiguredPlugin) -> tuple[dict[str, ToolMetadata], str | None]:

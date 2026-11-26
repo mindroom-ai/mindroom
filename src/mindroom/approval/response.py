@@ -202,7 +202,13 @@ def timed_grant_operation(
     resolved_tools = (
         config_plugins(config, runtime_paths).tools if tools is None and runtime_paths is not None else tools
     )
-    return grant_operation(config, call.tool_name, dict(tool.tool_args or {}), tools=resolved_tools)
+    return grant_operation(
+        config,
+        call.tool_name,
+        dict(tool.tool_args or {}),
+        tools=resolved_tools,
+        toolkit_name=call.toolkit_name,
+    )
 
 
 async def _publish_cards(

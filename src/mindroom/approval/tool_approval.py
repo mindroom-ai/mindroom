@@ -419,6 +419,7 @@ def scheduled_call_offers_any_arguments(
     approver_id: str,
     authored_confirmation: bool,
     tools: ToolRegistry | None = None,
+    toolkit_name: str | None = None,
 ) -> bool:
     """Return whether a scheduled call's card may offer approving any arguments.
 
@@ -429,7 +430,7 @@ def scheduled_call_offers_any_arguments(
     """
     if not config.tool_approval.scheduled_any_arguments or approver_id != requester_id or authored_confirmation:
         return False
-    operation = grant_operation(config, tool_name, arguments, tools=tools)
+    operation = grant_operation(config, tool_name, arguments, tools=tools, toolkit_name=toolkit_name)
     return operation is not None and operation.mcp_server_id is None
 
 
