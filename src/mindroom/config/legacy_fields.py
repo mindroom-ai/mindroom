@@ -351,7 +351,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits (scheduler, searxng, memory, todo, file_generation, visualization, unsplash).
 # Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
 #   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
 #   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
@@ -395,6 +395,28 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "file_generation": {
+        "generate_json_file": "generate_file",
+        "generate_csv_file": "generate_file",
+        "generate_pdf_file": "generate_file",
+        "generate_docx_file": "generate_file",
+        "generate_text_file": "generate_file",
+        "generate_html_file": "generate_file",
+        "generate_code_file": "generate_file",
+    },
+    "visualization": {
+        "create_bar_chart": "create_chart",
+        "create_line_chart": "create_chart",
+        "create_pie_chart": "create_chart",
+        "create_scatter_plot": "create_chart",
+        "create_histogram": "create_chart",
+    },
+    "unsplash": {
+        "search_photos": "unsplash",
+        "get_photo": "unsplash",
+        "get_random_photo": "unsplash",
+        "download_photo": "unsplash",
     },
 }
 

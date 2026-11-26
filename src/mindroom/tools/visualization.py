@@ -15,7 +15,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.tools.agno_compat_visualization import WorkspaceVisualizationTools
+    from mindroom.custom_tools.visualization import VisualizationTools
 
 
 @register_tool_with_metadata(
@@ -83,16 +83,10 @@ if TYPE_CHECKING:
     dependencies=["matplotlib"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#visualization",
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
-    function_names=(
-        "create_bar_chart",
-        "create_histogram",
-        "create_line_chart",
-        "create_pie_chart",
-        "create_scatter_plot",
-    ),
+    function_names=("create_chart",),
 )
-def visualization_tools() -> type[WorkspaceVisualizationTools]:
+def visualization_tools() -> type[VisualizationTools]:
     """Return Visualization tools that save charts only inside the agent workspace."""
-    from mindroom.tools.agno_compat_visualization import WorkspaceVisualizationTools
+    from mindroom.custom_tools.visualization import VisualizationTools
 
-    return WorkspaceVisualizationTools
+    return VisualizationTools

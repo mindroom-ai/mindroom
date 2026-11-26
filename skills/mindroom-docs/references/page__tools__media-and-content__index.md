@@ -119,26 +119,26 @@ agents:
 
 ## [`unsplash`]
 
-`unsplash` returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
+`unsplash` provides a unified `unsplash(action, ...)` tool that returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
 
-- `search_photos(query, per_page=10, page=1, orientation=None, color=None)` returns the total match count and a list of photos with author and image URLs.
-- `get_photo(photo_id)` adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
-- `get_random_photo(query=None, orientation=None, count=1)` returns one or more random photos, optionally matching a query.
-- `download_photo(photo_id)` reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
+- `action="search"` (`query`, optional `count`, `page`, `orientation`, `color`) returns the total match count and a list of photos with author and image URLs.
+- `action="get"` (`photo_id`) adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
+- `action="random"` (optional `query`, `orientation`, `count`) returns one or more random photos, optionally matching a query.
+- `action="download"` (`photo_id`) reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `access_key` | `password` | `null` | Required Unsplash access key; falls back to `UNSPLASH_ACCESS_KEY`. Get one from [Unsplash Developers](https://unsplash.com/developers). |
-| `enable_search_photos` | `boolean` | `true` | Enable `search_photos()`. |
-| `enable_get_photo` | `boolean` | `true` | Enable `get_photo()`. |
-| `enable_get_random_photo` | `boolean` | `true` | Enable `get_random_photo()`. |
-| `enable_download_photo` | `boolean` | `false` | Enable `download_photo()`. |
-| `all` | `boolean` | `false` | Enable all functions. |
+| `enable_search_photos` | `boolean` | `true` | Enable `action="search"` in `unsplash()`. |
+| `enable_get_photo` | `boolean` | `true` | Enable `action="get"` in `unsplash()`. |
+| `enable_get_random_photo` | `boolean` | `true` | Enable `action="random"` in `unsplash()`. |
+| `enable_download_photo` | `boolean` | `false` | Enable `action="download"` in `unsplash()`. |
+| `all` | `boolean` | `false` | Enable all actions in `unsplash()`. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 
 ```python
-search_photos("conference stage lighting", per_page=5, orientation="landscape")
-get_random_photo(query="workspace desk", count=3)
+unsplash("search", query="conference stage lighting", count=5, orientation="landscape")
+unsplash("random", query="workspace desk", count=3)
 ```
 
 ## [`brandfetch`]

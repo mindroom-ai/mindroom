@@ -556,11 +556,11 @@ agents:
 
 ## [`file_generation`]
 
-`file_generation` provides `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
-Each function returns the generated file in its tool result.
+`file_generation` provides a unified `generate_file(format, content, filename=None, title=None, headers=None, language=None)` tool supporting `json`, `csv`, `pdf`, `docx`, `html`, `txt`, and `code`.
+Each call returns the generated file in its tool result.
 Filenames are generated when omitted, and a missing extension is added for the export type.
-`generate_json_file()` accepts dicts, lists, or strings, and wraps a string that is not valid JSON.
-PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavailable, even if enabled in config.
+`format="json"` accepts dicts, lists, or strings, and wraps a string that is not valid JSON.
+PDF and DOCX generation require `reportlab` or `python-docx`.
 
 Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
 Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
@@ -572,14 +572,14 @@ Saved files go into `output_directory` inside the agent workspace, or the worksp
 | --- | --- | --- | --- | --- |
 | `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
 | `save_files` | `boolean` | `no` | `false` | Save generated files; when `output_directory` is unset, they go to the workspace root. |
-| `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
-| `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
-| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()`. |
-| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()`. |
-| `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
-| `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
-| `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()`. |
-| `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
+| `enable_json_generation` | `boolean` | `no` | `true` | Enable `format="json"` in `generate_file()`. |
+| `enable_csv_generation` | `boolean` | `no` | `true` | Enable `format="csv"` in `generate_file()`. |
+| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `format="pdf"` in `generate_file()`. |
+| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `format="docx"` in `generate_file()`. |
+| `enable_txt_generation` | `boolean` | `no` | `true` | Enable `format="txt"` in `generate_file()`. |
+| `enable_html_generation` | `boolean` | `no` | `true` | Enable `format="html"` in `generate_file()`. |
+| `enable_code_generation` | `boolean` | `no` | `true` | Enable `format="code"` in `generate_file()`. |
+| `all` | `boolean` | `no` | `false` | Enable all formats in `generate_file()`. |
 
 ### Example
 
@@ -592,16 +592,16 @@ agents:
 ```
 
 ```python
-generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
-generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
-generate_docx_file("Quarterly summary", filename="report.docx", title="Q1 Report")
+generate_file("csv", [{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
+generate_file("pdf", "Quarterly summary", filename="report.pdf", title="Q1 Report")
+generate_file("docx", "Quarterly summary", filename="report.docx", title="Q1 Report")
 ```
 
 ## [`visualization`]
 
-`visualization` provides `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
-Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scatter plots take x and y lists, and histograms take a list of numbers.
-Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
+`visualization` provides a unified `create_chart(chart_type, ...)` tool supporting `bar`, `line`, `pie`, `scatter`, and `histogram`.
+Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scatter plots take `x_data`/`y_data` (or `data`), and histograms take a list of numbers.
+Each call saves a PNG in `output_dir` inside the agent workspace and returns the file path.
 A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
 Charts overwrite files of the same name, and `output_dir` is created when missing.
 Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
@@ -611,19 +611,19 @@ Because charts are in the workspace, `attachments` and `matrix_message` can send
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_dir` | `text` | `no` | `"charts"` | Directory inside the agent workspace where charts are saved; absolute paths and `..` are rejected. |
-| `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `create_bar_chart()`. |
-| `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `create_line_chart()`. |
-| `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `create_pie_chart()`. |
-| `enable_create_scatter_plot` | `boolean` | `no` | `true` | Enable `create_scatter_plot()`. |
-| `enable_create_histogram` | `boolean` | `no` | `true` | Enable `create_histogram()`. |
-| `all` | `boolean` | `no` | `false` | Enable all chart functions. |
+| `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `chart_type="bar"` in `create_chart()`. |
+| `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `chart_type="line"` in `create_chart()`. |
+| `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `chart_type="pie"` in `create_chart()`. |
+| `enable_create_scatter_plot` | `boolean` | `no` | `true` | Enable `chart_type="scatter"` in `create_chart()`. |
+| `enable_create_histogram` | `boolean` | `no` | `true` | Enable `chart_type="histogram"` in `create_chart()`. |
+| `all` | `boolean` | `no` | `false` | Enable all chart types in `create_chart()`. |
 
 ### Example
 
 ```python
-create_bar_chart({"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
-create_scatter_plot(x=[1, 2, 3], y=[2, 5, 7], title="Experiment results")
-create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
+create_chart("bar", data={"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
+create_chart("scatter", x_data=[1, 2, 3], y_data=[2, 5, 7], title="Experiment results")
+create_chart("histogram", data=[1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 ```
 
 ## [`sleep`]

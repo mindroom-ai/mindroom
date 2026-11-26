@@ -9,13 +9,12 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.eleven_labs import ElevenLabsTools
+    from mindroom.custom_tools.eleven_labs import ElevenLabsTools
 
 
 @register_tool_with_metadata(
     name="eleven_labs",
     file_access=ToolFileAccess.NONE,
-    worker_inert_agent_functions=("text_to_speech",),
     display_name="Eleven Labs",
     description="Text-to-speech and sound effect generation using AI voices",
     category=ToolCategory.DEVELOPMENT,
@@ -95,6 +94,6 @@ if TYPE_CHECKING:
 )
 def eleven_labs_tools() -> type[ElevenLabsTools]:
     """Return Eleven Labs tools for text-to-speech and sound effect generation."""
-    from agno.tools.eleven_labs import ElevenLabsTools
+    from mindroom.custom_tools.eleven_labs import ElevenLabsTools
 
     return ElevenLabsTools
