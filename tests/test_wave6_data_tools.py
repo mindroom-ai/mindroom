@@ -69,6 +69,13 @@ def test_csv_query_dotted_stem_and_preserves_persistent_duckdb_table(tmp_path: P
         assert queried == "id,amount\n1,100\n2,250"
         # Existing persistent table on the supplied connection stays intact and unshadowed.
         assert con.sql('SELECT persistent_col FROM "sales.2025"').fetchall() == [(999,)]
+
+        # Existing caller-owned TEMP table of the same name is never overwritten or dropped on collision.
+        con.execute('CREATE TEMP TABLE "sales.2025" AS SELECT 777 AS caller_temp_col')
+        err = tool.query_csv_file("sales.2025", 'SELECT * FROM "sales.2025"')
+        assert "Error querying csv" in err
+        assert "already exists" in err
+        assert con.sql('SELECT caller_temp_col FROM temp.main."sales.2025"').fetchall() == [(777,)]
     finally:
         con.close()
 

@@ -95,8 +95,8 @@ def test_yfinance_actions_toggles_and_schema_narrowing(monkeypatch: pytest.Monke
     }
 
 
-def test_openbb_real_sdk_isolation_and_fail_closed_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real installed openbb app starts with empty isolated credentials and fails closed on PAT or credentialed providers."""
+def test_openbb_real_sdk_isolation_and_provider_auth_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real installed openbb app strips ambient credentials, allows yfinance even with PAT, and fails closed on paid providers."""
     import mindroom.tools.openbb as openbb_module  # noqa: PLC0415
 
     monkeypatch.setenv("OPENBB_PAT", "ambient-pat")
@@ -109,21 +109,21 @@ def test_openbb_real_sdk_isolation_and_fail_closed_auth(monkeypatch: pytest.Monk
     non_empty_creds = {k: v for k, v in isolated_app.user.credentials.model_dump().items() if v is not None}
     assert non_empty_creds == {}
 
-    # Real installed openbb SDK has no obb.account.login: openbb_pat fails closed instead of swallowing and continuing.
-    with_pat = openbb_cls(openbb_pat="scoped-pat", provider="yfinance")
-    pat_err = with_pat.openbb_get("stock_price", symbol="AAPL")
-    assert "Error fetching OpenBB stock_price" in pat_err
-    assert "obb.account.login" in pat_err
+    # With default provider="yfinance", configuring openbb_pat warns instead of failing on OpenBB 4.7.2 (no account.login).
+    yf_with_pat = openbb_cls(openbb_pat="scoped-pat", provider="yfinance")
+    client = yf_with_pat._client()
+    assert {k: v for k, v in client.user.credentials.model_dump().items() if v is not None} == {}
 
-    # Credentialed providers fail closed even when ambient provider API keys exist in process env.
-    fmp_tool = openbb_cls(provider="fmp")
-    fmp_err = fmp_tool.openbb_get("stock_price", symbol="AAPL")
-    assert "Error fetching OpenBB stock_price" in fmp_err
-    assert "scoped credentials" in fmp_err
+    # Credentialed providers fail closed (both with and without openbb_pat) even when ambient keys exist in process env.
+    for kwargs in ({"provider": "fmp"}, {"provider": "fmp", "openbb_pat": "scoped-pat"}):
+        fmp_tool = openbb_cls(**kwargs)
+        fmp_err = fmp_tool.openbb_get("stock_price", symbol="AAPL")
+        assert "Error fetching OpenBB stock_price" in fmp_err
+        assert "scoped credentials" in fmp_err
 
 
-def test_openbb_actions_and_non_swallowed_login_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OpenBBTools executes all 5 actions on real-shaped SDK objects and never swallows failing login errors."""
+def test_openbb_actions_and_pat_fallback_on_yfinance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenBBTools executes all 5 actions and keeps yfinance working when PAT login is absent or fails."""
     monkeypatch.setenv("OPENBB_PAT", "ambient-pat")
     openbb_cls = cast("Any", builtin_tool_registry().factory("openbb")())
 
@@ -160,26 +160,30 @@ def test_openbb_actions_and_non_swallowed_login_failure(monkeypatch: pytest.Monk
     assert json.loads(no_pat.openbb_get("company_profile", symbol="AAPL"))[0]["provider"] == "yfinance"
     assert json.loads(no_pat.openbb_get("price_targets", symbol="AAPL"))[0]["target"] == 200
 
-    # If a custom/older SDK exposes account.login and it fails, fail closed without calling quote.
-    quote_called = False
+    # Configuring openbb_pat with provider="yfinance" still succeeds on OpenBB 4.7.x without obb.account.login.
+    with_pat = openbb_cls(obb=real_shape_obb, openbb_pat="scoped-pat", provider="yfinance")
+    assert json.loads(with_pat.openbb_get("stock_price", symbol="MSFT"))[0]["symbol"] == "MSFT"
 
+    # Failing account.login logs a warning and still allows provider="yfinance", while paid providers fail closed.
     def fail_login(*, pat: str) -> None:
         msg = f"rejected {pat}"
         raise RuntimeError(msg)
 
-    def track_quote(*, symbol: str, provider: str) -> _FakeOBBResult:
-        nonlocal quote_called
-        quote_called = True
-        return _FakeOBBResult([{"symbol": symbol, "provider": provider}])
-
     failing_obb = SimpleNamespace(
         account=SimpleNamespace(login=fail_login),
-        equity=SimpleNamespace(price=SimpleNamespace(quote=track_quote)),
+        user=SimpleNamespace(
+            credentials=SimpleNamespace(origins={"fmp": ["fmp_api_key"], "yfinance": []}, fmp_api_key=None),
+        ),
+        equity=SimpleNamespace(
+            price=SimpleNamespace(
+                quote=lambda *, symbol, provider: _FakeOBBResult([{"symbol": symbol, "provider": provider}]),
+            ),
+        ),
     )
-    failing_tool = openbb_cls(obb=failing_obb, openbb_pat="bad-pat")
-    err = failing_tool.openbb_get("stock_price", symbol="MSFT")
-    assert "rejected bad-pat" in err
-    assert quote_called is False
+    yf_failing_pat = openbb_cls(obb=failing_obb, openbb_pat="bad-pat", provider="yfinance")
+    assert json.loads(yf_failing_pat.openbb_get("stock_price", symbol="NVDA"))[0]["symbol"] == "NVDA"
+    fmp_failing_pat = openbb_cls(obb=failing_obb, openbb_pat="bad-pat", provider="fmp")
+    assert "scoped credentials" in fmp_failing_pat.openbb_get("stock_price", symbol="NVDA")
 
     # Explicit None disables stock_price.
     assert openbb_cls(obb=real_shape_obb, enable_get_stock_price=None).functions == {}

@@ -76,9 +76,7 @@ IGNORED_AGNO_PARAMS = {
 # reads the null words as left out.
 BOOLEAN_WORDS = ("true", "False")
 NULL_WORDS = ("None", "null", " NULL ")
-IGNORED_EXTRA_CONFIG_FIELDS = {
-    # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
-}
+IGNORED_EXTRA_CONFIG_FIELDS: dict[str, set[str]] = {}
 
 
 def test_youtube_languages_accepts_authored_string_list() -> None:

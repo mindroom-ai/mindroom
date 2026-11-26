@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import csv
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY
@@ -14,15 +14,11 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    first_sql_statement,
     format_tabular_rows,
     quote_sql_identifier,
     require_non_empty,
     resolve_bool_toggle,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 logger = get_logger(__name__)
 
@@ -123,47 +119,32 @@ class _RedshiftTools(Toolkit):
             kwargs["password"] = require_non_empty(self.password, "password")
         return kwargs
 
-    @contextmanager
-    def _connection_scope(self) -> Iterator[Any]:
-        if self._connection is not None:
-            yield self._connection
-            return
+    def _ensure_connection(self) -> Any:  # noqa: ANN401 - optional redshift_connector connection
+        if self._connection is None:
+            import redshift_connector
+
+            self._connection = redshift_connector.connect(**self._build_connection_kwargs())
+        return self._connection
+
+    def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
         import redshift_connector
 
-        connection = redshift_connector.connect(**self._build_connection_kwargs())
         try:
-            yield connection
-        finally:
-            with suppress(Exception):
-                connection.close()
-
-    def _run_db_query(
-        self,
-        query: str,
-        params: tuple[object, ...] | None = None,
-        *,
-        commit: bool = False,
-    ) -> str:
-        try:
-            with self._connection_scope() as connection:
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute(query, params)
-                        if cursor.description is None:
-                            if commit:
-                                connection.commit()
-                            return "Query executed successfully."
-                        columns = [desc[0] for desc in cursor.description]
-                        rows = cursor.fetchall()
-                        if commit:
-                            connection.commit()
-                        if not rows:
-                            return f"Query returned no results.\nColumns: {', '.join(columns)}"
-                        return format_tabular_rows(columns, [tuple(row) for row in rows])
-                except Exception:
-                    with suppress(Exception):
-                        connection.rollback()
-                    raise
+            connection = self._ensure_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    if cursor.description is None:
+                        return "Query executed successfully."
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = cursor.fetchall()
+                    if not rows:
+                        return f"Query returned no results.\nColumns: {', '.join(columns)}"
+                    return format_tabular_rows(columns, [tuple(row) for row in rows])
+            except redshift_connector.Error:
+                with suppress(Exception):
+                    connection.rollback()
+                raise
         except Exception as exc:
             logger.exception("Error executing Redshift query")
             return f"Error executing query: {exc}"
@@ -171,7 +152,8 @@ class _RedshiftTools(Toolkit):
     def _summarize_table(self, table: str) -> str:
         try:
             full_table = f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table)}"
-            with self._connection_scope() as connection, connection.cursor() as cursor:
+            connection = self._ensure_connection()
+            with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT column_name, data_type FROM information_schema.columns "
                     "WHERE table_schema = %s AND table_name = %s;",
@@ -244,7 +226,7 @@ class _RedshiftTools(Toolkit):
             if action == "summarize_table":
                 return self._summarize_table(require_non_empty(table, "table"))
             if action == "inspect_query":
-                stmt = first_sql_statement(require_non_empty(query, "query"))
+                stmt = require_non_empty(require_non_empty(query, "query").rstrip(";"), "query")
                 return self._run_db_query(f"EXPLAIN {stmt}")
         except Exception as exc:
             return f"Error in redshift_inspect ({action}): {exc}"
@@ -252,7 +234,7 @@ class _RedshiftTools(Toolkit):
 
     def run_query(self, query: str) -> str:
         """Run a SQL query against Amazon Redshift and return CSV-formatted rows."""
-        return self._run_db_query(query, commit=True)
+        return self._run_db_query(query)
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a Redshift table as a local CSV file at `path`."""
@@ -261,7 +243,8 @@ class _RedshiftTools(Toolkit):
             target_path = Path(require_non_empty(path, "path"))
             full_table = f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table_name)}"
             stmt = f"SELECT * FROM {full_table};"  # noqa: S608 - schema and table quoted via quote_sql_identifier
-            with self._connection_scope() as connection, connection.cursor() as cursor:
+            connection = self._ensure_connection()
+            with connection.cursor() as cursor:
                 cursor.execute(stmt)
                 if cursor.description is None:
                     return f"Error: Query returned no description for table '{table_name}'."

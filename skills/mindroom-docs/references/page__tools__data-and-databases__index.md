@@ -37,6 +37,7 @@ Missing Python dependencies install automatically on first use; see [Automatic D
 Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
 The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
 For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
+PostgreSQL URLs require an explicit host (including Unix-socket `?host=...`), username, password, and database, and reject ambient libpq `passfile`, `PGSERVICE`, and `PGHOSTADDR` fallbacks.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -86,6 +87,7 @@ It authenticates with `user` and `password`, or with IAM through an AWS `profile
 Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
 With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
+IAM mode requires an explicit `profile` or both `access_key_id` and `secret_access_key` rather than falling back to ambient AWS default credential chains.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -355,7 +357,7 @@ agents:
 
 `openbb` provides `openbb_get(action, symbol=None, company_name=None, num_stories=10)` with actions `stock_price`, `search_symbol`, `company_news`, `company_profile`, and `price_targets`.
 Symbols can be comma-separated, such as `AAPL,MSFT`.
-The default `yfinance` provider works without an OpenBB account; set `openbb_pat` or the `OPENBB_PAT` environment variable for premium providers.
+The default `yfinance` provider works out of the box without credentials; credentialed providers are not supported via `openbb_pat` (or `OPENBB_PAT`) in OpenBB 4.7.2 (which removed `obb.account.login`) and fail closed rather than reading host environment variables or `~/.openbb_platform/user_settings.json`.
 Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data providers.
 
 | Option | Type | Default | Notes |

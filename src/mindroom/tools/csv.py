@@ -151,11 +151,13 @@ class _CsvTools(Toolkit):
             with conn_ctx as con:
                 table_ident = '"' + csv_name.replace('"', '""') + '"'
                 stmt = (
-                    f"CREATE OR REPLACE TEMP TABLE {table_ident} AS "  # noqa: S608 - single-part quoted identifier
+                    f"CREATE TEMP TABLE {table_ident} AS "  # noqa: S608 - single-part quoted identifier
                     "SELECT * FROM read_csv(?, ignore_errors=false, auto_detect=true)"
                 )
-                con.execute(stmt, [str(file_path)])
+                created_temp = False
                 try:
+                    con.execute(stmt, [str(file_path)])
+                    created_temp = True
                     formatted_sql = first_sql_statement(sql_query)
                     query_result = con.sql(formatted_sql)
                     if query_result is None:
@@ -166,8 +168,9 @@ class _CsvTools(Toolkit):
                     except AttributeError:
                         return str(query_result)
                 finally:
-                    with suppress(Exception):
-                        con.execute(f"DROP TABLE IF EXISTS temp.main.{table_ident}")
+                    if created_temp:
+                        with suppress(Exception):
+                            con.execute(f"DROP TABLE IF EXISTS temp.main.{table_ident}")
         except Exception as exc:
             logger.exception("Error querying CSV", csv_name=csv_name)
             return f"Error querying csv: {exc}"

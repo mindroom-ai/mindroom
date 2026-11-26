@@ -332,7 +332,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 # Legacy format: scheduler, searxng, memory, todo, and the Wave 6 native toolkits (csv, duckdb, sql, postgres,
 #   redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona) previously exposed
 #   individual per-operation function names that could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Wave 6: v2026.11.611 / unreleased); replacement: unreleased; consolidated into
+# Last legacy release: v2026.11.610 (Wave 6: v2026.11.625 / unreleased); replacement: unreleased; consolidated into
 #   action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
@@ -555,15 +555,9 @@ def _retired_approval_pair_error(
         default=default,
         default_timeout_days=default_timeout_days,
     )
-    if old_decision == new_decision and old_decision[1] is None:
+    if old_decision == new_decision:
         return None
     if first_old is not None:
-        if old_decision == new_decision and old_decision[1] is not None:
-            return (
-                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs script "
-                f"{old_decision[1]!r} for {old}; {old} is now {new}, so the script receives "
-                f"{new!r} instead of {old!r}; update the script and add an explicit rule for {new}."
-            )
         return (
             f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
             f"{old} is now {new}, which now gets a different approval decision; "

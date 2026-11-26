@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import sqlite3
+import sys
 from contextlib import closing
 from typing import TYPE_CHECKING, Any, cast
 
@@ -205,12 +206,23 @@ def test_postgres_scoped_credentials_read_only_and_export(
     assert fake_conn.read_only is True
     assert fake_conn.closed is True
 
-    # Ambient PGSERVICE fails closed before reaching libpq.
+    # Ambient PGSERVICE and PGHOSTADDR both fail closed before reaching libpq.
     monkeypatch.setenv("PGSERVICE", "host_prod")
     connect_calls.clear()
     assert "PGSERVICE" in tool.run_query("SELECT 1")
     assert connect_calls == []
     monkeypatch.delenv("PGSERVICE")
+
+    monkeypatch.setenv("PGHOSTADDR", "10.0.0.5")
+    assert "PGHOSTADDR" in tool.run_query("SELECT 1")
+    assert connect_calls == []
+    monkeypatch.delenv("PGHOSTADDR")
+
+    # inspect_query preserves semicolons inside SQL string literals.
+    explain_conn = _FakeConnection([([("QUERY PLAN",)], [{"QUERY PLAN": "Result"}])])
+    explain_tool = pg_cls(connection=explain_conn, table_schema="public")
+    assert explain_tool.postgres_inspect("inspect_query", query="SELECT ';' AS separator;") == "QUERY PLAN\nResult"
+    assert explain_conn.cursor_obj.executed[0][0] == "EXPLAIN SELECT ';' AS separator"
 
     export_conn = _FakeConnection([([("id",), ("name",)], [{"id": 1, "name": "alice"}])])
     export_tool = pg_cls(connection=export_conn, table_schema="public")
@@ -256,7 +268,7 @@ def test_redshift_scoped_credentials_ssl_default_and_operations(
     assert "Successfully exported" in tool.export_table_to_path('my"orders', str(out_csv))
     assert out_csv.read_text(encoding="utf-8").splitlines() == ["id,total", "1,42"]
     assert '"reporting"."my""orders"' in str(fake_conn.cursor_obj.executed[0][0])
-    assert fake_conn.closed is True
+    assert fake_conn.closed is False
     assert connect_calls[0]["ssl"] is True
 
 
@@ -390,7 +402,20 @@ def test_sql_postgresql_scoped_credentials_and_libpq_isolation(monkeypatch: pyte
     monkeypatch.setenv("PGSERVICE", "host_prod")
     with pytest.raises(ValueError, match="PGSERVICE"):
         sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@db.local/app")
-    monkeypatch.delenv("PGSERVICE")
+    # Also fails closed when psycopg 3 is unavailable (e.g. psycopg2 dialect).
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    with pytest.raises(ValueError, match="PGSERVICE"):
+        sql_cls(db_url=f"postgresql+psycopg2://u:{_DUMMY_SECRET}@db.local/app")
+    monkeypatch.undo()
+    monkeypatch.setenv("PGPASSWORD", "ambient-secret")
+    monkeypatch.setenv("PGHOST", "ambient-host")
+    monkeypatch.setenv("PGPORT", "6543")
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    monkeypatch.delenv("PGHOSTADDR", raising=False)
+
+    monkeypatch.setenv("PGHOSTADDR", "10.0.0.5")
+    with pytest.raises(ValueError, match="PGHOSTADDR"):
+        sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@db.local/app")
 
     captured: list[tuple[object, dict[str, object]]] = []
     real_create_engine = sqlalchemy.create_engine
@@ -400,14 +425,29 @@ def test_sql_postgresql_scoped_credentials_and_libpq_isolation(monkeypatch: pyte
         return real_create_engine(url, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(sqlalchemy, "create_engine", spy_create_engine)
+
+    # Explicit hostaddr in URL is allowed even when PGHOSTADDR is set in env.
+    hostaddr_tool = sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@db.local/app?hostaddr=127.0.0.1")
+    hostaddr_tool.db_engine.dispose()
+    monkeypatch.delenv("PGHOSTADDR")
+
     tool = sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@127.0.0.1/app")
     try:
-        assert len(captured) == 1
-        url_arg, engine_kwargs = captured[0]
+        url_arg, engine_kwargs = captured[-1]
         assert getattr(url_arg, "port", None) == 5432
         assert engine_kwargs["connect_args"] == {"passfile": ""}
     finally:
         tool.db_engine.dispose()
+
+    # Unix-socket PostgreSQL URL with ?host=/var/run/postgresql is accepted and pins port + empty passfile.
+    unix_tool = sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@/app?host=/var/run/postgresql")
+    try:
+        unix_url, unix_kwargs = captured[-1]
+        assert getattr(unix_url, "host", None) is None
+        assert dict(getattr(unix_url, "query", {}))["host"] == "/var/run/postgresql"
+        assert unix_kwargs["connect_args"] == {"passfile": "", "port": 5432}
+    finally:
+        unix_tool.db_engine.dispose()
 
 
 class _StatefulRedshiftCursor:
@@ -423,26 +463,30 @@ class _StatefulRedshiftCursor:
         return None
 
     def execute(self, query: str, _params: object = None) -> None:
-        if query.startswith("INSERT"):
-            self._conn.staged.append((1, "alpha"))
+        self._conn.executed.append(query)
+        if query.startswith("CREATE TEMP TABLE"):
+            self._conn.temp_rows.append((1, "alpha"))
             self.description = None
             self._rows = []
         elif query.startswith("FAIL"):
-            self._conn.staged.append((2, "should-rollback"))
-            msg = "boom"
-            raise RuntimeError(msg)
+            self._conn.temp_rows.append((2, "should-rollback"))
+            msg = "redshift boom"
+            raise redshift_connector.Error(msg)
+        elif query.startswith("EXPLAIN "):
+            self.description = [("QUERY PLAN",)]
+            self._rows = [("Result",)]
         else:
             self.description = [("id",), ("name",)]
-            self._rows = list(self._conn.backing_store) + list(self._conn.staged)
+            self._rows = list(self._conn.temp_rows)
 
     def fetchall(self) -> list[tuple[object, ...]]:
         return list(self._rows)
 
 
 class _StatefulRedshiftConnection:
-    def __init__(self, backing_store: list[tuple[int, str]]) -> None:
-        self.backing_store = backing_store
-        self.staged: list[tuple[int, str]] = []
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self.temp_rows: list[tuple[int, str]] = []
         self.committed = False
         self.rolled_back = False
         self.closed = False
@@ -451,43 +495,47 @@ class _StatefulRedshiftConnection:
         return _StatefulRedshiftCursor(self)
 
     def commit(self) -> None:
-        self.backing_store.extend(self.staged)
-        self.staged.clear()
         self.committed = True
 
     def rollback(self) -> None:
-        self.staged.clear()
+        self.temp_rows.clear()
         self.rolled_back = True
 
     def close(self) -> None:
-        self.staged.clear()
         self.closed = True
 
 
-def test_redshift_run_query_commits_dml_and_rolls_back_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redshift run_query commits DML before closing fresh connections and rolls back on failure."""
+def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_semicolons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redshift lazily reuses one connection without auto-commit, rolls back on Error, and keeps EXPLAIN literals."""
     rs_cls = cast("Any", builtin_tool_registry().factory("redshift")())
-    persisted_rows: list[tuple[int, str]] = []
     connections: list[_StatefulRedshiftConnection] = []
 
     def fake_connect(**_kwargs: object) -> _StatefulRedshiftConnection:
-        conn = _StatefulRedshiftConnection(persisted_rows)
+        conn = _StatefulRedshiftConnection()
         connections.append(conn)
         return conn
 
     monkeypatch.setattr(redshift_connector, "connect", fake_connect)
     tool = rs_cls(host="rs.example", database="dev", user="admin", password=_DUMMY_SECRET)
+    assert connections == []
 
-    assert tool.run_query("INSERT INTO items VALUES (1, 'alpha')") == "Query executed successfully."
-    assert connections[0].committed is True
-    assert connections[0].closed is True
+    assert tool.run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
+    assert len(connections) == 1
+    assert connections[0].committed is False
+    assert connections[0].closed is False
 
-    # A second fresh connection observes the committed write.
-    assert tool.run_query("SELECT id, name FROM items") == "id,name\n1,alpha"
-    assert len(connections) == 2
+    # Subsequent call reuses the same connection so temp-table state survives.
+    assert tool.run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
+    assert len(connections) == 1
 
-    # Failing DML rolls back and never persists to subsequent connections.
-    assert "Error executing query: boom" in tool.run_query("FAIL AFTER STAGING")
-    assert connections[2].rolled_back is True
-    assert connections[2].committed is False
-    assert tool.run_query("SELECT id, name FROM items") == "id,name\n1,alpha"
+    # inspect_query keeps semicolons inside string literals intact.
+    assert tool.redshift_inspect("inspect_query", query="SELECT ';' AS separator;") == "QUERY PLAN\nResult"
+    assert connections[0].executed[-1] == "EXPLAIN SELECT ';' AS separator"
+
+    # redshift_connector.Error rolls back the active transaction without closing the reused connection.
+    assert "Error executing query: redshift boom" in tool.run_query("FAIL AFTER STAGING")
+    assert connections[0].rolled_back is True
+    assert connections[0].committed is False
+    assert connections[0].closed is False

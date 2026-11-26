@@ -86,6 +86,7 @@ class _OpenBBTools(Toolkit):
         self._obb = obb
         self._injected_obb = obb is not None
         self._logged_in = False
+        self._pat_attempted = False
         self.openbb_pat = openbb_pat.strip() if isinstance(openbb_pat, str) and openbb_pat.strip() else None
         self.provider: _OpenBBProvider = provider
 
@@ -132,22 +133,32 @@ class _OpenBBTools(Toolkit):
     def _client(self) -> Any:  # noqa: ANN401 - OpenBB app object
         if self._obb is None:
             self._obb = _load_openbb_app()
-        if self.openbb_pat and not self._logged_in:
+        if self.openbb_pat and not self._logged_in and not self._pat_attempted:
+            self._pat_attempted = True
             account = getattr(self._obb, "account", None)
             login = getattr(account, "login", None)
             if not callable(login):
-                msg = (
-                    "Configured openbb_pat is not supported by the installed openbb SDK "
-                    "(no obb.account.login); refusing to fall back to ambient credentials."
+                logger.warning(
+                    "openbb_pat_login_unsupported",
+                    provider=self.provider,
+                    detail="Installed openbb SDK does not expose obb.account.login",
                 )
-                raise RuntimeError(msg)
-            login(pat=self.openbb_pat)
-            self._logged_in = True
-        if not self._injected_obb and not self._logged_in and self.provider != "yfinance":
+            else:
+                try:
+                    login(pat=self.openbb_pat)
+                    self._logged_in = True
+                except Exception as exc:
+                    logger.warning(
+                        "openbb_pat_login_failed",
+                        provider=self.provider,
+                        error=str(exc).replace(self.openbb_pat, "[REDACTED]"),
+                    )
+        if not self._logged_in and self.provider != "yfinance":
             credentials = getattr(getattr(self._obb, "user", None), "credentials", None)
             origins = getattr(credentials, "origins", None)
             required = origins.get(self.provider) if isinstance(origins, dict) else None
-            if required is None or any(not getattr(credentials, key, None) for key in required):
+            missing_creds = required is None or any(not getattr(credentials, key, None) for key in required)
+            if (not self._injected_obb or credentials is not None) and missing_creds:
                 msg = (
                     f"OpenBB provider '{self.provider}' requires scoped credentials that are not configured; "
                     "refusing to fall back to host environment or ~/.openbb_platform/user_settings.json."

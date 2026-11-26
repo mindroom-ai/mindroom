@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
@@ -17,10 +17,7 @@ from mindroom.tool_system.declarations import (
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import narrow_action_enum, require_enabled_action, require_non_empty
-
-if TYPE_CHECKING:
-    from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tools.native_helpers import require_non_empty
 
 logger = get_logger(__name__)
 
@@ -48,58 +45,6 @@ _DockerResourceAction = Literal[
     "connect_network",
     "disconnect_network",
 ]
-_ALL_ACTIONS_BY_TOOL: dict[str, tuple[str, ...]] = {
-    "docker_inspect": (
-        "list_containers",
-        "inspect_container",
-        "get_container_logs",
-        "list_images",
-        "inspect_image",
-        "list_volumes",
-        "inspect_volume",
-        "list_networks",
-        "inspect_network",
-    ),
-    "docker_container": ("run", "exec", "start", "stop", "remove"),
-    "docker_resource": (
-        "pull_image",
-        "build_image",
-        "tag_image",
-        "remove_image",
-        "create_volume",
-        "remove_volume",
-        "create_network",
-        "remove_network",
-        "connect_network",
-        "disconnect_network",
-    ),
-}
-_LEGACY_INCLUDE_MAP: dict[str, tuple[str, str]] = {
-    "list_containers": ("docker_inspect", "list_containers"),
-    "inspect_container": ("docker_inspect", "inspect_container"),
-    "get_container_logs": ("docker_inspect", "get_container_logs"),
-    "list_images": ("docker_inspect", "list_images"),
-    "inspect_image": ("docker_inspect", "inspect_image"),
-    "list_volumes": ("docker_inspect", "list_volumes"),
-    "inspect_volume": ("docker_inspect", "inspect_volume"),
-    "list_networks": ("docker_inspect", "list_networks"),
-    "inspect_network": ("docker_inspect", "inspect_network"),
-    "run_container": ("docker_container", "run"),
-    "exec_in_container": ("docker_container", "exec"),
-    "start_container": ("docker_container", "start"),
-    "stop_container": ("docker_container", "stop"),
-    "remove_container": ("docker_container", "remove"),
-    "pull_image": ("docker_resource", "pull_image"),
-    "build_image": ("docker_resource", "build_image"),
-    "tag_image": ("docker_resource", "tag_image"),
-    "remove_image": ("docker_resource", "remove_image"),
-    "create_volume": ("docker_resource", "create_volume"),
-    "remove_volume": ("docker_resource", "remove_volume"),
-    "create_network": ("docker_resource", "create_network"),
-    "remove_network": ("docker_resource", "remove_network"),
-    "connect_container_to_network": ("docker_resource", "connect_network"),
-    "disconnect_container_from_network": ("docker_resource", "disconnect_network"),
-}
 
 
 def _isolate_docker_client(client: Any) -> None:  # noqa: ANN401 - optional docker.DockerClient
@@ -152,33 +97,15 @@ class _DockerTools(Toolkit):
             "docker_resource": self.docker_resource,
         }
         if include_tools is None:
-            self._enabled_actions = dict(_ALL_ACTIONS_BY_TOOL)
             selected = list(all_tools.values())
         else:
-            valid_names = set(all_tools) | set(_LEGACY_INCLUDE_MAP)
-            unknown = sorted(set(include_tools) - valid_names)
+            unknown = sorted(set(include_tools) - set(all_tools))
             if unknown:
                 msg = f"Included tool(s) not present in the toolkit: {', '.join(unknown)}"
                 raise ValueError(msg)
-            enabled_sets: dict[str, set[str]] = {name: set() for name in all_tools}
-            for item in include_tools:
-                if item in _ALL_ACTIONS_BY_TOOL:
-                    enabled_sets[item].update(_ALL_ACTIONS_BY_TOOL[item])
-                else:
-                    tool_name, action_name = _LEGACY_INCLUDE_MAP[item]
-                    enabled_sets[tool_name].add(action_name)
-            self._enabled_actions = {
-                name: tuple(action for action in _ALL_ACTIONS_BY_TOOL[name] if action in enabled_sets[name])
-                for name in all_tools
-            }
-            selected = [fn for name, fn in all_tools.items() if self._enabled_actions[name]]
+            allowed = set(include_tools)
+            selected = [fn for name, fn in all_tools.items() if name in allowed]
         super().__init__(name="docker_tools", tools=selected)
-
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Restrict Docker tool ``action`` enums to actions enabled by ``include_tools``."""
-        if (enabled := self._enabled_actions.get(function.name)) is not None:
-            return narrow_action_enum(function, enabled)
-        return function
 
     def _get_client(self) -> Any:  # noqa: ANN401 - docker.DockerClient is an optional runtime import
         if self._client is None:
@@ -285,8 +212,6 @@ class _DockerTools(Toolkit):
         - `list_volumes` / `inspect_volume`: list volumes or inspect `target`.
         - `list_networks` / `inspect_network`: list networks or inspect `target`.
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions["docker_inspect"])) is not None:
-            return disabled
         try:
             result = self._inspect_dispatch(action, target=target, all_containers=all_containers, tail=tail)
         except Exception as exc:
@@ -370,8 +295,6 @@ class _DockerTools(Toolkit):
         - `start` / `stop`: start or stop `container_id` (optional `timeout` seconds for `stop`).
         - `remove`: remove `container_id` (`force`, `remove_volumes`).
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions["docker_container"])) is not None:
-            return disabled
         try:
             result = self._container_dispatch(
                 action,
@@ -494,8 +417,6 @@ class _DockerTools(Toolkit):
         - `create_network` / `remove_network`: create (`driver`, `internal`, `labels`) or remove network `name`.
         - `connect_network` / `disconnect_network`: attach or detach `container_id` on network `name`.
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions["docker_resource"])) is not None:
-            return disabled
         try:
             result = self._resource_dispatch(
                 action,

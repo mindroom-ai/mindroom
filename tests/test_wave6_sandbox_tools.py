@@ -13,7 +13,6 @@ from daytona_api_client import Configuration
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -55,8 +54,11 @@ def test_docker_inspect_container_resource_and_include_tools() -> None:
     # include_tools filtering validates names and exposes only requested tools.
     inspect_only = docker_cls(include_tools=["docker_inspect"])
     assert set(inspect_only.functions) == {"docker_inspect"}
-    with pytest.raises(ValueError, match="not present in the toolkit"):
-        docker_cls(include_tools=["not_a_real_docker_tool"])
+    container_only = docker_cls(include_tools=["docker_container"])
+    assert set(container_only.functions) == {"docker_container"}
+    for invalid in ("stop_container", "list_containers", "not_a_real_docker_tool"):
+        with pytest.raises(ValueError, match="not present in the toolkit"):
+            docker_cls(include_tools=[invalid])
 
     c1 = _FakeDockerContainer("cid-1", "web", image=None)  # dangling/deleted image
     net_events: list[str] = []
@@ -218,36 +220,6 @@ def test_wave6_batch4_action_scoped_grants_and_fail_closed_migration(tmp_path: P
                 },
                 runtime_paths,
             )
-
-
-def test_docker_legacy_include_tools_narrows_schema_and_runtime_dispatch() -> None:
-    """Legacy Docker function names in include_tools narrow both the offered action enum and runtime dispatch."""
-    docker_cls = cast("Any", builtin_tool_registry().factory("docker")())
-    c1 = _FakeDockerContainer("cid-stop", "web")
-    fake_client = SimpleNamespace(
-        containers=SimpleNamespace(
-            get=lambda _cid: c1,
-            run=lambda **_kw: (_ for _ in ()).throw(AssertionError("run must not be called")),
-        ),
-    )
-
-    stop_only = docker_cls(include_tools=["stop_container"])
-    stop_only._client = fake_client
-    assert set(stop_only.functions) == {"docker_container"}
-
-    adapted = adapt_toolkit(stop_only)
-    assert [fn.name for fn in adapted.functions] == ["docker_container"]
-    assert adapted.functions[0].parameters["properties"]["action"]["enum"] == ["stop"]
-
-    assert "stopped successfully" in stop_only.docker_container("stop", container_id="web", timeout=3)
-    assert c1.events == ["stop:3"]
-    for blocked in ("remove", "exec", "run", "start"):
-        msg = stop_only.docker_container(blocked, container_id="web", image="alpine", command="id")
-        assert "disabled" in msg
-    assert c1.events == ["stop:3"]
-
-    mixed = docker_cls(include_tools=["docker_inspect", "stop_container"])
-    assert set(mixed.functions) == {"docker_inspect", "docker_container"}
 
 
 def test_docker_client_isolates_ambient_docker_config_for_pull_and_build(

@@ -110,6 +110,7 @@ agents:
 `e2b` runs code in a hosted E2B sandbox.
 The tool creates one sandbox lazily on its first call and reuses it across calls in the reply.
 It fails to load when no API key is available, reporting `E2B API key is required.`
+Requests pin the `e2b.app` domain (ignoring ambient `E2B_DOMAIN`) and fail closed when ambient `E2B_DEBUG=true` is set.
 It provides:
 
 - `e2b_run(action, ...)`: `python`, `command`, `stream_command`, `background_command`, `kill_background`, and `server`.

@@ -513,6 +513,7 @@ A `worker_scope: user` worker serves several agents, so each of them reaches eve
 
 `docker` splits read-only introspection from mutations across three functions: `docker_inspect(action, ...)` (`list_containers`, `inspect_container`, `get_container_logs`, `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`), `docker_container(action, ...)` (`run`, `exec`, `start`, `stop`, `remove`), and `docker_resource(action, ...)` (`pull_image`, `build_image`, `tag_image`, `remove_image`, `create_volume`, `remove_volume`, `create_network`, `remove_network`, `connect_network`, `disconnect_network`).
 Docker daemon access is privileged host control, so `docker` runs in a worker by default, and the runtime that runs it needs a reachable Docker daemon or socket.
+The client is isolated from host `~/.docker/config.json` / `DOCKER_CONFIG` registry credentials and proxies, and `include_tools` accepts the consolidated names `docker_inspect`, `docker_container`, and `docker_resource`.
 
 ### Configuration
 

@@ -10,13 +10,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import (
-    first_sql_statement,
-    format_tabular_rows,
-    reject_ambient_pgservice,
-    require_non_empty,
-)
+from mindroom.tools.native_helpers import format_tabular_rows, require_non_empty
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -78,7 +74,7 @@ class _PostgresTools(Toolkit):
             msg = "table_schema must not contain NUL bytes"
             raise ValueError(msg)
 
-        reject_ambient_pgservice()
+        reject_ambient_libpq_env()
         kwargs: dict[str, Any] = {
             "host": self.host,
             "port": 5432 if self.port is None else self.port,
@@ -211,7 +207,7 @@ class _PostgresTools(Toolkit):
             if action == "summarize_table":
                 return self._summarize_table(require_non_empty(table, "table"))
             if action == "inspect_query":
-                stmt = first_sql_statement(require_non_empty(query, "query"))
+                stmt = require_non_empty(require_non_empty(query, "query").rstrip(";"), "query")
                 return self._run_db_query(f"EXPLAIN {stmt}")
         except Exception as exc:
             return f"Error in postgres_inspect ({action}): {exc}"

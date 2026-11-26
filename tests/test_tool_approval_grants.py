@@ -1073,42 +1073,6 @@ def test_retired_consolidated_approval_rules_fail_closed(
     assert loaded.tool_approval.rules[0].match == new_name
 
 
-def test_retired_consolidated_wildcard_script_rule_fails_closed(tmp_path: Path) -> None:
-    """A wildcard script rule matching renamed functions must fail closed until explicit rules exist for the new names."""
-    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
-
-    runtime_paths = test_runtime_paths(tmp_path)
-    (tmp_path / "policy.py").write_text("def check(tool_name, arguments, agent_name): return False\n", encoding="utf-8")
-    stale_data = {
-        "models": {"default": {"provider": "openai", "id": "x"}},
-        "agents": {"a": {"display_name": "A", "tools": ["docker"], "include_default_tools": False}},
-        "tool_approval": {"rules": [{"match": "*", "script": "policy.py"}]},
-    }
-    with pytest.raises(ConfigRuntimeValidationError, match=r"runs script 'policy\.py'.*docker_"):
-        Config.validate_with_runtime(stale_data, runtime_paths)
-
-    migrated_data = {
-        **stale_data,
-        "tool_approval": {
-            "rules": [
-                {"match": "docker_inspect", "script": "policy.py"},
-                {"match": "docker_container", "script": "policy.py"},
-                {"match": "docker_resource", "script": "policy.py"},
-                {"match": "scheduler", "script": "policy.py"},
-                {"match": "*", "script": "policy.py"},
-            ],
-        },
-    }
-    loaded = Config.validate_with_runtime(migrated_data, runtime_paths)
-    assert [rule.match for rule in loaded.tool_approval.rules] == [
-        "docker_inspect",
-        "docker_container",
-        "docker_resource",
-        "scheduler",
-        "*",
-    ]
-
-
 def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
     """Shared names like `add_memory` (mem0) or `search_web` (serper) still fail closed until the new tool has a rule."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415

@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
     narrow_action_enum,
-    reject_ambient_pgservice,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
@@ -28,16 +28,26 @@ _POSTGRES_BACKENDS = frozenset({"postgresql", "postgres"})
 _LIBPQ_DRIVERS = frozenset({"", "psycopg", "psycopg2", "psycopg2cffi"})
 
 
+def _first_query_str(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)) and value and isinstance(value[0], str):
+        return value[0]
+    return None
+
+
 def _prepare_engine_target(url: Any) -> tuple[Any, dict[str, Any]]:  # noqa: ANN401 - optional sqlalchemy URL
     """Enforce scoped PostgreSQL credentials and disable ambient libpq auth fallbacks."""
     backend = url.get_backend_name().lower()
     if backend not in _POSTGRES_BACKENDS:
         return url, {}
 
+    query_lower = {key.lower(): value for key, value in url.query.items()}
+    effective_host = url.host or _first_query_str(query_lower.get("host"))
     missing = [
         name
         for name, value in (
-            ("host", url.host),
+            ("host", effective_host),
             ("username", url.username),
             ("password", url.password),
             ("database", url.database),
@@ -48,20 +58,24 @@ def _prepare_engine_target(url: Any) -> tuple[Any, dict[str, Any]]:  # noqa: ANN
         msg = f"PostgreSQL connection requires explicit credentials/target in URL or config: {', '.join(missing)}"
         raise ValueError(msg)
 
-    query_lower = {key.lower(): value for key, value in url.query.items()}
     if "service" in query_lower:
         msg = "PostgreSQL connection URL must not use libpq 'service' lookup"
         raise ValueError(msg)
-    if "passfile" in query_lower and query_lower["passfile"] != "":
+    if "passfile" in query_lower and _first_query_str(query_lower["passfile"]) != "":
         msg = "PostgreSQL connection URL must not use libpq 'passfile' lookup"
         raise ValueError(msg)
 
     driver = url.drivername.partition("+")[2].lower()
     if driver in _LIBPQ_DRIVERS:
-        reject_ambient_pgservice()
-        if url.port is None:
-            url = url.set(port=5432)
-        return url, {"passfile": ""}
+        has_hostaddr = bool((_first_query_str(query_lower.get("hostaddr")) or "").strip())
+        reject_ambient_libpq_env(allow_hostaddr=has_hostaddr)
+        connect_args: dict[str, Any] = {"passfile": ""}
+        if url.port is None and not (_first_query_str(query_lower.get("port")) or "").strip():
+            if url.host:
+                url = url.set(port=5432)
+            else:
+                connect_args["port"] = 5432
+        return url, connect_args
     return url, {}
 
 
