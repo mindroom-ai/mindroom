@@ -44,6 +44,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.approval_card_helpers import (
     card_content,
     card_is_terminal,
@@ -982,46 +983,75 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "actions"),
+    ("toolkit_name", "tool_name", "actions"),
     [
-        ("triggers", ("list", "delete", "rotate_key")),
-        ("memory", ("list", "search", "delete")),
-        ("todo", ("list", "add", "update")),
-        ("scheduler", ("list", "create", "cancel")),
+        (None, "triggers", ("list", "delete", "rotate_key")),
+        (None, "memory", ("list", "search", "delete")),
+        (None, "todo", ("list", "add", "update")),
+        (None, "scheduler", ("list", "create", "cancel")),
+        ("twilio", "twilio_read", ("get_call_details", "list_messages")),
+        ("discord", "discord_read", ("get_channel_messages", "get_channel_info", "list_channels")),
+        ("telegram", "telegram_read", ("get_chat", "get_file")),
+        ("telegram", "telegram_send", ("message", "document")),
+        ("telegram", "telegram_manage", ("edit", "delete", "pin")),
+        ("whatsapp", "whatsapp_send", ("text", "template", "reaction")),
+        ("zoom", "zoom_read", ("get_meeting", "get_meeting_recordings")),
+        ("zoom", "zoom_manage", ("schedule_meeting", "delete_meeting")),
+        ("x", "x_read", ("search_posts", "get_home_timeline")),
+        ("x", "x_write", ("create_post", "reply_to_post", "send_dm")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
+    toolkit_name: str | None,
     tool_name: str,
-    actions: tuple[str, str, str],
+    actions: tuple[str, ...],
 ) -> None:
     """Timed grants for unified action-dispatched tools must be scoped per action."""
     config = Config()
-    ops = [grant_operation(config, tool_name, {"action": action}) for action in actions]
+    registry = builtin_tool_registry()
+
+    def operation(arguments: dict[str, object]) -> ApprovalOperation | None:
+        return grant_operation(config, tool_name, arguments, tools=registry, toolkit_name=toolkit_name)
+
+    ops = [operation({"action": action}) for action in actions]
     assert all(op is not None for op in ops)
-    assert ops[0] == grant_operation(config, tool_name, {"action": f" {actions[0]} "})
-    assert ops[0] == grant_operation(config, tool_name, {"action": actions[0]}, toolkit_name="other_toolkit")
+    assert ops[0] == operation({"action": f" {actions[0]} "})
     assert ops[0] is not None
-    assert ops[0].mcp_server_id == tool_name
-    assert len(set(ops)) == 3
-    assert len({op.key for op in ops if op is not None}) == 3
-    assert grant_operation(config, tool_name, {}) is None
-    assert grant_operation(config, tool_name, {"action": ""}) is None
-    assert grant_operation(config, tool_name, {"action": "   "}) is None
-    assert grant_operation(config, tool_name, {"action": 123}) is None
+    assert ops[0].mcp_server_id == (toolkit_name or tool_name)
+    assert ops[0].mcp_tool_name == actions[0]
+    other = grant_operation(config, tool_name, {"action": actions[0]}, tools=registry, toolkit_name="other_toolkit")
+    if toolkit_name is None:
+        assert other == ops[0]
+    else:
+        assert other is not None
+        assert other.mcp_server_id is None
+        assert other.key != ops[0].key
+    assert len({op.key for op in ops if op is not None}) == len(actions)
+    assert operation({}) is None
+    assert operation({"action": ""}) is None
+    assert operation({"action": "   "}) is None
+    assert operation({"action": 123}) is None
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "action"),
-    [("triggers", "list"), ("memory", "list"), ("todo", "list"), ("scheduler", "list")],
+    ("toolkit_name", "tool_name", "action"),
+    [
+        (None, "triggers", "list"),
+        (None, "memory", "list"),
+        (None, "todo", "list"),
+        (None, "scheduler", "list"),
+        ("zoom", "zoom_manage", "schedule_meeting"),
+    ],
 )
 def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
+    toolkit_name: str | None,
     tool_name: str,
     action: str,
 ) -> None:
     """Action-dispatched tools cannot offer any-arguments scheduled approvals that could switch actions."""
     from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
 
-    config = Config()
+    config = Config.model_validate({"tool_approval": {"scheduled_any_arguments": True}})
     assert (
         scheduled_call_offers_any_arguments(
             config,
@@ -1030,6 +1060,8 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
             requester_id="@alice:example.org",
             approver_id="@alice:example.org",
             authored_confirmation=False,
+            tools=builtin_tool_registry(),
+            toolkit_name=toolkit_name,
         )
         is False
     )
@@ -1130,6 +1162,20 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("visualization", "create_histogram", "create_chart"),
         ("unsplash", "search_photos", "unsplash"),
         ("unsplash", "download_photo", "unsplash"),
+        ("email", "email_user", "smtp_send_email"),
+        ("twilio", "get_call_details", "twilio_read"),
+        ("discord", "get_channel_messages", "discord_read"),
+        ("discord", "send_message", "discord_send"),
+        ("discord", "delete_message", "discord_manage"),
+        ("telegram", "get_file", "telegram_read"),
+        ("telegram", "send_photo", "telegram_send"),
+        ("telegram", "delete_message", "telegram_manage"),
+        ("whatsapp", "send_text_message", "whatsapp_send"),
+        ("webex", "list_rooms", "webex_read"),
+        ("zoom", "get_meeting_recordings", "zoom_read"),
+        ("zoom", "delete_meeting", "zoom_manage"),
+        ("x", "search_posts", "x_read"),
+        ("x", "send_dm", "x_write"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
@@ -1142,7 +1188,8 @@ def test_retired_consolidated_approval_rules_fail_closed(
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
-    tool_entry: object = {toolkit: {"host": "https://search.example.test"}} if toolkit == "searxng" else toolkit
+    options = {"searxng": {"host": "https://search.example.test"}, "telegram": {"chat_id": "1234"}}
+    tool_entry: object = {toolkit: options[toolkit]} if toolkit in options else toolkit
     stale_data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
@@ -1458,9 +1505,12 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_name", "action"), [("dispatch", "create"), ("telegram_send", "message")])
 async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_toolkits(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    tool_name: str,
+    action: str,
 ) -> None:
     """Two plugins declaring action_scoped_grants for the same function name keep distinct grant keys."""
     from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
@@ -1468,13 +1518,13 @@ async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_t
     issues_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="issues",
-        function_name="dispatch",
+        function_name=tool_name,
         retired_name=None,
     )
     deployments_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="deployments",
-        function_name="dispatch",
+        function_name=tool_name,
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1496,15 +1546,15 @@ async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_t
 
     issues_op = grant_operation(
         config,
-        "dispatch",
-        {"action": "create"},
+        tool_name,
+        {"action": action},
         tools=registry,
         toolkit_name="issues",
     )
     deployments_op = grant_operation(
         config,
-        "dispatch",
-        {"action": "create"},
+        tool_name,
+        {"action": action},
         tools=registry,
         toolkit_name="deployments",
     )
@@ -1512,27 +1562,33 @@ async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_t
     assert deployments_op is not None
     assert issues_op.mcp_server_id == "issues"
     assert deployments_op.mcp_server_id == "deployments"
-    assert issues_op.mcp_tool_name == "create"
-    assert deployments_op.mcp_tool_name == "create"
+    assert issues_op.mcp_tool_name == action
+    assert deployments_op.mcp_tool_name == action
     assert issues_op.key != deployments_op.key
+    for op, owner in ((issues_op, "issues"), (deployments_op, "deployments")):
+        assert op.scope_wire("scope", "code", "code")["operation"] == {
+            "tool_name": tool_name,
+            "mcp_server_id": owner,
+            "mcp_tool_name": action,
+        }
 
     dispatch_tool = ToolExecution(
         tool_call_id="call-dispatch",
-        tool_name="dispatch",
-        tool_args={"action": "create"},
+        tool_name=tool_name,
+        tool_args={"action": action},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     issues_call = ApprovalCall(
         tool_call_id="call-issues",
-        tool_name="dispatch",
+        tool_name=tool_name,
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="issues",
     )
     deployments_call = ApprovalCall(
         tool_call_id="call-deployments",
-        tool_name="dispatch",
+        tool_name=tool_name,
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="deployments",
@@ -1540,14 +1596,14 @@ async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_t
     assert timed_grant_operation(config, dispatch_tool, issues_call, tools=registry) == issues_op
     assert timed_grant_operation(config, dispatch_tool, deployments_call, tools=registry) == deployments_op
 
-    # Approving issues.dispatch(action="create") auto-approves issues again but leaves deployments gated.
+    # Timed approval covers the same action in issues, but not the same action in deployments.
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:
-        first_issues = await _card(journal, manager, "issues-1", tool_name="dispatch", grant_op=issues_op)
+        first_issues = await _card(journal, manager, "issues-1", tool_name=tool_name, grant_op=issues_op)
         assert (await _approve(manager, first_issues)).consumed
-        await _card(journal, manager, "issues-2", tool_name="dispatch", grant_op=issues_op)
-        await _card(journal, manager, "deployments-1", tool_name="dispatch", grant_op=deployments_op)
+        await _card(journal, manager, "issues-2", tool_name=tool_name, grant_op=issues_op)
+        await _card(journal, manager, "deployments-1", tool_name=tool_name, grant_op=deployments_op)
         assert await _call_row(journal, "issues-2") == ("approved", "@human:test")
         assert await _call_row(journal, "deployments-1") == (None, None)
     finally:

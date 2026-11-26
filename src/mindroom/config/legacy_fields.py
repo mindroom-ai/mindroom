@@ -353,11 +353,12 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 5 native toolkits (file_generation, visualization, unsplash),
-#   and Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
-#   openweather, docker, e2b, daytona) previously exposed individual per-operation function names that could appear in
+#   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona), and Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
+#   zoom, x) previously exposed individual per-operation function names that could appear in
 #   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Wave 5 & Wave 6: v2026.11.625 / unreleased); replacement: unreleased; consolidated
-#   into action-dispatched and risk-scoped functions.
+# Last legacy release: v2026.11.610 (Wave 5-7: v2026.11.623-v2026.11.625 / unreleased); replacement: unreleased;
+#   consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).
@@ -559,6 +560,57 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "get_photo": "unsplash",
         "get_random_photo": "unsplash",
         "download_photo": "unsplash",
+    },
+    "email": {"email_user": "smtp_send_email"},
+    "twilio": {"get_call_details": "twilio_read", "list_messages": "twilio_read"},
+    "discord": {
+        "get_channel_messages": "discord_read",
+        "get_channel_info": "discord_read",
+        "list_channels": "discord_read",
+        "send_message": "discord_send",
+        "delete_message": "discord_manage",
+    },
+    "telegram": {
+        "get_chat": "telegram_read",
+        "get_file": "telegram_read",
+        "send_message": "telegram_send",
+        "send_photo": "telegram_send",
+        "send_document": "telegram_send",
+        "send_video": "telegram_send",
+        "send_audio": "telegram_send",
+        "send_animation": "telegram_send",
+        "send_sticker": "telegram_send",
+        "edit_message": "telegram_manage",
+        "delete_message": "telegram_manage",
+        "react_with_emoji": "telegram_manage",
+        "pin_message": "telegram_manage",
+    },
+    "whatsapp": {
+        "send_text_message": "whatsapp_send",
+        "send_template_message": "whatsapp_send",
+        "send_reply_buttons": "whatsapp_send",
+        "send_list_message": "whatsapp_send",
+        "send_image": "whatsapp_send",
+        "send_document": "whatsapp_send",
+        "send_location": "whatsapp_send",
+        "send_reaction": "whatsapp_send",
+    },
+    "webex": {"list_rooms": "webex_read", "send_message": "webex_send"},
+    "zoom": {
+        "get_meeting": "zoom_read",
+        "get_upcoming_meetings": "zoom_read",
+        "list_meetings": "zoom_read",
+        "get_meeting_recordings": "zoom_read",
+        "schedule_meeting": "zoom_manage",
+        "delete_meeting": "zoom_manage",
+    },
+    "x": {
+        "get_user_info": "x_read",
+        "get_home_timeline": "x_read",
+        "search_posts": "x_read",
+        "create_post": "x_write",
+        "reply_to_post": "x_write",
+        "send_dm": "x_write",
     },
 }
 
