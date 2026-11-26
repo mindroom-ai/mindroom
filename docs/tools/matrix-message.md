@@ -143,7 +143,7 @@ matrix_message(message="Review this result.", recipient="code", new_thread=True,
 ```
 
 A key is scoped to the requester, the sending agent, and the destination room; using it in another room creates a separate send.
-A retry with the same key delivers the first call's message, recipient, and thread target, even if the retry's text, recipient, or current thread differs.
+A retry with the same key delivers the first call's message, recipient, thread target, and title, even if the retry's text, recipient, current thread, or title differs.
 Only `status="ok"` confirms delivery; after any error or lost result, keep the key and retry, because an error does not prove the message was not delivered.
 Errors that end in `retry with the same idempotency_key.`, such as the 60-second `Idempotent Matrix send timed out; retry with the same idempotency_key.`, are safe to retry.
 Retries recheck authorization for the sender and the original recipient, and they still count toward the rate limit.

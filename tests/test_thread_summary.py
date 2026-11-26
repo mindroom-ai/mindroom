@@ -532,6 +532,21 @@ def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
     assert normalize_thread_summary_text(raw_summary) == "Fix ISSUE-116 deploy done"
 
 
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        ("**1. Deploy**", "Deploy"),
+        ("`# Heading`", "Heading"),
+        ("**> **", ""),
+    ],
+)
+def test_normalize_thread_summary_text_is_idempotent(raw_text: str, expected: str) -> None:
+    """Nested markdown normalizes to a fixed point so repeated calls agree."""
+    once = normalize_thread_summary_text(raw_text)
+    assert once == expected
+    assert normalize_thread_summary_text(once) == once
+
+
 # -- threshold arithmetic --
 
 

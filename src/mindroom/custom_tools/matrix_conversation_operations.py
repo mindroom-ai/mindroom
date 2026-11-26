@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -305,25 +306,33 @@ class MatrixMessageOperations:
             return {}
         if send_claim is not None and send_claim.intent is not None and send_claim.intent.title_event_id is not None:
             return {"title": title, "title_event_id": send_claim.intent.title_event_id}
+        title_transaction_id = (
+            f"{send_claim.intent.transaction_id}-title"
+            if send_claim is not None and send_claim.intent is not None
+            else None
+        )
+        timeout_scope = asyncio.timeout(send_claim.title_timeout_seconds) if send_claim is not None else nullcontext()
         try:
-            written = await set_initial_thread_summary(
-                context.client,
-                room_id,
-                thread_id,
-                title,
-                message_count=message_count,
-                conversation_reader=context.conversation_reader,
-                known_latest_thread_event_id=known_latest_thread_event_id,
-                pin=True,
-            )
+            async with timeout_scope:
+                written = await set_initial_thread_summary(
+                    context.client,
+                    room_id,
+                    thread_id,
+                    title,
+                    message_count=message_count,
+                    conversation_reader=context.conversation_reader,
+                    known_latest_thread_event_id=known_latest_thread_event_id,
+                    transaction_id=title_transaction_id,
+                )
         except Exception as exc:
+            error_detail = str(exc) or type(exc).__name__
             logger.warning(
                 "Failed to set initial thread title",
                 room_id=room_id,
                 thread_id=thread_id,
-                error=str(exc),
+                error=error_detail,
             )
-            return {"warning": f"Message sent, but failed to set thread title: {exc}"}
+            return {"warning": f"Message sent, but failed to set thread title: {error_detail}"}
         if send_claim is not None:
             try:
                 await send_claim.record_title(written.event_id)

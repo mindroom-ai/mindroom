@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from unittest.mock import AsyncMock
 
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from tests.test_matrix_message_idempotency import MatrixTransport
 
@@ -299,3 +300,64 @@ async def test_oversized_matrix_event_id_cannot_consume_reserved_space(
     row = next(iter(json.loads(_state_path(context).read_bytes())["sends"].values()))
     assert row["event_id"] is None
     assert row["payload"]["body"] == "first"
+
+
+async def test_stalled_title_send_preserves_confirmed_root_and_recovers_deduplicated_title(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """A stalled title send degrades to a warning without hiding the confirmed root or leaking the scope lock."""
+    monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 0.5, raising=False)
+    title_accepted = asyncio.Event()
+    never = asyncio.Event()
+
+    async def stall_title_only(**kwargs: Any) -> nio.RoomSendResponse:  # noqa: ANN401
+        response = await transport.room_send(**kwargs)
+        if kwargs["content"].get("msgtype") == "m.notice":
+            title_accepted.set()
+            await never.wait()
+        return response
+
+    cast("AsyncMock", context.client.room_send).side_effect = stall_title_only
+    with tool_runtime_context(context):
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="Ship release",
+                new_thread=True,
+                title="🚀 Ship",
+                idempotency_key="stalled-title",
+            ),
+        )
+        assert title_accepted.is_set()
+        assert first["status"] == "ok"
+        assert first["event_id"] == first["thread_id"]
+        assert "title_event_id" not in first
+        assert "Message sent, but failed to set thread title:" in first["warning"]
+        root = context.runtime_paths.control_state_root
+        assert root is not None
+        assert not file_lock_is_held(next((root / "matrix_message_sends").glob("*.lock")))
+
+        monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 60, raising=False)
+        cast("AsyncMock", context.client.room_send).side_effect = transport.room_send
+        recovered = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="changed",
+                idempotency_key="stalled-title",
+            ),
+        )
+        replayed = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="changed again",
+                idempotency_key="stalled-title",
+            ),
+        )
+    assert recovered["status"] == "ok"
+    assert recovered["event_id"] == first["event_id"]
+    assert recovered["thread_id"] == first["thread_id"]
+    assert recovered["title"] == "🚀 Ship"
+    assert recovered["title_event_id"]
+    assert replayed == recovered
+    assert len(transport.events) == 2
+    assert thread_summary_baselines.count(context.room_id, recovered["thread_id"]) == 1

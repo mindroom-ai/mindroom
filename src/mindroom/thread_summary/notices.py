@@ -59,16 +59,20 @@ def normalize_thread_summary_text(raw_text: str) -> str:
     if not normalized:
         return ""
 
-    normalized = _MARKDOWN_CODE_BLOCK_RE.sub(r"\1", normalized)
-    normalized = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1) or match.group(2) or "", normalized)
-    normalized = _MARKDOWN_HEADING_RE.sub("", normalized)
-    normalized = _MARKDOWN_BLOCKQUOTE_RE.sub("", normalized)
-    normalized = _MARKDOWN_LIST_ITEM_RE.sub("", normalized)
-    normalized = _MARKDOWN_DOUBLE_EMPHASIS_RE.sub(r"\2", normalized)
-    normalized = _MARKDOWN_SINGLE_ASTERISK_RE.sub(r"\1", normalized)
-    normalized = _MARKDOWN_STRIKETHROUGH_RE.sub(r"\1", normalized)
-    normalized = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", normalized)
-    return " ".join(normalized.split())
+    while True:
+        updated = _MARKDOWN_CODE_BLOCK_RE.sub(r"\1", normalized)
+        updated = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1) or match.group(2) or "", updated)
+        updated = _MARKDOWN_HEADING_RE.sub("", updated)
+        updated = _MARKDOWN_BLOCKQUOTE_RE.sub("", updated)
+        updated = _MARKDOWN_LIST_ITEM_RE.sub("", updated)
+        updated = _MARKDOWN_DOUBLE_EMPHASIS_RE.sub(r"\2", updated)
+        updated = _MARKDOWN_SINGLE_ASTERISK_RE.sub(r"\1", updated)
+        updated = _MARKDOWN_STRIKETHROUGH_RE.sub(r"\1", updated)
+        updated = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", updated)
+        updated = " ".join(updated.split())
+        if updated == normalized:
+            return normalized
+        normalized = updated
 
 
 def validate_thread_summary_text(summary: str, *, field_name: str = "summary") -> str:
@@ -108,6 +112,7 @@ async def send_thread_summary_notice(
     pinned: bool | None = None,
     generated_at: datetime | None = None,
     known_latest_thread_event_id: str | None = None,
+    transaction_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
 
@@ -170,7 +175,11 @@ async def send_thread_summary_notice(
             SUPPRESS_PUSH_KEY: True,
         },
     )
-    delivered = await send_message_result(client, room_id, content)
+    delivered = (
+        await send_message_result(client, room_id, content, transaction_id=transaction_id)
+        if transaction_id is not None
+        else await send_message_result(client, room_id, content)
+    )
     if delivered is not None:
         logger.info(
             "Sent thread summary",
@@ -205,6 +214,50 @@ async def send_welcome_thread_summary(
     )
 
 
+async def _send_and_record_manual_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    normalized_summary: str,
+    *,
+    message_count: int,
+    conversation_reader: ConversationReader,
+    baselines: schedule._ThreadSummaryBaselines,
+    pinned: bool,
+    generated_at: datetime | None = None,
+    known_latest_thread_event_id: str | None = None,
+    transaction_id: str | None = None,
+) -> _ThreadSummaryWriteResult:
+    """Send one manual summary notice while holding its baseline lock and record the count."""
+    try:
+        event_id = await send_thread_summary_notice(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
+            message_count,
+            "manual",
+            conversation_reader,
+            pinned=pinned,
+            generated_at=generated_at,
+            known_latest_thread_event_id=known_latest_thread_event_id,
+            transaction_id=transaction_id,
+        )
+    except Exception as exc:
+        msg = "Failed to send thread summary event."
+        raise ThreadSummaryWriteError(msg) from exc
+    if event_id is None:
+        msg = "Failed to send thread summary event."
+        raise ThreadSummaryWriteError(msg)
+
+    baselines.record(room_id, thread_id, message_count)
+    return _ThreadSummaryWriteResult(
+        event_id=event_id,
+        message_count=message_count,
+        summary=normalized_summary,
+    )
+
+
 async def set_initial_thread_summary(
     client: nio.AsyncClient,
     room_id: str,
@@ -214,37 +267,24 @@ async def set_initial_thread_summary(
     message_count: int,
     conversation_reader: ConversationReader,
     known_latest_thread_event_id: str | None = None,
-    pin: bool = True,
+    transaction_id: str | None = None,
 ) -> _ThreadSummaryWriteResult:
-    """Write one validated initial summary for a newly started thread without waiting for sync echo."""
+    """Write one validated pinned initial summary for a newly started thread without waiting for sync echo."""
     normalized_summary = validate_thread_summary_text(summary)
     effective_count = max(1, message_count)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
-        try:
-            event_id = await send_thread_summary_notice(
-                client,
-                room_id,
-                thread_id,
-                normalized_summary,
-                effective_count,
-                "manual",
-                conversation_reader,
-                pinned=pin,
-                known_latest_thread_event_id=known_latest_thread_event_id,
-            )
-        except Exception as exc:
-            msg = "Failed to send thread summary event."
-            raise ThreadSummaryWriteError(msg) from exc
-        if event_id is None:
-            msg = "Failed to send thread summary event."
-            raise ThreadSummaryWriteError(msg)
-
-        baselines.record(room_id, thread_id, effective_count)
-        return _ThreadSummaryWriteResult(
-            event_id=event_id,
+        return await _send_and_record_manual_summary(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
             message_count=effective_count,
-            summary=normalized_summary,
+            conversation_reader=conversation_reader,
+            baselines=baselines,
+            pinned=True,
+            known_latest_thread_event_id=known_latest_thread_event_id,
+            transaction_id=transaction_id,
         )
 
 
@@ -295,28 +335,14 @@ async def set_manual_thread_summary(
             msg = "Summary authorization awaits room membership; retry after membership is available."
             raise ThreadSummaryWriteError(msg)
         generated_at = summary_generated_at(state.newest_generated_at)
-        try:
-            event_id = await send_thread_summary_notice(
-                client,
-                room_id,
-                thread_id,
-                normalized_summary,
-                state.message_count,
-                "manual",
-                conversation_reader,
-                pinned=pin,
-                generated_at=generated_at,
-            )
-        except Exception as exc:
-            msg = "Failed to send thread summary event."
-            raise ThreadSummaryWriteError(msg) from exc
-        if event_id is None:
-            msg = "Failed to send thread summary event."
-            raise ThreadSummaryWriteError(msg)
-
-        baselines.record(room_id, thread_id, state.message_count)
-        return _ThreadSummaryWriteResult(
-            event_id=event_id,
+        return await _send_and_record_manual_summary(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
             message_count=state.message_count,
-            summary=normalized_summary,
+            conversation_reader=conversation_reader,
+            baselines=baselines,
+            pinned=pin,
+            generated_at=generated_at,
         )
