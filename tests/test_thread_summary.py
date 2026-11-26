@@ -2418,13 +2418,29 @@ class TestMaybeGenerateThreadSummary:
         msg = "LLM unavailable"
         raise RuntimeError(msg)
 
-    async def test_untitled_generation_exception_cools_down_and_retries_after_expiry(self) -> None:
-        """An untitled thread hitting a generation exception cools down instead of advancing baseline, then retries."""
+    @pytest.mark.parametrize("failure", ["exception", "over-80-chars", "unparsed", "empty-normalized"])
+    async def test_untitled_generation_failure_cools_down_and_retries_after_expiry(self, failure: str) -> None:
+        """An untitled thread cools down on any generation failure without advancing baseline, then retries."""
         now = [100.0]
         self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
-        model = self._summarizer(Await(self._unavailable), _title("Recovered title"))
-        self._history(_make_thread_history(5))
         config = _mock_config()
+        self._history(_make_thread_history(5))
+
+        model = None
+        if failure == "empty-normalized":
+            fake_generate = AsyncMock(
+                side_effect=[GeneratedSummary(summary="** **"), GeneratedSummary(summary="🧵 Recovered title")],
+            )
+            self.monkeypatch.setattr(automatic, "generate_summary", fake_generate)
+        else:
+            over_80 = "🧵 " + " ".join(["longwordlong"] * 7)
+            initial_by_failure: dict[str, list[object]] = {
+                "exception": [Await(self._unavailable)],
+                "over-80-chars": [_title(over_80)] * 3,
+                "unparsed": [""],
+            }
+            initial = initial_by_failure[failure]
+            model = self._summarizer(*initial, _title("🧵 Recovered title"))
 
         await self._maybe_generate(config)
         self.client.room_send.assert_not_awaited()
@@ -2433,16 +2449,19 @@ class TestMaybeGenerateThreadSummary:
 
         # During cooldown, automatic passes return before reading history or calling the model.
         assert self.conversation_reader.read_strict.await_count == 1
+        requests_before_cooldown = len(model.requests) if model is not None else 0
         now[0] = 130.0
         await self._maybe_generate(config)
         assert self.conversation_reader.read_strict.await_count == 1
-        assert len(model.requests) == 1
+        if model is not None:
+            assert len(model.requests) == requests_before_cooldown
 
         # Once cooldown expires, the next pass retries, titles the thread, and clears cooldown.
         now[0] = 160.0
         await self._maybe_generate(config)
-        assert len(model.requests) == 2
-        assert _sent_summaries(self.client)[0]["summary"] == "Recovered title"
+        if model is not None:
+            assert len(model.requests) == requests_before_cooldown + 1
+        assert _sent_summaries(self.client)[0]["summary"] == "🧵 Recovered title"
         assert self._count() == 5
         assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
         assert (_ROOM, _THREAD) not in self.baselines._retry_after
@@ -2503,40 +2522,6 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 3
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "🧵 Fix auth token refresh retry race condition"
-        assert self._count() == 5
-        assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
-
-    @pytest.mark.parametrize("failure", ["over-80-chars", "unparsed", "empty-normalized"])
-    async def test_untitled_none_or_empty_generation_cools_down_and_retries_after_expiry(self, failure: str) -> None:
-        """Untitled generated-None and empty-normalized exits set cooldown without advancing baseline, then retry."""
-        now = [100.0]
-        self.monkeypatch.setattr(schedule.time, "monotonic", lambda: now[0])
-        config = _mock_config()
-        self._history(_make_thread_history(5))
-
-        if failure == "empty-normalized":
-            fake_generate = AsyncMock(
-                side_effect=[GeneratedSummary(summary="** **"), GeneratedSummary(summary="🧵 Recovered title")],
-            )
-            self.monkeypatch.setattr(automatic, "generate_summary", fake_generate)
-        else:
-            over_80 = "🧵 " + " ".join(["longwordlong"] * 7)
-            initial = [_title(over_80)] * 3 if failure == "over-80-chars" else [""]
-            self._summarizer(*initial, _title("🧵 Recovered title"))
-
-        await self._maybe_generate(config)
-        self.client.room_send.assert_not_awaited()
-        assert self._count() == 0
-        assert self.baselines.in_failure_cooldown(_ROOM, _THREAD)
-        assert self.conversation_reader.read_strict.await_count == 1
-
-        now[0] = 130.0
-        await self._maybe_generate(config)
-        assert self.conversation_reader.read_strict.await_count == 1
-
-        now[0] = 160.0
-        await self._maybe_generate(config)
-        assert _sent_summaries(self.client)[0]["summary"] == "🧵 Recovered title"
         assert self._count() == 5
         assert not self.baselines.in_failure_cooldown(_ROOM, _THREAD)
 
@@ -3191,7 +3176,7 @@ class TestGenerateSummary:
                 None,
                 "🧵 Review of the login failure investigation notes",
                 "🧵 Review of the login failure investigation notes",
-                "Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words after the emoji. Drop secondary detail rather than cutting the phrase short.",
+                "Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words. Drop secondary detail rather than cutting the phrase short.",
             ),
             (
                 {"THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE": "BAD: {rejected_title} | {error}"},

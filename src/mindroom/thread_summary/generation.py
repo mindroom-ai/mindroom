@@ -115,17 +115,24 @@ def _better_fallback(
 def _resolve_rejected_title(
     best_fallback: tuple[tuple[int, int], _ThreadSummary] | None,
     error: str | None,
+    *,
+    attempts: int,
 ) -> _ThreadSummary | None:
     """Return the shortest fallback when available, else log rejection when a title failed validation."""
     if best_fallback is not None:
         logger.warning(
-            "Thread title exceeded word limit on every attempt; using shortest fallback",
-            attempts=_TITLE_ATTEMPTS,
+            "Thread title did not pass validation; using shortest fallback",
+            attempts=attempts,
             error=error,
         )
         return best_fallback[1]
     if error is not None:
-        logger.warning("Thread title rejected on every attempt", attempts=_TITLE_ATTEMPTS, error=error)
+        event = (
+            "Thread title rejected on every attempt"
+            if attempts == _TITLE_ATTEMPTS
+            else "Thread title did not pass validation"
+        )
+        logger.warning(event, attempts=attempts, error=error)
     return None
 
 
@@ -301,7 +308,9 @@ async def generate_summary(
     error: str | None = None
     accepted: _ThreadSummary | None = None
     best_fallback: tuple[tuple[int, int], _ThreadSummary] | None = None
+    attempts = 0
     for attempt in range(_TITLE_ATTEMPTS):
+        attempts = attempt + 1
         response = await complete_prompt(
             provider,
             request,
@@ -331,5 +340,5 @@ async def generate_summary(
                 rejected_title=escape(content.title),
                 error=error,
             )
-    chosen = accepted if accepted is not None else _resolve_rejected_title(best_fallback, error)
+    chosen = accepted if accepted is not None else _resolve_rejected_title(best_fallback, error, attempts=attempts)
     return None if chosen is None else _to_generated_summary(chosen)

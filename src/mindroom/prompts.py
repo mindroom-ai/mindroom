@@ -514,7 +514,7 @@ THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE = """Your previous answer was rejected:
 {rejected_title}
 </rejected_title>
 {error}
-Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words after the emoji. Drop secondary detail rather than cutting the phrase short."""
+Rewrite the topic as a different, complete noun phrase. Aim for 3-5 words. Drop secondary detail rather than cutting the phrase short."""
 THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE = """{instructions}
 
 ROOM RULES:
