@@ -14,15 +14,25 @@ import inspect
 import json
 import pkgutil
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import typing_extensions
+from aiohttp import ClientError
 
 from mindroom import plugin_api, plugin_http, plugin_testing
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system import plugin_imports
+from tests.access_schema_support import membership_config, membership_index
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _EXPORTS = [
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
@@ -165,9 +175,11 @@ _EXPORTS = [
     "register_atlassian_connection_tools",
     "register_google_workspace_tools",
     "register_tool_with_metadata",
+    "resolve_accessible_room_id",
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_turn_model",
+    "shared_room_ids",
     "stop_worker_service",
     "tool",
     "toolkit_functions",
@@ -355,11 +367,14 @@ _SIGNATURES = {
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
         "requires_conversation, icon, icon_color, config_fields, agent_override_fields, authored_override_validator, "
         "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, workspace_writers, "
-        "approval_aliases, worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
+        "approval_aliases, action_scoped_grants, retired_functions, worker_inert_agent_functions, "
+        "managed_init_args, supports_toolkit_filters)"
     ),
+    "resolve_accessible_room_id": "(context, room_id, *, contact_room_ok)",
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
     "resolve_config_relative_path": "(raw_path, runtime_paths)",
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
+    "shared_room_ids": "(context, *, contact_room_ok)",
     "stop_worker_service": "(context, service, target)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
@@ -668,7 +683,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 34), "034bc7f03269dad758b759964a39abe584ba8ec4e8bee4f3a4966b5c7aaaa969")
+_PINNED_VERSION = ((1, 35), "9d9a2904c400cf06c02a2d9fdc2a6aa7903faeef54098b847f4b7566b25ffb48")
 
 
 def _is_enum(obj: object) -> bool:
@@ -801,3 +816,178 @@ def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
         "The plugin API changed: bump PLUGIN_API_VERSION in mindroom/tool_system/plugin_imports.py, the minor for an "
         f"addition and the major for a breaking change, and set _PINNED_VERSION to (the new version, {digest!r})."
     )
+
+
+async def _room_access_context(
+    tmp_path: Path,
+    *,
+    room_members: dict[str, tuple[str, ...] | Exception],
+    current_room_id: str = "!current:example.com",
+    requester_id: str = "@member:example.com",
+) -> ToolRuntimeContext:
+    """Build a ToolRuntimeContext with real authorization against a grant room."""
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["grant"],
+        access={"current_room_members": False, "members_of_rooms": ["grant"]},
+    )
+    runtime_paths = runtime_paths_for(config)
+    agent_id = entity_ids(config, runtime_paths)["talent"].full_id
+    memberships = await membership_index(config, {"grant": {requester_id}})
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        entry = room_members[room_id]
+        if isinstance(entry, Exception):
+            raise entry
+        return nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id, None, None) for user_id in (*entry, agent_id)],
+            room_id=room_id,
+        )
+
+    client = AsyncMock()
+    client.user_id = agent_id
+    client.rooms = {room_id: MagicMock(spec=nio.MatrixRoom) for room_id in room_members}
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    return make_test_tool_runtime_context(
+        agent_name="talent",
+        target=MessageTarget.resolve(room_id=current_room_id, thread_id=None, reply_to_event_id=None),
+        requester_id=requester_id,
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        agent_reply_memberships=memberships,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_resolve_accessible_room_id_allows_denies_and_validates(tmp_path: Path) -> None:
+    """resolve_accessible_room_id resolves defaults and room refs, and enforces room access."""
+    ctx = await _room_access_context(
+        tmp_path,
+        room_members={
+            "!current:example.com": ("@member:example.com",),
+            "!joined:example.com": ("@member:example.com",),
+            "!victim:example.com": ("@victim:example.com",),
+        },
+    )
+
+    assert await plugin_api.resolve_accessible_room_id(ctx) == ("!current:example.com", None)
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!joined:example.com") == ("!joined:example.com", None)
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!victim:example.com") == (
+        None,
+        "Not authorized to access the target room.",
+    )
+
+    unknown_room_id, unknown_error = await plugin_api.resolve_accessible_room_id(ctx, "nonexistent-room")
+    assert unknown_room_id is None
+    assert unknown_error is not None
+    assert "Unknown room" in unknown_error
+
+    assert await plugin_api.resolve_accessible_room_id(ctx, "   ") == (None, "room_id must be a non-empty string.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_resolve_accessible_room_id_respects_contact_room_ok(tmp_path: Path) -> None:
+    """Contact rooms stay denied by default and open only when contact_room_ok=True."""
+    ctx = await _room_access_context(
+        tmp_path,
+        room_members={
+            "!current:example.com": ("@member:example.com",),
+            "!contact:example.com": ("@member:example.com",),
+        },
+    )
+    record = MagicMock()
+    record.party.return_value.owner = "@member:example.com"
+
+    with patch(
+        "mindroom.custom_tools.attachment_helpers.contact_room",
+        side_effect=lambda _config, _paths, room_id, _agent: (
+            (record, "a") if room_id == "!contact:example.com" else None
+        ),
+    ):
+        assert await plugin_api.resolve_accessible_room_id(ctx, "!contact:example.com") == (
+            None,
+            "Not authorized to access the target room.",
+        )
+        assert await plugin_api.resolve_accessible_room_id(ctx, "!contact:example.com", contact_room_ok=True) == (
+            "!contact:example.com",
+            None,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_resolve_accessible_room_id_catches_transport_errors(tmp_path: Path) -> None:
+    """Transport errors during alias resolution or membership checks return an error tuple instead of raising."""
+    ctx = await _room_access_context(
+        tmp_path,
+        room_members={
+            "!current:example.com": ("@member:example.com",),
+            "!timeout:example.com": TimeoutError("slow"),
+            "!client-error:example.com": ClientError("boom"),
+        },
+    )
+    ctx.client.room_resolve_alias = AsyncMock(side_effect=ClientError("alias lookup failed"))
+
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!timeout:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!client-error:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+    assert await plugin_api.resolve_accessible_room_id(ctx, "#alias:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_shared_room_ids_filters_preserves_order_handles_errors_and_contact_flag(tmp_path: Path) -> None:
+    """shared_room_ids preserves room order, enforces current membership, drops errored rooms, and honors contact_room_ok."""
+    ctx = await _room_access_context(
+        tmp_path,
+        room_members={
+            "!z-room:example.com": ("@member:example.com",),
+            "!denied:example.com": ("@victim:example.com",),
+            "!client-error:example.com": ClientError("boom"),
+            "!timeout:example.com": TimeoutError("slow"),
+            "!contact-joined:example.com": ("@member:example.com",),
+            "!contact-invited:example.com": ("@other:example.com",),
+            "!current:example.com": ("@other:example.com",),
+            "!a-room:example.com": ("@member:example.com",),
+        },
+    )
+    record = MagicMock()
+    record.party.return_value.owner = "@member:example.com"
+    contact_rooms = {"!contact-joined:example.com", "!contact-invited:example.com"}
+
+    with patch(
+        "mindroom.custom_tools.attachment_helpers.contact_room",
+        side_effect=lambda _config, _paths, room_id, _agent: (record, "a") if room_id in contact_rooms else None,
+    ):
+        # Current room and an invited-but-not-joined contact room are allowed by resolve_accessible_room_id,
+        # while shared_room_ids strictly requires the requester to be joined right now.
+        assert await plugin_api.resolve_accessible_room_id(ctx) == ("!current:example.com", None)
+        assert await plugin_api.resolve_accessible_room_id(
+            ctx,
+            "!contact-invited:example.com",
+            contact_room_ok=True,
+        ) == ("!contact-invited:example.com", None)
+
+        assert await plugin_api.shared_room_ids(ctx) == [
+            "!z-room:example.com",
+            "!a-room:example.com",
+        ]
+        assert await plugin_api.shared_room_ids(ctx, contact_room_ok=True) == [
+            "!z-room:example.com",
+            "!contact-joined:example.com",
+            "!a-room:example.com",
+        ]

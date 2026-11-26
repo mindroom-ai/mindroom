@@ -31,6 +31,7 @@ from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_summary.state import current_thread_summary
 from mindroom.thread_workflow import latest_reply_question_ts, room_thread_facts, thread_workflow
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.plugin_room_access import shared_room_ids
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -436,18 +437,13 @@ class MatrixRoomTools(Toolkit):
         if message is not None:
             return self._payload("error", action="threads", room_id="all", message=message)
         identities = self._labelling_identities(context) if workflow is not None else None
+        # Privacy boundary: a room is read only once the requester is proven joined to it now.
+        room_ids = await shared_room_ids(context, contact_room_ok=True)
         reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
 
         async def read_room(room_id: str) -> tuple[list[tuple[dict[str, object], nio.Event]], bool, Exception | None]:
             """Return a shared room's rows, whether it has older threads, and why reading it failed."""
             async with reads:
-                # Privacy boundary: a room is read only once the requester is proven joined to it now.
-                try:
-                    shared = await room_access_allowed(context, room_id, contact_room_ok=True, require_membership=True)
-                except (ClientError, TimeoutError):
-                    shared = False
-                if not shared:
-                    return [], False, None
                 try:
                     roots, next_token = await get_room_threads_page(context.client, room_id, limit=limit)
                     labels = await self._thread_labels(context, room_id, roots, identities)
@@ -457,7 +453,6 @@ class MatrixRoomTools(Toolkit):
             rows = self._thread_rows(room_id, roots, labels, workflow)
             return [({"room_id": room_id, **row}, event) for row, event in rows], next_token is not None, None
 
-        room_ids = list(context.client.rooms)
         results = await asyncio.gather(*(read_room(room_id) for room_id in room_ids))
         rows = sorted(
             (row for room_rows, _more, _failed in results for row in room_rows),
@@ -479,48 +474,64 @@ class MatrixRoomTools(Toolkit):
             **({"retry_after_ms": max(hints)} if hints else {}),
         )
 
-    async def _state(
+    async def _state_event(
         self,
         context: ToolRuntimeContext,
         *,
         room_id: str,
-        event_type: str | None,
+        event_type: str,
         state_key: str,
     ) -> str:
-        if event_type is not None:
-            try:
-                response = await context.client.room_get_state_event(
-                    room_id,
-                    event_type,
-                    state_key,
-                )
-            except (ClientError, TimeoutError) as exc:
-                return self._payload(
-                    "error",
-                    action="state",
-                    room_id=room_id,
-                    event_type=event_type,
-                    state_key=state_key,
-                    message=self._transport_error_message(exc),
-                )
-            if isinstance(response, nio.RoomGetStateEventResponse):
-                return self._payload(
-                    "ok",
-                    action="state",
-                    room_id=room_id,
-                    event_type=event_type,
-                    state_key=state_key,
-                    content=response.content,
-                )
+        try:
+            response = await context.client.room_get_state_event(
+                room_id,
+                event_type,
+                state_key,
+            )
+        except (ClientError, TimeoutError) as exc:
             return self._payload(
                 "error",
                 action="state",
                 room_id=room_id,
                 event_type=event_type,
                 state_key=state_key,
-                message=f"Failed to fetch state event: {response}",
+                message=self._transport_error_message(exc),
+            )
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            return self._payload(
+                "ok",
+                action="state",
+                room_id=room_id,
+                event_type=event_type,
+                state_key=state_key,
+                content=response.content,
+            )
+        return self._payload(
+            "error",
+            action="state",
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+            message=f"Failed to fetch state event: {response}",
+        )
+
+    async def _state(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_type: str | None,
+        state_key: str | None,
+    ) -> str:
+        if event_type is not None and state_key is not None:
+            return await self._state_event(
+                context,
+                room_id=room_id,
+                event_type=event_type,
+                state_key=state_key,
             )
 
+        error_extra: dict[str, object] = {"event_type": event_type} if event_type is not None else {}
         try:
             response = await context.client.room_get_state(room_id)
         except (ClientError, TimeoutError) as exc:
@@ -528,6 +539,7 @@ class MatrixRoomTools(Toolkit):
                 "error",
                 action="state",
                 room_id=room_id,
+                **error_extra,
                 message=self._transport_error_message(exc),
             )
         if not isinstance(response, nio.RoomGetStateResponse):
@@ -535,7 +547,26 @@ class MatrixRoomTools(Toolkit):
                 "error",
                 action="state",
                 room_id=room_id,
+                **error_extra,
                 message=f"Failed to fetch room state: {response}",
+            )
+
+        if event_type is not None:
+            matching_events = [
+                {
+                    "state_key": event_dict.get("state_key", ""),
+                    "content": event_dict.get("content", {}),
+                }
+                for event_dict in response.events
+                if event_dict.get("type") == event_type
+            ]
+            return self._payload(
+                "ok",
+                action="state",
+                room_id=room_id,
+                event_type=event_type,
+                count=len(matching_events),
+                events=matching_events,
             )
 
         state_events: list[dict[str, Any]] = []
@@ -585,7 +616,7 @@ class MatrixRoomTools(Toolkit):
         - members: Joined members with display names and power levels.
         - agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message="...")` (separate from `run_subagent` allowlist).
         - threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow="all"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: questions only in unencrypted rooms; single runtime; filtered pages may be shorter than `limit`. `room_id="all"` spans all shared rooms (one page/room; pair with `workflow="needs_you"` for "what needs me?").
-        - state: Specific state event (`event_type` + optional `state_key`), or summary of all state events (`m.room.member` elided).
+        - state: Without `event_type`, summary of all state events (`m.room.member` elided); `event_type` alone lists all events of that type with full `content`; `event_type` + `state_key` (including `""`) fetches one specific state event.
         """
         if isinstance(context := tool_context_or_error(self._payload, "Matrix room"), str):
             return context
@@ -643,5 +674,5 @@ class MatrixRoomTools(Toolkit):
             context,
             room_id=resolved_room_id,
             event_type=(event_type or "").strip() or None,
-            state_key=(state_key or "").strip(),
+            state_key=None if state_key is None else state_key.strip(),
         )

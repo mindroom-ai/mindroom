@@ -25,7 +25,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -1131,6 +1131,131 @@ async def test_a_reload_that_fails_as_a_whole_keeps_the_live_plugins_and_their_t
 
         assert not live_task.done()
         assert _live_hook_plugins(orchestrator) == ["import-task"]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_plugin_hot_reload_rejects_retired_functions_conflicting_with_approval_rules(tmp_path: Path) -> None:
+    """A hot reload adding retired_functions that conflict with active tool_approval.rules fails and keeps the previous generation."""
+    plugin_root = tmp_path / "plugins" / "demo_consolidated"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo_consolidated", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}',
+        encoding="utf-8",
+    )
+    tools_path = (plugin_root / "tools.py").resolve()
+    tools_path.write_text(
+        """import asyncio
+from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+_BACKGROUND_TASK = asyncio.create_task(asyncio.Event().wait(), name="retired-reload-v1")
+
+
+class DemoConsolidatedTools(Toolkit):
+    name = "demo_consolidated"
+
+    @tool
+    def unlink_demo(self) -> str:
+        return "v1"
+
+
+@register_tool_with_metadata(
+    name="demo_consolidated",
+    display_name="Demo Consolidated",
+    description="v1",
+    category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.NONE,
+    function_names=("unlink_demo",),
+)
+def demo_consolidated_tools() -> type[DemoConsolidatedTools]:
+    return DemoConsolidatedTools
+""",
+        encoding="utf-8",
+    )
+
+    runtime_paths = orchestrator_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [{"path": "./plugins/demo_consolidated"}],
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "tools": ["demo_consolidated"],
+                    "include_default_tools": False,
+                },
+            },
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [{"match": "unlink_demo", "action": "require_approval"}],
+            },
+        },
+        runtime_paths,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
+    orchestrator.running = True
+
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        initial = await orchestrator.reload_plugins_now(source="test")
+        assert initial.active_plugin_names == ("demo_consolidated",)
+        live_task = cached_plugin_module(tools_path)._BACKGROUND_TASK
+        tasks.append(live_task)
+        live_hooks = orchestrator.hook_registry
+        assert config_plugins(config, runtime_paths).tools.entries["demo_consolidated"].description == "v1"
+
+        tools_path.write_text(
+            """import asyncio
+from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+_BACKGROUND_TASK = asyncio.create_task(asyncio.Event().wait(), name="retired-reload-v2")
+
+
+class DemoConsolidatedTools(Toolkit):
+    name = "demo_consolidated"
+
+    @tool
+    def demo_action_tool(self, action: str) -> str:
+        return action
+
+
+@register_tool_with_metadata(
+    name="demo_consolidated",
+    display_name="Demo Consolidated",
+    description="v2",
+    category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.NONE,
+    function_names=("demo_action_tool",),
+    action_scoped_grants=("demo_action_tool",),
+    retired_functions={"unlink_demo": "demo_action_tool"},
+)
+def demo_consolidated_tools() -> type[DemoConsolidatedTools]:
+    return DemoConsolidatedTools
+""",
+            encoding="utf-8",
+        )
+
+        with (
+            patch.object(
+                orchestrator_module,
+                "dispose_plugins",
+                wraps=orchestrator_module.dispose_plugins,
+            ) as dispose_spy,
+            pytest.raises(ConfigRuntimeValidationError, match="demo_action_tool"),
+        ):
+            await orchestrator.reload_plugins_now(source="command")
+        await asyncio.sleep(0)
+
+        dispose_spy.assert_called_once()
+        assert not live_task.done()
+        assert all(task.get_name() != "retired-reload-v2" for task in asyncio.all_tasks())
+        assert orchestrator.hook_registry is live_hooks
+        live_metadata = config_plugins(config, runtime_paths).tools.entries["demo_consolidated"]
+        assert live_metadata.description == "v1"
+        assert live_metadata.retired_functions == {}
     finally:
         for task in tasks:
             task.cancel()

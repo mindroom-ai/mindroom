@@ -96,6 +96,7 @@ from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.token_counting.families import start_loading_o200k
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import (
+    ConfigPlugins,
     PluginGeneration,
     PluginReloadResult,
     config_plugins,
@@ -937,6 +938,11 @@ class _MultiAgentOrchestrator:
             try:
                 try:
                     generation = prepare_plugins(config, self.runtime_paths)
+                    try:
+                        config.validate_tool_registry(ConfigPlugins.of(generation, config, self.runtime_paths).tools)
+                    except BaseException:
+                        dispose_plugins(generation)
+                        raise
                 except Exception as exc:
                     logger.warning(
                         "Plugin reload failed; the previous plugins stay active",

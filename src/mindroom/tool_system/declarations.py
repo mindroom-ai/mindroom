@@ -188,6 +188,10 @@ class ToolMetadata:
     workspace_writers: tuple[str, ...] = ()
     # The toolkit's functions, by name, whose calls another function's approval rules judge too.
     approval_aliases: Mapping[str, ApprovalAlias] = field(default_factory=dict)
+    # The toolkit's action-dispatched functions whose timed approval grants bind to (tool_name, action).
+    action_scoped_grants: tuple[str, ...] = ()
+    # Retired function names mapped to their replacement function name, for fail-closed approval rule validation.
+    retired_functions: Mapping[str, str] = field(default_factory=dict)
     # SDK functions that accept, but never use, an injected Agent or Team.
     worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
