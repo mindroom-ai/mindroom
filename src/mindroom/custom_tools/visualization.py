@@ -144,7 +144,7 @@ class VisualizationTools(Toolkit):
     def create_chart(
         self,
         chart_type: _ChartType,
-        data: dict[str, int | float] | list[Any] | str | None = None,
+        data: dict[str, int | float | list[int | float]] | list[Any] | str | None = None,
         x_data: list[int | float] | None = None,
         y_data: list[int | float] | None = None,
         title: str | None = None,

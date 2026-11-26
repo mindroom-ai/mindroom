@@ -21,6 +21,8 @@ from mindroom.tool_system.tool_function import ToolValue
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.constants import RuntimePaths
+
 logger = get_logger(__name__)
 
 # google-genai 3 routes the Gemini API to v1 by default, which omits preview image models; Vertex AI keeps its default.
@@ -33,7 +35,7 @@ class GeminiTools(Toolkit):
     def __init__(
         self,
         api_key: str | None = None,
-        vertexai: bool = False,
+        vertexai: bool | None = None,
         project_id: str | None = None,
         location: str | None = None,
         image_generation_model: str = GOOGLE_IMAGE,
@@ -41,11 +43,17 @@ class GeminiTools(Toolkit):
         enable_generate_image: bool = True,
         enable_generate_video: bool = True,
         all: bool = False,  # noqa: A002
+        *,
+        runtime_paths: RuntimePaths | None = None,
     ) -> None:
-        self.vertexai = vertexai
+        self.vertexai = (
+            vertexai
+            if vertexai is not None
+            else (runtime_paths.env_flag("GOOGLE_GENAI_USE_VERTEXAI") if runtime_paths is not None else False)
+        )
         self.project_id = project_id
         self.location = location
-        self.api_key = api_key
+        self.api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
         if not self.vertexai and not self.api_key:
             msg = "GOOGLE_API_KEY not set. Please provide api_key or set the environment variable."
             raise ValueError(msg)

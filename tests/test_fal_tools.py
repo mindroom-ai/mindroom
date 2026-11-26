@@ -257,3 +257,22 @@ def test_image_to_image_returns_provider_error(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.content == "Error: provider unavailable"
     assert not result.images
+
+
+@pytest.mark.parametrize("api_key", [None, "", "   "])
+def test_fal_missing_or_blank_api_key_fails_closed_without_sdk_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    api_key: str | None,
+) -> None:
+    """Missing or blank Fal keys must fail closed before constructing SyncClient even when FAL_KEY is set."""
+    monkeypatch.setenv("FAL_KEY", "ambient-fal-key")
+    sync_client = Mock(side_effect=AssertionError("SyncClient must not be constructed without a resolved key"))
+    monkeypatch.setattr(fal_client, "SyncClient", sync_client)
+    toolkit = FalTools(api_key=api_key, enable_image_to_image=True)
+
+    media_result = toolkit.generate_media("A sunset")
+    edit_result = toolkit.image_to_image("Add clouds", image_url="https://cdn.example.test/source.png")
+
+    sync_client.assert_not_called()
+    assert media_result.content == "Error: FAL_API_KEY not set."
+    assert edit_result.content == "Error: FAL_API_KEY not set."

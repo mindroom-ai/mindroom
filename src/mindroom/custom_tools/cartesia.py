@@ -39,11 +39,12 @@ class CartesiaTools(Toolkit):
         enable_localize_voice: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        if not api_key:
+        resolved_key = api_key.strip() if isinstance(api_key, str) else ""
+        if not resolved_key:
             msg = "CARTESIA_API_KEY not set. Please set the CARTESIA_API_KEY environment variable."
             raise ValueError(msg)
 
-        self.api_key: str = api_key
+        self.api_key: str = resolved_key
         self.client: Any = cartesia.Cartesia(api_key=self.api_key)
         self.model_id = model_id
         self.default_voice_id = default_voice_id
@@ -61,7 +62,7 @@ class CartesiaTools(Toolkit):
         """List available Cartesia voices (first page) as JSON."""
         try:
             voices = self.client.voices.list()
-            items = voices.items if voices else ()
+            items = voices.data if voices is not None else ()
             result = [
                 {
                     "id": getattr(voice, "id", None),
@@ -83,6 +84,7 @@ class CartesiaTools(Toolkit):
         description: str,
         language: str,
         original_speaker_gender: _SpeakerGender,
+        accent: str,
         voice_id: str | None = None,
     ) -> str:
         """Create a localized Cartesia voice in another language.
@@ -92,12 +94,14 @@ class CartesiaTools(Toolkit):
             description: Voice description.
             language: Target language code (e.g. `fr`, `es`).
             original_speaker_gender: Gender of the base voice speaker.
+            accent: Cartesia catalog accent ID (e.g. `parisian`, `southern-us`, `general-american`).
             voice_id: Base voice ID; defaults to the configured `default_voice_id`.
 
         """
         base_voice_id = voice_id or self.default_voice_id
         try:
             result = self.client.voices.localize(
+                accent=accent,
                 voice_id=base_voice_id,
                 name=name,
                 description=description,
@@ -121,7 +125,7 @@ class CartesiaTools(Toolkit):
         """
         effective_voice_id = voice_id or self.default_voice_id
         try:
-            audio_iterator = self.client.tts.bytes(
+            audio_response = self.client.tts.generate(
                 model_id=self.model_id,
                 transcript=transcript,
                 voice={"mode": "id", "id": effective_voice_id},
@@ -129,10 +133,9 @@ class CartesiaTools(Toolkit):
                     "container": "mp3",
                     "sample_rate": 44100,
                     "bit_rate": 128000,
-                    "encoding": "mp3",
                 },
             )
-            audio_data = b"".join(audio_iterator)
+            audio_data = audio_response.read()
             audio = Audio(id=str(uuid4()), content=audio_data, mime_type="audio/mpeg")
             return ToolValue(content="Audio generated and attached successfully.", audios=(audio,))
         except Exception as exc:

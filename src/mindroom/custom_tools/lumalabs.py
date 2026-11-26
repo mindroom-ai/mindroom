@@ -1,4 +1,4 @@
-"""Native Luma Labs Dream Machine video generation toolkit."""
+"""Native Luma AI Dream Machine video generation toolkit."""
 
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_LumaModel = Literal["ray-2", "ray-flash-2"]
 _LumaAspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
+_LumaModel = Literal["ray-2", "ray-flash-2"]
 
 
 class LumaLabTools(Toolkit):
-    """Generate videos from text prompts or keyframe images using Luma Dream Machine."""
+    """Generate videos via Luma AI Dream Machine."""
 
     def __init__(
         self,
@@ -40,61 +40,84 @@ class LumaLabTools(Toolkit):
         all: bool = False,  # noqa: A002
         model: _LumaModel | None = "ray-2",
     ) -> None:
+        resolved_key = api_key.strip() if isinstance(api_key, str) else ""
+        if not resolved_key:
+            msg = "LUMAAI_API_KEY not set. Please set the LUMAAI_API_KEY environment variable."
+            raise ValueError(msg)
+
         self.wait_for_completion = wait_for_completion
         self.poll_interval = poll_interval
         self.max_wait_time = max_wait_time
-        self.api_key = api_key
+        self.api_key: str = resolved_key
         self.model: _LumaModel = "ray-2" if model is None else model
-        self._allow_text_to_video = all or enable_generate_video
-        self._allow_image_to_video = all or enable_image_to_video
-
-        if not self.api_key:
-            logger.error("LUMAAI_API_KEY not set")
-
         self.client: Any = LumaAI(auth_token=self.api_key)
 
         tools: list[Callable[..., Any]] = []
-        if self._allow_text_to_video or self._allow_image_to_video:
+        if all or enable_generate_video:
             tools.append(self.generate_video)
+        if all or enable_image_to_video:
+            tools.append(self.image_to_video)
         super().__init__(name="lumalabs", tools=tools)
 
     def generate_video(
         self,
         prompt: str,
-        start_image_url: str | None = None,
-        end_image_url: str | None = None,
         loop: bool = False,
         aspect_ratio: _LumaAspectRatio = "16:9",
         keyframes: dict[str, dict[str, str]] | None = None,
     ) -> ToolValue:
-        """Generate a video from a text prompt and optional start/end images or keyframes.
+        """Generate a video from a text prompt and optional keyframes.
 
         Args:
             prompt: Text description of the desired video.
-            start_image_url: Optional starting keyframe image URL (image-to-video).
-            end_image_url: Optional ending keyframe image URL (requires `start_image_url`).
             loop: Whether the video should loop seamlessly.
             aspect_ratio: Output aspect ratio.
             keyframes: Optional raw keyframe mapping (e.g. `{"frame0": {"type": "image", "url": "..."}}`).
 
         """
-        if end_image_url and not start_image_url:
-            return ToolValue(content="Error: end_image_url requires start_image_url.")
+        return self._submit_and_poll_video(
+            prompt=prompt,
+            loop=loop,
+            aspect_ratio=aspect_ratio,
+            keyframes=keyframes,
+        )
 
-        resolved_keyframes = keyframes
-        if start_image_url:
-            resolved_keyframes = {"frame0": {"type": "image", "url": start_image_url}}
-            if end_image_url:
-                resolved_keyframes["frame1"] = {"type": "image", "url": end_image_url}
+    def image_to_video(
+        self,
+        prompt: str,
+        start_image_url: str,
+        end_image_url: str | None = None,
+        loop: bool = False,
+        aspect_ratio: _LumaAspectRatio = "16:9",
+    ) -> ToolValue:
+        """Generate a video from one or two images with a prompt.
 
-        has_images = bool(resolved_keyframes)
-        if has_images and not self._allow_image_to_video:
-            return ToolValue(content="Error: Image-to-video generation is disabled in configuration.")
-        if not has_images and not self._allow_text_to_video:
-            return ToolValue(
-                content="Error: Text-to-video generation is disabled; provide start_image_url or keyframes.",
-            )
+        Args:
+            prompt: Text description of the desired video.
+            start_image_url: URL of the starting image.
+            end_image_url: Optional URL of the ending image.
+            loop: Whether the video should loop seamlessly.
+            aspect_ratio: Output aspect ratio.
 
+        """
+        keyframes: dict[str, dict[str, str]] = {"frame0": {"type": "image", "url": start_image_url}}
+        if end_image_url:
+            keyframes["frame1"] = {"type": "image", "url": end_image_url}
+        return self._submit_and_poll_video(
+            prompt=prompt,
+            loop=loop,
+            aspect_ratio=aspect_ratio,
+            keyframes=keyframes,
+        )
+
+    def _submit_and_poll_video(
+        self,
+        *,
+        prompt: str,
+        loop: bool,
+        aspect_ratio: _LumaAspectRatio,
+        keyframes: dict[str, dict[str, str]] | None = None,
+    ) -> ToolValue:
         try:
             params: dict[str, Any] = {
                 "model": self.model,
@@ -102,8 +125,8 @@ class LumaLabTools(Toolkit):
                 "loop": loop,
                 "aspect_ratio": aspect_ratio,
             }
-            if resolved_keyframes is not None:
-                params["keyframes"] = resolved_keyframes
+            if keyframes is not None:
+                params["keyframes"] = keyframes
 
             generation = self.client.generations.create(**params)
             return self._poll_generation(generation)

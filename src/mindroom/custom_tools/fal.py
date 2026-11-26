@@ -36,7 +36,7 @@ class FalTools(Toolkit):
         enable_image_to_image: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        self.api_key = api_key
+        self.api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
         if not self.api_key:
             logger.error("FAL_API_KEY not set")
         self.model = model
@@ -65,6 +65,9 @@ class FalTools(Toolkit):
             prompt: Text description of the media to generate.
 
         """
+        if not self.api_key:
+            logger.error("fal_api_key_missing")
+            return ToolValue(content="Error: FAL_API_KEY not set.")
         try:
             result = fal_client.SyncClient(key=self.api_key).subscribe(
                 self.model,
@@ -87,6 +90,9 @@ class FalTools(Toolkit):
         """
         if not image_url:
             return ToolValue(content="Error: image_url is required for image editing.")
+        if not self.api_key:
+            logger.error("fal_api_key_missing")
+            return ToolValue(content="Error: FAL_API_KEY not set.")
         try:
             result = fal_client.SyncClient(key=self.api_key).subscribe(
                 _FAL_IMAGE_EDIT_ENDPOINT,

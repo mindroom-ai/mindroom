@@ -759,3 +759,57 @@ def test_retry_after_without_retryable_failure_does_not_stop_polling(provider: _
     assert "success" in result.content.lower()
     assert result.images is not None
     assert [item.url for item in result.images] == [media_url]
+
+
+@pytest.mark.parametrize(
+    ("wait_for_completion", "payloads", "expected_timeouts"),
+    [
+        pytest.param(
+            False,
+            [
+                {
+                    "status": "processing",
+                    "id": 74123,
+                    "eta": 10,
+                    "future_links": ["https://media.example.test/queued.mp4"],
+                },
+            ],
+            [120],
+            id="non-waiting-120s",
+        ),
+        pytest.param(
+            True,
+            [
+                {
+                    "status": "processing",
+                    "id": 74123,
+                    "eta": 1,
+                    "future_links": ["https://media.example.test/queued.mp4"],
+                },
+                {"status": "success", "output": ["https://media.example.test/final.mp4"]},
+            ],
+            [60, 60],
+            id="waiting-60s",
+        ),
+    ],
+)
+def test_submission_read_timeout_depends_on_wait_for_completion(
+    provider: _ModelsLabTransport,
+    wait_for_completion: bool,
+    payloads: list[dict[str, object]],
+    expected_timeouts: list[int],
+) -> None:
+    """Non-waiting submissions preserve the 120s read timeout while waiting submissions use 60s."""
+    provider.payloads = payloads
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="mp4",
+        wait_for_completion=wait_for_completion,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test video")
+
+    assert provider.timeouts == expected_timeouts
+    assert result.videos

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -56,7 +55,7 @@ class OpenAITools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
+        resolved_key = api_key.strip() if isinstance(api_key, str) else ""
         if not resolved_key:
             msg = "OPENAI_API_KEY not set. Please set the OPENAI_API_KEY environment variable."
             raise ValueError(msg)

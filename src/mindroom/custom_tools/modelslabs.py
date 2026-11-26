@@ -21,6 +21,7 @@ from mindroom.tool_system.tool_function import ToolValue
 logger = get_logger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 60
+_NONWAITING_SUBMISSION_TIMEOUT_SECONDS = 120
 
 
 class _ModelsLabFileType(StrEnum):
@@ -252,12 +253,15 @@ class ModelsLabTools(Toolkit):
         if not self.api_key:
             return ToolValue(content="Please set the MODELS_LAB_API_KEY")
 
+        submission_timeout = (
+            _REQUEST_TIMEOUT_SECONDS if self.wait_for_completion else _NONWAITING_SUBMISSION_TIMEOUT_SECONDS
+        )
         try:
             response = requests.post(
                 self.url,
                 data=json.dumps(self._create_payload(prompt)),
                 headers={"Content-Type": "application/json"},
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=submission_timeout,
             )
             result = response.json()
             _check_provider_http_status(response, result)

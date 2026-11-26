@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import GOOGLE_IMAGE, GOOGLE_VEO
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -90,6 +97,7 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["google-genai"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#gemini",
     function_names=("generate_image", "generate_video"),

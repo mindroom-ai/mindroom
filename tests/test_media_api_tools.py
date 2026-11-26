@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import httpx
+import pytest
 
 import mindroom.custom_tools.cartesia as cartesia_module
 import mindroom.custom_tools.eleven_labs as eleven_labs_module
@@ -21,8 +22,6 @@ from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_eleven_labs_voices_tts_and_sfx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,16 +52,63 @@ def test_eleven_labs_voices_tts_and_sfx(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_cartesia_voices_tts_and_localize(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cartesia lists voices, generates MP3 audio artifacts, and localizes voices."""
-    voice = SimpleNamespace(id="c1", name="Sonic", description="Clear", language="en")
-    client = SimpleNamespace(
-        voices=SimpleNamespace(
-            list=Mock(return_value=SimpleNamespace(items=[voice])),
-            localize=Mock(return_value={"id": "c2", "language": "fr"}),
-        ),
-        tts=SimpleNamespace(bytes=Mock(return_value=iter([b"mp3", b"-data"]))),
+    """Cartesia exercises the real 5.1.0 SDK page type, localize accent parameter, and TTS bytes endpoint."""
+    recorded_requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        recorded_requests.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path == "/voices":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "c1",
+                            "access": "public",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "description": "Clear",
+                            "is_owner": False,
+                            "language": "en",
+                            "locales": [{"locale": "en-US", "is_native": True}],
+                            "name": "Sonic",
+                            "status": "active",
+                            "tagline": "Clear voice",
+                            "visibility": "all",
+                        },
+                    ],
+                    "has_more": False,
+                },
+                request=request,
+            )
+        if request.method == "POST" and request.url.path == "/voices/localize":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "c2",
+                    "access": "private",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "description": "Desc",
+                    "language": "fr",
+                    "name": "French",
+                    "tagline": "French voice",
+                    "user_id": "u1",
+                    "visibility": "owner",
+                },
+                request=request,
+            )
+        if request.method == "POST" and request.url.path == "/tts/bytes":
+            return httpx.Response(200, content=b"mp3-data", request=request)
+        msg = f"Unexpected Cartesia request: {request.method} {request.url.path}"
+        raise AssertionError(msg)
+
+    real_client_cls = cartesia_module.cartesia.Cartesia
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        cartesia_module.cartesia,
+        "Cartesia",
+        lambda **kwargs: real_client_cls(**kwargs, http_client=http_client),
     )
-    monkeypatch.setattr(cartesia_module.cartesia, "Cartesia", Mock(return_value=client))
     toolkit = CartesiaTools(api_key="ct-key", enable_localize_voice=True)
 
     listed = json.loads(toolkit.list_voices())
@@ -74,8 +120,16 @@ def test_cartesia_voices_tts_and_localize(monkeypatch: pytest.MonkeyPatch) -> No
     assert speech.audios[0].content == b"mp3-data"
     assert speech.audios[0].mime_type == "audio/mpeg"
 
-    localized = json.loads(toolkit.localize_voice("French", "Desc", "fr", "female"))
-    assert localized == {"id": "c2", "language": "fr"}
+    localized = json.loads(toolkit.localize_voice("French", "Desc", "fr", "female", accent="parisian"))
+    assert localized["id"] == "c2"
+    assert localized["language"] == "fr"
+
+    localize_body = next(body for method, path, body in recorded_requests if path == "/voices/localize")
+    assert localize_body is not None
+    assert localize_body["accent"] == "parisian"
+    assert localize_body["language"] == "fr"
+    assert localize_body["original_speaker_gender"] == "female"
+    assert localize_body["voice_id"] == toolkit.default_voice_id
 
 
 def test_giphy_search_returns_image_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,3 +205,32 @@ def test_unsplash_consolidated_actions_and_enable_flags(monkeypatch: pytest.Monk
     all_toolkit = UnsplashTools(access_key="u-key", enable_download_photo=True)
     dl_res = json.loads(all_toolkit.unsplash("download", photo_id="p1"))
     assert dl_res == {"photo_id": "p1", "download_url": "https://images.unsplash.com/dl"}
+
+
+@pytest.mark.parametrize("action", ["get", "download"])
+@pytest.mark.parametrize(
+    "bad_photo_id",
+    [
+        "abc/download",
+        "../random",
+        "abc?foo=1",
+        "abc#frag",
+        "abc def",
+        "abc\n",
+        "https://api.unsplash.com/photos/abc",
+    ],
+)
+def test_unsplash_rejects_path_traversal_and_non_opaque_photo_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    bad_photo_id: str,
+) -> None:
+    """Unsplash rejects path traversal or query/URL syntax in photo_id before issuing any HTTP call."""
+    http_get = Mock(side_effect=AssertionError("httpx.get must not be called for invalid photo_id"))
+    monkeypatch.setattr(unsplash_module.httpx, "get", http_get)
+    toolkit = UnsplashTools(access_key="u-key", enable_download_photo=True)
+
+    result = toolkit.unsplash(action, photo_id=bad_photo_id)  # type: ignore[arg-type]
+
+    assert result.startswith("Error: Invalid photo ID")
+    http_get.assert_not_called()

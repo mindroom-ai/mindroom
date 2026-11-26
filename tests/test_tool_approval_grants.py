@@ -1061,7 +1061,6 @@ def test_action_dispatched_scheduled_calls_never_offer_any_arguments(
         ("file_generation", "generate_code_file", "generate_file"),
         ("visualization", "create_bar_chart", "create_chart"),
         ("visualization", "create_histogram", "create_chart"),
-        ("lumalabs", "image_to_video", "generate_video"),
         ("unsplash", "search_photos", "unsplash"),
         ("unsplash", "download_photo", "unsplash"),
     ],

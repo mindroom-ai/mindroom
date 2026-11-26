@@ -389,9 +389,6 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_scatter_plot": "create_chart",
         "create_histogram": "create_chart",
     },
-    "lumalabs": {
-        "image_to_video": "generate_video",
-    },
     "unsplash": {
         "search_photos": "unsplash",
         "get_photo": "unsplash",

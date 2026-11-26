@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal
 
 import httpx
@@ -29,6 +30,15 @@ _UnsplashColor = Literal[
 ]
 
 _BASE_URL = "https://api.unsplash.com"
+_PHOTO_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _validate_photo_id(photo_id: str | None) -> str | None:
+    if not photo_id:
+        return "Error: Please provide a photo ID."
+    if _PHOTO_ID_RE.fullmatch(photo_id) is None:
+        return "Error: Invalid photo ID. Expected an Unsplash photo ID containing only letters, numbers, '-' or '_'."
+    return None
 
 
 def _format_photo(photo: dict[str, Any]) -> dict[str, Any]:
@@ -174,8 +184,8 @@ class UnsplashTools(Toolkit):
         )
 
     def _get(self, *, photo_id: str | None) -> str:
-        if not photo_id:
-            return "Error: Please provide a photo ID."
+        if (error := _validate_photo_id(photo_id)) is not None:
+            return error
         photo = self._request(f"/photos/{photo_id}")
         result = _format_photo(photo)
         if exif := photo.get("exif"):
@@ -205,7 +215,7 @@ class UnsplashTools(Toolkit):
         return json.dumps({"photos": photos})
 
     def _download(self, *, photo_id: str | None) -> str:
-        if not photo_id:
-            return "Error: Please provide a photo ID."
+        if (error := _validate_photo_id(photo_id)) is not None:
+            return error
         data = self._request(f"/photos/{photo_id}/download")
         return json.dumps({"photo_id": photo_id, "download_url": data.get("url")})

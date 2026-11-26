@@ -73,7 +73,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
@@ -153,7 +153,7 @@ It works only with models that accept a single `prompt` field and return files w
 
 ## `cartesia`
 
-`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
+`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
 `localize_voice()` creates a new voice in another language from an existing one.
 Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
 `text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
@@ -172,7 +172,7 @@ Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the
 
 `eleven_labs` provides `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`.
 The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
-Audio attachments are always labeled MP3 (`audio/mpeg`), even when `output_format` selects PCM or u-law.
+`text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `generate_sound_effect()` returns MP3 (`audio/mpeg`).
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -188,9 +188,9 @@ Audio attachments are always labeled MP3 (`audio/mpeg`), even when `output_forma
 
 ## `lumalabs`
 
-`lumalabs` provides `generate_video(prompt, start_image_url=None, end_image_url=None, loop=False, aspect_ratio="16:9", keyframes=None)`.
-Pass `start_image_url` (and optionally `end_image_url`) or `keyframes` to animate between remote image URLs; local file paths are not accepted.
-`generate_video()` waits for the video until it finishes or `max_wait_time` passes.
+`lumalabs` provides `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
+`image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
+Both functions wait for the video until it finishes or `max_wait_time` passes.
 Keep `wait_for_completion: true`, because `false` returns `Async generation unsupported` without a job handle.
 
 | Option | Type | Default | Notes |
@@ -200,9 +200,9 @@ Keep `wait_for_completion: true`, because `false` returns `Async generation unsu
 | `wait_for_completion` | `boolean` | `true` | Wait for the finished video. |
 | `poll_interval` | `number` | `3` | Seconds between status checks. |
 | `max_wait_time` | `number` | `300` | Seconds to wait before timing out. |
-| `enable_generate_video` | `boolean` | `true` | Enable text-to-video calls in `generate_video()`. |
-| `enable_image_to_video` | `boolean` | `true` | Enable image/keyframe calls in `generate_video()`. |
-| `all` | `boolean` | `false` | Enable both text-to-video and image-to-video modes. |
+| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
+| `enable_image_to_video` | `boolean` | `true` | Enable `image_to_video()`. |
+| `all` | `boolean` | `false` | Enable both functions. |
 
 ## `modelslabs`
 

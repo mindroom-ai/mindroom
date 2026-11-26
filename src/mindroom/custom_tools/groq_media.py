@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -46,7 +45,7 @@ class GroqTools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        resolved_key = api_key or os.getenv("GROQ_API_KEY")
+        resolved_key = api_key.strip() if isinstance(api_key, str) else ""
         if not resolved_key:
             msg = "GROQ_API_KEY not set. Please set the GROQ_API_KEY environment variable."
             raise ValueError(msg)

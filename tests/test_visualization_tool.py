@@ -138,3 +138,34 @@ def test_visualization_honors_enable_flags(tmp_path: Path) -> None:
 
     assert result["status"] == "error"
     assert "disabled" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_visualization_scatter_dict_series_passes_validated_tool_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling create_chart('scatter', data={'x': [1, 2], 'y': [3, 4]}) passes schema and runtime validation."""
+    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
+    from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call  # noqa: PLC0415
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    toolkit = visualization_tools()(tool_output_workspace_root=workspace)
+    adapted = adapt_toolkit(toolkit)
+    function = next(fn for fn in adapted.functions if fn.name == "create_chart")
+
+    outcome = await execute_tool_call(
+        function,
+        {"chart_type": "scatter", "data": {"x": [1, 2], "y": [3, 4]}, "filename": "scatter_valid.png"},
+        ToolCallContext(run_id="run-1", session_id="sess-1", session_state={}, user_id=None),
+        middleware=(),
+    )
+
+    assert not outcome.is_error
+    payload = json.loads(outcome.content)
+    assert payload["status"] == "success"
+    assert payload["chart_type"] == "scatter_plot"
+    assert payload["data_points"] == 2
+    assert (workspace / "charts" / "scatter_valid.png").read_bytes().startswith(_PNG_SIGNATURE)
