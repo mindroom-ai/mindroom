@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.baidusearch import BaiduSearchTools
+    from mindroom.custom_tools.baidusearch import BaiduSearchTools
 
 
 @register_tool_with_metadata(
@@ -85,6 +85,6 @@ if TYPE_CHECKING:
 )
 def baidusearch_tools() -> type[BaiduSearchTools]:
     """Return Baidu search tools for web search."""
-    from agno.tools.baidusearch import BaiduSearchTools
+    from mindroom.custom_tools.baidusearch import BaiduSearchTools
 
     return BaiduSearchTools

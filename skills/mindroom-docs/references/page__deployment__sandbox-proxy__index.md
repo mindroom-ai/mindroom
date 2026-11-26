@@ -1,6 +1,6 @@
 # Sandbox Proxy Isolation
 
-Code-execution tools such as `shell`, `file`, and `python` can read and modify anything their process can reach, including config files, credentials, and application code.
+Code-execution tools such as `shell` can read and modify anything their process can reach, including config files, credentials, and application code.
 The **sandbox proxy** runs these tools in a separate worker runtime that has none of the primary runtime's secrets.
 Use it whenever agents may run untrusted code; without it, the operator trusts every agent with code-execution tools completely.
 This page covers the worker backends and how to deploy them, which tools run in workers, worker scopes and isolation, the shell environment inside workers, credential leases, brokered egress, and the environment variable reference.
@@ -45,7 +45,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
     networks:
       - mindroom-network
 
@@ -120,7 +120,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
 mindroom run
 ```
 
@@ -167,15 +167,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 
   research:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -266,13 +266,13 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, filesystem, python]
-    worker_tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
+    worker_tools: [shell, filesystem]
 ```
 
 
 
-The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, `python`, and `shell`.
+The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
@@ -330,7 +330,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-`shell`, `filesystem`, and `python` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell` and `filesystem` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -356,7 +356,6 @@ Configured MCP `mcp_<server_id>` tools work on every worker scope (see [MCP](htt
 
 Worker-routed `shell` receives only a small non-secret system environment by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale, proxy, and certificate path variables.
 Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are not forwarded.
-Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
@@ -366,7 +365,7 @@ A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-com
 
 ### Workspace home contract
 
-For worker-routed `shell` and `python` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
+For worker-routed `shell` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
 As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
@@ -374,7 +373,7 @@ For example, after `get_attachment("att_...", mindroom_output_path="incoming/fil
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
 
-Agents can set custom environment variables for worker-routed `shell` and `python` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
+Agents can set custom environment variables for worker-routed `shell` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
 It works the same with every worker backend.
 For an example, see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
@@ -419,7 +418,7 @@ For shell authentication, use [environment passthrough](#shell-environment-and-p
 
 ## Agent Keys (egress broker)
 
-To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
+To let worker-routed `shell` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
 There are two supported shapes:
 
@@ -435,7 +434,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 
 ## Stopping and background commands
 
-Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+Stopping a response also stops its in-flight worker calls, such as `run_shell_command`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
 By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.

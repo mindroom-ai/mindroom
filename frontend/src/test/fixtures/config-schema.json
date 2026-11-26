@@ -1781,7 +1781,7 @@
         },
         "file_access": {
           "default": "workspace",
-          "description": "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
+          "description": "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell are always unrestricted; isolate them with worker_tools",
           "enum": [
             "workspace",
             "unrestricted"
@@ -3857,7 +3857,7 @@
             }
           ],
           "default": null,
-          "description": "Optional dashboard icon name, such as SiConfluence or Calendar",
+          "description": "Optional dashboard icon name, such as SiAtlassian or Calendar",
           "title": "Icon"
         },
         "description": {
@@ -6452,7 +6452,7 @@
         "private_networks": [],
         "services": {}
       },
-      "description": "Credential-injecting egress broker for worker shell and python traffic"
+      "description": "Credential-injecting egress broker for shell traffic"
     },
     "administrators": {
       "default": [],

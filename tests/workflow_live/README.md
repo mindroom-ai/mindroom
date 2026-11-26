@@ -15,7 +15,6 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `kill_after_write.py --barrier after-receipt` | Kills the backend with `SIGKILL` after the receipt was saved and before the run's node was written. | `lines=1 node=cached attempt=2 run=completed deliveries=1 reports=1` |
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
 | `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper (the first with `minimal=True`); the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
-| `large_result.py` | Reads a 9 MiB file through `tool("python", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
 | `approval_restart.py` | One agent writes its one line and then calls `write_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
 | `diamond_restart.py` | A plan agent returns six lines, `foreach` runs one research agent per line, two at a time, and one agent joins their answers. The script stops the backend with `SIGTERM` after three research agents completed and starts it again. | `agents=8/8 subagents=8 paid_once=True attempt_below_run=True attempt=2 run=completed deliveries=1 reports=1` |
 
@@ -57,7 +56,6 @@ Each script edits the slot's `config.yaml`: the Helper gets the `workflow` toolk
 Every edit goes through `Deployment.edit_config`, and the script's exit writes the file back as the script found it, so no script meets the edit of another.
 A script that is killed with `SIGKILL` leaves its edit behind.
 `agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room, and prepends an `auto_approve` rule for `run_shell_command` so the minimal agent's shell is not excluded by the stack's scripted shell-review rule.
-`large_result.py` also gives the Helper the `python` toolkit, whose `read_file` returns a file whole: `filesystem` and `shell` return 50 KiB at most.
 `approval_restart.py` also gives the Helper the `filesystem` toolkit and adds a `tool_approval` rule, first in the list of rules, that makes `write_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
 A script names a toolkit by its registered name: `tool("file", ...)` fails with `The requested tool is no longer available to this script run.` since `file` became another name of `filesystem`, and an approval rule that matches the retired `save_file` alone stops the backend from starting.
 A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
@@ -86,7 +84,6 @@ python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot 
 python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot N
 python3 -m tests.workflow_live.restart_mid_run --slot N
 python3 -m tests.workflow_live.agents_restart --slot N
-python3 -m tests.workflow_live.large_result --slot N
 python3 -m tests.workflow_live.approval_restart --slot N
 python3 -m tests.workflow_live.diamond_restart --slot N
 python3 -m tests.workflow_live.pauses --slot N
@@ -125,7 +122,6 @@ python3 -m tests.workflow_live.kill_after_write --barrier before-receipt --slot 
 python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot "$N" --send api
 python3 -m tests.workflow_live.restart_mid_run --slot "$N" --send api
 python3 -m tests.workflow_live.agents_restart --slot "$N" --send api
-python3 -m tests.workflow_live.large_result --slot "$N" --send api
 python3 -m tests.workflow_live.approval_restart --slot "$N" --send api
 python3 -m tests.workflow_live.diamond_restart --slot "$N" --send api
 docker ps --all --filter "label=mindroom-client-e2e.slot=$N"        # the slot's workers, before the teardown

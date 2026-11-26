@@ -205,40 +205,40 @@ def test_values_annotated_any_or_object_take_any_json_value() -> None:
 
 
 def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
-    """A thread tag's data and a Matrix event's content pass the argument validation agent CLI calls run.
+    """A thread tag's data, a Matrix event's content, and a custom API request body pass argument validation.
 
     A value that is not an object is still refused there, so a tool body never receives one.
     """
     tag_thread = toolkit_offers(ThreadTagsTools(), "tag_thread")
     matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api")
-    event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
-
-    validate_tool_arguments(dict(tag_thread.parameters), {"tag": "blocked", "data": {"priority": "high"}})
-    validate_tool_arguments(dict(matrix_api.parameters), event)
-    with pytest.raises(ValueError, match="Invalid tool arguments"):
-        validate_tool_arguments(dict(matrix_api.parameters), {**event, "content": "Hi"})
-
-
-def test_vendor_tools_taking_any_values_accept_real_arguments() -> None:
-    """A custom API request's JSON body and a pandas operation's own documented arguments pass argument validation.
-
-    A value that is not an object is still refused there, so a tool body never receives one.
-    """
     make_request = toolkit_offers(custom_api_tools()(), "make_request")
-    operation = toolkit_offers(pandas_tools()(), "run_dataframe_operation")
+    event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
     request = {
         "endpoint": "https://api.example.com/items",
         "method": "POST",
         "json_data": {"name": "lamp", "tags": ["new"], "price": 12.5},
     }
 
+    validate_tool_arguments(dict(tag_thread.parameters), {"tag": "blocked", "data": {"priority": "high"}})
+    validate_tool_arguments(dict(matrix_api.parameters), event)
     validate_tool_arguments(dict(make_request.parameters), request)
-    validate_tool_arguments(
-        dict(operation.parameters),
-        {"dataframe_name": "sales", "operation": "head", "operation_parameters": {"n": 5}},
-    )
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(dict(matrix_api.parameters), {**event, "content": "Hi"})
     with pytest.raises(ValueError, match="Invalid tool arguments"):
         validate_tool_arguments(dict(make_request.parameters), {**request, "json_data": "lamp"})
+
+
+def test_vendor_tools_taking_any_values_accept_real_arguments() -> None:
+    """A pandas operation's own documented arguments pass argument validation.
+
+    A value that is not an object is still refused there, so a tool body never receives one.
+    """
+    operation = toolkit_offers(pandas_tools()(), "run_dataframe_operation")
+    arguments = {"dataframe_name": "sales", "operation": "head", "operation_parameters": {"n": 5}}
+
+    validate_tool_arguments(dict(operation.parameters), arguments)
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(dict(operation.parameters), {**arguments, "operation_parameters": "five"})
 
 
 def no_docstring(value: str) -> str:  # noqa: D103 - The case is a function without one.

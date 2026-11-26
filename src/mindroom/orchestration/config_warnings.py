@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.egress_broker.env import egress_broker_enabled, egress_tool_with_only_primary_python
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
 from mindroom.script_runs.manager import script_execution_uses_worker
@@ -28,7 +27,6 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     """Log every risky-but-allowed choice in one loaded config."""
     warn_about_foreign_homeserver_authorities(config, runtime_paths)
     _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config, runtime_paths)
-    _warn_about_agent_keys_with_only_primary_python(config, runtime_paths)
     if "accept_invites" in config.router.model_fields_set:
         logger.warning("router.accept_invites is deprecated and ignored: the MindRoom owner account accepts no invites")
 
@@ -77,21 +75,4 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
                 agent=agent_name,
                 worker_code_tools=worker_code_tools,
                 unconfined_primary_tools=unconfined_primary_tools,
-            )
-
-
-def _warn_about_agent_keys_with_only_primary_python(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Warn about each agent that lists `egress_credentials`, but whose only command tool is a `python` in the primary.
-
-    A primary `python` runs in-process, where the broker env cannot reach it, so such an agent is left off the Agent
-    Keys pages.
-    """
-    if not egress_broker_enabled(runtime_paths):
-        return
-    for agent_name in config.agents:
-        if egress_tool_with_only_primary_python(config, agent_name, runtime_paths):
-            logger.warning(
-                "Agent lists the egress_credentials tool, but its only command tool is python in the primary "
-                "process, so Agent Keys never applies to it",
-                agent=agent_name,
             )

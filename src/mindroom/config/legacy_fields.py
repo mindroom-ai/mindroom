@@ -213,6 +213,27 @@ def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
     return value
 
 
+# LEGACY_COMPAT: Retired overlapping built-in toolkits.
+# Legacy format: Authored tool lists accepted web_browser_tools, jira, confluence, and python.
+# Last legacy release: v2026.11.615; replacement: unreleased; use browser, atlassian, or shell and filesystem.
+# Handling: Reject the old names with explicit migration guidance; never grant replacement capabilities implicitly.
+# Coverage: tests/test_retired_tools.py.
+_RETIRED_TOOL_REPLACEMENTS = {
+    "web_browser_tools": "choose and configure `browser` explicitly if you want Chromium or desktop browser access",
+    "jira": "configure the `atlassian` tool and connect an Atlassian account",
+    "confluence": "configure the `atlassian` tool and connect an Atlassian account",
+    "python": "use `shell` to run Python and `filesystem` to read and write files",
+}
+
+
+def retired_tool_message(name: str) -> str | None:
+    """Return migration guidance for a retired toolkit or one of its functions."""
+    toolkit = name.partition(".")[0]
+    if toolkit in _RETIRED_TOOL_REPLACEMENTS:
+        return f"Tool {toolkit!r} was removed; {_RETIRED_TOOL_REPLACEMENTS[toolkit]}."
+    return None
+
+
 # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
 # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
 # Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and
