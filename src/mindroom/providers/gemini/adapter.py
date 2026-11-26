@@ -10,7 +10,6 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
@@ -52,7 +51,7 @@ from mindroom.token_counting.families import counter_for_model
 from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 
     from google.genai import Client
     from google.genai.types import GenerateContentConfig, GenerateContentResponse
@@ -367,25 +366,6 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
     return with_runtime_application_credentials(kwargs, runtime_paths)
 
 
-def _resolved_endpoint(settings: GeminiSettings) -> str:
-    """Return the effective Gemini or Vertex AI server endpoint for ``settings``."""
-    client_params = settings.client_params or {}
-    http_options = client_params.get("http_options")
-    base_url: object = None
-    if isinstance(http_options, Mapping):
-        base_url = http_options.get("base_url") or http_options.get("baseUrl")
-    elif http_options is not None:
-        base_url = getattr(http_options, "base_url", None)
-    if isinstance(base_url, str) and base_url.strip():
-        return base_url.strip().rstrip("/")
-    if client_params.get("vertexai", settings.vertexai):
-        location = client_params.get("location") or settings.location
-        if isinstance(location, str) and (region := location.strip()) and region.lower() != "global":
-            return f"https://{region}-aiplatform.googleapis.com"
-        return "https://aiplatform.googleapis.com"
-    return "https://generativelanguage.googleapis.com"
-
-
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
     """Build the adapter for a ``google`` or ``gemini`` model config; its settings record the resolved route."""
     vertexai = gemini_uses_vertexai(model_config, runtime_paths)
@@ -399,7 +379,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         extra_kwargs = _vertex_kwargs(extra_kwargs, runtime_paths)
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     return GeminiProvider(
-        identity=model_identity(model_config, endpoint=_resolved_endpoint(settings)),
+        identity=model_identity(model_config),
         capabilities=Capabilities(
             structured_output="native",
             # Gemini fetches Cloud Storage and HTTPS files and video links itself.

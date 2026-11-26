@@ -64,7 +64,6 @@ from mindroom.providers.pipeline.connectivity import connectivity_retry_stream
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
-from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
@@ -82,7 +81,6 @@ _CLOUD = "https://api.openai.com/v1"
 _FALLBACK = "https://api.anthropic.com"
 _LOCAL = "http://127.0.0.1:11434"
 _REMOTE_HS = "https://matrix.example.com"
-_LOCAL_HS = "http://127.0.0.1:8008"
 
 
 @dataclass
@@ -137,8 +135,8 @@ def _net_err(code: str = CONNECTION_ERROR, *, replay_stripped: bool = False) -> 
 def _fast_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     real = connectivity.wait_for_connectivity
 
-    async def _fast(endpoint: str | None, *, deadline: float) -> bool:
-        return await real(endpoint, deadline=deadline, probe_backoff=(0.005,), jitter_range=(0.0, 0.0))
+    async def _fast(*, deadline: float) -> bool:
+        return await real(deadline=deadline, probe_backoff=(0.005,), jitter_range=(0.0, 0.0))
 
     monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", _fast)
 
@@ -153,11 +151,11 @@ async def test_remote_matrix_outage_waits_and_resumes_on_sync_recovery(
     mark_matrix_sync_loop_started("agent")
     mark_matrix_sync_failure("agent")
     _fast_wait(monkeypatch)
-    monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=True))
 
     inner = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
-        [[_net_err(code, replay_stripped=True)], [_turn("resumed")]],
+        [[StreamProgress(commits=False), _net_err(code, replay_stripped=True)], [_turn("resumed")]],
     )
     activities: list[tuple[str, str | None]] = []
     waiting = asyncio.Event()
@@ -184,13 +182,15 @@ async def test_remote_matrix_outage_waits_and_resumes_on_sync_recovery(
     assert inner.requests[1].strip_encrypted_replay is True
     assert inner.requests[1].messages == req.messages
     assert [text for _, text in activities] == [connectivity_stage._WAITING_STATUS_TEXT, None]
-    assert connectivity.is_endpoint_known_reachable(_CLOUD)
 
 
 @pytest.mark.asyncio
-async def test_remote_homeserver_probe_coalesces_and_classifies_http_or_cert_as_online(
+async def test_homeserver_probe_coalesces_classifies_responses_and_recovers_early_outage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Unregistered homeserver without matrix_offline() never corroborates offline.
+    assert await connectivity.corroborate_offline() is False
+
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     gate = asyncio.Event()
     http_calls = 0
@@ -204,14 +204,31 @@ async def test_remote_homeserver_probe_coalesces_and_classifies_http_or_cert_as_
     real_http_probe = connectivity._http_probe_homeserver
     monkeypatch.setattr(connectivity, "_http_probe_homeserver", _fake_probe)
     # Early outage (matrix_offline() is still False): two concurrent waiters share ONE probe.
-    t1 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD))
-    t2 = asyncio.create_task(connectivity.corroborate_offline(_CLOUD))
+    t1 = asyncio.create_task(connectivity.corroborate_offline())
+    t2 = asyncio.create_task(connectivity.corroborate_offline())
     await asyncio.sleep(0)
     gate.set()
     assert await asyncio.gather(t1, t2) == [True, True]
     assert http_calls == 1
 
-    # Verify HTTP 503 and SSLCertVerificationError both count as online (not offline).
+    # Early outage end-to-end recovers via /versions probe once homeserver responds again.
+    _fast_wait(monkeypatch)
+    probes = iter([False, False, True])
+    monkeypatch.setattr(
+        connectivity,
+        "_http_probe_homeserver",
+        lambda *_a, **_kw: asyncio.sleep(0, result=next(probes)),
+    )
+    early = _Scripted(
+        ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
+        [[_net_err()], [_turn("probe recovered")]],
+    )
+    events = await drain(WrappedProvider(early, connectivity_retry_stream), _req())
+    assert isinstance(events[-1], TurnCompleted)
+    assert events[-1].message.content == "probe recovered"
+    assert len(early.requests) == 2
+
+    # HTTP 200, HTTP 503, and SSLCertVerificationError all count as online; ConnectError counts as offline.
     class _FakeClient:
         def __init__(self, outcome: object) -> None:
             self._outcome = outcome
@@ -228,8 +245,9 @@ async def test_remote_homeserver_probe_coalesces_and_classifies_http_or_cert_as_
             return self._outcome
 
     cfg = (_REMOTE_HS, True)
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: _FakeClient(httpx.Response(503)))
-    assert await real_http_probe(cfg, 1.0) is True
+    for online_outcome in (httpx.Response(200), httpx.Response(503)):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda outcome=online_outcome, **_kw: _FakeClient(outcome))
+        assert await real_http_probe(cfg, 1.0) is True
     cert_connect = httpx.ConnectError("cert failed")
     cert_connect.__context__ = ssl.SSLCertVerificationError(1, "untrusted")
     cert_connect.__suppress_context__ = True
@@ -272,85 +290,27 @@ async def test_non_network_errors_never_wait(monkeypatch: pytest.MonkeyPatch, er
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", [CONNECTION_ERROR, STREAM_STALLED])
-async def test_online_provider_failure_or_stall_fails_fast(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
-    connectivity.register_matrix_homeserver(_REMOTE_HS)
-    monkeypatch.setattr(connectivity, "_probe_homeserver_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=True))
-    inner = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint="https://bad.invalid"), [[_net_err(code)]])
+@pytest.mark.parametrize(
+    ("homeserver", "endpoint"),
+    [
+        (_REMOTE_HS, "https://bad.invalid"),
+        (_REMOTE_HS, _LOCAL),
+        ("http://127.0.0.1:8008", _CLOUD),
+        ("http://tuwunel:8008", _CLOUD),
+    ],
+)
+async def test_reachable_homeserver_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    homeserver: str,
+    endpoint: str,
+) -> None:
+    connectivity.register_matrix_homeserver(homeserver)
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    inner = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=endpoint), [[_net_err(code)]])
     with pytest.raises(ProviderUnavailable):
         await drain(WrappedProvider(inner, connectivity_retry_stream), _req())
     assert len(inner.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_local_homeserver_wan_outage_known_reachable_vs_typo_and_online_stall(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert all(
-        connectivity.is_local_host(h)
-        for h in (
-            "localhost",
-            "tuwunel",
-            "synapse",
-            "host.docker.internal",
-            "127.0.0.1",
-            "::1",
-            "192.168.1.5",
-            "fd00::1",
-            "fe80::1%eth0",
-            "box.local",
-        )
-    )
-    assert not connectivity.is_local_host("matrix.mindroom.chat")
-    assert not connectivity.is_local_host("2606:4700:4700::1111")
-
-    connectivity.register_matrix_homeserver(_LOCAL_HS)
-    _fast_wait(monkeypatch)
-
-    # Typo/never-reachable URL fails fast.
-    monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=False))
-    typo = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint="https://typo.invalid"), [[_net_err()]])
-    with pytest.raises(ProviderUnavailable):
-        await drain(WrappedProvider(typo, connectivity_retry_stream), _req())
-    assert len(typo.requests) == 1
-
-    # Known-reachable endpoint + online STREAM_STALLED (TCP connects) fails fast.
-    connectivity.note_endpoint_reachable(_CLOUD)
-    monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=True))
-    stalled = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[_net_err(STREAM_STALLED)]])
-    with pytest.raises(ProviderUnavailable):
-        await drain(WrappedProvider(stalled, connectivity_retry_stream), _req())
-    assert len(stalled.requests) == 1
-
-    # Known-reachable endpoint + genuine WAN outage waits and resumes when TCP connects (incl. uncommitted progress).
-    probes = iter([False, False, True])
-    monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=next(probes)))
-    wan = _Scripted(
-        ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
-        [[StreamProgress(commits=False), _net_err()], [_turn("back")]],
-    )
-    events = await drain(WrappedProvider(wan, connectivity_retry_stream), _req())
-    assert isinstance(events[-1], TurnCompleted)
-    assert events[-1].message.content == "back"
-    assert len(wan.requests) == 2
-
-    # Docker single-label homeservers (tuwunel, synapse) count as local and corroborate via known cloud endpoint.
-    for docker_hs in ("http://tuwunel:8008", "http://synapse:8008"):
-        connectivity.register_matrix_homeserver(docker_hs)
-        monkeypatch.setattr(connectivity, "_probe_tcp_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=False))
-        assert await connectivity.corroborate_offline(_CLOUD) is True
-
-    # Stopped local model server (previously reachable) NEVER waits, even when TCP refuses.
-    for local_model in (_LOCAL, "http://ollama-m5.local:11434"):
-        connectivity.note_endpoint_reachable(local_model)
-        local_srv = _Scripted(ModelIdentity(id="llama", provider="ollama", endpoint=local_model), [[_net_err()]])
-        with pytest.raises(ProviderUnavailable):
-            await drain(WrappedProvider(local_srv, connectivity_retry_stream), _req())
-        assert len(local_srv.requests) == 1
-
-    # Proxy config routes TCP probe to proxy host:port when not bypassed.
-    monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://proxy.internal:8443"})
-    monkeypatch.setattr("urllib.request.proxy_bypass", lambda _host: False)
-    assert connectivity._tcp_probe_target("https://api.openai.com/v1|proj|us") == ("proxy.internal", 8443)
 
 
 @pytest.mark.asyncio
@@ -465,14 +425,14 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
 
 
 @pytest.mark.asyncio
-async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
+async def test_cooldown_rollback_guards_tls_failover_and_no_urls_in_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connectivity.register_matrix_homeserver(_REMOTE_HS)
 
     # 1. Without corroborated outage (wait=False or online probe), cooldown is NOT rolled back.
     fallback_stage._COOLDOWN_UNTIL.clear()
-    monkeypatch.setattr(connectivity, "_probe_homeserver_reachable", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=True))
     for wait_flag, key in ((False, "no-wait-pk"), (True, "online-pk")):
         p = _Scripted(ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD), [[_net_err()]])
         s = _Scripted(ModelIdentity(id="claude", provider="anthropic", endpoint=_FALLBACK), [[_net_err()]])
@@ -497,7 +457,7 @@ async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
     mark_matrix_sync_failure("agent")
     newer_until = 9e12
 
-    async def _corroborate_with_concurrent_write(_endpoint: str | None) -> bool:
+    async def _corroborate_with_concurrent_write() -> bool:
         fallback_stage._COOLDOWN_UNTIL["conc-pk"] = newer_until
         return True
 
@@ -557,7 +517,7 @@ async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
     assert bad_tls.requests[0].messages[0].images == (img,)
     assert healthy.requests[0].messages[0].images == (img,)
 
-    # 4. Reconnect logs record only host:port, never credential-bearing path tokens.
+    # 4. Reconnect logs record only structured metadata (provider/model_id/error_code/attempt/max_attempts), never URLs.
     monkeypatch.setattr(connectivity_stage, "corroborate_offline", connectivity.corroborate_offline)
     monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", lambda *_a, **_kw: asyncio.sleep(0, result=True))
     gateway_endpoint = "https://gateway.example.com/opaque-path-xyz/v1"
@@ -568,9 +528,14 @@ async def test_cooldown_rollback_guards_tls_failover_and_log_url_redaction(
     with capture_logs() as cap_logs:
         await drain(WrappedProvider(gw, connectivity_retry_stream), _req())
     conn_logs = [entry for entry in cap_logs if str(entry.get("event", "")).startswith("provider_connectivity_")]
-    assert conn_logs
-    assert all(entry.get("endpoint") == "gateway.example.com:443" for entry in conn_logs)
-    assert all("opaque-path-xyz" not in str(entry) for entry in conn_logs)
+    assert [entry["event"] for entry in conn_logs] == ["provider_connectivity_wait", "provider_connectivity_resumed"]
+    assert conn_logs[0]["remaining_seconds"] > 0
+    assert all(
+        (entry["provider"], entry["model_id"], entry["error_code"], entry["attempt"], entry["max_attempts"])
+        == ("openai", "gpt-5", CONNECTION_ERROR, 1, 3)
+        for entry in conn_logs
+    )
+    assert all("endpoint" not in entry and "gateway.example.com" not in str(entry) for entry in conn_logs)
 
 
 @pytest.mark.asyncio
@@ -749,7 +714,6 @@ async def test_opt_out_builders_and_usage_attribution(
 async def test_matrix_health_sync_transitions_and_ssl_cert_non_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Matrix health transitions, sync_forever_with_restart hook, and SSLCertVerificationError non-retryable.
     reset_matrix_sync_health()
     mark_matrix_sync_loop_started("a")
     mark_matrix_sync_loop_started("b")
@@ -786,38 +750,3 @@ async def test_matrix_health_sync_transitions_and_ssl_cert_non_retryable(
         mapped = provider_failure(raw, provider="openai")
         assert type(mapped) is ProviderError
         assert (mapped.retryable, mapped.code) == (False, TLS_CERTIFICATE_ERROR)
-
-
-@pytest.mark.parametrize(
-    ("extra_kwargs", "expected"),
-    [
-        ({}, "https://generativelanguage.googleapis.com"),
-        ({"vertexai": True, "location": "us-central1"}, "https://us-central1-aiplatform.googleapis.com"),
-        ({"vertexai": True, "location": "global"}, "https://aiplatform.googleapis.com"),
-        ({"vertexai": True}, "https://aiplatform.googleapis.com"),
-        (
-            {"client_params": {"http_options": {"base_url": "https://gemini-proxy.example/"}}},
-            "https://gemini-proxy.example",
-        ),
-    ],
-)
-def test_gemini_identity_resolves_effective_endpoint(
-    tmp_path: Path,
-    extra_kwargs: dict[str, object],
-    expected: str,
-) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
-    config = Config(
-        models={
-            "default": ModelConfig(
-                provider="google",
-                id="gemini-2.5-pro",
-                api_key="test-key",
-                extra_kwargs=extra_kwargs,
-            ),
-        },
-    )
-    provider = build_model_provider(config, runtime_paths, "default")
-    assert provider.identity.endpoint == expected
