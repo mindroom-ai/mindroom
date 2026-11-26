@@ -19,6 +19,7 @@ import secrets
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import time
 from dataclasses import dataclass, field
@@ -239,9 +240,11 @@ class TerminalSession:
         self._publish(TerminalEvent("output", data=chunk))
 
     async def _wait_exit(self) -> None:
-        try:
-            pidfd = os.pidfd_open(self._process.pid)
-        except (AttributeError, OSError):
+        pidfd: int | None = None
+        if sys.platform == "linux":
+            with contextlib.suppress(AttributeError, OSError):
+                pidfd = os.pidfd_open(self._process.pid)
+        if pidfd is None:
             # No pidfds on this platform: poll, since no thread may sit in wait() while the loop shuts down.
             while (code := self._process.poll()) is None:  # noqa: ASYNC110 - no event says a child exited
                 await asyncio.sleep(_EXIT_POLL_SECONDS)
@@ -258,7 +261,17 @@ class TerminalSession:
             code = self._process.wait()
         self._finish(code)
 
+    def _reap_if_exited(self) -> bool:
+        """Record a shell exit that polling has not observed yet."""
+        if not self.alive or (code := self._process.poll()) is None:
+            return False
+        self._finish(code)
+        self._exit_task.cancel()
+        return True
+
     def _finish(self, code: int) -> None:
+        if not self.alive:
+            return
         if self._master_fd is not None:
             # What the shell wrote before it exited.
             with contextlib.suppress(OSError):
@@ -417,8 +430,12 @@ class TerminalManager:
             watcher.cancel()
 
     async def _end_when_idle(self, session: TerminalSession) -> None:
-        while (idle := session.idle_seconds()) < _IDLE_SECONDS:  # noqa: ASYNC110 - idle time has no event to await
-            await asyncio.sleep(_IDLE_SECONDS - idle)
-        self._forget(session)
-        logger.info("Terminal idle", session_id=session.id, alive=session.alive)
-        await session.close()
+        while True:
+            while (idle := session.idle_seconds()) < _IDLE_SECONDS:  # noqa: ASYNC110 - idle time has no event to await
+                await asyncio.sleep(_IDLE_SECONDS - idle)
+            if session._reap_if_exited():
+                continue
+            self._forget(session)
+            logger.info("Terminal idle", session_id=session.id, alive=session.alive)
+            await session.close()
+            return

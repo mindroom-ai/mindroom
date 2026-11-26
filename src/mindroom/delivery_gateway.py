@@ -354,6 +354,7 @@ class _NoteRow:
     rendered: RenderedReply
     target: MessageTarget
     model: Mapping[str, str] | None = None
+    error_info: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1192,7 +1193,18 @@ class DeliveryGateway:
             shown = _with_note(_shown_before(reply, handle), row_note)
             # An interruption's note keeps its sources pending, yet shows as a failure.
             rendered = render(shown, state=ReplyState.FAILED if row_state is ReplyState.ACTIVE else row_state)
-            return _NoteRow(reply, terminal_write(handle, shown, state=row_state), rendered, target)
+            row_error_info = (
+                ending.error_info
+                if not stopped and isinstance(ending, Failed) and row_state is ReplyState.FAILED
+                else None
+            )
+            return _NoteRow(
+                reply,
+                terminal_write(handle, shown, state=row_state),
+                rendered,
+                target,
+                error_info=row_error_info,
+            )
 
         sent = await self._send_note(compose)
         reply, rendered, delivered = sent.row.reply, sent.row.rendered, sent.event_id
@@ -1220,6 +1232,7 @@ class DeliveryGateway:
                     row.rendered,
                     event_id=row.reply.event_id,
                     model=row.model,
+                    error_info=row.error_info,
                 )
             except ReplyWriteRefusedError as refused:
                 if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
@@ -1237,6 +1250,7 @@ class DeliveryGateway:
         *,
         event_id: str | None,
         model: Mapping[str, str] | None = None,
+        error_info: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
@@ -1247,7 +1261,11 @@ class DeliveryGateway:
         resolved_model = handle_model if handle_model is not None else model
         extra_content: dict[str, Any] = {
             constants.STREAM_STATUS_KEY: rendered.stream_status,
-            **build_terminal_note_ai_run_metadata_content(rendered.stream_status, model=resolved_model),
+            **build_terminal_note_ai_run_metadata_content(
+                rendered.stream_status,
+                model=resolved_model,
+                error_info=error_info if rendered.stream_status == "error" else None,
+            ),
         }
         compactions = write.handle.compactions.content() if write.handle is not None else None
         if compactions is not None:
@@ -1373,6 +1391,7 @@ class DeliveryGateway:
         text: str,
         target: MessageTarget,
         model_name: str | None = None,
+        error_info: Mapping[str, Any] | None = None,
     ) -> bool:
         """Show a failed approval's note on the reply it paused; ``text`` is an error note's.
 
@@ -1417,7 +1436,14 @@ class DeliveryGateway:
                 if live_model is not None
                 else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
             )
-            return _NoteRow(reply, write, render(shown, state=state), target, model=model)
+            return _NoteRow(
+                reply,
+                write,
+                render(shown, state=state),
+                target,
+                model=model,
+                error_info=error_info if shown_note is NoteKind.ERROR else None,
+            )
 
         sent = await self._send_note(compose)
         if isinstance(sent, bool):
@@ -1440,7 +1466,13 @@ class DeliveryGateway:
         )
         return applied.transition.applied
 
-    async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
+    async def fail_reply_dispatch(
+        self,
+        event_id: str,
+        error_text: str,
+        *,
+        error_info: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Show a dispatch failure on the reply bound to one event before a span ran it.
 
         Returns whether a reply owns the event; its records then settle the
@@ -1453,7 +1485,13 @@ class DeliveryGateway:
         applied = await self.deps.outbox.replies.decide(
             reply_id=reply.reply_id,
             span_id=reply.last_span_id,
-            decide=lambda current, span: rl.dispatch_failed(current, span, error_text=error_text, now_ns=now_ns),
+            decide=lambda current, span: rl.dispatch_failed(
+                current,
+                span,
+                error_text=error_text,
+                error_info=error_info,
+                now_ns=now_ns,
+            ),
         )
         await self._after_reply_commit(applied)
         return True
@@ -1571,7 +1609,7 @@ class DeliveryGateway:
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
-            return _NoteRow(reply, write, render(shown, state=reply.state), target)
+            return _NoteRow(reply, write, render(shown, state=reply.state), target, error_info=owed.error_info)
 
         sent = await self._send_note(compose)
         if sent is None or sent.refused:

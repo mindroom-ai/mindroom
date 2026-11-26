@@ -95,7 +95,7 @@ Compare the frequency of `event_loop_gc_collection` records, which report garbag
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables stall detection and this summary.
 
-Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` (default `3600`, `0` disables, any other value below `60` fails startup), MindRoom collects garbage once and excludes the surviving objects from later collections, logging `runtime_heap_refrozen`.
+Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` (default `3600`, `0` disables, any other value below `60` fails startup), MindRoom collects garbage once, excludes the surviving objects from later collections, and calls glibc `malloc_trim(0)` on a worker thread, logging `runtime_heap_refrozen` (where `malloc_trimmed` is `true` if glibc released pages to the OS, `false` if nothing was releasable, and `null` on non-glibc platforms).
 This keeps routine collections short on large processes at the cost of one full collection per interval.
 After the first refreeze, MindRoom also raises CPython's full-collection threshold and logs `gc_full_collection_threshold_raised`, so routine full collections run less often, by an amount that depends on the workload; unreachable reference cycles then wait longer to be freed.
 Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.

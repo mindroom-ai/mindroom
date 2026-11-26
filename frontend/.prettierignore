@@ -15,6 +15,7 @@ bun.lock
 yarn.lock
 src/components/Integrations/iconMapping.tsx
 src/test/fixtures/config-schema.json
+src/components/Usage/__fixtures__/providerUsageContract.json
 src/test/fixtures/egressPresets.json
 
 # IDE

@@ -780,11 +780,13 @@ class SummaryCalls:
         return self.summary or f"SUMMARY-{len(self.inputs)}"
 
 
-def blank_pdf(pages: int, *, delete: int = 0) -> bytes:
-    """Return a PDF of ``pages`` blank pages, then an incremental save that deletes the last ``delete`` of them."""
+def blank_pdf(pages: int, *, delete: int = 0, padding_bytes: int = 0) -> bytes:
+    """Return a PDF of ``pages`` blank pages, optionally padded and/or followed by an incremental delete."""
     writer = PdfWriter()
     for _ in range(pages):
         writer.add_blank_page(width=612, height=792)
+    if padding_bytes:
+        writer.add_metadata({"/Padding": "p" * padding_bytes})
     written = io.BytesIO()
     writer.write(written)
     if not delete:

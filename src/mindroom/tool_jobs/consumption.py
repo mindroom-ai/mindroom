@@ -197,7 +197,7 @@ class ConsumptionOwner:
         if returned_inline:
             runtime.hold_inline(job.job_id, claim)
 
-    async def acknowledge_saved_run(self, run: AnyRunRecord) -> None:
+    async def _acknowledge_saved_run(self, run: AnyRunRecord) -> None:
         """Acknowledge claims already proved by a durably saved run record."""
         if not self._claims:
             return
@@ -266,7 +266,7 @@ async def acknowledge_saved_run(run: AnyRunRecord) -> None:
     """Acknowledge claims already proved by ``run`` after its canonical save succeeded."""
     owner = _OWNER.get()
     if owner is not None:
-        await owner.acknowledge_saved_run(run)
+        await owner._acknowledge_saved_run(run)
 
 
 async def finalize_consumption() -> None:

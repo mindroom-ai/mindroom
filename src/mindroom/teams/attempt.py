@@ -23,7 +23,7 @@ from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.history.types import PreparedHistoryState
@@ -170,6 +170,7 @@ class TeamAttempt:
         session_id: str,
         status: RunStatus,
         prior_usage: Sequence[RunMetrics] = (),
+        error_info: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history.
 
@@ -192,6 +193,7 @@ class TeamAttempt:
             context_run=record,
             tool_count=len(run_tool_executions(record)),
             prepared_history=self.prepared_history,
+            error_info=error_info,
         )
 
 

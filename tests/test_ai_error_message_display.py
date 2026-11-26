@@ -17,7 +17,7 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import log_reply_error
 from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -451,5 +451,5 @@ class TestAIErrorDisplay:
             assert warnings[0].get("exc_info") is True
 
         with capture_logs() as non_streaming_logs:
-            get_user_friendly_error_message(RuntimeError("boom"), "test_agent")
+            log_reply_error(RuntimeError("boom"), "test_agent")
         assert [entry["event"] for entry in non_streaming_logs if entry["log_level"] == "error"] == ["agent_error"]

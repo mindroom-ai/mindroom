@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.reply_lifecycle import (
     NoteKind,
@@ -63,8 +63,11 @@ def _ids(stored: object) -> tuple[str, ...]:
 def _owed_json(owed: OwedWrite | None) -> str | None:
     if owed is None:
         return None
+    payload: dict[str, Any] = {"span_id": owed.span_id, "note": owed.note, "text": owed.text}
+    if owed.error_info is not None:
+        payload["error_info"] = dict(owed.error_info)
     return json.dumps(
-        {"span_id": owed.span_id, "note": owed.note, "text": owed.text},
+        payload,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -79,10 +82,12 @@ def _owed(stored: object) -> OwedWrite | None:
         raise TypeError(msg)
     data = cast("dict[str, object]", raw)
     text = data.get("text")
+    raw_error_info = data.get("error_info")
     return OwedWrite(
         span_id=str(data["span_id"]),
         note=NoteKind(str(data["note"])),
         text=text if isinstance(text, str) else None,
+        error_info=dict(raw_error_info) if isinstance(raw_error_info, dict) else None,
     )
 
 
@@ -378,15 +383,16 @@ def spans_in_room(
     return frozenset(str(row["span_id"]) for row in rows)
 
 
+_OPEN_REPLIES_SQL = (
+    f"SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages "  # noqa: S608 - a fixed column list
+    "WHERE state IN ('active', 'paused') "
+    "ORDER BY principal_id, created_at_ns, reply_id"
+)
+
+
 def open_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
     """Return every principal's replies not yet terminal, with their principal."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
-        WHERE state IN ('active', 'paused')
-        ORDER BY principal_id, created_at_ns, reply_id
-        """,  # noqa: S608 - a fixed column list
-    )
+    rows = transaction.fetchall(_OPEN_REPLIES_SQL)
     return tuple((str(row["principal_id"]), _reply(row)) for row in rows)
 
 

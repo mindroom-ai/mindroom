@@ -5209,3 +5209,93 @@ async def test_mcp_manager_disconnect_cancels_owner_task_when_close_event_missin
     assert state.session_close_event is None
     assert state.session is None
     assert state.connected is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_sync_servers_connects_servers_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """sync_servers connects independent enabled servers concurrently instead of sequentially."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    entered: list[str] = []
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    original_connect = MCPServerManager._connect_and_discover
+
+    async def barrier_connect(
+        self: MCPServerManager,
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        entered.append(state.server_id)
+        if len(entered) == 2:
+            both_entered.set()
+        await release.wait()
+        return await original_connect(self, state, auth_headers=auth_headers)
+
+    monkeypatch.setattr(MCPServerManager, "_connect_and_discover", barrier_connect)
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "alpha": MCPServerConfig(transport="stdio", command="npx"),
+            "beta": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    sync_task = asyncio.create_task(manager.sync_servers(config))
+    try:
+        async with asyncio.timeout(2):
+            await both_entered.wait()
+        assert set(entered) == {"alpha", "beta"}
+    finally:
+        release.set()
+        changed = await sync_task
+
+    assert changed == {"alpha", "beta"}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_disconnects_servers_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shutdown disconnects live server sessions concurrently while closing each in its own owner task."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.enforce_same_task_exit = True
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "alpha": MCPServerConfig(transport="stdio", command="npx"),
+            "beta": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    assert len(_FakeClientSession.sessions) == 2
+
+    disconnecting: list[str] = []
+    both_disconnecting = asyncio.Event()
+    release = asyncio.Event()
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def barrier_disconnect(state: MCPServerState) -> None:
+        disconnecting.append(state.server_id)
+        if len(disconnecting) == 2:
+            both_disconnecting.set()
+        await release.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", barrier_disconnect)
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    try:
+        async with asyncio.timeout(2):
+            await both_disconnecting.wait()
+        assert set(disconnecting) == {"alpha", "beta"}
+    finally:
+        release.set()
+        await shutdown_task
+
+    assert all(session.closed for session in _FakeClientSession.sessions)

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import ProviderError, ProviderUnavailable, incomplete_turn_error
+from mindroom.llm.errors import STREAM_STALLED, ProviderError, ProviderUnavailable, incomplete_turn_error
 from mindroom.llm.provider import TurnCompleted
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
@@ -37,7 +37,6 @@ __all__ = ["STREAM_STALLED", "retrying_stream"]
 
 logger = get_logger(__name__)
 
-STREAM_STALLED = "stream_stalled"
 # One initial attempt plus this many reissued requests, enough to outlast a short provider overload, which also
 # arrives as an SSE error event after the response already started with 200.
 _MAX_TRANSIENT_RETRIES = 4

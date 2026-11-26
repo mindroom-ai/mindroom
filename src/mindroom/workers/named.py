@@ -33,10 +33,6 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.backends._dedicated_worker_common import (
-    normalize_sandbox_mount_dir,
-    resolve_sandbox_mount_target,
-)
 from mindroom.workers.backends.kubernetes_config import (
     NAMED_WORKERS_MAX_ENV,
     configured_named_workers_max,
@@ -45,6 +41,10 @@ from mindroom.workers.backends.kubernetes_config import (
 )
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
+from mindroom.workers.sandbox_mounts import (
+    normalize_sandbox_mount_dir,
+    resolve_sandbox_mount_target,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

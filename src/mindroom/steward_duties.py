@@ -27,7 +27,6 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE
 from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
-from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.room_member_joins import (
     RoomMemberJoin,
     RoomMemberLeave,
@@ -165,7 +164,7 @@ class StewardDutiesDeps:
 class StewardDuties:
     """Publish the room state of the rooms this bot stewards and emit their room-membership hooks.
 
-    The owner account's administration, orphaned-account cleanup and the welcome, also lives here for now.
+    The owner account's welcome administration also lives here for now.
     """
 
     deps: StewardDutiesDeps
@@ -197,20 +196,11 @@ class StewardDuties:
         steward = self.deps.runtime.orchestrator.room_steward(room_id)
         return steward is not None and steward.agent_name == self.deps.hook_context.agent_name
 
-    async def started(self, client: nio.AsyncClient) -> None:
-        """Have reads that find a room's thread mode changed tell its steward, and clean up as the owner account.
-
-        The owner account removes managed accounts the config no longer has from the rooms it can see.
-        """
+    def started(self) -> None:
+        """Have reads that find a room's thread mode changed tell its steward."""
         runtime = self.deps.runtime
         republish = partial(republish_thread_mode_as_steward, runtime.orchestrator.room_steward)
         on_thread_mode_change(runtime.runtime_paths, republish)
-        if not self._is_owner:
-            return
-        try:
-            await cleanup_all_orphaned_bots(client, self.deps.runtime.config, self.deps.runtime.runtime_paths)
-        except Exception as e:
-            self.deps.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 
     def stopping(self) -> None:
         """Cancel the room state publishes and retries, which a stopping bot discards, without waiting.

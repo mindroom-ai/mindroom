@@ -9,7 +9,7 @@ import httpx
 
 from mindroom.tool_system.authoring import Toolkit
 
-SearxngCategory = Literal["images", "it", "map", "music", "news", "science", "videos"]
+_SearxngCategory = Literal["images", "it", "map", "music", "news", "science", "videos"]
 
 
 class SearxngTools(Toolkit):
@@ -31,7 +31,7 @@ class SearxngTools(Toolkit):
     def searxng_search(
         self,
         query: str,
-        category: SearxngCategory | None = None,
+        category: _SearxngCategory | None = None,
         max_results: int = 5,
     ) -> str:
         """Search via SearxNG (general web by default, or a specialized category).

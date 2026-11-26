@@ -47,7 +47,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
 | `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads, unless a foreground approval asked after the resolve still waits), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
-| `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
+| `state` | Without `event_type`, a summary of up to 100 non-member state events; with `event_type` alone, all matching state events with full `content`; with `event_type` and `state_key` (including `""`), that single state event |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
 The list covers conversation targets only; the `run_subagent` tool describes the caller's allowed subagents.
@@ -57,7 +57,7 @@ Each agent, requester, and room combination may make 20 calls per 30 seconds.
 matrix_room(action="agents")
 matrix_room(action="threads", limit=10)
 matrix_room(action="threads", page_token="next-page-token")
-matrix_room(action="state", event_type="m.room.topic")
+matrix_room(action="state", event_type="m.room.topic", state_key="")
 ```
 
 ## [`matrix_voice_message`]
@@ -105,7 +105,7 @@ matrix_voice_message(
 - `list_thread_tags(thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
 
 Without `thread_id`, `tag_thread()` and `untag_thread()` use the current thread; outside a thread, pass `thread_id`.
-Without `thread_id`, `list_thread_tags()` lists the current thread, or the whole room when called outside a thread or with `room_id`.
+Without `thread_id`, `list_thread_tags()` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
 
 Tag names that are already valid IDs of up to 50 characters are kept; other input is lowercased and hyphenated into a tag of at most 25 characters.
 The `tag_thread()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.

@@ -867,7 +867,7 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
 
     assert result.failed
     assert result.text == (
-        "[coder] 🔑 No AI provider key is set up yet, so I can't reply. "
+        "🔑 No AI provider key is set up yet, so I can't reply. "
         "OPENAI_API_KEY not set. Please set the OPENAI_API_KEY environment variable. "
         f"A `.env` file at {storage.resolve() / '.env'} works too."
     )

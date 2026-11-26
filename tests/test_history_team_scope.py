@@ -25,7 +25,9 @@ from mindroom.history.session_context import (
 from mindroom.history.types import (
     PreparedHistoryState,
 )
+from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
+from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -458,3 +460,48 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
             team_name=None,
             requester_user_id=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_team_turn_sends_filtered_inline_file_media_and_omission_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team execution sends the filtered prepared media (not raw ctx.media) and notes omitted oversized files."""
+    export_path = tmp_path / "export.json"
+    export_path.write_bytes(b'{"rows": "' + b"z" * (2 * 1024 * 1024) + b'"}')
+    notes_path = tmp_path / "notes.txt"
+    notes_path.write_text("team notes", encoding="utf-8")
+
+    huge_json = File(id="att_team1", filepath=str(export_path), filename="export.json", mime_type="application/json")
+    small_notes = File(id="att_team2", filepath=str(notes_path), filename="notes.txt", mime_type="text/plain")
+    image = Image(content=b"img", mime_type="image/png")
+
+    authored = authored_team_config(
+        {
+            "alpha": {"display_name": "Alpha", "role": "Analyzes."},
+            "beta": {"display_name": "Beta", "role": "Reviews."},
+        },
+        models=("default",),
+    )
+    turn = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("alpha", "beta"),
+        scripts={"default": [answer("Team handled it.")]},
+    )
+    reply = await turn.respond(
+        message="Review these files.",
+        media=MediaInputs(images=(image,), files=(huge_json, small_notes)),
+    )
+
+    assert "Team handled it." in reply
+    [request] = turn.models["default"].requests
+    sent = request.messages[-1]
+    assert sent.files == (small_notes,)
+    assert sent.images == (image,)
+    content = str(sent.content)
+    assert "[Inline file attachment omitted]" in content
+    assert "export.json (att_team1, 2.0 MiB)" in content
+    assert "get_attachment" in content

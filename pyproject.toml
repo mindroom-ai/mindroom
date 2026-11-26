@@ -25,7 +25,7 @@ dependencies = [
   # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
   "click<8.5",
   "cron-descriptor>=1.4.5",
-  "croniter>=7.0.0",
+  "croniter>=7",
   "cryptography>=47",
   # Tool descriptions and parameter descriptions come from docstrings (tool_system/tool_schema.py).
   "docstring-parser>=0.18",
@@ -609,7 +609,7 @@ build-constraint-dependencies = [
 [tool.ruff]
 target-version = "py313"
 line-length = 120
-extend-exclude = ["tests/workflow_examples"]
+extend-exclude = [ "tests/workflow_examples" ]
 force-exclude = true
 [tool.ruff.lint]
 select = [
