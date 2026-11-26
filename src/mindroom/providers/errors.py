@@ -348,7 +348,6 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
     import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
     import httpx2  # noqa: PLC0415 - the OpenAI and Claude SDKs' transport, loaded only once a request fails
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
-    from requests import exceptions as requests_exc  # noqa: PLC0415 - google-auth's transport, loaded on failure
 
     chain = list(_visible_chain(error))
     transport = (
@@ -357,13 +356,11 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         ConnectionError,
         TimeoutError,
         aiohttp.ClientError,
-        requests_exc.ConnectionError,
-        requests_exc.Timeout,
     )
     if any(isinstance(cause, transport) for cause in chain):
         # A timeout as either HTTP client raises it, or as aiohttp and the socket layer raise it: the OpenAI and
         # Claude SDKs send through httpx2, the Gemini and Ollama SDKs and the CLI login refreshes through httpx.
-        timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError, requests_exc.Timeout)
+        timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError)
         timed_out = any(isinstance(cause, timeouts) for cause in chain)
         code = TRANSPORT_TIMEOUT if timed_out else CONNECTION_ERROR
         return ProviderUnavailable(failure_text(error), provider=provider, code=code)

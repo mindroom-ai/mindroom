@@ -11,7 +11,6 @@ import httpx
 import pytest
 
 from mindroom.llm.errors import (
-    CONNECTION_ERROR,
     QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
@@ -463,8 +462,8 @@ def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
     assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)
 
 
-def test_google_retryable_refresh_error_without_transport_cause_has_no_network_code() -> None:
-    """Google token/metadata 503s stay retryable without a network code; real requests DNS errors get CONNECTION_ERROR."""
+def test_google_auth_transport_and_retryable_refresh_errors_have_no_network_code() -> None:
+    """Google auth transport/refresh failures stay retryable with code None; unwrapped requests SSLError falls through."""
     import requests.exceptions  # noqa: PLC0415
     from google.auth import exceptions as google_auth  # noqa: PLC0415
 
@@ -486,7 +485,9 @@ def test_google_retryable_refresh_error_without_transport_cause_has_no_network_c
     dns_wrapped.__cause__ = dns_cause
     dns_err = provider_failure(dns_wrapped, provider="VertexAI")
     assert type(dns_err) is ProviderUnavailable
-    assert (dns_err.retryable, dns_err.code) == (True, CONNECTION_ERROR)
+    assert (dns_err.retryable, dns_err.code) == (True, None)
+
+    assert provider_failure(requests.exceptions.SSLError("certificate verify failed"), provider="VertexAI") is None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -2171,17 +2171,6 @@ _REQUESTS_OAUTH_HOST_FAILURE = (
     "Failed to resolve 'oauth2.googleapis.com' ([Errno -3] Temporary failure in name resolution)\"))"
 )
 _UNAVAILABLE_FINAL_MESSAGE = "⚠️ Model provider temporarily unavailable after automatic retries"
-_UNREACHABLE_FINAL_MESSAGE = "⚠️ The model request failed with a network error or timeout."
-
-
-def _requests_transport_error(message: str) -> google.auth.exceptions.TransportError:
-    """Return the TransportError chain google-auth's requests transport raises on a DNS/connect failure."""
-    import requests.exceptions  # noqa: PLC0415
-
-    cause = requests.exceptions.ConnectionError(message)
-    err = google.auth.exceptions.TransportError(cause)
-    err.__cause__ = cause
-    return err
 
 
 class _RefreshFailingCredentials(Credentials):
@@ -2206,10 +2195,10 @@ class _RefreshFailingCredentials(Credentials):
             _UNAVAILABLE_FINAL_MESSAGE,
         ),
         (
-            _requests_transport_error(_REQUESTS_OAUTH_HOST_FAILURE),
+            google.auth.exceptions.TransportError(_REQUESTS_OAUTH_HOST_FAILURE),
             ProviderUnavailable,
             None,
-            _UNREACHABLE_FINAL_MESSAGE,
+            _UNAVAILABLE_FINAL_MESSAGE,
         ),
         (
             google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True),
@@ -2234,10 +2223,9 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     status_code: int | None,
     final_message: str,
 ) -> None:
-    """Vertex token refresh failures map to network, unavailable, or authentication errors.
+    """A network failure while minting the Vertex token is retryable and ends as temporary unavailability.
 
-    A transport failure reports a network error, a retryable token-endpoint reply ends as temporary
-    unavailability, and rejected credentials end as an authentication failure.
+    Rejected credentials end as an authentication failure.
     """
     monkeypatch.setattr(google.auth, "default", lambda scopes: (_RefreshFailingCredentials(failure), "adc-project"))  # noqa: ARG005
     config_path = tmp_path / "config.yaml"
