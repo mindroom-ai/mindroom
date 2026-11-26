@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
 from mindroom.knowledge.legacy_metadata import normalize_legacy_indexing_settings
+from mindroom.knowledge.memory_entries import MEMORY_ENTRIES_STRATEGY_ID
 from mindroom.knowledge.redaction import credential_free_url_identity
 
 if TYPE_CHECKING:
@@ -317,7 +318,7 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         extra_extensions = _filter_settings_key(base_config.extra_extensions)
         vector_store = _VECTOR_STORE_FORMAT
         chunk_context_model = base_config.chunk_context_model or ""
-        chunk_strategy = "" if base_config.chunk_strategy == "fixed" else base_config.chunk_strategy
+        chunk_strategy = MEMORY_ENTRIES_STRATEGY_ID if base_config.chunk_strategy == "memory_entries" else ""
     else:
         embedder_provider = ""
         embedder_model = ""

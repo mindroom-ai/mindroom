@@ -2575,112 +2575,6 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Confluence instance URL",
-          "env": [
-            "CONFLUENCE_URL"
-          ],
-          "label": "Confluence URL",
-          "name": "url",
-          "options": null,
-          "placeholder": "https://your-confluence-instance.atlassian.net",
-          "required": false,
-          "type": "url",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "Confluence username",
-          "env": [
-            "CONFLUENCE_USERNAME"
-          ],
-          "label": "Username",
-          "name": "username",
-          "options": null,
-          "placeholder": "your-username",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": false,
-          "default": null,
-          "description": "Confluence password",
-          "env": [
-            "CONFLUENCE_PASSWORD"
-          ],
-          "label": "Password",
-          "name": "password",
-          "options": null,
-          "placeholder": "your-password",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "authored_override": false,
-          "default": null,
-          "description": "Confluence API key, alternative to password",
-          "env": [
-            "CONFLUENCE_API_KEY"
-          ],
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "your-api-key",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": "Whether to verify SSL certificates when connecting to Confluence",
-          "env": [],
-          "label": "Verify SSL",
-          "name": "verify_ssl",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
-      "dependencies": [
-        "atlassian-python-api"
-      ],
-      "description": "Atlassian wiki platform for retrieving, creating, and updating pages",
-      "display_name": "Confluence",
-      "docs_url": "https://docs.mindroom.chat/tools/project-management/#confluence",
-      "executes_code": false,
-      "file_access": "none",
-      "function_names": [
-        "create_page",
-        "get_all_page_from_space",
-        "get_all_space_detail",
-        "get_page_content",
-        "get_space_key",
-        "update_page"
-      ],
-      "helper_text": null,
-      "icon": "SiConfluence",
-      "icon_color": "text-blue-600",
-      "name": "confluence",
-      "requires_conversation": false,
-      "requires_room_context": false,
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": [
-        {
-          "authored_override": true,
-          "default": null,
           "description": null,
           "env": [],
           "label": "Base URL",
@@ -2799,7 +2693,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "requests"
+        "httpx"
       ],
       "description": "Make HTTP requests to any external API with customizable authentication and parameters",
       "display_name": "Custom API",
@@ -4659,176 +4553,6 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [
-            "JIRA_SERVER_URL"
-          ],
-          "label": "Server URL",
-          "name": "server_url",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "url",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [
-            "JIRA_USERNAME"
-          ],
-          "label": "Username",
-          "name": "username",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": false,
-          "default": null,
-          "description": null,
-          "env": [
-            "JIRA_PASSWORD"
-          ],
-          "label": "Password",
-          "name": "password",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "authored_override": false,
-          "default": null,
-          "description": null,
-          "env": [
-            "JIRA_TOKEN"
-          ],
-          "label": "Token",
-          "name": "token",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Get Issue",
-          "name": "enable_get_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Create Issue",
-          "name": "enable_create_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Search Issues",
-          "name": "enable_search_issues",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Add Comment",
-          "name": "enable_add_comment",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Add Worklog",
-          "name": "enable_add_worklog",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "env": [],
-          "label": "All",
-          "name": "all",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
-      "dependencies": [
-        "jira"
-      ],
-      "description": "Issue tracking and project management",
-      "display_name": "Jira",
-      "docs_url": "https://docs.mindroom.chat/tools/project-management/#jira",
-      "executes_code": false,
-      "file_access": "none",
-      "function_names": [
-        "add_comment",
-        "add_worklog",
-        "create_issue",
-        "get_issue",
-        "search_issues"
-      ],
-      "helper_text": null,
-      "icon": "SiJira",
-      "icon_color": "text-blue-600",
-      "name": "jira",
-      "requires_conversation": false,
-      "requires_room_context": false,
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": [
-        {
           "authored_override": false,
           "default": null,
           "description": null,
@@ -5876,51 +5600,6 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": false,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Base Dir",
-          "name": "base_dir",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        }
-      ],
-      "consumes_workspace_paths": true,
-      "default_execution_target": "worker",
-      "dependencies": null,
-      "description": "Execute Python code, manage files, and install packages",
-      "display_name": "Python Tools",
-      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#python",
-      "executes_code": true,
-      "file_access": "unconfined",
-      "function_names": [
-        "list_files",
-        "pip_install_package",
-        "read_file",
-        "run_python_code",
-        "run_python_file_return_variable",
-        "save_to_file_and_run",
-        "uv_pip_install_package"
-      ],
-      "helper_text": null,
-      "icon": "SiPython",
-      "icon_color": "text-blue-500",
-      "name": "python",
-      "requires_conversation": false,
-      "requires_room_context": false,
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": [
-        {
           "authored_override": true,
           "default": true,
           "description": null,
@@ -6858,58 +6537,6 @@
       "icon": "FaChartBar",
       "icon_color": "text-indigo-500",
       "name": "visualization",
-      "requires_conversation": false,
-      "requires_room_context": false,
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": [
-        {
-          "authored_override": true,
-          "default": true,
-          "description": null,
-          "env": [],
-          "label": "Enable Open Page",
-          "name": "enable_open_page",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "env": [],
-          "label": "All",
-          "name": "all",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
-      "dependencies": [],
-      "description": "Open URLs in web browser tabs or windows",
-      "display_name": "Web Browser Tools",
-      "docs_url": "https://docs.mindroom.chat/tools/web-scraping-and-browser/#web_browser_tools",
-      "executes_code": false,
-      "file_access": "none",
-      "function_names": [
-        "open_page"
-      ],
-      "helper_text": null,
-      "icon": "FaGlobe",
-      "icon_color": "text-blue-600",
-      "name": "web_browser_tools",
       "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
@@ -8104,7 +7731,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Opt this agent's shell and worker Python calls into Agent Keys, inspect available keys, and request missing ones",
+      "description": "Opt this agent's shell calls into Agent Keys, inspect available keys, and request missing ones",
       "display_name": "Egress Credentials",
       "docs_url": "https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
       "executes_code": false,
@@ -10356,7 +9983,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "triggers"
+        "triggers",
+        "watch_pr"
       ],
       "helper_text": null,
       "icon": "Webhook",
@@ -11639,10 +11267,6 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "aclose_session",
-        "aget_page_content",
-        "anavigate_to",
-        "ascreenshot",
         "close_session",
         "get_page_content",
         "navigate_to",
@@ -13776,7 +13400,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "requests"
+        "httpx"
       ],
       "description": "Search Google, news, academic papers, and scrape webpages using Serper API",
       "display_name": "Serper",
@@ -14747,8 +14371,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_wikipedia",
-        "search_wikipedia_and_update_knowledge_base"
+        "search_wikipedia"
       ],
       "helper_text": null,
       "icon": "SiWikipedia",

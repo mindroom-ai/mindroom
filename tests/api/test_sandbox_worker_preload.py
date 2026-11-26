@@ -681,7 +681,7 @@ def test_a_plugin_is_preloaded_however_it_is_configured_except_under_the_home_di
     )
 
 
-def test_a_plugin_beside_the_config_is_the_same_one_in_a_call_with_another_home_and_working_directory(
+def test_relative_plugin_paths_are_resolved_against_the_config_for_preloading_and_calls(
     manager: _SandboxForkserver,
     tmp_path: Path,
 ) -> None:
@@ -690,38 +690,17 @@ def test_a_plugin_beside_the_config_is_the_same_one_in_a_call_with_another_home_
     elsewhere = tmp_path / "elsewhere"
     for name in ("dotted", "bare"):
         _write_plugin(tmp_path / "plugins", name, worker_preload=True)
-        # The call's HOME and working directory hold another plugin under the same relative path.
+        # A different root can hold another plugin under the same relative path.
         _write_plugin(elsewhere / "plugins", name, worker_preload=True)
         (elsewhere / "plugins" / name / "data.txt").write_text("elsewhere", encoding="utf-8")
     plugins = [PluginEntryConfig(path="./plugins/dotted"), PluginEntryConfig(path="plugins/bare")]
     assert worker_preload_plugin_paths(Config(plugins=plugins), runtime_paths) == ("./plugins/dotted", "plugins/bare")
     _serve_preload(runtime_paths, plugins)
 
-    response: ExecuteResponse = sandbox_runner_module._execute_request_subprocess_sync(
-        execute_call(
-            runtime_paths,
-            Config(plugins=plugins),
-            tool_name="python",
-            function_name="run_python_code",
-            args=[
-                "import os, sys\n"
-                "data = sorted(m.DATA for n, m in sys.modules.items() if n.startswith('mindroom_plugin_') and"
-                " hasattr(m, 'DATA'))\n"
-                "result = f\"{os.environ['HOME']}|{os.getcwd()}|{os.getpid()}|{','.join(data)}\"",
-                "result",
-            ],
-            kwargs={},
-            base_dir=str(elsewhere),
-            execution_env={"HOME": str(elsewhere)},
-        ),
-    )
-
-    assert response.ok is True, response.error
-    home, cwd, call_pid, data = str(response.result).split("|")
-    assert (home, cwd, data) == (str(elsewhere), str(elsewhere), "v1,v1")
-    assert manager.dispatched == [True]
+    assert _report(runtime_paths, plugins, "dotted")[0] == "v1"
+    assert _report(runtime_paths, plugins, "bare")[0] == "v1"
+    assert manager.dispatched == [True, True]
     template_pid = manager.spawned[0].process.pid
-    assert int(call_pid) != template_pid
     for name in ("dotted", "bare"):
         assert [pid for pid, _cwd, _data in _imports(tmp_path / "plugins", name)] == [template_pid]
         assert _imports(elsewhere / "plugins", name) == []

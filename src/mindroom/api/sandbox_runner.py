@@ -641,7 +641,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
 class _PreparedRoute:
     """What one routed request acts on: its config, its caller, its prepared worker and its one workspace.
 
-    ``workspace`` is where the request acts: the HOME and ``.mindroom/worker-env.sh`` of shell and python, the
+    ``workspace`` is where the request acts: the HOME and ``.mindroom/worker-env.sh`` of shell, the
     subprocess cwd, the tool output root and the tools' ``base_dir``, the view-file and save-attachment root, and
     the browser's workspace.
     """
@@ -1576,7 +1576,7 @@ def _parse_subprocess_response(
     completed: subprocess.CompletedProcess[str],
 ) -> ExecuteResponse:
     # The worker writes the JSON response to stderr after a marker line so that
-    # tool stdout (e.g. print() inside python tools) does not corrupt the protocol.
+    # tool stdout does not corrupt the protocol.
     stderr = completed.stderr or ""
     if (timing := sandbox_protocol.extract_timing(stderr)) is not None:
         logger.debug("sandbox_subprocess_child_timing", timing=timing)
@@ -1926,9 +1926,6 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
     # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
-    if request.tool_name == "python":
-        # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
-        sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     shell_scope = ShellBackgroundScope(scope_id=request.shell_scope_id) if request.shell_scope_id is not None else None
     scope_binding = bind_shell_background_scope(shell_scope) if shell_scope is not None else nullcontext()
@@ -2444,14 +2441,7 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
             return await _run_cancellable(_execute_streamed(call, frames))
         # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
         # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
-        if (
-            sandbox_exec.runner_uses_subprocess(route.runtime_paths)
-            or (
-                request.tool_name == "python"
-                and sandbox_exec.request_execution_env(request.tool_name, request.execution_env, route.runtime_paths)
-            )
-            or route.worker_key is not None
-        ):
+        if sandbox_exec.runner_uses_subprocess(route.runtime_paths) or route.worker_key is not None:
             return await _execute_request_subprocess(call)
         return await _run_cancellable(_execute_request_inprocess(call))
 

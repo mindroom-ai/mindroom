@@ -2473,6 +2473,7 @@ class TestAgentBot(AgentBotTestBase):
                 "title": "Reply failed",
                 "summary": "Failed to download image",
                 "retryable": False,
+                "fallback": "⚠️ Failed to download image",
             },
         }
         assert sent[-1]["io.mindroom.ai_run"] == expected_ai_run
@@ -2518,6 +2519,7 @@ class TestAgentBot(AgentBotTestBase):
                             "title": "Reply failed",
                             "summary": "boom",
                             "retryable": False,
+                            "fallback": "⚠️ boom",
                         },
                     },
                 },
@@ -2573,6 +2575,7 @@ class TestAgentBot(AgentBotTestBase):
                 "detail": "selection timed out",
                 "retryable": True,
                 "action": "retry",
+                "fallback": "⏰ Request timed out — The model timed out waiting for a response. Try again shortly.",
             },
         }
         assert sent[-1]["io.mindroom.ai_run"] == expected_ai_run
@@ -2642,6 +2645,7 @@ class TestAgentBot(AgentBotTestBase):
                             "title": "Reply failed",
                             "summary": "boom",
                             "retryable": False,
+                            "fallback": "⚠️ boom",
                         },
                     },
                 },

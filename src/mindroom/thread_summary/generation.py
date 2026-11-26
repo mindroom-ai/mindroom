@@ -46,7 +46,7 @@ _unknown_room_models_logged: set[tuple[Path, str, str]] = set()
 # ``THREAD_SUMMARY_MAX_LENGTH``.
 _GENERATED_TITLE_MAX_LENGTH = 80
 _GENERATED_TITLE_MAX_WORDS = 6
-# One answer plus two retries that each see the rejected title and why.
+# One answer plus two retries that accumulate rejected titles and why.
 _TITLE_ATTEMPTS = 3
 
 logger = get_logger(__name__)
@@ -82,9 +82,14 @@ class GeneratedSummary:
     keep_current: bool = False
 
 
+def _word_count(title: str) -> int:
+    """Return the number of word-like tokens; emoji and dashes are not words."""
+    return sum(any(char.isalnum() for char in token) for token in title.split())
+
+
 def title_error(title: str) -> str | None:
     """Return why a normalized title breaks the short-title limits, or None; emoji and dashes are not words."""
-    words = sum(any(char.isalnum() for char in token) for token in title.split())
+    words = _word_count(title)
     if not title:
         return "The title is empty."
     if words > _GENERATED_TITLE_MAX_WORDS or len(title) > _GENERATED_TITLE_MAX_LENGTH:
@@ -93,6 +98,54 @@ def title_error(title: str) -> str | None:
             f"{_GENERATED_TITLE_MAX_WORDS} words and {_GENERATED_TITLE_MAX_LENGTH} characters."
         )
     return None
+
+
+def _better_fallback(
+    best: tuple[tuple[int, int], _ThreadSummary] | None,
+    content: _ThreadSummary,
+    normalized: str,
+) -> tuple[tuple[int, int], _ThreadSummary] | None:
+    """Keep the shortest complete ``<= _GENERATED_TITLE_MAX_LENGTH`` candidate; earlier attempts win ties."""
+    if not normalized or len(normalized) > _GENERATED_TITLE_MAX_LENGTH:
+        return best
+    rank = (_word_count(normalized), len(normalized))
+    return (rank, content) if best is None or rank < best[0] else best
+
+
+def _resolve_rejected_title(
+    best_fallback: tuple[tuple[int, int], _ThreadSummary] | None,
+    error: str | None,
+    *,
+    attempts: int,
+) -> _ThreadSummary | None:
+    """Return the shortest fallback when available, else log rejection when a title failed validation."""
+    if best_fallback is not None:
+        logger.warning(
+            "Thread title did not pass validation; using shortest fallback",
+            attempts=attempts,
+            error=error,
+        )
+        return best_fallback[1]
+    if error is not None:
+        event = (
+            "Thread title rejected on every attempt"
+            if attempts == _TITLE_ATTEMPTS
+            else "Thread title did not pass validation"
+        )
+        logger.warning(event, attempts=attempts, error=error)
+    return None
+
+
+def _to_generated_summary(content: _ThreadSummary) -> GeneratedSummary:
+    """Build a ``GeneratedSummary`` from a validated model response."""
+    if not isinstance(content, _ThreadEnrichment):
+        return GeneratedSummary(summary=content.title, keep_current=content.keep_current)
+    tags: list[str] = []
+    for raw_tag in content.tags:
+        tag = coerce_tag_name(raw_tag)
+        if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
+            tags.append(tag)
+    return GeneratedSummary(summary=content.title, tags=tuple(tags), keep_current=content.keep_current)
 
 
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
@@ -218,11 +271,13 @@ async def generate_summary(
     tag_vocabulary: str | None,
     room_instructions: str | None = None,
     current_title: str | None = None,
+    allow_fallback: bool = False,
 ) -> GeneratedSummary | None:
     """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
 
     ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
     ``current_title`` is shown after the thread, and the system rules let the model keep it unless the topic changed.
+    ``allow_fallback`` keeps the shortest intact ``<= 80``-char candidate if every attempt exceeds the word limit.
     """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
@@ -250,8 +305,12 @@ async def generate_summary(
         instructions.append(config.get_prompt("THREAD_SUMMARY_KEEP_INSTRUCTIONS"))
     schema = _ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary
     request = prompt
-    error = None
-    for _attempt in range(_TITLE_ATTEMPTS):
+    error: str | None = None
+    accepted: _ThreadSummary | None = None
+    best_fallback: tuple[tuple[int, int], _ThreadSummary] | None = None
+    attempts = 0
+    for attempt in range(_TITLE_ATTEMPTS):
+        attempts = attempt + 1
         response = await complete_prompt(
             provider,
             request,
@@ -262,27 +321,24 @@ async def generate_summary(
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
         content = response.content
         if not isinstance(content, schema):
-            return None
+            break
         # A kept title is the current one, so only a new title is checked.
         if current_title is not None and content.keep_current:
+            accepted = content
             break
-        error = title_error(normalize_thread_summary_text(content.title))
+        normalized = normalize_thread_summary_text(content.title)
+        error = title_error(normalized)
         if error is None:
+            accepted = content
             break
-        # The rejected answer and the reason go back with the same request, so any route can retry.
-        request = f"{prompt}\n\n" + config.render_prompt(
-            "THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE",
-            rejected_title=escape(content.title),
-            error=error,
-        )
-    else:
-        logger.warning("Thread title rejected on every attempt", attempts=_TITLE_ATTEMPTS, error=error)
-        return None
-    if not isinstance(content, _ThreadEnrichment):
-        return GeneratedSummary(summary=content.title, keep_current=content.keep_current)
-    tags: list[str] = []
-    for raw_tag in content.tags:
-        tag = coerce_tag_name(raw_tag)
-        if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
-            tags.append(tag)
-    return GeneratedSummary(summary=content.title, tags=tuple(tags), keep_current=content.keep_current)
+        if allow_fallback:
+            best_fallback = _better_fallback(best_fallback, content, normalized)
+        if attempt + 1 < _TITLE_ATTEMPTS:
+            # Append each rejected answer and reason so retries see every failed attempt.
+            request = f"{request}\n\n" + config.render_prompt(
+                "THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE",
+                rejected_title=escape(content.title),
+                error=error,
+            )
+    chosen = accepted if accepted is not None else _resolve_rejected_title(best_fallback, error, attempts=attempts)
+    return None if chosen is None else _to_generated_summary(chosen)

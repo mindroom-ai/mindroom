@@ -29,7 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.tools.agentql import AgentQLTools
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+
 
 _CUSTOM_QUERY = "{ title links[] { href label } metadata { count enabled missing } }"
 _URL = "https://example.org/source"
@@ -180,7 +181,7 @@ def _tool(
     requester: str = "@alice:example.org",
     query: str = _CUSTOM_QUERY,
     process_env: dict[str, str] | None = None,
-) -> AgentQLTools:
+) -> AnyToolkit:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -205,17 +206,14 @@ def _tool(
             worker_target=worker_target,
             primary_built_tool=True,
         )
-    return cast(
-        "AgentQLTools",
-        get_tool_by_name(
-            "agentql",
-            runtime_paths,
-            credentials_manager=credentials,
-            tool_config_overrides={"agentql_query": query},
-            worker_target=worker_target,
-            runs_in_worker=False,
-            tools=builtin_tool_registry(),
-        ),
+    return get_tool_by_name(
+        "agentql",
+        runtime_paths,
+        credentials_manager=credentials,
+        tool_config_overrides={"agentql_query": query},
+        worker_target=worker_target,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
 
@@ -647,10 +645,10 @@ def test_agentql_malformed_success_retains_parse_error(
 
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
     sdk = importlib.import_module("agentql")
-    compat = importlib.import_module("mindroom.custom_tools.agno_compat_agentql")
+    agentql_module = importlib.import_module("mindroom.tools.agentql")
     legacy_page = sdk.wrap(_BrowserPage(agentql_boundary))
     legacy_page.goto(_URL)
-    scoped_page = compat._CredentialedPage.for_service(
+    scoped_page = agentql_module._credentialed_page_for_service(
         _BrowserPage(agentql_boundary),
         api_host="https://api.agentql.test",
         api_key="scoped-key",

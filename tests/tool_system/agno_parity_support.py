@@ -94,7 +94,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "browserbase": {"api_key": _KEY, "project_id": _KEY},
     "cartesia": {"api_key": _KEY},
     "clickup": {"api_key": _KEY, "master_space_id": _KEY},
-    "confluence": {"url": _URL, "username": _KEY, "api_key": _KEY},
     "daytona": {"api_key": _KEY},
     "discord": {"bot_token": _KEY},
     "e2b": {"api_key": _KEY},
@@ -105,7 +104,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     # The client rejects keys without Google's prefix.
     "google_maps": {"key": "AIza-golden-dummy"},
     "groq": {"api_key": _KEY},
-    "jira": {"server_url": _URL, "username": _KEY, "token": _KEY},
     "linear": {"api_key": _KEY},
     "linkup": {"api_key": _KEY},
     "lumalabs": {"api_key": _KEY},
@@ -131,7 +129,6 @@ OFFLINE_CLIENTS = {
     "e2b": "agno.tools.e2b.Sandbox",
     # Its Places client looks for Google Cloud credentials, retrying the metadata server for many seconds.
     "google_maps": "agno.tools.google.maps.places_v1",
-    "jira": "agno.tools.jira.JIRA",
     "mem0": "agno.tools.mem0.MemoryClient",
     "neo4j": "agno.tools.neo4j.GraphDatabase",
     "zep": "agno.tools.zep.Zep",

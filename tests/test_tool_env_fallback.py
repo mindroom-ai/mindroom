@@ -67,7 +67,7 @@ def _env_reads(source: str) -> set[str]:
 
 
 def _module_env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads, from its source file."""
+    """Return the variables one module reads from the process environment, from its source file."""
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     assert spec.origin is not None

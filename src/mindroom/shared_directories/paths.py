@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.shared_directories.store import SharedDirectory
 
-_SHARE_READING_TOOLS = ("shell", "python", "filesystem")
+_SHARE_READING_TOOLS = ("shell", "filesystem")
 
 
 def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:

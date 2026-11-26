@@ -820,7 +820,7 @@ eventCache:
 workers:
   backend: kubernetes
   sandbox:
-    proxyTools: shell,file,python,coding
+    proxyTools: shell,file,coding
     proxyToken:
       existingSecret: mindroom-sandbox-proxy
       key: MINDROOM_SANDBOX_PROXY_TOKEN

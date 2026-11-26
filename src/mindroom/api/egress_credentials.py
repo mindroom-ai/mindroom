@@ -805,7 +805,7 @@ async def allow_egress_account_reuse(
 ) -> None:
     """Let Agent Keys use the service's connected account for this agent; the body must confirm the approval bypass.
 
-    The account's own connection, connected now or later, is then injected for the agent's shell and python, for
+    The account's own connection, connected now or later, is then injected for the agent's shell, for
     reads only when `access` is `read`; allowing it again changes the level. Who may do this, and the 403, 404, and
     409 answers, follow the connect route; a body without the confirmation is a 422, and `read` for a service that
     does not offer it a 409.

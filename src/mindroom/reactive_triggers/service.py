@@ -7,7 +7,7 @@ import contextlib
 import json
 import sqlite3
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import nio
@@ -28,6 +28,7 @@ from mindroom.reactive_triggers.dispatch import (
     check_room_source_owner_authorization,
     dispatch_reactive_trigger,
 )
+from mindroom.reactive_triggers.github_pr import GitHubPRPoller
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
 from mindroom.reactive_triggers.models import (
     FiringRecord,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _POLL_INTERVAL_SECONDS = 5.0
+_GITHUB_PR_POLL_INTERVAL_SECONDS = 15.0
 _PRUNE_INTERVAL_SECONDS = 3600.0
 _RESTORE_RETRY_DELAY_SECONDS = 30.0
 _READ_TIMEOUT_SECONDS = 60.0
@@ -179,6 +181,7 @@ class ReactiveTriggerService:
             self._store = None
 
         self._poll_interval_seconds = _POLL_INTERVAL_SECONDS
+        self._github_pr_poll_interval_seconds = _GITHUB_PR_POLL_INTERVAL_SECONDS
         self._wake_event = asyncio.Event()
         self._running_loop: asyncio.AbstractEventLoop | None = None
         self._loop = SupervisedLoop(self.name, self._run)
@@ -187,6 +190,18 @@ class ReactiveTriggerService:
         self._restore_locks: dict[str, asyncio.Lock] = {}
         self._restore_retries: dict[str, asyncio.Task[None]] = {}
         self._reconcile_task: asyncio.Task[None] | None = None
+        self._github_pr_poll_task: asyncio.Task[None] | None = None
+        self._pr_poll_requested = False
+        self._github_pr_poller = (
+            None
+            if self._store is None
+            else GitHubPRPoller(
+                store=self._store,
+                config_provider=self.config_provider,
+                runtime_paths=self.runtime_paths,
+                on_enqueued=lambda: self.notify_work(poll_github_prs=False),
+            )
+        )
         self._live_during_restore: dict[str, set[tuple[str, str]]] = {}
 
         self._unfinished_waits: dict[str, tuple[str, float]] = {}
@@ -217,7 +232,7 @@ class ReactiveTriggerService:
         self._loop.start()
 
     async def stop(self) -> None:
-        """Stop the background loop, cancel reconcile/restore tasks, and reset transient wait/restore caches."""
+        """Stop the background loop, cancel reconcile/restore/PR poll tasks, and reset transient wait/restore caches."""
         reconcile_task = self._reconcile_task
         self._reconcile_task = None
         if reconcile_task is not None:
@@ -230,13 +245,19 @@ class ReactiveTriggerService:
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
         await self._loop.stop()
+        if (poll_task := self._github_pr_poll_task) is not None:
+            self._github_pr_poll_task = None
+            poll_task.cancel()
+            await asyncio.gather(poll_task, return_exceptions=True)
         self._restored_rooms.clear()
         self._refetch_waits.clear()
         self._unfinished_waits.clear()
         self._room_member_cache.clear()
 
-    def notify_work(self) -> None:
+    def notify_work(self, *, poll_github_prs: bool = True) -> None:
         """Wake the delivery loop immediately when new reactive trigger work is enqueued."""
+        if poll_github_prs:
+            self._pr_poll_requested = True
         running_loop = self._running_loop
         if running_loop is not None and not running_loop.is_closed():
             try:
@@ -292,42 +313,62 @@ class ReactiveTriggerService:
         except Exception:
             logger.exception("Reactive trigger thread_tag sync reconciliation failed")
 
+    async def poll_github_prs_once(self) -> int:
+        """Poll due github_pr triggers once and return the number of enqueued firings."""
+        return 0 if self._github_pr_poller is None else await self._github_pr_poller.poll_due_once()
+
+    def _schedule_github_pr_poll(self) -> None:
+        if self._github_pr_poller is None:
+            return
+        if self._github_pr_poll_task is not None and not self._github_pr_poll_task.done():
+            self._pr_poll_requested = True
+            return
+
+        async def _poll() -> None:
+            try:
+                await self._run_guarded(self.poll_github_prs_once, "Reactive trigger github_pr poll failed")
+            finally:
+                if self._github_pr_poll_task is asyncio.current_task():
+                    self._github_pr_poll_task = None
+                    if self._pr_poll_requested:
+                        self.notify_work()
+
+        self._github_pr_poll_task = asyncio.create_task(_poll())
+
+    async def _run_guarded(self, coro: Callable[[], Awaitable[object]], error_message: str) -> None:
+        try:
+            await coro()
+        except Exception:
+            logger.exception(error_message)
+
     async def _run(self) -> None:
-        """Poll room messages on a fixed cadence, drain due firings immediately on wakeup, and prune hourly."""
+        """Poll room messages and GitHub PRs on a fixed cadence, drain due firings on wakeup, and prune hourly."""
         self._running_loop = asyncio.get_running_loop()
         next_poll_at = 0.0
+        next_github_pr_poll_at = 0.0
         next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
         try:
             while True:
                 now_mono = time.monotonic()
                 if now_mono >= next_poll_at:
-                    try:
-                        await self.poll_room_messages_once()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.exception("Reactive trigger room message poll failed")
+                    await self._run_guarded(self.poll_room_messages_once, "Reactive trigger room message poll failed")
                     next_poll_at = time.monotonic() + self._poll_interval_seconds
 
                 self._wake_event.clear()
-                try:
-                    await self.drain_due_firings_once()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("Reactive trigger firing drain failed")
+                if self._pr_poll_requested or now_mono >= next_github_pr_poll_at:
+                    self._pr_poll_requested = False
+                    self._schedule_github_pr_poll()
+                    next_github_pr_poll_at = time.monotonic() + self._github_pr_poll_interval_seconds
+
+                await self._run_guarded(self.drain_due_firings_once, "Reactive trigger firing drain failed")
 
                 now_mono = time.monotonic()
                 if now_mono >= next_prune_at:
-                    try:
-                        await self._prune_old_firings()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.exception("Reactive trigger firing prune failed")
-                    next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
+                    await self._run_guarded(self._prune_old_firings, "Reactive trigger firing prune failed")
+                    next_prune_at = now_mono + _PRUNE_INTERVAL_SECONDS
 
-                wait_seconds = max(0.0, min(self._poll_interval_seconds, next_poll_at - time.monotonic()))
+                due = min(self._poll_interval_seconds, next_poll_at - now_mono, next_github_pr_poll_at - now_mono)
+                wait_seconds = max(0.0, due)
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(wait_seconds):
                         await self._wake_event.wait()
@@ -1055,7 +1096,10 @@ class ReactiveTriggerService:
                 if not claimed_ok:
                     return
                 claimed_now = True
-            elif (not rule.enabled and rule.disabled_reason != "once_consumed") or _is_rule_expired(rule, time.time()):
+            elif (not rule.enabled and rule.disabled_reason not in ("once_consumed", "pr_closed")) or _is_rule_expired(
+                rule,
+                time.time(),
+            ):
                 await self._run_store_update_safe(store.mark_skipped, firing.id, "disabled_or_expired")
                 return
 

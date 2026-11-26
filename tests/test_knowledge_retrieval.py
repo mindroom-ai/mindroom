@@ -187,15 +187,19 @@ class _RaisingReranker:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reranker", "traceback"),
+    ("reranker", "traceback", "expected_error"),
     [
-        (_RaisingReranker(JudgmentError("timeout")), False),
-        (_RaisingReranker(TimeoutError()), False),
-        (_Reranker([0.9]), False),
-        (_RaisingReranker(RuntimeError("unexpected")), True),
+        (_RaisingReranker(JudgmentError("timeout")), False, "JudgmentError: timeout"),
+        (_RaisingReranker(TimeoutError()), False, "TimeoutError"),
+        (_Reranker([0.9]), False, "_InvalidScoresError:"),
+        (_RaisingReranker(RuntimeError("unexpected")), True, None),
     ],
 )
-async def test_only_an_unexpected_reranker_failure_logs_a_traceback(reranker: Reranker, traceback: bool) -> None:
+async def test_only_an_unexpected_reranker_failure_logs_a_traceback(
+    reranker: Reranker,
+    traceback: bool,
+    expected_error: str | None,
+) -> None:
     """A judgment failure, a timeout or invalid scores log one warning without a traceback; anything else keeps it."""
     with capture_logs() as logs:
         kept = await retrieve("query", _GAP_CANDIDATES, _GAP_SELECTION, reranker=reranker)
@@ -203,23 +207,40 @@ async def test_only_an_unexpected_reranker_failure_logs_a_traceback(reranker: Re
     assert kept == list(_GAP_CANDIDATES[:2])
     [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
     assert bool(warning.get("exc_info")) == traceback
+    assert isinstance(warning["latency_ms"], int)
+    assert warning["latency_ms"] >= 0
+    assert warning["candidate_count"] == len(_GAP_CANDIDATES)
+    assert warning["deadline_seconds"] is None
+    if expected_error is not None:
+        if expected_error.endswith(":"):
+            assert warning["error"].startswith(expected_error)
+        else:
+            assert warning["error"] == expected_error
 
 
 @pytest.mark.asyncio
 async def test_deadline_keeps_hybrid_selection() -> None:
-    """A reranker slower than the deadline is abandoned for the hybrid selection, without waiting for it."""
+    """A reranker slower than the deadline is abandoned for the hybrid selection, logging latency and metadata."""
     started = time.monotonic()
 
-    kept = await retrieve(
-        "query",
-        _GAP_CANDIDATES,
-        _GAP_SELECTION,
-        reranker=_Reranker([0.1, 0.9, 0.5], delay=1.0),
-        deadline_seconds=0.01,
-    )
+    with capture_logs() as logs:
+        kept = await retrieve(
+            "query",
+            _GAP_CANDIDATES,
+            _GAP_SELECTION,
+            reranker=_Reranker([0.1, 0.9, 0.5], delay=1.0),
+            deadline_seconds=0.01,
+        )
 
     assert time.monotonic() - started < 0.5
     assert kept == list(_GAP_CANDIDATES[:2])
+    [warning] = [entry for entry in logs if entry["event"] == "Reranking failed; keeping search order"]
+    assert warning["error"] == "TimeoutError"
+    assert isinstance(warning["latency_ms"], int)
+    assert warning["latency_ms"] >= 0
+    assert warning["candidate_count"] == len(_GAP_CANDIDATES)
+    assert warning["deadline_seconds"] == 0.01
+    assert not warning.get("exc_info")
 
 
 @pytest.mark.asyncio
