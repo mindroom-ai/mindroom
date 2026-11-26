@@ -111,7 +111,7 @@ def next_cron_run_utc(cron: str, after_utc: datetime, cron_timezone: str) -> dat
     return croniter(cron, local_after).get_next(datetime).astimezone(UTC)
 
 
-def prev_cron_run_utc(cron: str, before_utc: datetime, cron_timezone: str) -> datetime:
+def _prev_cron_run_utc(cron: str, before_utc: datetime, cron_timezone: str) -> datetime:
     """Return the previous UTC occurrence of ``cron`` evaluated in ``cron_timezone`` strictly before ``before_utc``."""
     local_before = before_utc.astimezone(ZoneInfo(cron_timezone))
     return croniter(cron, local_before).get_prev(datetime).astimezone(UTC)
@@ -138,7 +138,7 @@ def _plan(
     elif checkpoint.prepared is None and checkpoint.next_run_at <= now_utc:
         # Coalesce downtime to its latest occurrence, including an exact cron boundary.
         # Compute +1us in UTC before converting to ZoneInfo(cron_timezone) so DST folds stay exact.
-        latest = prev_cron_run_utc(cron, now_utc + timedelta(microseconds=1), cron_timezone)
+        latest = _prev_cron_run_utc(cron, now_utc + timedelta(microseconds=1), cron_timezone)
         if (now_utc - latest).total_seconds() > grace_seconds:
             checkpoint = replace(
                 checkpoint,
@@ -153,7 +153,7 @@ def _plan(
                 reason=checkpoint.skip_reason,
             )
         elif latest > checkpoint.next_run_at:
-            skipped_at = prev_cron_run_utc(cron, latest, cron_timezone)
+            skipped_at = _prev_cron_run_utc(cron, latest, cron_timezone)
             checkpoint = replace(
                 checkpoint,
                 next_run_at=latest,
@@ -224,7 +224,7 @@ async def complete_recurring_occurrence(
 ) -> None:
     """Advance after delivery, hook suppression, or a terminal preparation failure."""
     completed_at = max(now.astimezone(UTC), occurrence.checkpoint.next_run_at.astimezone(UTC))
-    latest = prev_cron_run_utc(cron, completed_at + timedelta(microseconds=1), cron_timezone)
+    latest = _prev_cron_run_utc(cron, completed_at + timedelta(microseconds=1), cron_timezone)
     checkpoint = replace(
         occurrence.checkpoint,
         next_run_at=next_cron_run_utc(cron, completed_at, cron_timezone),

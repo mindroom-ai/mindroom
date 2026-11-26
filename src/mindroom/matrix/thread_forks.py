@@ -37,7 +37,7 @@ class CrossRoomForkAuthorization:
 
 
 @dataclass(frozen=True, slots=True)
-class ThreadForkReference:
+class _ThreadForkReference:
     """The optional parent room, parent thread, and last parent message a forked thread includes."""
 
     room_id: str | None
@@ -72,7 +72,7 @@ def _is_valid_event_id(value: object) -> TypeIs[str]:
     return isinstance(value, str) and len(value) > 1 and value.startswith("$") and not any(c.isspace() for c in value)
 
 
-def thread_fork_reference(content: Mapping[str, Any]) -> ThreadForkReference | None:
+def thread_fork_reference(content: Mapping[str, Any]) -> _ThreadForkReference | None:
     """Parse the fork reference from a thread root's content, or None when absent or invalid."""
     value = content.get(FORK_CONTENT_KEY)
     if not isinstance(value, dict):
@@ -87,7 +87,7 @@ def thread_fork_reference(content: Mapping[str, Any]) -> ThreadForkReference | N
         if not _is_valid_room_id(raw_room_id):
             return None
         room_id = raw_room_id
-    return ThreadForkReference(room_id=room_id, thread_id=thread_id, event_id=event_id)
+    return _ThreadForkReference(room_id=room_id, thread_id=thread_id, event_id=event_id)
 
 
 def _message_room_id(message: ResolvedVisibleMessage, default_room_id: str) -> str:
@@ -134,7 +134,7 @@ def fork_reference(
     thread_id: str,
     *,
     room_id: str | None = None,
-) -> ThreadForkReference | None:
+) -> _ThreadForkReference | None:
     """Return the fork reference on ``thread_id``'s root in ``history``, or None."""
     root = fork_root_message(history, thread_id, room_id=room_id)
     return None if root is None else thread_fork_reference(root.content)

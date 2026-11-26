@@ -429,13 +429,13 @@ async def test_index_transitions_save_failure_and_retry(tmp_path: Path, monkeypa
         intercept_job_saves(monkeypatch, before=maybe_fail)
         gate_fail.set()
         await wait_for_status(rt, "job-fail", "failed")
-        assert not rt.outcome_saved("job-fail")
+        assert not rt._outcome_saved("job-fail")
         _assert_indexes(rt)
         fail_save = False
         await rt.cancel("job-fail", owner=owner_a, depth=0)
         if (drain := rt._entries["job-fail"].drain) is not None:
             await drain
-        assert rt.outcome_saved("job-fail")
+        assert rt._outcome_saved("job-fail")
         intercept_job_saves(monkeypatch)
         _assert_indexes(rt)
     finally:

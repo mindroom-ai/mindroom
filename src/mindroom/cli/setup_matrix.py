@@ -19,14 +19,14 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
-MatrixAuthMethod = Literal["token", "shared_secret", "open", "provisioning"]
+_MatrixAuthMethod = Literal["token", "shared_secret", "open", "provisioning"]
 _MenuChoice = Literal["mindroom.chat", "custom"]
 _AuthChoice = Literal["token", "shared_secret", "open", "provisioning_url"]
 
 _SELF_HOSTED_PLACEHOLDER = "https://matrix.example.com"
-PROVISIONING_CONNECTIONS_PATH = "/v1/local-mindroom/connections"
+_PROVISIONING_CONNECTIONS_PATH = "/v1/local-mindroom/connections"
 # Kept in sync with scripts/local_mindroom_provisioning_service.py (`_verify_openid_user`).
-PROVISIONING_MISSING_OPENID_DETAIL = "Missing Matrix OpenID token"
+_PROVISIONING_MISSING_OPENID_DETAIL = "Missing Matrix OpenID token"
 _PROBE_TIMEOUT_SECONDS = 4.0
 _REG_TOKEN = "MATRIX_REGISTRATION_TOKEN"  # noqa: S105
 _REG_SECRET = "MATRIX_REGISTRATION_SHARED_SECRET"  # noqa: S105
@@ -37,7 +37,7 @@ _AUTH_SECRETS = {
     "token": ("Matrix registration token", _REG_TOKEN),
     "shared_secret": ("Matrix registration shared secret", _REG_SECRET),
 }
-_CLEAR_ON_AUTH: dict[MatrixAuthMethod, tuple[str, ...]] = {
+_CLEAR_ON_AUTH: dict[_MatrixAuthMethod, tuple[str, ...]] = {
     "provisioning": (_REG_TOKEN, _REG_SECRET, _REG_SECRET_FILE),
     "token": (*_PROV_KEYS, _REG_SECRET, _REG_SECRET_FILE),
     "shared_secret": (*_PROV_KEYS, _REG_TOKEN),
@@ -61,7 +61,7 @@ _UNCONFIGURED_ENV_BLOCK = (
 
 
 @dataclass(frozen=True, slots=True)
-class ParsedMatrixServerInput:
+class _ParsedMatrixServerInput:
     """Normalized user input for a Matrix server domain or URL."""
 
     url: str
@@ -70,7 +70,7 @@ class ParsedMatrixServerInput:
 
 
 @dataclass(frozen=True, slots=True)
-class MatrixServerProbeResult:
+class _MatrixServerProbeResult:
     """Discovery, reachability, and provisioning probe outcome for a custom Matrix server."""
 
     homeserver: str
@@ -90,7 +90,7 @@ class StarterMatrixSelection:
     registration_token: str | None = None
     registration_shared_secret: str | None = None
     owner_user_id: str | None = None
-    auth_method: MatrixAuthMethod | None = None
+    auth_method: _MatrixAuthMethod | None = None
     configured: bool = True
 
     @property
@@ -129,7 +129,7 @@ def _homeserver_host(homeserver_url: str) -> str:
     return f"[{host}]" if ":" in host else (host or homeserver_url.strip())
 
 
-def parse_matrix_server_input(raw: str) -> ParsedMatrixServerInput | None:
+def _parse_matrix_server_input(raw: str) -> _ParsedMatrixServerInput | None:
     """Normalize a bare server name (`example.com` or `example.org:8448`) or explicit `http(s)://` URL."""
     from mindroom.matrix.identity import valid_matrix_server_name  # noqa: PLC0415  # lazy: keeps CLI startup slim
 
@@ -157,14 +157,14 @@ def parse_matrix_server_input(raw: str) -> ParsedMatrixServerInput | None:
 
     port_part = f":{port}" if port is not None and port != (443 if scheme == "https" else 80) else ""
     path = "" if is_bare else parsed.path.rstrip("/")
-    return ParsedMatrixServerInput(f"{scheme}://{host_lit}{port_part}{path}", server_name, is_bare)
+    return _ParsedMatrixServerInput(f"{scheme}://{host_lit}{port_part}{path}", server_name, is_bare)
 
 
 def _normalize_server_url(raw: str | None) -> str | None:
     cleaned = (raw or "").strip()
     if not cleaned:
         return None
-    parsed = parse_matrix_server_input(cleaned)
+    parsed = _parse_matrix_server_input(cleaned)
     return parsed.url if parsed is not None else cleaned.rstrip("/")
 
 
@@ -187,18 +187,18 @@ def _http_get_json(url: str, *, timeout_seconds: float) -> tuple[int | None, obj
         return response.status_code, None
 
 
-def probe_provisioning_service(base_url: str, *, timeout_seconds: float = _PROBE_TIMEOUT_SECONDS) -> bool:
+def _probe_provisioning_service(base_url: str, *, timeout_seconds: float = _PROBE_TIMEOUT_SECONDS) -> bool:
     """Return whether `base_url` exposes MindRoom's local provisioning service (fail-open)."""
-    url = f"{base_url.rstrip('/')}{PROVISIONING_CONNECTIONS_PATH}"
+    url = f"{base_url.rstrip('/')}{_PROVISIONING_CONNECTIONS_PATH}"
     status, payload = _http_get_json(url, timeout_seconds=timeout_seconds)
-    return status == 401 and isinstance(payload, dict) and payload.get("detail") == PROVISIONING_MISSING_OPENID_DETAIL
+    return status == 401 and isinstance(payload, dict) and payload.get("detail") == _PROVISIONING_MISSING_OPENID_DETAIL
 
 
-def probe_matrix_server(
-    parsed: ParsedMatrixServerInput,
+def _probe_matrix_server(
+    parsed: _ParsedMatrixServerInput,
     *,
     timeout_seconds: float = _PROBE_TIMEOUT_SECONDS,
-) -> MatrixServerProbeResult:
+) -> _MatrixServerProbeResult:
     """Discover `.well-known/matrix/client` (blocking HTTPS->HTTP downgrade), verify versions, and probe provisioning."""
     homeserver, discovered, require_https = parsed.url, False, parsed.url.startswith("https://")
     if not urlsplit(parsed.url).path:
@@ -207,17 +207,17 @@ def probe_matrix_server(
         if wk_status == 200 and isinstance(wk_payload, dict):
             m_hs = wk_payload.get("m.homeserver")
             raw_base = m_hs.get("base_url") if isinstance(m_hs, dict) else None
-            resolved = parse_matrix_server_input(raw_base) if isinstance(raw_base, str) else None
+            resolved = _parse_matrix_server_input(raw_base) if isinstance(raw_base, str) else None
             https_ok = resolved is not None and (not require_https or resolved.url.startswith("https://"))
             if resolved is not None and not resolved.is_bare_domain and https_ok:
                 homeserver, discovered = resolved.url, True
 
     ver_status, ver_payload = _http_get_json(f"{homeserver}/_matrix/client/versions", timeout_seconds=timeout_seconds)
     if ver_status is None:
-        return MatrixServerProbeResult(homeserver, discovered_via_well_known=discovered)
+        return _MatrixServerProbeResult(homeserver, discovered_via_well_known=discovered)
     reachable = ver_status == 200 and isinstance(ver_payload, dict) and isinstance(ver_payload.get("versions"), list)
-    prov = probe_provisioning_service(homeserver, timeout_seconds=timeout_seconds)
-    return MatrixServerProbeResult(homeserver, discovered, reachable, prov)
+    prov = _probe_provisioning_service(homeserver, timeout_seconds=timeout_seconds)
+    return _MatrixServerProbeResult(homeserver, discovered, reachable, prov)
 
 
 def ensure_kept_env_compatible(selection: StarterMatrixSelection, env_path: Path) -> None:
@@ -249,10 +249,10 @@ def ensure_kept_env_compatible(selection: StarterMatrixSelection, env_path: Path
         raise ValueError(msg)
 
 
-def _prompt_matrix_url(message: str, *, default: str = "", io: WizardIO) -> ParsedMatrixServerInput:
+def _prompt_matrix_url(message: str, *, default: str = "", io: WizardIO) -> _ParsedMatrixServerInput:
     current = default
     while True:
-        if (parsed := parse_matrix_server_input(io.text(message, default=current).strip())) is not None:
+        if (parsed := _parse_matrix_server_input(io.text(message, default=current).strip())) is not None:
             return parsed
         io.console.print(
             "[red]✗[/red] Enter a valid domain or http(s) URL (e.g. example.com or http://localhost:8008).",
@@ -307,7 +307,7 @@ def _prompt_custom_server_auth(*, homeserver: str, server_name: str, io: WizardI
     if auth_choice == "provisioning_url":
         prov = _prompt_matrix_url("Provisioning service URL (e.g. https://provision.example.com)", io=io)
         with io.console.status("Checking provisioning service..."):
-            ok = probe_provisioning_service(prov.url)
+            ok = _probe_provisioning_service(prov.url)
         if ok:
             io.print_literal("[green]✓[/green] Local pairing supported on ", prov.url)
         else:
@@ -327,9 +327,9 @@ def _prompt_custom_server_auth(*, homeserver: str, server_name: str, io: WizardI
 
 
 def _resolve_server_name(
-    parsed: ParsedMatrixServerInput,
-    probe: MatrixServerProbeResult,
-    existing_parsed: ParsedMatrixServerInput | None,
+    parsed: _ParsedMatrixServerInput,
+    probe: _MatrixServerProbeResult,
+    existing_parsed: _ParsedMatrixServerInput | None,
     runtime_paths: RuntimePaths,
     *,
     io: WizardIO,
@@ -346,14 +346,16 @@ def _resolve_server_name(
 def _select_custom_matrix_server(runtime_paths: RuntimePaths, *, io: WizardIO) -> StarterMatrixSelection:
     existing_hs = (runtime_paths.env_value("MATRIX_HOMESERVER") or "").strip()
     skip = {None, constants.DEFAULT_MATRIX_HOMESERVER, _SELF_HOSTED_PLACEHOLDER}
-    existing_parsed = parse_matrix_server_input(existing_hs) if _normalize_server_url(existing_hs) not in skip else None
+    existing_parsed = (
+        _parse_matrix_server_input(existing_hs) if _normalize_server_url(existing_hs) not in skip else None
+    )
     prompt = "Matrix server domain or URL (e.g. example.com or https://matrix.example.com)"
     parsed = _prompt_matrix_url(prompt, default=existing_hs if existing_parsed else "", io=io)
     if constants.is_hosted_matrix_homeserver(parsed.url):
         return hosted_matrix_selection()
 
     with io.console.status("Checking Matrix server..."):
-        probe = probe_matrix_server(parsed)
+        probe = _probe_matrix_server(parsed)
     hs, delegated = probe.homeserver, probe.discovered_via_well_known and probe.homeserver != parsed.url
     if delegated:
         io.print_literal("[green]✓[/green] Discovered homeserver ", hs, f" (server name: {escape(parsed.server_name)})")
@@ -397,10 +399,10 @@ def resolve_interactive_matrix_server(
     return selection
 
 
-def _infer_auth_method(s: StarterMatrixSelection) -> MatrixAuthMethod:
+def _infer_auth_method(s: StarterMatrixSelection) -> _MatrixAuthMethod:
     if s.auth_method:
         return s.auth_method
-    pairs: tuple[tuple[MatrixAuthMethod, object], ...] = (
+    pairs: tuple[tuple[_MatrixAuthMethod, object], ...] = (
         ("provisioning", s.uses_provisioning),
         ("token", s.registration_token),
         ("shared_secret", s.registration_shared_secret),

@@ -1433,6 +1433,8 @@ def _schedule_process_tree_idle(pid: int) -> None:
     before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
     thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
     """
+    if sys.platform != "linux":
+        return
     pending = [pid]
     while pending:
         with contextlib.suppress(OSError):

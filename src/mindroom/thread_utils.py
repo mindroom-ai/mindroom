@@ -282,7 +282,7 @@ def thread_requires_explicit_agent_targeting(
     room_id: str | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
-    sender_visible_responders = filter_thread_agents_for_sender(
+    sender_visible_responders = _filter_thread_agents_for_sender(
         get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id),
         sender_id,
         config,
@@ -301,7 +301,7 @@ def thread_requires_explicit_agent_targeting(
     )
 
 
-def filter_thread_agents_for_sender(
+def _filter_thread_agents_for_sender(
     agents_in_thread: Sequence[MatrixID],
     sender_id: str,
     config: Config,
@@ -373,7 +373,7 @@ def _decide_thread_agent_response(
     thread_agents = agents_in_thread
     if thread_agents is None:
         thread_agents = get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id)
-    sender_visible_thread_agents = filter_thread_agents_for_sender(
+    sender_visible_thread_agents = _filter_thread_agents_for_sender(
         thread_agents,
         sender_id,
         config,

@@ -15,7 +15,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
-from mindroom.delegation.personas import follow_up_refusal, inline_persona
+from mindroom.delegation.personas import _inline_persona, follow_up_refusal
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
@@ -786,7 +786,7 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
     base, resolve = _native_resolver(tmp_path, _config())
 
     refused = await resolve(base, skills=["absent"])
-    inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"], None)))
+    inherited = await resolve(replace(base, persona=_inline_persona("P", None, ["writing"], None)))
 
     assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research, writing."
     assert not isinstance(inherited, str)
@@ -802,7 +802,7 @@ async def test_native_authoring_checks_names_and_inherits_knowledge(tmp_path: Pa
     refused = await resolve(base, knowledge=["wiki"])
     refused_files = await resolve(base, knowledge=["notes"])
     named = await resolve(base, knowledge=["faq"])
-    inherited = await resolve(replace(base, persona=inline_persona("P", None, None, ["docs"])))
+    inherited = await resolve(replace(base, persona=_inline_persona("P", None, None, ["docs"])))
 
     assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
     assert refused_files == "Cannot delegate: unknown knowledge base 'notes'. Your knowledge bases: docs, faq."

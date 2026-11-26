@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
 
-type AnswerOutcome = Literal[
+type _AnswerOutcome = Literal[
     "accepted",
     "not_for_you",
     "wrong_place",
@@ -158,7 +158,7 @@ def _clip_options(options: list[str], limit: int | None) -> list[str]:
     return [] if limit == 0 else [clip(option, limit) for option in options]
 
 
-def question_content(
+def _question_content(
     run: WorkflowRun,
     node: WorkflowNode,
     status: Literal["open", "answered", "cancelled"] = "open",
@@ -226,7 +226,7 @@ async def show_question(
     if as_edit and not isinstance(event_id, str):
         return None
     for chars, answer_chars, option_chars, body_option_chars in _CLOSED_FITS if as_edit else _OPEN_FITS:
-        content = question_content(
+        content = _question_content(
             run,
             node,
             status,
@@ -248,6 +248,11 @@ def _open(node: WorkflowNode | None) -> bool:
     return waits and node.kind == "ask" and "event_id" in node.links
 
 
+def _options(node: WorkflowNode) -> list[str]:
+    raw = node.request.get("options")
+    return [str(option) for option in raw] if isinstance(raw, list | tuple) else []
+
+
 async def answer_question(
     engine: WorkflowEngine,
     *,
@@ -259,7 +264,7 @@ async def answer_question(
     card_event_id: str | None,
     option: str | None,
     text: str | None,
-) -> AnswerOutcome:
+) -> _AnswerOutcome:
     """Answer the question of one `ask` call of a run, and return whether the answer counted or why it did not.
 
     It counts only from the run's requester, in the run's room and thread, for the card of the call as it is now,
@@ -276,7 +281,7 @@ async def answer_question(
         return "no_longer_open"
     if node.state is WorkflowNodeState.COMPLETED:
         return "already_answered"
-    options = node.request.get("options") or ()
+    options = _options(node)
     answer = option if options else (text or "").strip()
     if not answer or (option is not None and not options) or (options and answer not in options):
         return "not_an_option" if _open(node) else "no_longer_open"
@@ -289,7 +294,7 @@ async def handle_workflow_answer(
     *,
     agent_name: str,
     engine: Callable[[], WorkflowEngine],
-) -> AnswerOutcome | None:
+) -> _AnswerOutcome | None:
     """Answer the question a client's answer event names, and tell its sender when the answer did not count.
 
     The event is `{run, node, option | text}` in the run's thread, as a reply to the question's card. Every bot in
@@ -345,7 +350,8 @@ async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str
     """
     match = _ANSWER.fullmatch(text.strip())
     named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
-    if not answer or (named is None and _ANSWER.fullmatch(f"{answer} x").group(1)):  # type: ignore[union-attr]
+    probe = _ANSWER.fullmatch(f"{answer} x") if named is None and answer else None
+    if not answer or (probe is not None and probe.group(1)):
         return "Use !answer <id> <answer>."
     matches = [
         (qid, run.run_id, node.key)
@@ -364,7 +370,7 @@ async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str
         )
     qid, run_id, key = matches[0]
     node = cast("WorkflowNode", engine.store.get_node(run_id, key))
-    options = [str(option) for option in node.request.get("options") or ()]
+    options = _options(node)
     if options:
         number = int(answer) if len(answer) <= 6 and answer.isdecimal() else 0
         answer = options[number - 1] if 0 < number <= len(options) else answer
