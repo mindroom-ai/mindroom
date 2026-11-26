@@ -27,7 +27,7 @@ def _extract_reddit_id(value: str, field_name: str, *, post_url: bool = False) -
     return safe_path_segment(parts[-1], field_name)
 
 
-class RedditTools(Toolkit):
+class _RedditTools(Toolkit):
     """Browse Reddit users/subreddits and publish posts or replies via `praw`."""
 
     def __init__(
@@ -351,6 +351,6 @@ class RedditTools(Toolkit):
     function_names=("reddit_read", "reddit_write"),
     action_scoped_grants=("reddit_read", "reddit_write"),
 )
-def reddit_tools() -> type[RedditTools]:
+def reddit_tools() -> type[Toolkit]:
     """Return Reddit tools for social media interaction."""
-    return RedditTools
+    return _RedditTools

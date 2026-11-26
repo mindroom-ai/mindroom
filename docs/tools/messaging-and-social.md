@@ -257,7 +257,7 @@ A nonempty `allowed_subreddits` list limits posts and replies to those subreddit
 | `user_agent` | `text` | `null` | Custom user agent, or `REDDIT_USER_AGENT`; defaults to `RedditTools v1.0`. |
 | `username` | `text` | `null` | Reddit username for posts and replies. |
 | `password` | `password` | `null` | Reddit password for posts and replies. |
-| `allowed_subreddits` | `string[]` | `null` | Subreddits permitted for posts and replies; `null` or `[]` allows all. |
+| `allowed_subreddits` | `string[]` | `null` | Subreddits permitted for posts and replies; `null` allows all and `[]` blocks all writes. |
 
 ```yaml
 agents:

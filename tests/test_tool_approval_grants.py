@@ -1074,7 +1074,7 @@ def test_retired_consolidated_approval_rules_fail_closed(
 
 
 def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
-    """Shared names like `add_memory` (mem0) or `search_web` (serper) still fail closed until the new tool has a rule."""
+    """Shared names like `search_web` (serper) or `add_memory` (mem0/memory) still fail closed until each replacement has a rule."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1099,7 +1099,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
             ],
         },
     }
-    with pytest.raises(ConfigRuntimeValidationError, match=r"searxng_search|memory"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"searxng_search|memory|mem0_add"):
         Config.validate_with_runtime(base_data, runtime_paths)
 
     explicit_data = {
@@ -1108,6 +1108,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
             "rules": [
                 {"match": "add_memory", "action": "require_approval"},
                 {"match": "memory", "action": "require_approval"},
+                {"match": "mem0_add", "action": "require_approval"},
                 {"match": "search_web", "action": "require_approval"},
                 {"match": "searxng_search", "action": "auto_approve"},
             ],
@@ -1117,6 +1118,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
     assert [rule.match for rule in loaded.tool_approval.rules] == [
         "add_memory",
         "memory",
+        "mem0_add",
         "search_web",
         "searxng_search",
     ]

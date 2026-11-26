@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from mindroom.failure_text import failure_text
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import UNSET, UnsetType, json_dumps, require_non_empty, resolve_toggle
@@ -51,7 +51,7 @@ def _extract_memory_list(results: object) -> list[Any]:
     return []
 
 
-class Mem0Tools(Toolkit):
+class _Mem0Tools(Toolkit):
     """Store, search, list, and delete persistent user memories via Mem0 2."""
 
     def __init__(
@@ -106,10 +106,13 @@ class Mem0Tools(Toolkit):
         return self.client
 
     def _require_user_id(self, method_name: str) -> str:
-        if not self.user_id:
-            msg = f"Error in {method_name}: A user_id must be configured on the mem0 tool."
-            raise ValueError(msg)
-        return self.user_id
+        if self.user_id:
+            return self.user_id
+        call = current_call()
+        if call is not None and call.runtime is not None and call.runtime.requester_id:
+            return call.runtime.requester_id
+        msg = f"Error in {method_name}: A user_id must be provided or resolvable from the active request."
+        raise ValueError(msg)
 
     @staticmethod
     def _redacted_error(prefix: str, exc: Exception) -> str:
@@ -253,6 +256,6 @@ class Mem0Tools(Toolkit):
     function_names=("mem0_read", "mem0_add", "mem0_delete_all"),
     action_scoped_grants=("mem0_read",),
 )
-def mem0_tools() -> type[Mem0Tools]:
+def mem0_tools() -> type[Toolkit]:
     """Return Mem0 memory tools for persistent memory management."""
-    return Mem0Tools
+    return _Mem0Tools

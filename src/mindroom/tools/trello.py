@@ -14,7 +14,7 @@ _WriteAction = Literal["create_board", "create_list", "create_card", "move_card"
 _BoardFilter = Literal["all", "open", "closed", "organization", "public", "starred"]
 
 
-class TrelloTools(Toolkit):
+class _TrelloTools(Toolkit):
     """Manage Trello boards, lists, and cards via `py-trello`."""
 
     def __init__(
@@ -192,6 +192,6 @@ class TrelloTools(Toolkit):
     function_names=("trello_read", "trello_write"),
     action_scoped_grants=("trello_read", "trello_write"),
 )
-def trello_tools() -> type[TrelloTools]:
+def trello_tools() -> type[Toolkit]:
     """Return Trello tools for project board management."""
-    return TrelloTools
+    return _TrelloTools

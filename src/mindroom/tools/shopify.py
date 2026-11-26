@@ -135,7 +135,7 @@ def _order_items(node: dict[str, Any]) -> list[dict[str, Any]]:
     return [edge["node"] for edge in node.get("lineItems", {}).get("edges", []) if isinstance(edge, dict)]
 
 
-class ShopifyTools(Toolkit):
+class _ShopifyTools(Toolkit):
     """Read store data, inventory, orders, and sales analytics via the Shopify Admin GraphQL API."""
 
     def __init__(
@@ -823,6 +823,6 @@ class ShopifyTools(Toolkit):
     function_names=("shopify_store", "shopify_analytics"),
     action_scoped_grants=("shopify_store", "shopify_analytics"),
 )
-def shopify_tools() -> type[ShopifyTools]:
+def shopify_tools() -> type[Toolkit]:
     """Return Shopify tools for e-commerce analytics."""
-    return ShopifyTools
+    return _ShopifyTools

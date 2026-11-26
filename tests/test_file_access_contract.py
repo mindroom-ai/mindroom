@@ -51,7 +51,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
-from mindroom.tools.airflow import AirflowTools
+from mindroom.tools.airflow import airflow_tools
 from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
 from tests.microsoft_graph_test_support import FakeGraph
 from tests.microsoft_graph_test_support import publish_grant as publish_microsoft_grant
@@ -280,7 +280,7 @@ async def _read_dag_file(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool = AirflowTools(tool_output_workspace_root=workspace, file_access=file_access)
+    tool = airflow_tools()(tool_output_workspace_root=workspace, file_access=file_access)
     return tool.read_dag_file(raw_path) == _TEXT
 
 

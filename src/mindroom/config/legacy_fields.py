@@ -328,12 +328,11 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "rotate_trigger_key": "triggers",
 }
 
-# LEGACY_COMPAT: Retired individual functions of the consolidated scheduler, searxng, memory, and todo toolkits.
-# Legacy format: scheduler exposed schedule/edit_schedule/list_schedules/cancel_schedule; searxng exposed 8 vertical
-#   search functions (search_web, image_search, ...); memory exposed 6 CRUD functions (add_memory, search_memories,
-#   ...); todo exposed 6 plan functions (plan, add_todo, ...), which could appear in tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into scheduler, searxng_search, memory,
-#   and todo respectively.
+# LEGACY_COMPAT: Retired individual functions of consolidated toolkits (scheduler, searxng, memory, todo, and Wave 8).
+# Legacy format: scheduler, searxng, memory, todo, linear, notion, todoist, clickup, trello, bitbucket, cal_com,
+#   shopify, spotify, reddit, google_maps, brandfetch, mem0, and zep previously exposed granular per-operation functions
+#   that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610; replacement: unreleased; consolidated into lean risk-scoped action functions.
 # Handling: When the config enables one of these toolkits, allow configs with an explicit exact rule deciding the
 #   replacement function, and otherwise reject tool_approval.rules when any retired function's effective decision
 #   differs from the replacement's effective decision (regardless of other toolkits).

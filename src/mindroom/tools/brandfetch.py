@@ -32,7 +32,7 @@ def _validate_base_url(value: str) -> str:
     return cleaned
 
 
-class BrandfetchTools(Toolkit):
+class _BrandfetchTools(Toolkit):
     """Retrieve brand assets by identifier or search brands by name via Brandfetch API v2."""
 
     def __init__(
@@ -186,6 +186,6 @@ class BrandfetchTools(Toolkit):
     function_names=("brandfetch_lookup",),
     action_scoped_grants=("brandfetch_lookup",),
 )
-def brandfetch_tools() -> type[BrandfetchTools]:
+def brandfetch_tools() -> type[Toolkit]:
     """Return Brandfetch tools for brand data retrieval."""
-    return BrandfetchTools
+    return _BrandfetchTools

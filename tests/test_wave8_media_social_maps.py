@@ -14,9 +14,9 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.spotify import SpotifyTools
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.brandfetch import BrandfetchTools
-from mindroom.tools.google_maps import GoogleMapTools
-from mindroom.tools.reddit import RedditTools
+from mindroom.tools.brandfetch import brandfetch_tools
+from mindroom.tools.google_maps import google_maps_tools
+from mindroom.tools.reddit import reddit_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,10 +40,10 @@ def test_batch3_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("BRANDFETCH_API_KEY", "bf-host-secret")
     monkeypatch.setenv("BRANDFETCH_CLIENT_ID", "bf-host-cid")
 
-    assert "required" in json.loads(RedditTools().reddit_read(action="trending_subreddits"))["error"]
+    assert "required" in json.loads(reddit_tools()().reddit_read(action="trending_subreddits"))["error"]
     with pytest.raises(ValueError, match="Google Maps API key"):
-        GoogleMapTools(key=None)
-    assert "API key is required" in json.loads(BrandfetchTools().brandfetch_lookup("nike.com"))["error"]
+        google_maps_tools()(key=None)
+    assert "API key is required" in json.loads(brandfetch_tools()().brandfetch_lookup("nike.com"))["error"]
 
 
 def test_spotify_search_playlist_playback_and_validation(
@@ -152,7 +152,7 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
     reddit.submission.return_value = fake_sub_post
 
     # Empty allowed_subreddits must block all writes, never act as unrestricted!
-    blocked = RedditTools(reddit_instance=reddit, username="bot", password="pw", allowed_subreddits=[])  # noqa: S106
+    blocked = reddit_tools()(reddit_instance=reddit, username="bot", password="pw", allowed_subreddits=[])  # noqa: S106
     assert "not in the allowed_subreddits scope" in blocked.reddit_write(
         action="create_post",
         subreddit="python",
@@ -160,7 +160,7 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
         content="C",
     )
 
-    toolkit = RedditTools(reddit_instance=reddit, username="bot", password="pw", allowed_subreddits=["Python"])  # noqa: S106
+    toolkit = reddit_tools()(reddit_instance=reddit, username="bot", password="pw", allowed_subreddits=["Python"])  # noqa: S106
     stats = json.loads(toolkit.reddit_read(action="subreddit_stats", subreddit="python"))
     assert stats["subreddit_stats"]["subscribers"] == 100
     posted = json.loads(toolkit.reddit_write(action="create_post", subreddit="python", title="Hi", content="Body"))
@@ -179,7 +179,7 @@ def test_reddit_read_write_and_allowed_subreddits_boundary() -> None:
 
 def test_google_maps_toggles_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Google Maps respects explicit None toggles, stays offline on init, and dispatches calls."""
-    disabled = GoogleMapTools(
+    disabled = google_maps_tools()(
         key="AIza-test",
         search_places=None,
         get_directions=None,
@@ -192,7 +192,7 @@ def test_google_maps_toggles_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> No
     )
     assert list(disabled.functions) == []
 
-    toolkit = GoogleMapTools(key="AIza-test", get_elevation=False)
+    toolkit = google_maps_tools()(key="AIza-test", get_elevation=False)
     toolkit.client = MagicMock()
     toolkit.client.geocode.return_value = [{"formatted_address": "Amsterdam"}]
     toolkit.client.directions.return_value = [{"summary": "A10"}]
@@ -224,7 +224,7 @@ def test_google_maps_toggles_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_brandfetch_toggles_validation_and_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Brandfetch respects explicit None toggles, rejects traversal queries, and dispatches both actions."""
-    disabled = BrandfetchTools(
+    disabled = brandfetch_tools()(
         api_key="k",
         client_id="c",
         enable_search_by_identifier=None,
@@ -244,10 +244,10 @@ def test_brandfetch_toggles_validation_and_lookup(monkeypatch: pytest.MonkeyPatc
     real_client = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
 
-    default_tool = BrandfetchTools(api_key="bf_key", client_id="bf_cid")
+    default_tool = brandfetch_tools()(api_key="bf_key", client_id="bf_cid")
     assert json.loads(default_tool.brandfetch_lookup("nike.com"))["name"] == "Nike"
     assert "disabled" in json.loads(default_tool.brandfetch_lookup("Nike", action="by_brand"))["error"]
 
-    all_tool = BrandfetchTools(api_key="bf_key", client_id="bf_cid", all=True)
+    all_tool = brandfetch_tools()(api_key="bf_key", client_id="bf_cid", all=True)
     assert json.loads(all_tool.brandfetch_lookup("Nike", action="by_brand"))[0]["domain"] == "nike.com"
     assert "Invalid query" in json.loads(all_tool.brandfetch_lookup("../secret"))["error"]

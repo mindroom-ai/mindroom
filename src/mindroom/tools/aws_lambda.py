@@ -44,7 +44,7 @@ def _build_lambda_client(region_name: str, runtime_paths: RuntimePaths | None) -
     return session.client("lambda", region_name=region_name)
 
 
-class AWSLambdaTools(Toolkit):
+class _AWSLambdaTools(Toolkit):
     """List and invoke AWS Lambda functions in a configured region."""
 
     def __init__(
@@ -135,6 +135,6 @@ class AWSLambdaTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_lambda",
     function_names=("invoke_function", "list_functions"),
 )
-def aws_lambda_tools() -> type[AWSLambdaTools]:
+def aws_lambda_tools() -> type[Toolkit]:
     """Return AWS Lambda tools for serverless function management."""
-    return AWSLambdaTools
+    return _AWSLambdaTools

@@ -9,12 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.airflow import AirflowTools
-from mindroom.tools.aws_lambda import AWSLambdaTools
-from mindroom.tools.mem0 import Mem0Tools
-from mindroom.tools.zep import ZepTools
+from mindroom.tools.airflow import airflow_tools
+from mindroom.tools.aws_lambda import aws_lambda_tools
+from mindroom.tools.mem0 import mem0_tools
+from mindroom.tools.zep import zep_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,10 +31,10 @@ def test_batch4_action_scoped_grants_and_toggles() -> None:
     assert registry.entries["mem0"].action_scoped_grants == ("mem0_read",)
     assert registry.entries["zep"].action_scoped_grants == ("zep_read",)
 
-    assert list(AirflowTools(enable_save_dag_file=None, enable_read_dag_file=None).functions) == []
+    assert list(airflow_tools()(enable_save_dag_file=None, enable_read_dag_file=None).functions) == []
     assert (
         list(
-            Mem0Tools(
+            mem0_tools()(
                 enable_add_memory=None,
                 enable_search_memory=None,
                 enable_get_all_memories=None,
@@ -43,7 +45,7 @@ def test_batch4_action_scoped_grants_and_toggles() -> None:
     )
     assert (
         list(
-            ZepTools(
+            zep_tools()(
                 api_key="zep-key",
                 enable_add_zep_message=None,
                 enable_get_zep_memory=None,
@@ -82,7 +84,7 @@ def test_aws_lambda_scoped_credentials_toggles_and_invoke(tmp_path: Path, monkey
             return fake_client
 
     with patch("boto3.session.Session", _FakeSession):
-        disabled = AWSLambdaTools(
+        disabled = aws_lambda_tools()(
             region_name="eu-west-1",
             enable_list_functions=None,
             enable_invoke_function=None,
@@ -90,7 +92,7 @@ def test_aws_lambda_scoped_credentials_toggles_and_invoke(tmp_path: Path, monkey
         )
         assert list(disabled.functions) == []
 
-        toolkit = AWSLambdaTools(region_name="eu-west-1", runtime_paths=paths)
+        toolkit = aws_lambda_tools()(region_name="eu-west-1", runtime_paths=paths)
 
     assert session_kwargs_seen[0] == {
         "region_name": "eu-west-1",
@@ -107,7 +109,7 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
     """Zep requires scoped api_key, stays offline at init, and uses zep-cloud 3.x APIs cleanly."""
     monkeypatch.setenv("ZEP_API_KEY", "host-zep-secret")
     with pytest.raises(ValueError, match="Zep API key"):
-        ZepTools(api_key=None)
+        zep_tools()(api_key=None)
 
     fake_zep = MagicMock()
     fake_zep.thread.get_user_context.return_value = SimpleNamespace(context="User likes tea.")
@@ -118,7 +120,7 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
     )
 
     with patch("zep_cloud.client.Zep", return_value=fake_zep) as zep_cls:
-        toolkit = ZepTools(
+        toolkit = zep_tools()(
             api_key="scoped-zep-key",
             user_id="alice",
             session_id="sess-1",
@@ -140,7 +142,7 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
         assert "Tea: Beverage" in toolkit.zep_read(action="search", query="tea", search_scope="nodes")
 
     # Disabled search sub-action is enforced cleanly.
-    read_only_context = ZepTools(
+    read_only_context = zep_tools()(
         api_key="scoped-zep-key",
         user_id="alice",
         session_id="sess-1",
@@ -151,3 +153,42 @@ def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatc
     read_only_context.session_id = "sess-1"
     read_only_context._initialized = True
     assert "disabled" in read_only_context.zep_read(action="search", query="tea")
+
+
+def test_wave8_retired_approval_rules_fail_closed_and_action_scoped_grants(tmp_path: Path) -> None:
+    """Wave 8 retired functions fail closed in tool_approval.rules and action_scoped_grants scope per action."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    registry = builtin_tool_registry()
+
+    stale = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["linear", "spotify", "zep"], "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": "create_issue", "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="linear_write"):
+        Config.validate_with_runtime(stale, paths)
+
+    migrated = Config.validate_with_runtime(
+        {
+            **stale,
+            "tool_approval": {"rules": [{"match": "linear_write", "action": "require_approval"}]},
+        },
+        paths,
+    )
+    op_create = grant_operation(
+        migrated,
+        "linear_write",
+        {"action": "create_issue", "title": "Bug", "team_id": "t1"},
+        tools=registry,
+        toolkit_name="linear",
+    )
+    op_update = grant_operation(
+        migrated,
+        "linear_write",
+        {"action": "update_issue", "issue_id": "i1", "title": "Fix"},
+        tools=registry,
+        toolkit_name="linear",
+    )
+    assert op_create is not None
+    assert op_update is not None
+    assert op_create != op_update

@@ -1958,23 +1958,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Manage Bitbucket repositories, pull requests, commits, and issues",
       "display_name": "Bitbucket",
       "docs_url": "https://docs.mindroom.chat/tools/project-management/#bitbucket",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_repository",
-        "get_pull_request_changes",
-        "get_pull_request_details",
-        "get_repository_details",
-        "list_all_pull_requests",
-        "list_issues",
-        "list_repositories",
-        "list_repository_commits"
+        "bitbucket_read",
+        "bitbucket_create_repository"
       ],
       "helper_text": "For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in Token, with your Atlassian account email in Username. Other deployments must accept the supplied credentials through Basic authentication.",
       "icon": "SiBitbucket",
@@ -2127,21 +2119,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests",
-        "pytz"
-      ],
+      "dependencies": [],
       "description": "Calendar scheduling and booking management",
       "display_name": "Cal.com",
       "docs_url": "https://docs.mindroom.chat/tools/calendar-and-scheduling/#cal_com",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "cancel_booking",
-        "create_booking",
-        "get_available_slots",
-        "get_upcoming_bookings",
-        "reschedule_booking"
+        "cal_com_read",
+        "cal_com_write"
       ],
       "helper_text": null,
       "icon": "FaCalendarAlt",
@@ -4395,14 +4381,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "geocode_address",
-        "get_directions",
-        "get_distance_matrix",
-        "get_elevation",
-        "get_timezone",
-        "reverse_geocode",
-        "search_places",
-        "validate_address"
+        "google_maps_places",
+        "google_maps_routes"
       ],
       "helper_text": null,
       "icon": "SiGooglemaps",
@@ -4865,23 +4845,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Issue tracking and project management",
       "display_name": "Linear",
       "docs_url": "https://docs.mindroom.chat/tools/project-management/#linear",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_issue",
-        "get_high_priority_issues",
-        "get_issue_details",
-        "get_teams_details",
-        "get_user_assigned_issues",
-        "get_user_details",
-        "get_workflow_issues",
-        "update_issue"
+        "linear_read",
+        "linear_write"
       ],
       "helper_text": null,
       "icon": "SiLinear",
@@ -6736,13 +6708,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_board",
-        "create_card",
-        "create_list",
-        "get_board_lists",
-        "get_cards",
-        "list_boards",
-        "move_card"
+        "trello_read",
+        "trello_write"
       ],
       "helper_text": null,
       "icon": "SiTrello",
@@ -7130,9 +7097,7 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Customer support platform for searching help center articles",
       "display_name": "Zendesk",
       "docs_url": "https://docs.mindroom.chat/tools/project-management/#zendesk",
@@ -7673,33 +7638,17 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "httpx"
-      ],
+      "dependencies": [],
       "description": "Search tracks, manage playlists, get recommendations, and control playback on Spotify",
       "display_name": "Spotify",
       "docs_url": "https://docs.mindroom.chat/tools/media-and-content/#spotify",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_tracks_to_playlist",
-        "create_playlist",
-        "get_album_tracks",
-        "get_artist_top_tracks",
-        "get_current_user",
-        "get_currently_playing",
-        "get_my_top_artists",
-        "get_my_top_tracks",
-        "get_playlist",
-        "get_track_recommendations",
-        "get_user_playlists",
-        "play_track",
-        "remove_tracks_from_playlist",
-        "search_albums",
-        "search_artists",
-        "search_playlists",
-        "search_tracks",
-        "update_playlist_details"
+        "spotify_search",
+        "spotify_library",
+        "spotify_playlist_write",
+        "spotify_play"
       ],
       "helper_text": null,
       "icon": "SiSpotify",
@@ -7948,7 +7897,9 @@
           "authored_override": false,
           "default": null,
           "description": "Composio API key",
-          "env": [],
+          "env": [
+            "COMPOSIO_API_KEY"
+          ],
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -8091,7 +8042,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "composio-agno"
+        "composio-core"
       ],
       "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
       "display_name": "Composio",
@@ -8226,29 +8177,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "httpx"
-      ],
+      "dependencies": [],
       "description": "Analyze sales data, products, orders, and customer insights from your Shopify store",
       "display_name": "Shopify",
       "docs_url": "https://docs.mindroom.chat/tools/location-commerce-and-home/#shopify",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_average_order_value",
-        "get_customer_order_history",
-        "get_inventory_levels",
-        "get_low_stock_products",
-        "get_order_analytics",
-        "get_orders",
-        "get_product_sales_breakdown",
-        "get_products",
-        "get_products_bought_together",
-        "get_repeat_customers",
-        "get_sales_by_date_range",
-        "get_sales_trends",
-        "get_shop_info",
-        "get_top_selling_products"
+        "shopify_store",
+        "shopify_analytics"
       ],
       "helper_text": "Create and install new apps through the [Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), then follow its authentication steps and store the Admin API access token here. Existing legacy custom apps can keep their token setup. This tool does not issue or refresh tokens.",
       "icon": "SiShopify",
@@ -8501,22 +8438,15 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "requests"
-      ],
+      "dependencies": [],
       "description": "Manage tasks, spaces, and lists in ClickUp project management",
       "display_name": "ClickUp",
       "docs_url": "https://docs.mindroom.chat/tools/project-management/#clickup",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_task",
-        "delete_task",
-        "get_task",
-        "list_lists",
-        "list_spaces",
-        "list_tasks",
-        "update_task"
+        "clickup_read",
+        "clickup_write"
       ],
       "helper_text": "Get your API key from [ClickUp Settings > Apps](https://app.clickup.com/settings/apps)",
       "icon": "SiClickup",
@@ -9343,10 +9273,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_memory",
-        "delete_all_memories",
-        "get_all_memories",
-        "search_memory"
+        "mem0_read",
+        "mem0_add",
+        "mem0_delete_all"
       ],
       "helper_text": null,
       "icon": "Brain",
@@ -9695,9 +9624,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_page",
-        "search_pages",
-        "update_page"
+        "notion_search",
+        "notion_write"
       ],
       "helper_text": "Create an integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it",
       "icon": "SiNotion",
@@ -10335,13 +10263,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "close_task",
-        "create_task",
-        "delete_task",
-        "get_active_tasks",
-        "get_projects",
-        "get_task",
-        "update_task"
+        "todoist_read",
+        "todoist_write"
       ],
       "helper_text": null,
       "icon": "SiTodoist",
@@ -10683,9 +10606,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_zep_message",
-        "get_zep_memory",
-        "search_zep_memory"
+        "zep_read",
+        "zep_add_message"
       ],
       "helper_text": null,
       "icon": "Brain",
@@ -11112,19 +11034,14 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "httpx"
-      ],
+      "dependencies": [],
       "description": "Retrieve brand data including logos, colors, and fonts by domain or name",
       "display_name": "Brandfetch",
       "docs_url": "https://docs.mindroom.chat/tools/media-and-content/#brandfetch",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "asearch_by_brand",
-        "asearch_by_identifier",
-        "search_by_brand",
-        "search_by_identifier"
+        "brandfetch_lookup"
       ],
       "helper_text": "Get API keys from [Brandfetch Developers](https://developers.brandfetch.com/)",
       "icon": "FaPalette",
@@ -14958,14 +14875,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_post",
-        "get_subreddit_info",
-        "get_subreddit_stats",
-        "get_top_posts",
-        "get_trending_subreddits",
-        "get_user_info",
-        "reply_to_comment",
-        "reply_to_post"
+        "reddit_read",
+        "reddit_write"
       ],
       "helper_text": null,
       "icon": "SiReddit",

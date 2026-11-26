@@ -23,7 +23,7 @@ _WriteAction = Literal["create_page", "update_page"]
 _NOTION_API_VERSION = "2022-06-28"
 
 
-class NotionTools(Toolkit):
+class _NotionTools(Toolkit):
     """Create, update, and search pages in a Notion database."""
 
     def __init__(
@@ -235,6 +235,6 @@ class NotionTools(Toolkit):
     function_names=("notion_search", "notion_write"),
     action_scoped_grants=("notion_write",),
 )
-def notion_tools() -> type[NotionTools]:
+def notion_tools() -> type[Toolkit]:
     """Return Notion tools for page management."""
-    return NotionTools
+    return _NotionTools

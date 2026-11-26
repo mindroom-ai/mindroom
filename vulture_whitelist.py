@@ -393,8 +393,6 @@ _.transcribe_audio  # OpenAITools and GroqTools register these file_access overr
 _.translate_audio  # GroqTools registers this file_access override (src/mindroom/tools/agno_compat_groq.py)
 _.extract_audio  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
 _.create_srt  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
-_.save_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
-_.read_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
 
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)

@@ -16,7 +16,7 @@ _WriteAction = Literal["create_task", "update_task", "delete_task"]
 _CLICKUP_BASE_URL = "https://api.clickup.com/api/v2"
 
 
-class ClickUpTools(Toolkit):
+class _ClickUpTools(Toolkit):
     """Manage ClickUp spaces, lists, and tasks via the ClickUp v2 REST API."""
 
     def __init__(
@@ -248,6 +248,6 @@ class ClickUpTools(Toolkit):
     function_names=("clickup_read", "clickup_write"),
     action_scoped_grants=("clickup_read", "clickup_write"),
 )
-def clickup_tools() -> type[ClickUpTools]:
+def clickup_tools() -> type[Toolkit]:
     """Return ClickUp tools for project management."""
-    return ClickUpTools
+    return _ClickUpTools

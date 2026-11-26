@@ -26,7 +26,7 @@ _CALCOM_API_BASE = "https://api.cal.com/v2"
 _CALCOM_API_VERSION = "2024-08-13"
 
 
-class CalComTools(Toolkit):
+class _CalComTools(Toolkit):
     """Query availability and manage bookings via the Cal.com v2 API."""
 
     def __init__(
@@ -338,6 +338,6 @@ class CalComTools(Toolkit):
     function_names=("cal_com_read", "cal_com_write"),
     action_scoped_grants=("cal_com_read", "cal_com_write"),
 )
-def cal_com_tools() -> type[CalComTools]:
+def cal_com_tools() -> type[Toolkit]:
     """Return Cal.com tools for calendar scheduling and booking management."""
-    return CalComTools
+    return _CalComTools

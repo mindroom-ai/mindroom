@@ -84,17 +84,15 @@
     "functions": [
       {
         "name": "save_dag_file",
-        "description": "Saves python code for an Airflow DAG to a file called `dag_file` and returns the file path if successful.",
+        "description": "Write Python DAG `contents` to `dag_file` under the DAG directory and return its path.",
         "parameters": {
           "type": "object",
           "properties": {
             "contents": {
-              "type": "string",
-              "description": "The contents of the DAG."
+              "type": "string"
             },
             "dag_file": {
-              "type": "string",
-              "description": "The file to save to, relative to the DAG directory; with ``file_access: workspace`` it must stay inside the agent workspace."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -120,13 +118,12 @@
       },
       {
         "name": "read_dag_file",
-        "description": "Reads an Airflow DAG file `dag_file` and returns the contents if successful.",
+        "description": "Read and return the contents of `dag_file` under the DAG directory.",
         "parameters": {
           "type": "object",
           "properties": {
             "dag_file": {
-              "type": "string",
-              "description": "The file to read, relative to the DAG directory; with ``file_access: workspace`` it must be inside the agent workspace."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -246,7 +243,7 @@
     "functions": [
       {
         "name": "list_functions",
-        "description": "List all AWS Lambda functions in the configured AWS account.",
+        "description": "List AWS Lambda function names in the configured region.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -271,17 +268,15 @@
       },
       {
         "name": "invoke_function",
-        "description": "Invoke a specific AWS Lambda function with an optional JSON payload.",
+        "description": "Invoke AWS Lambda `function_name` with a JSON `payload` string.",
         "parameters": {
           "type": "object",
           "properties": {
             "function_name": {
-              "type": "string",
-              "description": "(str) The name of the Lambda function to invoke."
+              "type": "string"
             },
             "payload": {
-              "type": "string",
-              "description": "(str) The JSON payload to send to the function. Defaults to \"{}\"."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -413,14 +408,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_by_identifier",
-        "description": "Search for brand data by identifier (domain, brand id, isin, stock ticker).",
+        "name": "brandfetch_lookup",
+        "description": "Retrieve Brandfetch brand assets or search brands by name.\nActions:\n- `by_identifier`: Fetch brand assets for domain, brand ID, ISIN, or ticker `query` (requires `api_key`).\n- `by_brand`: Search brands by name `query` (requires `client_id` and `enable_search_by_brand`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "identifier": {
+            "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "Options are you can use: Domain (nike.com), Brand ID (id_0dwKPKT), ISIN (US6541061031), Stock Ticker (NKE)"
+              "enum": [
+                "by_identifier",
+                "by_brand"
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -436,38 +437,7 @@
             }
           },
           "required": [
-            "identifier"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_by_brand",
-        "description": "Search for brands by name using the Brand Search API - can give you the right brand id to use for the brand api.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Brand name to search for (e.g., 'Google', 'Apple')"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "name"
+            "query"
           ]
         },
         "strict": false,
@@ -792,18 +762,47 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_available_slots",
-        "description": "Get available time slots for booking.",
+        "name": "cal_com_read",
+        "description": "Read Cal.com availability and upcoming bookings.\nActions:\n- `available_slots`: Fetch open slots between `start_date` and `end_date` (`YYYY-MM-DD`).\n- `upcoming_bookings`: List upcoming bookings (optional `email` attendee filter).",
         "parameters": {
           "type": "object",
           "properties": {
-            "start_date": {
+            "action": {
               "type": "string",
-              "description": "Start date in YYYY-MM-DD format"
+              "enum": [
+                "available_slots",
+                "upcoming_bookings"
+              ]
+            },
+            "start_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "end_date": {
-              "type": "string",
-              "description": "End date in YYYY-MM-DD format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "email": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -819,8 +818,7 @@
             }
           },
           "required": [
-            "start_date",
-            "end_date"
+            "action"
           ]
         },
         "strict": false,
@@ -828,24 +826,40 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_booking",
-        "description": "Create a new booking.",
+        "name": "cal_com_write",
+        "description": "Create, reschedule, or cancel Cal.com bookings.\nActions:\n- `create_booking`: Book `start_time` (ISO-8601) for attendee `name` and `email`.\n- `reschedule_booking`: Move `booking_uid` to `start_time` with `reason`.\n- `cancel_booking`: Cancel `booking_uid` with `reason`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "start_time": {
+            "action": {
               "type": "string",
-              "description": "Start time in YYYY-MM-DDTHH:MM:SSZ format"
+              "enum": [
+                "create_booking",
+                "reschedule_booking",
+                "cancel_booking"
+              ]
+            },
+            "start_time": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "name": {
-              "type": "string",
-              "description": "Attendee's name"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "email": {
-              "type": "string",
-              "description": "Attendee's email"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -853,67 +867,27 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "start_time",
-            "name",
-            "email"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_upcoming_bookings",
-        "description": "Get all upcoming bookings for an attendee.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "email": {
-              "type": "string",
-              "description": "(str) Attendee's email [Optional]"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reschedule_booking",
-        "description": "Reschedule an existing booking.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "booking_uid": {
-              "type": "string",
-              "description": "Booking UID to reschedule"
-            },
-            "new_start_time": {
-              "type": "string",
-              "description": "New start time in YYYY-MM-DDTHH:MM:SSZ format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "reason": {
-              "type": "string",
-              "description": "Reason for rescheduling"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -929,45 +903,7 @@
             }
           },
           "required": [
-            "booking_uid",
-            "new_start_time",
-            "reason"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_booking",
-        "description": "Cancel an existing booking.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "booking_uid": {
-              "type": "string",
-              "description": "Booking UID to cancel"
-            },
-            "reason": {
-              "type": "string",
-              "description": "Reason for cancellation"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "booking_uid",
-            "reason"
+            "action"
           ]
         },
         "strict": false,
@@ -4059,8 +3995,52 @@
     "guidance": null,
     "functions": [
       {
-        "name": "add_memory",
-        "description": "Add facts to the user's memory.",
+        "name": "mem0_read",
+        "description": "Search or list stored Mem0 memories for the configured user.\nActions:\n- `search`: Semantic search across memories (`query`).\n- `get_all`: Return all memories for the user.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "search",
+                "get_all"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "mem0_add",
+        "description": "Store a fact or key-value dictionary in the user's Mem0 memory.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4078,8 +4058,7 @@
                     "type": "string"
                   }
                 }
-              ],
-              "description": "(Union[str, Dict[str, str]]) The facts that should be stored."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4103,63 +4082,8 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_memory",
-        "description": "Semantic search for *query* across the user's stored memories.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_all_memories",
-        "description": "Return **all** memories for the current user as a JSON string.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_all_memories",
-        "description": "Delete *all* memories associated with the current user",
+        "name": "mem0_delete_all",
+        "description": "Permanently delete all Mem0 memories for the configured user.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4502,91 +4426,13 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_page",
-        "description": "Create a new page in the Notion database with a title, tag, and content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "title": {
-              "type": "string",
-              "description": "(str) The title of the page"
-            },
-            "tag": {
-              "type": "string",
-              "description": "(str) The tag/category for the page (e.g., travel, tech, general-blogs, fashion, documents)"
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content to add to the page"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "title",
-            "tag",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_page",
-        "description": "Add content to an existing Notion page.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "page_id": {
-              "type": "string",
-              "description": "(str) The ID of the page to update"
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content to append to the page"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "page_id",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_pages",
-        "description": "Search for pages in the database by tag.",
+        "name": "notion_search",
+        "description": "Search Notion database pages matching a `Tag` select value.",
         "parameters": {
           "type": "object",
           "properties": {
             "tag": {
-              "type": "string",
-              "description": "(str) The tag to search for"
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4603,6 +4449,80 @@
           },
           "required": [
             "tag"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "notion_write",
+        "description": "Create or append content to Notion pages.\nActions:\n- `create_page`: Create a page in the database (`title`, `tag`, `content`).\n- `update_page`: Append a paragraph block to `page_id` (`page_id`, `content`).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_page",
+                "update_page"
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tag": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "page_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
           ]
         },
         "strict": false,
@@ -8723,7 +8643,7 @@
     "functions": [
       {
         "name": "search_zendesk",
-        "description": "Searches for articles in Zendesk Help Center that match the given search string.\nParameters:\nsearch_string (str): The search query to look for in Zendesk articles.\n\nReturns:\nstr: A JSON-formatted string containing the list of articles without HTML tags.\n\nRaises:\nConnectionError: If the API request fails due to connection-related issues.",
+        "description": "Search Zendesk Help Center articles matching `search_string`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -8760,22 +8680,79 @@
       "enable_get_zep_memory": true,
       "enable_search_zep_memory": true
     },
-    "instructions": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
-    "guidance": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
+    "instructions": null,
+    "guidance": null,
     "functions": [
       {
-        "name": "add_zep_message",
-        "description": "Adds a message to the current Zep session memory.",
+        "name": "zep_read",
+        "description": "Retrieve Zep session context/messages or search the user knowledge graph.\nActions:\n- `context`: Summarized memory context for the current session.\n- `messages`: Raw messages in the current session.\n- `search`: Search user graph `edges` (facts) or `nodes` for `query` (`search_scope`).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "context",
+                "messages",
+                "search"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search_scope": {
+              "type": "string",
+              "enum": [
+                "edges",
+                "nodes"
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "zep_add_message",
+        "description": "Append a message with `role` and `content` to the current Zep session.",
         "parameters": {
           "type": "object",
           "properties": {
             "role": {
               "type": "string",
-              "description": "(str) The role of the message sender (e.g., 'user', 'assistant', 'system')."
+              "enum": [
+                "user",
+                "assistant",
+                "system",
+                "function",
+                "tool"
+              ]
             },
             "content": {
-              "type": "string",
-              "description": "(str) The text content of the message."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8793,70 +8770,6 @@
           "required": [
             "role",
             "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_zep_memory",
-        "description": "Retrieves the memory for the current Zep session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "memory_type": {
-              "type": "string",
-              "description": "The type of memory to retrieve ('context', 'messages')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_zep_memory",
-        "description": "Searches the Zep knowledge graph for relevant facts or nodes.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The search term to find relevant facts or nodes."
-            },
-            "search_scope": {
-              "type": "string",
-              "description": "The scope of the search to perform. Can be \"edges\" (for facts) or \"nodes\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
           ]
         },
         "strict": false,

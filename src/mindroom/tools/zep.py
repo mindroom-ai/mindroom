@@ -18,7 +18,7 @@ _SearchScope = Literal["edges", "nodes"]
 _MessageRole = Literal["user", "assistant", "system", "function", "tool"]
 
 
-class ZepTools(Toolkit):
+class _ZepTools(Toolkit):
     """Store conversation messages and retrieve or search Zep memory."""
 
     def __init__(
@@ -236,6 +236,6 @@ class ZepTools(Toolkit):
     function_names=("zep_read", "zep_add_message"),
     action_scoped_grants=("zep_read",),
 )
-def zep_tools() -> type[ZepTools]:
+def zep_tools() -> type[Toolkit]:
     """Return Zep memory tools for storing and retrieving conversational data."""
-    return ZepTools
+    return _ZepTools

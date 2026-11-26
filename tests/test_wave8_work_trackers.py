@@ -10,10 +10,10 @@ import httpx
 import pytest
 
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.clickup import ClickUpTools
-from mindroom.tools.linear import LinearTools
-from mindroom.tools.notion import NotionTools
-from mindroom.tools.trello import TrelloTools
+from mindroom.tools.clickup import clickup_tools
+from mindroom.tools.linear import linear_tools
+from mindroom.tools.notion import notion_tools
+from mindroom.tools.trello import trello_tools
 
 
 def test_batch1_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,12 +35,12 @@ def test_batch1_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("TRELLO_TOKEN", "host-secret")
 
     with pytest.raises(ValueError, match="Linear API key"):
-        LinearTools(api_key=None)
+        linear_tools()(api_key=None)
     with pytest.raises(ValueError, match="Notion API key"):
-        NotionTools(api_key=None, database_id="db-1")
+        notion_tools()(api_key=None, database_id="db-1")
     with pytest.raises(ValueError, match="ClickUp API key"):
-        ClickUpTools(api_key=None, master_space_id="space-1")
-    trello = TrelloTools()
+        clickup_tools()(api_key=None, master_space_id="space-1")
+    trello = trello_tools()()
     assert "required" in json.loads(trello.trello_read(action="list_boards"))["error"]
 
 
@@ -90,7 +90,7 @@ def test_linear_read_and_write(monkeypatch: pytest.MonkeyPatch) -> None:
         return httpx.Response(200, request=req, json={"errors": [{"message": "boom"}]})
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    toolkit = LinearTools(api_key="lin_key", timeout=15)
+    toolkit = linear_tools()(api_key="lin_key", timeout=15)
 
     assert json.loads(toolkit.linear_read(action="viewer"))["name"] == "Ada"
     created = json.loads(toolkit.linear_write(action="create_issue", title="Bug", team_id="t1"))
@@ -104,7 +104,7 @@ def test_linear_read_and_write(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_notion_toggles_and_crud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Notion respects explicit None toggles, validates IDs, and runs search/create/update."""
-    disabled = NotionTools(
+    disabled = notion_tools()(
         api_key="ntn_key",
         database_id="db-123",
         enable_create_page=None,
@@ -114,9 +114,9 @@ def test_notion_toggles_and_crud(monkeypatch: pytest.MonkeyPatch) -> None:
     assert list(disabled.functions) == []
 
     with pytest.raises(ValueError, match="Invalid database_id"):
-        NotionTools(api_key="ntn_key", database_id="../other")
+        notion_tools()(api_key="ntn_key", database_id="../other")
 
-    toolkit = NotionTools(api_key="ntn_key", database_id="db-123", enable_update_page=False)
+    toolkit = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=False)
     toolkit.client = MagicMock()
     toolkit.client.pages.create.return_value = {"id": "p1", "url": "https://notion.so/p1"}
 
@@ -156,7 +156,7 @@ def test_notion_toggles_and_crud(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_clickup_read_write_and_path_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     """ClickUp validates path segments and executes space/list/task flows."""
     with pytest.raises(ValueError, match="Invalid master_space_id"):
-        ClickUpTools(api_key="pk_1", master_space_id="team/../bad")
+        clickup_tools()(api_key="pk_1", master_space_id="team/../bad")
 
     def fake_request(
         method: str,
@@ -181,7 +181,7 @@ def test_clickup_read_write_and_path_validation(monkeypatch: pytest.MonkeyPatch)
         return httpx.Response(404, request=req, text="not found")
 
     monkeypatch.setattr(httpx, "request", fake_request)
-    toolkit = ClickUpTools(api_key="pk_1", master_space_id="team1")
+    toolkit = clickup_tools()(api_key="pk_1", master_space_id="team1")
 
     created = json.loads(toolkit.clickup_write(action="create_task", space_name="eng", task_name="Fix CI"))
     assert created["id"] == "tk1"
@@ -195,7 +195,7 @@ def test_clickup_read_write_and_path_validation(monkeypatch: pytest.MonkeyPatch)
 
 def test_trello_read_write_and_validation() -> None:
     """Trello dispatches board/list/card operations and validates path segments."""
-    toolkit = TrelloTools(api_key="k", api_secret="s", token="t")  # noqa: S106 - synthetic credentials
+    toolkit = trello_tools()(api_key="k", api_secret="s", token="t")  # noqa: S106 - synthetic credentials
     fake_card = SimpleNamespace(
         id="c1",
         name="Task",

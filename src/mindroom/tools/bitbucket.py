@@ -37,7 +37,7 @@ def _normalize_base_url(server_url: str, api_version: str) -> str:
     return f"{raw}/{safe_version}"
 
 
-class BitbucketTools(Toolkit):
+class _BitbucketTools(Toolkit):
     """Manage Bitbucket repositories, commits, pull requests, and issues."""
 
     def __init__(
@@ -276,6 +276,6 @@ class BitbucketTools(Toolkit):
     function_names=("bitbucket_read", "bitbucket_create_repository"),
     action_scoped_grants=("bitbucket_read",),
 )
-def bitbucket_tools() -> type[BitbucketTools]:
+def bitbucket_tools() -> type[Toolkit]:
     """Return Bitbucket tools for repository management."""
-    return BitbucketTools
+    return _BitbucketTools

@@ -23,7 +23,7 @@ from mindroom.tools.native_helpers import (
 _HTML_TAG_RE = re.compile(r"<.*?>")
 
 
-class ZendeskTools(Toolkit):
+class _ZendeskTools(Toolkit):
     """Search Zendesk Help Center articles."""
 
     def __init__(
@@ -132,6 +132,6 @@ class ZendeskTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/project-management/#zendesk",
     function_names=("search_zendesk",),
 )
-def zendesk_tools() -> type[ZendeskTools]:
+def zendesk_tools() -> type[Toolkit]:
     """Return Zendesk tools for searching help center articles."""
-    return ZendeskTools
+    return _ZendeskTools

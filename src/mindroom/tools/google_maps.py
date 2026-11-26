@@ -35,7 +35,7 @@ def _require_coords(lat: float | None, lng: float | None) -> tuple[float, float]
     return (float(lat), float(lng))
 
 
-class GoogleMapTools(Toolkit):
+class _GoogleMapTools(Toolkit):
     """Query Google Maps Places, Geocoding, Address Validation, Elevation, Timezone, and Routes APIs."""
 
     def __init__(
@@ -311,6 +311,6 @@ class GoogleMapTools(Toolkit):
     function_names=("google_maps_places", "google_maps_routes"),
     action_scoped_grants=("google_maps_places", "google_maps_routes"),
 )
-def google_maps_tools() -> type[GoogleMapTools]:
+def google_maps_tools() -> type[Toolkit]:
     """Return Google Maps tools for location services."""
-    return GoogleMapTools
+    return _GoogleMapTools

@@ -112,17 +112,15 @@
     "functions": [
       {
         "name": "save_dag_file",
-        "description": "Saves python code for an Airflow DAG to a file called `dag_file` and returns the file path if successful.",
+        "description": "Write Python DAG `contents` to `dag_file` under the DAG directory and return its path.",
         "parameters": {
           "type": "object",
           "properties": {
             "contents": {
-              "type": "string",
-              "description": "The contents of the DAG."
+              "type": "string"
             },
             "dag_file": {
-              "type": "string",
-              "description": "The file to save to, relative to the DAG directory; with ``file_access: workspace`` it must stay inside the agent workspace."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -148,13 +146,12 @@
       },
       {
         "name": "read_dag_file",
-        "description": "Reads an Airflow DAG file `dag_file` and returns the contents if successful.",
+        "description": "Read and return the contents of `dag_file` under the DAG directory.",
         "parameters": {
           "type": "object",
           "properties": {
             "dag_file": {
-              "type": "string",
-              "description": "The file to read, relative to the DAG directory; with ``file_access: workspace`` it must be inside the agent workspace."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1113,7 +1110,7 @@
     "functions": [
       {
         "name": "list_functions",
-        "description": "List all AWS Lambda functions in the configured AWS account.",
+        "description": "List AWS Lambda function names in the configured region.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1138,17 +1135,15 @@
       },
       {
         "name": "invoke_function",
-        "description": "Invoke a specific AWS Lambda function with an optional JSON payload.",
+        "description": "Invoke AWS Lambda `function_name` with a JSON `payload` string.",
         "parameters": {
           "type": "object",
           "properties": {
             "function_name": {
-              "type": "string",
-              "description": "(str) The name of the Lambda function to invoke."
+              "type": "string"
             },
             "payload": {
-              "type": "string",
-              "description": "(str) The JSON payload to send to the function. Defaults to \"{}\"."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1267,14 +1262,44 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_repositories",
-        "description": "Get all repositories in the workspace.",
+        "name": "bitbucket_read",
+        "description": "Read Bitbucket repositories, commits, pull requests, diffs, and issues.\nActions:\n- `list_repositories`: List workspace repositories (up to `count`, max 50).\n- `repository_details`: Fetch metadata for the configured repository.\n- `commits`: List repository commits (up to `count`, max 50).\n- `pull_requests`: List pull requests filtered by `state`.\n- `pull_request_details`: Fetch details for `pull_request_id`.\n- `pull_request_changes`: Fetch raw diff for `pull_request_id`.\n- `issues`: List repository issues (up to `count`, max 50).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_repositories",
+                "repository_details",
+                "commits",
+                "pull_requests",
+                "pull_request_details",
+                "pull_request_changes",
+                "issues"
+              ]
+            },
             "count": {
-              "type": "integer",
-              "description": "(int) The number of repositories to retrieve"
+              "type": "integer"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "OPEN",
+                "MERGED",
+                "DECLINED",
+                "SUPERSEDED"
+              ]
+            },
+            "pull_request_id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1289,70 +1314,61 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_repository_details",
-        "description": "Retrieves repository information.\nAPI Docs: https://developer.atlassian.com/cloud/bitbucket/rest/api-group-repositories/#api-repositories-workspace-repo-slug-get",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_repository",
-        "description": "Creates a new repository in Bitbucket for the given workspace.",
+        "name": "bitbucket_create_repository",
+        "description": "Create a new Git repository in the configured Bitbucket workspace.",
         "parameters": {
           "type": "object",
           "properties": {
             "name": {
-              "type": "string",
-              "description": "(str) The name of the new repository."
+              "type": "string"
             },
             "project": {
-              "type": "string",
-              "description": "(str) The key of the project to create the repository in."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "is_private": {
-              "type": "boolean",
-              "description": "(bool) Whether the repository is private."
+              "type": "boolean"
             },
             "description": {
-              "type": "string",
-              "description": "(str) A short description of the repository."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "language": {
-              "type": "string",
-              "description": "(str) The primary language of the repository"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "has_issues": {
-              "type": "boolean",
-              "description": "(bool) Whether the repository has issues enabled."
+              "type": "boolean"
             },
             "has_wiki": {
-              "type": "boolean",
-              "description": "(bool) Whether the repository has a wiki enabled."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1374,155 +1390,6 @@
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
-      },
-      {
-        "name": "list_repository_commits",
-        "description": "Retrieves all commits in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "count": {
-              "type": "integer",
-              "description": "(int) The number of commits to retrieve. Defaults to 10. Maximum 50."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_all_pull_requests",
-        "description": "Retrieves all pull requests for a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "state": {
-              "type": "string",
-              "description": "(str) The state of the pull requests to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_details",
-        "description": "Retrieves a pull request for a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pull_request_id": {
-              "type": "integer",
-              "description": "(int) The ID of the pull request to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "pull_request_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_pull_request_changes",
-        "description": "Retrieves changes for a pull request in a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pull_request_id": {
-              "type": "integer",
-              "description": "(int) The ID of the pull request to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "pull_request_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_issues",
-        "description": "Retrieves all issues for a repository.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "count": {
-              "type": "integer",
-              "description": "(int) The number of issues to retrieve. Defaults to 10. Maximum 50."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
       }
     ]
   },
@@ -1531,14 +1398,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_by_identifier",
-        "description": "Search for brand data by identifier (domain, brand id, isin, stock ticker).",
+        "name": "brandfetch_lookup",
+        "description": "Retrieve Brandfetch brand assets or search brands by name.\nActions:\n- `by_identifier`: Fetch brand assets for domain, brand ID, ISIN, or ticker `query` (requires `api_key`).\n- `by_brand`: Search brands by name `query` (requires `client_id` and `enable_search_by_brand`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "identifier": {
+            "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "Options are you can use: Domain (nike.com), Brand ID (id_0dwKPKT), ISIN (US6541061031), Stock Ticker (NKE)"
+              "enum": [
+                "by_identifier",
+                "by_brand"
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1554,7 +1427,7 @@
             }
           },
           "required": [
-            "identifier"
+            "query"
           ]
         },
         "strict": false,
@@ -3522,18 +3395,47 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_available_slots",
-        "description": "Get available time slots for booking.",
+        "name": "cal_com_read",
+        "description": "Read Cal.com availability and upcoming bookings.\nActions:\n- `available_slots`: Fetch open slots between `start_date` and `end_date` (`YYYY-MM-DD`).\n- `upcoming_bookings`: List upcoming bookings (optional `email` attendee filter).",
         "parameters": {
           "type": "object",
           "properties": {
-            "start_date": {
+            "action": {
               "type": "string",
-              "description": "Start date in YYYY-MM-DD format"
+              "enum": [
+                "available_slots",
+                "upcoming_bookings"
+              ]
+            },
+            "start_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "end_date": {
-              "type": "string",
-              "description": "End date in YYYY-MM-DD format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "email": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3549,8 +3451,7 @@
             }
           },
           "required": [
-            "start_date",
-            "end_date"
+            "action"
           ]
         },
         "strict": false,
@@ -3558,24 +3459,40 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_booking",
-        "description": "Create a new booking.",
+        "name": "cal_com_write",
+        "description": "Create, reschedule, or cancel Cal.com bookings.\nActions:\n- `create_booking`: Book `start_time` (ISO-8601) for attendee `name` and `email`.\n- `reschedule_booking`: Move `booking_uid` to `start_time` with `reason`.\n- `cancel_booking`: Cancel `booking_uid` with `reason`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "start_time": {
+            "action": {
               "type": "string",
-              "description": "Start time in YYYY-MM-DDTHH:MM:SSZ format"
+              "enum": [
+                "create_booking",
+                "reschedule_booking",
+                "cancel_booking"
+              ]
+            },
+            "start_time": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "name": {
-              "type": "string",
-              "description": "Attendee's name"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "email": {
-              "type": "string",
-              "description": "Attendee's email"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -3583,67 +3500,27 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "start_time",
-            "name",
-            "email"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_upcoming_bookings",
-        "description": "Get all upcoming bookings for an attendee.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "email": {
-              "type": "string",
-              "description": "(str) Attendee's email [Optional]"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reschedule_booking",
-        "description": "Reschedule an existing booking.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "booking_uid": {
-              "type": "string",
-              "description": "Booking UID to reschedule"
-            },
-            "new_start_time": {
-              "type": "string",
-              "description": "New start time in YYYY-MM-DDTHH:MM:SSZ format"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "reason": {
-              "type": "string",
-              "description": "Reason for rescheduling"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3659,45 +3536,7 @@
             }
           },
           "required": [
-            "booking_uid",
-            "new_start_time",
-            "reason"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_booking",
-        "description": "Cancel an existing booking.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "booking_uid": {
-              "type": "string",
-              "description": "Booking UID to cancel"
-            },
-            "reason": {
-              "type": "string",
-              "description": "Reason for cancellation"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "booking_uid",
-            "reason"
+            "action"
           ]
         },
         "strict": false,
@@ -4381,14 +4220,39 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_tasks",
-        "description": "List all tasks in a space.",
+        "name": "clickup_read",
+        "description": "Read ClickUp spaces, lists, and tasks.\nActions:\n- `list_spaces`: List all spaces in the configured workspace.\n- `list_lists`: List lists in `space_name`.\n- `list_tasks`: List all tasks across lists in `space_name`.\n- `get_task`: Fetch a single task by `task_id`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "space_name": {
+            "action": {
               "type": "string",
-              "description": "(str) Name of the space to list tasks from"
+              "enum": [
+                "list_spaces",
+                "list_lists",
+                "list_tasks",
+                "get_task"
+              ]
+            },
+            "space_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4404,7 +4268,7 @@
             }
           },
           "required": [
-            "space_name"
+            "action"
           ]
         },
         "strict": false,
@@ -4412,22 +4276,82 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_task",
-        "description": "Create a new task in a space.",
+        "name": "clickup_write",
+        "description": "Create, update, or delete ClickUp tasks.\nActions:\n- `create_task`: Create a task in `space_name` (`task_name`, optional `task_description`, optional `list_name`).\n- `update_task`: Update `task_id` (`updates` dict and/or `task_name`, `task_description`).\n- `delete_task`: Permanently delete `task_id`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "space_name": {
+            "action": {
               "type": "string",
-              "description": "(str) Name of the space to create task in"
+              "enum": [
+                "create_task",
+                "update_task",
+                "delete_task"
+              ]
+            },
+            "space_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "list_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "task_name": {
-              "type": "string",
-              "description": "(str) Name of the task"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "task_description": {
-              "type": "string",
-              "description": "(str) Description of the task"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "updates": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4443,158 +4367,7 @@
             }
           },
           "required": [
-            "space_name",
-            "task_name",
-            "task_description"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_task",
-        "description": "Get details of a specific task.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "(str) The ID of the task"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_task",
-        "description": "Update a specific task.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "(str) The ID of the task"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_task",
-        "description": "Delete a specific task.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "(str) The ID of the task"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_spaces",
-        "description": "List all spaces in the workspace.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_lists",
-        "description": "List all lists in a space.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "space_name": {
-              "type": "string",
-              "description": "(str) Name of the space to list lists from"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "space_name"
+            "action"
           ]
         },
         "strict": false,
@@ -14363,16 +14136,23 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_places",
-        "description": "Search for places using Google Maps Places API.\nThis tool takes a search query and returns detailed place information.",
+        "name": "google_maps_places",
+        "description": "Search places, geocode/validate addresses, or look up elevation and timezone.\nActions:\n- `search_places`: Text place search (`query`).\n- `geocode`: Convert `address` to coordinates (optional `region`).\n- `reverse_geocode`: Convert `lat`/`lng` to address (optional `result_type`, `location_type`).\n- `validate_address`: Validate `address` (optional `region`, `locality`, `enable_usps_cass`).\n- `elevation`: Elevation at `lat`/`lng`.\n- `timezone`: Timezone at `lat`/`lng` (optional ISO-8601 `timestamp`).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "search_places",
+                "geocode",
+                "reverse_geocode",
+                "validate_address",
+                "elevation",
+                "timezone"
+              ]
+            },
             "query": {
-              "type": "string",
-              "description": "(str) The query string to search for using Google Maps Search API. (e.g., \"dental clinics in Noida\")"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -14380,95 +14160,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_directions",
-        "description": "Get directions between two locations using Google Maps Directions API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "origin": {
-              "type": "string",
-              "description": "(str) Starting point address or coordinates"
+              ]
             },
-            "destination": {
-              "type": "string",
-              "description": "(str) Destination address or coordinates"
-            },
-            "mode": {
-              "type": "string",
-              "description": "(str) Travel mode. Options: \"driving\", \"walking\", \"bicycling\", \"transit\". Defaults to \"driving\""
-            },
-            "departure_time": {
-              "type": "object",
-              "properties": {},
-              "additionalProperties": false,
-              "description": "(datetime) Desired departure time for transit directions"
-            },
-            "avoid": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) Features to avoid: \"tolls\", \"highways\", \"ferries\""
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "origin",
-            "destination"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "validate_address",
-        "description": "Validate an address using Google Maps Address Validation API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "address": {
-              "type": "string",
-              "description": "(str) The address to validate"
-            },
-            "region_code": {
-              "type": "string",
-              "description": "(str) The region code (e.g., \"US\" for United States)"
-            },
-            "locality": {
-              "type": "string",
-              "description": "(str) The locality (city) to help with validation"
-            },
-            "enable_usps_cass": {
-              "type": "boolean",
-              "description": "(bool) Whether to enable USPS CASS validation for US addresses"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -14476,34 +14170,29 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "address"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "geocode_address",
-        "description": "Convert an address into geographic coordinates using Google Maps Geocoding API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "address": {
-              "type": "string",
-              "description": "(str) The address to geocode"
+              ]
+            },
+            "lat": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lng": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "region": {
-              "type": "string",
-              "description": "(str) The region code to bias results"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -14511,46 +14200,56 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "address"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reverse_geocode",
-        "description": "Convert geographic coordinates into an address using Google Maps Reverse Geocoding API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "lat": {
-              "type": "number",
-              "description": "(float) Latitude"
+              ]
             },
-            "lng": {
-              "type": "number",
-              "description": "(float) Longitude"
+            "locality": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "enable_usps_cass": {
+              "type": "boolean"
             },
             "result_type": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) Array of address types to filter results"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "location_type": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) Array of location types to filter results"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "timestamp": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14566,8 +14265,7 @@
             }
           },
           "required": [
-            "lat",
-            "lng"
+            "action"
           ]
         },
         "strict": false,
@@ -14575,41 +14273,95 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_distance_matrix",
-        "description": "Calculate distance and time for a matrix of origins and destinations.",
+        "name": "google_maps_routes",
+        "description": "Compute Google Maps directions or distance matrices.\nActions:\n- `directions`: Route from `origin` to `destination` (`mode`, optional ISO-8601 `departure_time`, `avoid`).\n- `distance_matrix`: Travel time/distance between `origins` and `destinations` (`mode`, `departure_time`, `avoid`).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "directions",
+                "distance_matrix"
+              ]
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "destination": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "origins": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) List of addresses or coordinates"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "destinations": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) List of addresses or coordinates"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mode": {
               "type": "string",
-              "description": "(str) Travel mode. Options: \"driving\", \"walking\", \"bicycling\", \"transit\""
+              "enum": [
+                "driving",
+                "walking",
+                "bicycling",
+                "transit"
+              ]
             },
             "departure_time": {
-              "type": "object",
-              "properties": {},
-              "additionalProperties": false,
-              "description": "(datetime) Desired departure time"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "avoid": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "(List[str]) Features to avoid: \"tolls\", \"highways\", \"ferries\""
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14625,86 +14377,7 @@
             }
           },
           "required": [
-            "origins",
-            "destinations"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_elevation",
-        "description": "Get the elevation for a specific location using Google Maps Elevation API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "lat": {
-              "type": "number",
-              "description": "(float) Latitude"
-            },
-            "lng": {
-              "type": "number",
-              "description": "(float) Longitude"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "lat",
-            "lng"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_timezone",
-        "description": "Get timezone information for a location using Google Maps Time Zone API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "lat": {
-              "type": "number",
-              "description": "(float) Latitude"
-            },
-            "lng": {
-              "type": "number",
-              "description": "(float) Longitude"
-            },
-            "timestamp": {
-              "type": "object",
-              "properties": {},
-              "additionalProperties": false,
-              "description": "(datetime) The timestamp to use for timezone calculation"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "lat",
-            "lng"
+            "action"
           ]
         },
         "strict": false,
@@ -16284,64 +15957,51 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_user_details",
-        "description": "Fetch authenticated user details.\nIt will return the user's unique ID, name, and email address from the viewer object in the GraphQL response.",
+        "name": "linear_read",
+        "description": "Read Linear user, team, and issue data.\nActions:\n- `viewer`: Authenticated user profile.\n- `teams`: Accessible teams.\n- `issue`: Details for `issue_id`.\n- `user_issues`: Issues assigned to `user_id`.\n- `workflow_issues`: Issues in workflow state `workflow_id`.\n- `high_priority`: Issues with priority <= 2.",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_teams_details",
-        "description": "Fetch the list of authenticated teams.\nIt will return the unique ID and team name for each team, from the viewer object in the GraphQL response.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_issue_details",
-        "description": "Retrieve details of a specific issue by issue ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_id": {
+            "action": {
               "type": "string",
-              "description": "(str) The unique identifier of the issue to retrieve."
+              "enum": [
+                "viewer",
+                "teams",
+                "issue",
+                "user_issues",
+                "workflow_issues",
+                "high_priority"
+              ]
+            },
+            "issue_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "user_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "workflow_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -16357,7 +16017,7 @@
             }
           },
           "required": [
-            "issue_id"
+            "action"
           ]
         },
         "strict": false,
@@ -16365,30 +16025,77 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_issue",
-        "description": "Create a new issue within a specific project and team.",
+        "name": "linear_write",
+        "description": "Create or update Linear issues.\nActions:\n- `create_issue`: Create an issue (`title`, `team_id`; optional `description`, `project_id`, `assignee_id`).\n- `update_issue`: Update `issue_id` (`title`, `description`, or `assignee_id`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "title": {
+            "action": {
               "type": "string",
-              "description": "(str) The title of the new issue."
+              "enum": [
+                "create_issue",
+                "update_issue"
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "description": {
-              "type": "string",
-              "description": "(str) The description of the new issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "team_id": {
-              "type": "string",
-              "description": "(str) The unique identifier of the team in which to create the issue."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "issue_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "project_id": {
-              "type": "string",
-              "description": "(Optional[str]) The ID of the project (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "assignee_id": {
-              "type": "string",
-              "description": "(Optional[str]) The ID of the assignee (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -16404,133 +16111,8 @@
             }
           },
           "required": [
-            "title",
-            "description",
-            "team_id"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_issue",
-        "description": "Update the title or state of a specific issue by issue ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "issue_id": {
-              "type": "string",
-              "description": "(str) The unique identifier of the issue to update."
-            },
-            "title": {
-              "type": "string",
-              "description": "(str) The new title for the issue. If None, the title remains unchanged."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "issue_id",
-            "title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_user_assigned_issues",
-        "description": "Retrieve issues assigned to a specific user by user ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "user_id": {
-              "type": "string",
-              "description": "(str) The unique identifier of the user for whom to retrieve assigned issues."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "user_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_workflow_issues",
-        "description": "Retrieve issues within a specific workflow state by workflow ID.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "workflow_id": {
-              "type": "string",
-              "description": "(str) The unique identifier of the workflow state to retrieve issues from."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "workflow_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_high_priority_issues",
-        "description": "Retrieve issues with a high priority (priority <= 2).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -17427,8 +17009,52 @@
     "guidance": null,
     "functions": [
       {
-        "name": "add_memory",
-        "description": "Add facts to the user's memory.",
+        "name": "mem0_read",
+        "description": "Search or list stored Mem0 memories for the configured user.\nActions:\n- `search`: Semantic search across memories (`query`).\n- `get_all`: Return all memories for the user.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "search",
+                "get_all"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "mem0_add",
+        "description": "Store a fact or key-value dictionary in the user's Mem0 memory.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17446,8 +17072,7 @@
                     "type": "string"
                   }
                 }
-              ],
-              "description": "(Union[str, Dict[str, str]]) The facts that should be stored."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17471,63 +17096,8 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_memory",
-        "description": "Semantic search for *query* across the user's stored memories.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_all_memories",
-        "description": "Return **all** memories for the current user as a JSON string.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_all_memories",
-        "description": "Delete *all* memories associated with the current user",
+        "name": "mem0_delete_all",
+        "description": "Permanently delete all Mem0 memories for the configured user.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20158,91 +19728,13 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_page",
-        "description": "Create a new page in the Notion database with a title, tag, and content.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "title": {
-              "type": "string",
-              "description": "(str) The title of the page"
-            },
-            "tag": {
-              "type": "string",
-              "description": "(str) The tag/category for the page (e.g., travel, tech, general-blogs, fashion, documents)"
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content to add to the page"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "title",
-            "tag",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_page",
-        "description": "Add content to an existing Notion page.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "page_id": {
-              "type": "string",
-              "description": "(str) The ID of the page to update"
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content to append to the page"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "page_id",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_pages",
-        "description": "Search for pages in the database by tag.",
+        "name": "notion_search",
+        "description": "Search Notion database pages matching a `Tag` select value.",
         "parameters": {
           "type": "object",
           "properties": {
             "tag": {
-              "type": "string",
-              "description": "(str) The tag to search for"
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20259,6 +19751,80 @@
           },
           "required": [
             "tag"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "notion_write",
+        "description": "Create or append content to Notion pages.\nActions:\n- `create_page`: Create a page in the database (`title`, `tag`, `content`).\n- `update_page`: Append a paragraph block to `page_id` (`page_id`, `content`).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_page",
+                "update_page"
+              ]
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tag": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "page_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
           ]
         },
         "strict": false,
@@ -22583,15 +22149,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_user_info",
-        "description": "Get information about a Reddit user.",
+        "name": "reddit_read",
+        "description": "Read Reddit user profiles, posts, and subreddit metadata.\nActions:\n- `user_info`: Profile & karma for `username`.\n- `top_posts`: Top posts in `subreddit` (`time_filter`, `limit`).\n- `subreddit_info`: Metadata & available flairs for `subreddit`.\n- `trending_subreddits`: Top 5 popular subreddits.\n- `subreddit_stats`: Subscriber & active user counts for `subreddit`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "username": {
-              "type": "string"
+            "action": {
+              "type": "string",
+              "enum": [
+                "user_info",
+                "top_posts",
+                "subreddit_info",
+                "trending_subreddits",
+                "subreddit_stats"
+              ]
             },
-            "mindroom_output_path": {
+            "username": {
               "anyOf": [
                 {
                   "type": "string"
@@ -22599,36 +22172,31 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "username"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_top_posts",
-        "description": "Get top posts from a subreddit for a specific time period.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
             "subreddit": {
-              "type": "string",
-              "description": "(str) Name of the subreddit."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "time_filter": {
               "type": "string",
-              "description": "(str) Time period to filter posts."
+              "enum": [
+                "all",
+                "day",
+                "hour",
+                "month",
+                "week",
+                "year"
+              ]
             },
             "limit": {
-              "type": "integer",
-              "description": "(int) Number of posts to fetch."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -22644,7 +22212,7 @@
             }
           },
           "required": [
-            "subreddit"
+            "action"
           ]
         },
         "strict": false,
@@ -22652,72 +22220,20 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_subreddit_info",
-        "description": "Get information about a specific subreddit.",
+        "name": "reddit_write",
+        "description": "Create Reddit posts or reply to posts and comments.\nActions:\n- `create_post`: Submit a post in `subreddit` (`title`, `content`, optional `flair`, `is_self`).\n- `reply_to_post`: Reply to `post_id` (ID or URL) with `content` (optional `subreddit` check).\n- `reply_to_comment`: Reply to `comment_id` (ID or URL) with `content` (optional `subreddit` check).",
         "parameters": {
           "type": "object",
           "properties": {
-            "subreddit_name": {
+            "action": {
               "type": "string",
-              "description": "(str) Name of the subreddit."
+              "enum": [
+                "create_post",
+                "reply_to_post",
+                "reply_to_comment"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "subreddit_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_trending_subreddits",
-        "description": "Get currently trending subreddits.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_subreddit_stats",
-        "description": "Get statistics about a subreddit.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "subreddit": {
-              "type": "string",
-              "description": "(str) Name of the subreddit."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -22725,44 +22241,60 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "subreddit"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_post",
-        "description": "Create a new post in a subreddit.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "subreddit": {
-              "type": "string",
-              "description": "(str) Name of the subreddit to post in."
+              ]
             },
             "title": {
-              "type": "string",
-              "description": "(str) Title of the post."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "content": {
-              "type": "string",
-              "description": "(str) Content of the post (text for self posts, URL for link posts)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "post_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "comment_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "flair": {
-              "type": "string",
-              "description": "(Optional[str]) Flair to add to the post. Must be an available flair in the subreddit."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "is_self": {
-              "type": "boolean",
-              "description": "(bool) Whether this is a self (text) post (True) or link post (False)."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -22778,89 +22310,7 @@
             }
           },
           "required": [
-            "subreddit",
-            "title",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reply_to_post",
-        "description": "Post a reply to an existing Reddit post or comment.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "post_id": {
-              "type": "string",
-              "description": "(str) The ID of the post or comment to reply to.\nCan be a full URL, permalink, or just the ID."
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content of the reply."
-            },
-            "subreddit": {
-              "type": "string",
-              "description": "(Optional[str]) The subreddit name if known.\nThis helps with error handling and validation."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "post_id",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reply_to_comment",
-        "description": "Post a reply to an existing Reddit comment.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "comment_id": {
-              "type": "string",
-              "description": "(str) The ID of the comment to reply to.\nCan be a full URL, permalink, or just the ID."
-            },
-            "content": {
-              "type": "string",
-              "description": "(str) The content of the reply."
-            },
-            "subreddit": {
-              "type": "string",
-              "description": "(Optional[str]) The subreddit name if known.\nThis helps with error handling and validation."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "comment_id",
-            "content"
+            "action"
           ]
         },
         "strict": false,
@@ -24506,45 +23956,25 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_shop_info",
-        "description": "Get basic information about the Shopify store.",
+        "name": "shopify_store",
+        "description": "Read Shopify store metadata, products, orders, and inventory levels.\nActions:\n- `shop_info`: Store metadata, currency, domain, and plan.\n- `products`: List products (optional `max_results`, `status`: ACTIVE/ARCHIVED/DRAFT).\n- `orders`: Recent orders (optional `max_results`, `status`: paid/pending/refunded, `created_after`/`created_before` YYYY-MM-DD).\n- `inventory_levels`: Inventory quantities for active products (`max_results`).\n- `low_stock`: Active products at or below `threshold` inventory (`max_results`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_products",
-        "description": "Get products from the store.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "shop_info",
+                "products",
+                "orders",
+                "inventory_levels",
+                "low_stock"
+              ]
+            },
             "max_results": {
-              "type": "integer",
-              "description": "Maximum number of products to return (default 50, max 250)."
+              "type": "integer"
             },
             "status": {
-              "type": "string",
-              "description": "Filter by status - 'ACTIVE', 'ARCHIVED', or 'DRAFT' (optional)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -24552,40 +23982,19 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_orders",
-        "description": "Get recent orders from the store.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of orders to return (default 50, max 250)."
-            },
-            "status": {
-              "type": "string",
-              "description": "Filter by financial status - 'paid', 'pending', 'refunded' (optional)."
+              ]
             },
             "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -24593,280 +24002,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_top_selling_products",
-        "description": "Get the top selling products by quantity sold.\nAnalyzes order data to find which products sell the most.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "limit": {
-              "type": "integer",
-              "description": "Number of top products to return (default 10)."
+              ]
             },
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_products_bought_together",
-        "description": "Find products that are frequently bought together.\nAnalyzes orders to find product pairs that appear together most often.\nUseful for cross-selling and bundle recommendations.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "min_occurrences": {
-              "type": "integer",
-              "description": "Minimum times a pair must appear together (default 2)."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Number of product pairs to return (default 20)."
-            },
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_sales_by_date_range",
-        "description": "Get sales summary for a specific date range.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "start_date": {
-              "type": "string",
-              "description": "Start date in YYYY-MM-DD format."
-            },
-            "end_date": {
-              "type": "string",
-              "description": "End date in YYYY-MM-DD format."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "start_date",
-            "end_date"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_order_analytics",
-        "description": "Get comprehensive order analytics for a time period.\nProvides metrics like total orders, revenue, average order value,\nfulfillment rates, and more.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_product_sales_breakdown",
-        "description": "Get detailed sales breakdown for a specific product.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "product_id": {
-              "type": "string",
-              "description": "The Shopify product ID (gid://shopify/Product/xxx or just the number)."
-            },
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "product_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_customer_order_history",
-        "description": "Get order history for a specific customer.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "customer_email": {
-              "type": "string",
-              "description": "The customer's email address."
-            },
-            "max_orders": {
-              "type": "integer",
-              "description": "Maximum number of orders to return (default 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "customer_email"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_inventory_levels",
-        "description": "Get current inventory levels for all products.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of products to return (default 100)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_low_stock_products",
-        "description": "Get products that are running low on stock.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "threshold": {
-              "type": "integer",
-              "description": "Inventory level below which a product is considered low stock (default 10)."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of products to return (default 50)."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -24881,31 +24020,45 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_sales_trends",
-        "description": "Get sales trends comparing current period to previous period.",
+        "name": "shopify_analytics",
+        "description": "Analyze Shopify sales, product performance, and customer order insights.\nActions (optional `created_after`/`created_before` YYYY-MM-DD unless noted):\n- `top_selling`: Top products by quantity (`limit`).\n- `bought_together`: Frequent product pairs (`min_occurrences`, `limit`).\n- `sales_by_date`: Revenue and daily breakdown (requires `created_after`, `created_before`).\n- `order_analytics`: Totals, AOV, shipping, tax, and status breakdowns.\n- `product_breakdown`: Sales by variant and day for `product_id`.\n- `customer_orders`: Order history for `customer_email` (`limit`).\n- `sales_trends`: Period metrics with optional `compare_previous_period`.\n- `average_order_value`: AOV grouped by `group_by` (`day`/`week`/`month`).\n- `repeat_customers`: Customers with >= `min_occurrences` orders (`limit`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "created_after": {
+            "action": {
               "type": "string",
-              "description": "Start date for analysis period (YYYY-MM-DD format, optional)."
+              "enum": [
+                "top_selling",
+                "bought_together",
+                "sales_by_date",
+                "order_analytics",
+                "product_breakdown",
+                "customer_orders",
+                "sales_trends",
+                "average_order_value",
+                "repeat_customers"
+              ]
+            },
+            "created_after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "created_before": {
-              "type": "string",
-              "description": "End date for analysis period (YYYY-MM-DD format, optional)."
-            },
-            "compare_previous_period": {
-              "type": "boolean",
-              "description": "Whether to compare with previous period of same length (default True)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -24913,75 +24066,44 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_average_order_value",
-        "description": "Get average order value over time.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
+            "product_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "customer_email": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "min_occurrences": {
+              "type": "integer"
+            },
             "group_by": {
               "type": "string",
-              "description": "How to group data - 'day', 'week', or 'month' (default 'day')."
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
             },
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_repeat_customers",
-        "description": "Find customers who have made multiple purchases.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "min_orders": {
-              "type": "integer",
-              "description": "Minimum number of orders to qualify as repeat customer (default 2)."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum number of customers to return (default 50)."
-            },
-            "created_after": {
-              "type": "string",
-              "description": "Only include orders created after this date (YYYY-MM-DD format, optional)."
-            },
-            "created_before": {
-              "type": "string",
-              "description": "Only include orders created before this date (YYYY-MM-DD format, optional)."
+            "compare_previous_period": {
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -24996,7 +24118,9 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -25646,24 +24770,53 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_tracks",
-        "description": "Search for tracks on Spotify.\nUse this to find songs by name, artist, album, or any combination.\nExamples: \"happy Eminem\", \"Coldplay Paradise\", \"upbeat pop songs\"",
+        "name": "spotify_search",
+        "description": "Search Spotify catalog, get recommendations, or inspect album/artist tracks.\nActions:\n- `search`: Search by `query` and `search_type` (`track`/`playlist`/`artist`/`album`, `limit`, `market`).\n- `recommendations`: Recommend tracks from `seed_tracks`/`seed_artists`/`seed_genres` and audio targets (`limit`).\n- `album_tracks`: Fetch tracks for album `item_id` (`market`).\n- `artist_top_tracks`: Fetch top tracks for artist `item_id` (`market`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "Search query - can include track name, artist, genre, mood, etc."
+              "enum": [
+                "search",
+                "recommendations",
+                "album_tracks",
+                "artist_top_tracks"
+              ]
             },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of tracks to return (default 10, max 50)."
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search_type": {
+              "type": "string",
+              "enum": [
+                "track",
+                "playlist",
+                "artist",
+                "album"
+              ]
+            },
+            "item_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "type": "integer"
             },
             "market": {
-              "type": "string",
-              "description": "Country code for market (e.g., 'US'). Uses default if not specified."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -25671,236 +24824,86 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_playlists",
-        "description": "Search for playlists on Spotify by name.\nUse this to find playlists by name before updating them.\nExample: \"Good Vibes\", \"Workout Mix\", \"Chill Beats\"",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Search query - playlist name or keywords."
+              ]
             },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of playlists to return (default 10, max 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_artists",
-        "description": "Search for artists on Spotify.\nUse this to find an artist's ID before getting their top tracks.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Artist name to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of artists to return (default 5, max 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_albums",
-        "description": "Search for albums on Spotify.\nUse this to find an album's ID before getting its tracks.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Album name or artist + album name to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of albums to return (default 10, max 50)."
-            },
-            "market": {
-              "type": "string",
-              "description": "Country code for market (e.g., 'US'). Uses default if not specified."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_user_playlists",
-        "description": "Get the current user's playlists.\nUse this to find playlists owned by or followed by the current user.\nThis is more reliable than search when looking for the user's own playlists.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "max_results": {
-              "type": "integer",
-              "description": "Maximum number of playlists to return (default 20, max 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_track_recommendations",
-        "description": "Get track recommendations based on seed tracks, artists, or genres.\nMust provide at least one seed (track, artist, or genre). Maximum 5 seeds total.\n\nFor mood-based playlists, use these audio features (0.0 to 1.0 scale):\n- valence: happiness (0=sad, 1=happy)\n- energy: intensity (0=calm, 1=energetic)\n- danceability: how danceable (0=least, 1=most)\n- tempo: BPM (e.g., 120 for upbeat)",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "seed_tracks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of Spotify track IDs (not URIs) to use as seeds."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "seed_artists": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of Spotify artist IDs to use as seeds."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "seed_genres": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of genres (e.g., \"pop\", \"hip-hop\", \"rock\", \"electronic\")."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Number of recommendations to return (default 20, max 100)."
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "target_energy": {
-              "type": "number",
-              "description": "Target energy level 0.0-1.0 (higher = more energetic)."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "target_valence": {
-              "type": "number",
-              "description": "Target happiness level 0.0-1.0 (higher = happier)."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "target_danceability": {
-              "type": "number",
-              "description": "Target danceability 0.0-1.0 (higher = more danceable)."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "target_tempo": {
-              "type": "number",
-              "description": "Target tempo in BPM (e.g., 120)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "number"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_artist_top_tracks",
-        "description": "Get an artist's top tracks on Spotify.\nUse search_artists first to get the artist_id if you don't have it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "artist_id": {
-              "type": "string",
-              "description": "The Spotify ID of the artist."
-            },
-            "market": {
-              "type": "string",
-              "description": "Country code for market (e.g., 'US'). Uses default if not specified."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -25916,7 +24919,7 @@
             }
           },
           "required": [
-            "artist_id"
+            "action"
           ]
         },
         "strict": false,
@@ -25924,20 +24927,23 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_album_tracks",
-        "description": "Get all tracks from an album.\nUse search_albums first to get the album_id if you don't have it.\nUseful for adding entire albums to a playlist.",
+        "name": "spotify_library",
+        "description": "Read the user's Spotify profile, playback state, playlists, and top items.\nActions:\n- `current_user`: Authenticated user profile.\n- `currently_playing`: Current track, device, and playback progress.\n- `user_playlists`: Current user's playlists (`limit`).\n- `playlist`: Details and optional track list for `playlist_id` (`include_tracks`).\n- `my_top_tracks`: User's top tracks (`time_range`, `limit`).\n- `my_top_artists`: User's top artists (`time_range`, `limit`).",
         "parameters": {
           "type": "object",
           "properties": {
-            "album_id": {
+            "action": {
               "type": "string",
-              "description": "The Spotify ID of the album."
+              "enum": [
+                "current_user",
+                "currently_playing",
+                "user_playlists",
+                "playlist",
+                "my_top_tracks",
+                "my_top_artists"
+              ]
             },
-            "market": {
-              "type": "string",
-              "description": "Country code for market (e.g., 'US'). Uses default if not specified."
-            },
-            "mindroom_output_path": {
+            "playlist_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -25945,187 +24951,21 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "album_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_my_top_tracks",
-        "description": "Get the current user's most played tracks.\nRequires the 'user-top-read' scope.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "time_range": {
-              "type": "string",
-              "description": "Time period for top tracks:\n- \"short_term\": Last 4 weeks\n- \"medium_term\": Last 6 months (default)\n- \"long_term\": All time (several years)"
+              ]
             },
             "limit": {
-              "type": "integer",
-              "description": "Number of tracks to return (default 20, max 50)."
+              "type": "integer"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_my_top_artists",
-        "description": "Get the current user's most played artists.\nRequires the 'user-top-read' scope.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "time_range": {
               "type": "string",
-              "description": "Time period for top artists:\n- \"short_term\": Last 4 weeks\n- \"medium_term\": Last 6 months (default)\n- \"long_term\": All time (several years)"
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Number of artists to return (default 20, max 50)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_playlist",
-        "description": "Create a new playlist for the current user.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Name of the playlist."
-            },
-            "description": {
-              "type": "string",
-              "description": "Optional description for the playlist."
-            },
-            "public": {
-              "type": "boolean",
-              "description": "Whether the playlist should be public (default False)."
-            },
-            "track_uris": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Optional list of Spotify track URIs to add initially.\nFormat: [\"spotify:track:xxx\", \"spotify:track:yyy\"]"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "add_tracks_to_playlist",
-        "description": "Add tracks to an existing playlist.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "playlist_id": {
-              "type": "string",
-              "description": "The Spotify ID of the playlist."
-            },
-            "track_uris": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of Spotify track URIs to add.\nFormat: [\"spotify:track:xxx\", \"spotify:track:yyy\"]"
-            },
-            "position": {
-              "type": "integer",
-              "description": "Optional position to insert tracks (0-indexed). Appends to end if not specified."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "playlist_id",
-            "track_uris"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_playlist",
-        "description": "Get details of a playlist.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "playlist_id": {
-              "type": "string",
-              "description": "The Spotify ID of the playlist."
+              "enum": [
+                "short_term",
+                "medium_term",
+                "long_term"
+              ]
             },
             "include_tracks": {
-              "type": "boolean",
-              "description": "Whether to include track listing (default True)."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -26141,7 +24981,7 @@
             }
           },
           "required": [
-            "playlist_id"
+            "action"
           ]
         },
         "strict": false,
@@ -26149,28 +24989,51 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "update_playlist_details",
-        "description": "Update a playlist's name, description, or visibility.",
+        "name": "spotify_playlist_write",
+        "description": "Create or modify Spotify playlists.\nActions:\n- `create`: Create a playlist (`name`; optional `description`, `public`, `track_uris`).\n- `update`: Update `playlist_id` details (`name`, `description`, or `public`).\n- `add_tracks`: Add `track_uris` (max 100) to `playlist_id` (optional 0-indexed `position`).\n- `remove_tracks`: Remove `track_uris` from `playlist_id`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "playlist_id": {
+            "action": {
               "type": "string",
-              "description": "The Spotify ID of the playlist."
+              "enum": [
+                "create",
+                "update",
+                "add_tracks",
+                "remove_tracks"
+              ]
             },
             "name": {
-              "type": "string",
-              "description": "New name for the playlist (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "description": {
-              "type": "string",
-              "description": "New description for the playlist (optional)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "public": {
-              "type": "boolean",
-              "description": "New visibility setting (optional)."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "mindroom_output_path": {
+            "playlist_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -26178,35 +25041,30 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "playlist_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "remove_tracks_from_playlist",
-        "description": "Remove tracks from a playlist.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "playlist_id": {
-              "type": "string",
-              "description": "The Spotify ID of the playlist."
+              ]
             },
             "track_uris": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of Spotify track URIs to remove.\nFormat: [\"spotify:track:xxx\", \"spotify:track:yyy\"]"
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -26222,8 +25080,7 @@
             }
           },
           "required": [
-            "playlist_id",
-            "track_uris"
+            "action"
           ]
         },
         "strict": false,
@@ -26231,53 +25088,12 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_current_user",
-        "description": "Get the current authenticated user's profile.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "play_track",
-        "description": "Start or resume playback on the user's Spotify.\nRequires an active Spotify session (open Spotify app on any device).\nRequires the 'user-modify-playback-state' scope.",
+        "name": "spotify_play",
+        "description": "Start or resume Spotify playback on an active device.",
         "parameters": {
           "type": "object",
           "properties": {
             "track_uri": {
-              "type": "string",
-              "description": "Spotify URI of track to play (e.g., \"spotify:track:xxx\").\nIf not provided, resumes current playback."
-            },
-            "context_uri": {
-              "type": "string",
-              "description": "Spotify URI of context to play (album, artist, playlist).\ne.g., \"spotify:playlist:xxx\" or \"spotify:album:xxx\""
-            },
-            "device_id": {
-              "type": "string",
-              "description": "Optional device ID to play on. Uses active device if not specified."
-            },
-            "position_ms": {
-              "type": "integer",
-              "description": "Position in milliseconds to start from (default 0)."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -26285,23 +25101,31 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_currently_playing",
-        "description": "Get information about the user's current playback state.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ]
+            },
+            "context_uri": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "device_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "position_ms": {
+              "type": "integer"
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -27393,33 +26217,38 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_task",
-        "description": "Create a new task in Todoist.",
+        "name": "todoist_read",
+        "description": "Read Todoist tasks and projects.\nActions:\n- `get_task`: Fetch a task by `task_id`.\n- `active_tasks`: List active tasks (optional `project_id` filter).\n- `projects`: List all projects.",
         "parameters": {
           "type": "object",
           "properties": {
-            "content": {
+            "action": {
               "type": "string",
-              "description": "The task content/description"
+              "enum": [
+                "get_task",
+                "active_tasks",
+                "projects"
+              ]
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "project_id": {
-              "type": "string",
-              "description": "Optional ID of the project to add the task to"
-            },
-            "due_string": {
-              "type": "string",
-              "description": "Optional due date in natural language (e.g., \"tomorrow at 12:00\")"
-            },
-            "priority": {
-              "type": "integer",
-              "description": "Optional priority level (1-4, where 4 is highest)"
-            },
-            "labels": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Optional list of label names to apply to the task"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27435,7 +26264,7 @@
             }
           },
           "required": [
-            "content"
+            "action"
           ]
         },
         "strict": false,
@@ -27443,15 +26272,21 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_task",
-        "description": "Get a specific task by ID.",
+        "name": "todoist_write",
+        "description": "Create, update, complete, or delete Todoist tasks.\nActions:\n- `create_task`: Create a task (`content`; optional `description`, `project_id`, `section_id`, `priority`, `labels`, `due_string`, `due_date`, `due_datetime`, `due_lang`, `assignee_id`).\n- `update_task`: Update `task_id` fields or move to `section_id`.\n- `close_task`: Mark `task_id` completed.\n- `delete_task`: Permanently delete `task_id`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "task_id": {
-              "type": "string"
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_task",
+                "update_task",
+                "close_task",
+                "delete_task"
+              ]
             },
-            "mindroom_output_path": {
+            "task_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27459,71 +26294,120 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_task",
-        "description": "Update an existing task with the specified parameters.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string",
-              "description": "The ID of the task to update"
+              ]
             },
             "content": {
-              "type": "string",
-              "description": "The task content/name"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "description": {
-              "type": "string",
-              "description": "The task description"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "labels": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Array of label names"
-            },
-            "priority": {
-              "type": "integer",
-              "description": "Task priority from 1 (normal) to 4 (urgent)"
-            },
-            "due_string": {
-              "type": "string",
-              "description": "Human readable date (\"next Monday\", \"tomorrow\", etc)"
-            },
-            "due_date": {
-              "type": "string",
-              "description": "Specific date in YYYY-MM-DD format"
-            },
-            "due_datetime": {
-              "type": "string",
-              "description": "Specific date and time in RFC3339 format"
-            },
-            "due_lang": {
-              "type": "string",
-              "description": "2-letter code specifying language of due_string (\"en\", \"fr\", etc)"
-            },
-            "assignee_id": {
-              "type": "string",
-              "description": "The responsible user ID"
+            "project_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "section_id": {
-              "type": "string",
-              "description": "ID of the section to move task to"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "labels": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "due_string": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "due_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "due_datetime": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "due_lang": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "assignee_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27539,118 +26423,8 @@
             }
           },
           "required": [
-            "task_id"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "close_task",
-        "description": "Mark a task as completed.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_task",
-        "description": "Delete a task.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "task_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "task_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_active_tasks",
-        "description": "Get all active (not completed) tasks.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_projects",
-        "description": "Get all projects.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -27843,28 +26617,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_card",
-        "description": "Create a new card in the specified board and list.",
+        "name": "trello_read",
+        "description": "Read Trello boards, lists, and cards.\nActions:\n- `list_boards`: List user boards filtered by `board_filter`.\n- `board_lists`: List lists and card counts on `board_id`.\n- `cards`: List cards in `list_id`.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_boards",
+                "board_lists",
+                "cards"
+              ]
+            },
             "board_id": {
-              "type": "string",
-              "description": "(str) ID of the board to create the card in"
-            },
-            "list_name": {
-              "type": "string",
-              "description": "(str) Name of the list to add the card to"
-            },
-            "card_title": {
-              "type": "string",
-              "description": "(str) Title of the card"
-            },
-            "description": {
-              "type": "string",
-              "description": "(str) Description of the card"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27872,67 +26638,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "board_id",
-            "list_name",
-            "card_title"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_board_lists",
-        "description": "Get all lists on a board.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "board_id": {
-              "type": "string",
-              "description": "(str) ID of the board"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "board_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "move_card",
-        "description": "Move a card to a different list.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "card_id": {
-              "type": "string",
-              "description": "(str) ID of the card to move"
+              ]
             },
             "list_id": {
-              "type": "string",
-              "description": "(str) ID of the destination list"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -27940,135 +26648,18 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "card_id",
-            "list_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_cards",
-        "description": "Get all cards in a list.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "list_id": {
-              "type": "string",
-              "description": "(str) ID of the list"
+              ]
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "list_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_board",
-        "description": "Create a new Trello board.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "(str) Name of the board"
-            },
-            "default_lists": {
-              "type": "boolean",
-              "description": "(bool) Whether the default lists should be created"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "create_list",
-        "description": "Create a new list on a specified board.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "board_id": {
-              "type": "string",
-              "description": "(str) ID of the board to create the list in"
-            },
-            "list_name": {
-              "type": "string",
-              "description": "(str) Name of the new list"
-            },
-            "pos": {
-              "type": "string",
-              "description": "(str) Position of the list - 'top', 'bottom', or a positive number"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "board_id",
-            "list_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_boards",
-        "description": "Get a list of all boards for the authenticated user.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "board_filter": {
               "type": "string",
-              "description": "(str) Filter for boards. Options: 'all', 'open', 'closed',\n'organization', 'public', 'starred'. Defaults to 'all'."
+              "enum": [
+                "all",
+                "open",
+                "closed",
+                "organization",
+                "public",
+                "starred"
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -28083,7 +26674,104 @@
               "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "trello_write",
+        "description": "Create boards/lists/cards or move Trello cards.\nActions:\n- `create_board`: Create a board (`name`, optional `default_lists`).\n- `create_list`: Create a list on `board_id` (`list_name` or `name`, optional `pos`).\n- `create_card`: Create a card on `board_id` in `list_name` (`name`, optional `description`).\n- `move_card`: Move `card_id` to `list_id`.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create_board",
+                "create_list",
+                "create_card",
+                "move_card"
+              ]
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "board_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "list_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "list_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "card_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "type": "string"
+            },
+            "default_lists": {
+              "type": "boolean"
+            },
+            "pos": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -30229,7 +28917,7 @@
     "functions": [
       {
         "name": "search_zendesk",
-        "description": "Searches for articles in Zendesk Help Center that match the given search string.\nParameters:\nsearch_string (str): The search query to look for in Zendesk articles.\n\nReturns:\nstr: A JSON-formatted string containing the list of articles without HTML tags.\n\nRaises:\nConnectionError: If the API request fails due to connection-related issues.",
+        "description": "Search Zendesk Help Center articles matching `search_string`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -30260,22 +28948,79 @@
     ]
   },
   "zep": {
-    "instructions": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
-    "guidance": "<Memory Instructions>\nYou have access to the users memories stored in Zep. You can interact with them using the following tools:\n- `add_zep_message`: Add a message to the Zep session memory. Use this to add messages to the Zep session memory.\n- `get_zep_memory`: Get the memory for the current Zep session. Use this to get the memory for the current Zep session.\n- `search_zep_memory`: Search the Zep user graph for relevant facts. Use this to search the Zep user graph for relevant facts.\n\nGuidelines:\n- Use `add_zep_message` tool to add relevant messages to the users memories. You can use this tool multiple times to add multiple messages.\n- Use `get_zep_memory` tool to get the memory for the current Zep session for additional context. This will give you a entire context of the user's memories with relevant facts.\n- Use `search_zep_memory` tool to search the Zep user memories for relevant facts. This will give you a list of relevant facts.\n\n</Memory Instructions>",
+    "instructions": null,
+    "guidance": null,
     "functions": [
       {
-        "name": "add_zep_message",
-        "description": "Adds a message to the current Zep session memory.",
+        "name": "zep_read",
+        "description": "Retrieve Zep session context/messages or search the user knowledge graph.\nActions:\n- `context`: Summarized memory context for the current session.\n- `messages`: Raw messages in the current session.\n- `search`: Search user graph `edges` (facts) or `nodes` for `query` (`search_scope`).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "context",
+                "messages",
+                "search"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "search_scope": {
+              "type": "string",
+              "enum": [
+                "edges",
+                "nodes"
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "zep_add_message",
+        "description": "Append a message with `role` and `content` to the current Zep session.",
         "parameters": {
           "type": "object",
           "properties": {
             "role": {
               "type": "string",
-              "description": "(str) The role of the message sender (e.g., 'user', 'assistant', 'system')."
+              "enum": [
+                "user",
+                "assistant",
+                "system",
+                "function",
+                "tool"
+              ]
             },
             "content": {
-              "type": "string",
-              "description": "(str) The text content of the message."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -30293,70 +29038,6 @@
           "required": [
             "role",
             "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_zep_memory",
-        "description": "Retrieves the memory for the current Zep session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "memory_type": {
-              "type": "string",
-              "description": "The type of memory to retrieve ('context', 'messages')."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_zep_memory",
-        "description": "Searches the Zep knowledge graph for relevant facts or nodes.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The search term to find relevant facts or nodes."
-            },
-            "search_scope": {
-              "type": "string",
-              "description": "The scope of the search to perform. Can be \"edges\" (for facts) or \"nodes\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "query"
           ]
         },
         "strict": false,

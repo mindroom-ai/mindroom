@@ -56,7 +56,7 @@ mutation IssueUpdate($issueId: String!, $input: IssueUpdateInput!) {
 """
 
 
-class LinearTools(Toolkit):
+class _LinearTools(Toolkit):
     """Issue tracking and project management via Linear's GraphQL API."""
 
     def __init__(
@@ -70,7 +70,7 @@ class LinearTools(Toolkit):
         self.headers = {"Authorization": self.api_key}
         super().__init__(name="linear", tools=[self.linear_read, self.linear_write])
 
-    def _execute_query(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"query": query}
         if variables is not None:
             payload["variables"] = variables
@@ -94,17 +94,17 @@ class LinearTools(Toolkit):
         workflow_id: str | None,
     ) -> Any:  # noqa: ANN401
         if action == "viewer":
-            result: Any = self._execute_query(_QUERY_VIEWER).get("viewer")
+            result: Any = self._graphql(_QUERY_VIEWER).get("viewer")
         elif action == "teams":
-            teams = self._execute_query(_QUERY_TEAMS).get("teams")
+            teams = self._graphql(_QUERY_TEAMS).get("teams")
             result = teams.get("nodes", []) if isinstance(teams, dict) else []
         elif action == "issue":
-            result = self._execute_query(_QUERY_ISSUE, {"issueId": require_non_empty(issue_id, "issue_id")}).get(
+            result = self._graphql(_QUERY_ISSUE, {"issueId": require_non_empty(issue_id, "issue_id")}).get(
                 "issue",
             )
         elif action == "user_issues":
             target = require_non_empty(user_id, "user_id")
-            user = self._execute_query(_QUERY_USER_ISSUES, {"userId": target}).get("user")
+            user = self._graphql(_QUERY_USER_ISSUES, {"userId": target}).get("user")
             result = (
                 user.get("assignedIssues", {}).get("nodes", [])
                 if isinstance(user, dict)
@@ -112,14 +112,14 @@ class LinearTools(Toolkit):
             )
         elif action == "workflow_issues":
             target = require_non_empty(workflow_id, "workflow_id")
-            state = self._execute_query(_QUERY_WORKFLOW_ISSUES, {"workflowId": target}).get("workflowState")
+            state = self._graphql(_QUERY_WORKFLOW_ISSUES, {"workflowId": target}).get("workflowState")
             result = (
                 state.get("issues", {}).get("nodes", [])
                 if isinstance(state, dict)
                 else {"error": f"Workflow state '{target}' not found."}
             )
         else:
-            issues = self._execute_query(_QUERY_HIGH_PRIORITY).get("issues")
+            issues = self._graphql(_QUERY_HIGH_PRIORITY).get("issues")
             result = issues.get("nodes", []) if isinstance(issues, dict) else []
         return result
 
@@ -162,7 +162,7 @@ class LinearTools(Toolkit):
             variables["projectId"] = project_id
         if assignee_id is not None:
             variables["assigneeId"] = assignee_id
-        created = self._execute_query(_MUTATION_CREATE_ISSUE, variables).get("issueCreate")
+        created = self._graphql(_MUTATION_CREATE_ISSUE, variables).get("issueCreate")
         if not isinstance(created, dict) or not created.get("success"):
             return error_json("Issue creation failed.")
         return json_dumps(created.get("issue"))
@@ -182,7 +182,7 @@ class LinearTools(Toolkit):
         }
         if not update_input:
             return error_json("Provide at least one field to update (title, description, or assignee_id).")
-        updated = self._execute_query(_MUTATION_UPDATE_ISSUE, {"issueId": target, "input": update_input}).get(
+        updated = self._graphql(_MUTATION_UPDATE_ISSUE, {"issueId": target, "input": update_input}).get(
             "issueUpdate",
         )
         if not isinstance(updated, dict) or not updated.get("success"):
@@ -245,6 +245,6 @@ class LinearTools(Toolkit):
     function_names=("linear_read", "linear_write"),
     action_scoped_grants=("linear_read", "linear_write"),
 )
-def linear_tools() -> type[LinearTools]:
+def linear_tools() -> type[Toolkit]:
     """Return Linear tools for issue tracking and project management."""
-    return LinearTools
+    return _LinearTools

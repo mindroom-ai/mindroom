@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -72,28 +71,107 @@ def _module_env_reads(module_name: str) -> set[str]:
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
+_SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+# Native tools that read one named internal runtime variable directly (never a user credential).
+_ALLOWED_NATIVE_ENV_VARS: dict[str, frozenset[str]] = {
+    "mindroom.tools.shell": frozenset({"SHELL_SUPERVISOR_SOCKET_ENV"}),
+}
+
+
+def _mindroom_module_path(module_name: str) -> Path | None:
+    candidate = _SRC_ROOT / Path(*module_name.split("."))
+    if candidate.with_suffix(".py").is_file():
+        return candidate.with_suffix(".py")
+    if (candidate / "__init__.py").is_file():
+        return candidate / "__init__.py"
+    return None
+
+
+def _ast_referenced_modules(module_name: str) -> tuple[set[str], set[str]]:
+    """Collect referenced local tool modules and Agno modules by AST without importing optional SDKs."""
+    visited: set[str] = set()
+    local_modules: set[str] = set()
+    agno_modules: set[str] = set()
+    pending = [module_name]
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        path = _mindroom_module_path(current)
+        if path is None:
+            continue
+        local_modules.add(current)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module.startswith("agno.tools."):
+                    agno_modules.add(node.module)
+                elif node.module.startswith(("mindroom.tools.", "mindroom.custom_tools.")) and not node.module.endswith(
+                    ".__init__",
+                ):
+                    pending.append(node.module)
+    return local_modules, agno_modules
+
+
 def _agno_modules(tool_name: str) -> set[str]:
     """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
     factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
         return set()
+    _, ast_agno = _ast_referenced_modules(factory.__module__)
+    if not ast_agno:
+        return set()
     try:
         toolkit_class = factory()
     except ImportError:
-        # The toolkit's SDK is not installed, so read the Agno modules its registration imports.
-        registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
-        return {
-            node.module
-            for node in ast.walk(registration)
-            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
-        }
+        return ast_agno
     return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
+
+
+def _native_env_reads(module_name: str) -> set[str]:
+    """Return direct os.getenv/os.environ reads in a native MindRoom tool module via AST."""
+    path = _mindroom_module_path(module_name)
+    if path is None:
+        return set()
+    allowed = _ALLOWED_NATIVE_ENV_VARS.get(module_name, frozenset())
+    reads: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Name) and node.func.id == "getenv")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "getenv")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "get" and _is_environ(node.func.value))
+        ):
+            target = node.args[0]
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) and _is_environ(node.value):
+            target = node.slice
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id in allowed:
+            continue
+        if isinstance(target, ast.Constant) and isinstance(target.value, str):
+            reads.add(target.value)
+        else:
+            reads.add(f"<dynamic line {node.lineno}>")
+    return reads
 
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
+    """Agno toolkits declare every env var they read; native toolkits never read os.environ directly."""
+    factory = builtin_tool_registry().entries[tool_name].factory
     modules = _agno_modules(tool_name)
+    if not modules:
+        if factory is None:
+            return
+        # mindroom.tools.__init__ registers multiple built-in tools; only scan dedicated tool modules directly.
+        if factory.__module__ == "mindroom.tools":
+            return
+        local_modules, _ = _ast_referenced_modules(factory.__module__)
+        direct_reads = {mod: reads for mod in sorted(local_modules) if (reads := _native_env_reads(mod))}
+        assert direct_reads == {}, f"Native toolkit {tool_name!r} must not read os.environ directly: {direct_reads}"
+        return
+
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}

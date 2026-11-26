@@ -103,7 +103,7 @@ google_tasks_update_task("dGFzay0x", completed=True)
 ## [`cal_com`]
 
 `cal_com` uses the Cal.com v2 API at `https://api.cal.com/v2` to look up availability and manage bookings.
-It provides `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`.
+It provides `cal_com_read()` (`available_slots`, `upcoming_bookings`) and `cal_com_write()` (`create_booking`, `reschedule_booking`, `cancel_booking`).
 Slot lookup and new bookings use the configured `event_type_id`.
 Returned times are converted from UTC into `user_timezone`.
 Use the per-function `enable_*` flags when an agent should, for example, only check availability or only manage existing bookings.
@@ -134,13 +134,14 @@ agents:
 ```
 
 ```python
-get_available_slots(start_date="2026-04-01", end_date="2026-04-07")
-create_booking(
+cal_com_read(action="available_slots", start_date="2026-04-01", end_date="2026-04-07")
+cal_com_write(
+    action="create_booking",
     start_time="2026-04-03T17:00:00+00:00",
     name="Alex Example",
     email="alex@example.com",
 )
-get_upcoming_bookings(email="alex@example.com")
+cal_com_read(action="upcoming_bookings", email="alex@example.com")
 ```
 
 ## Related Docs

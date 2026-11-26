@@ -8,10 +8,10 @@ import httpx
 import pytest
 
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.bitbucket import BitbucketTools
-from mindroom.tools.cal_com import CalComTools
-from mindroom.tools.shopify import ShopifyTools
-from mindroom.tools.zendesk import ZendeskTools
+from mindroom.tools.bitbucket import bitbucket_tools
+from mindroom.tools.cal_com import cal_com_tools
+from mindroom.tools.shopify import shopify_tools
+from mindroom.tools.zendesk import zendesk_tools
 
 
 def test_batch2_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,16 +33,16 @@ def test_batch2_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("ZENDESK_COMPANY_NAME", "acme")
 
     with pytest.raises(ValueError, match="Bitbucket username"):
-        BitbucketTools(workspace="w", repo_slug="r")
-    assert "API key" in CalComTools().cal_com_read(action="upcoming_bookings")
-    assert "required" in json.loads(ShopifyTools().shopify_store(action="shop_info"))["error"]
-    assert "required" in json.loads(ZendeskTools().search_zendesk("help"))["error"]
+        bitbucket_tools()(workspace="w", repo_slug="r")
+    assert "API key" in cal_com_tools()().cal_com_read(action="upcoming_bookings")
+    assert "required" in json.loads(shopify_tools()().shopify_store(action="shop_info"))["error"]
+    assert "required" in json.loads(zendesk_tools()().search_zendesk("help"))["error"]
 
 
 def test_bitbucket_read_create_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bitbucket validates path segments, paginates safely on the same origin, and returns diffs."""
     with pytest.raises(ValueError, match="Invalid workspace"):
-        BitbucketTools(username="u", token="t", workspace="../evil", repo_slug="repo")  # noqa: S106
+        bitbucket_tools()(username="u", token="t", workspace="../evil", repo_slug="repo")  # noqa: S106
 
     requests_seen: list[tuple[str, str, dict[str, object] | None]] = []
 
@@ -71,7 +71,7 @@ def test_bitbucket_read_create_and_validation(monkeypatch: pytest.MonkeyPatch) -
         return httpx.Response(200, request=req, json={"ok": True})
 
     monkeypatch.setattr(httpx, "request", fake_request)
-    toolkit = BitbucketTools(username="u", token="t", workspace="ws", repo_slug="repo")  # noqa: S106
+    toolkit = bitbucket_tools()(username="u", token="t", workspace="ws", repo_slug="repo")  # noqa: S106
 
     commits = json.loads(toolkit.bitbucket_read(action="commits", count=2))
     assert [c["hash"] for c in commits["values"]] == ["c1", "c2"]
@@ -83,7 +83,7 @@ def test_bitbucket_read_create_and_validation(monkeypatch: pytest.MonkeyPatch) -
 
 def test_cal_com_toggles_timezone_and_booking_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cal.com respects explicit None toggles, validates booking_uid, and formats timezones."""
-    disabled = CalComTools(
+    disabled = cal_com_tools()(
         api_key="cal_k",
         event_type_id=10,
         enable_get_available_slots=None,
@@ -112,7 +112,7 @@ def test_cal_com_toggles_timezone_and_booking_flow(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    toolkit = CalComTools(api_key="cal_k", event_type_id=10, user_timezone="UTC", enable_cancel_booking=False)
+    toolkit = cal_com_tools()(api_key="cal_k", event_type_id=10, user_timezone="UTC", enable_cancel_booking=False)
     assert "2026-12-01 15:00 UTC" in toolkit.cal_com_read(
         action="available_slots",
         start_date="2026-12-01",
@@ -139,7 +139,7 @@ def test_cal_com_toggles_timezone_and_booking_flow(monkeypatch: pytest.MonkeyPat
 def test_shopify_store_and_analytics(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shopify validates shop_name, uses GraphQL variables, and computes analytics accurately."""
     with pytest.raises(ValueError, match="Invalid shop_name"):
-        ShopifyTools(shop_name="evil.com/path", access_token="tok")  # noqa: S106
+        shopify_tools()(shop_name="evil.com/path", access_token="tok")  # noqa: S106
 
     sample_orders = [
         {
@@ -240,7 +240,7 @@ def test_shopify_store_and_analytics(monkeypatch: pytest.MonkeyPatch) -> None:
         return httpx.Response(200, request=req, json={"data": {"orders": {"edges": sample_orders}}})
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    toolkit = ShopifyTools(shop_name="acme.myshopify.com", access_token="shpat_123")  # noqa: S106
+    toolkit = shopify_tools()(shop_name="acme.myshopify.com", access_token="shpat_123")  # noqa: S106
 
     assert json.loads(toolkit.shopify_store(action="shop_info"))["name"] == "Acme"
     low = json.loads(toolkit.shopify_store(action="low_stock", threshold=5))
@@ -258,9 +258,9 @@ def test_shopify_store_and_analytics(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_zendesk_validation_toggles_and_search(monkeypatch: pytest.MonkeyPatch) -> None:
     """Zendesk validates subdomain labels, respects explicit None toggles, and strips HTML."""
     with pytest.raises(ValueError, match="Invalid company_name"):
-        ZendeskTools(username="u", password="p", company_name="evil.com#")  # noqa: S106
+        zendesk_tools()(username="u", password="p", company_name="evil.com#")  # noqa: S106
 
-    disabled = ZendeskTools(username="u", password="p", company_name="acme", enable_search_zendesk=None)  # noqa: S106
+    disabled = zendesk_tools()(username="u", password="p", company_name="acme", enable_search_zendesk=None)  # noqa: S106
     assert list(disabled.functions) == []
 
     def fake_get(url: str, *, params: dict[str, str], auth: tuple[str, str], **_kwargs: object) -> httpx.Response:
@@ -271,5 +271,5 @@ def test_zendesk_validation_toggles_and_search(monkeypatch: pytest.MonkeyPatch) 
         return httpx.Response(200, request=req, json={"results": [{"body": "<p>Reset <b>here</b></p>"}]})
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    toolkit = ZendeskTools(username="u", password="p", company_name="acme")  # noqa: S106
+    toolkit = zendesk_tools()(username="u", password="p", company_name="acme")  # noqa: S106
     assert json.loads(toolkit.search_zendesk("reset password")) == ["Reset here"]

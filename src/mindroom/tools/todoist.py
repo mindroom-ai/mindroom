@@ -85,7 +85,7 @@ def _optional_task_fields(
     return {key: value for key, value in raw.items() if value is not None}
 
 
-class TodoistTools(Toolkit):
+class _TodoistTools(Toolkit):
     """Manage Todoist tasks and projects via `todoist-api-python`."""
 
     def __init__(self, api_token: str | None = None) -> None:
@@ -220,6 +220,6 @@ class TodoistTools(Toolkit):
     function_names=("todoist_read", "todoist_write"),
     action_scoped_grants=("todoist_read", "todoist_write"),
 )
-def todoist_tools() -> type[TodoistTools]:
+def todoist_tools() -> type[Toolkit]:
     """Return Todoist tools for task management."""
-    return TodoistTools
+    return _TodoistTools

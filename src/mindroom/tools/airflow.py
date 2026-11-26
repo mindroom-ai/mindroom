@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class AirflowTools(Toolkit):
+class _AirflowTools(Toolkit):
     """Read and write Airflow DAG files relative to the agent workspace under ``file_access``."""
 
     def __init__(
@@ -125,6 +125,6 @@ class AirflowTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#airflow",
     function_names=("read_dag_file", "save_dag_file"),
 )
-def airflow_tools() -> type[AirflowTools]:
+def airflow_tools() -> type[Toolkit]:
     """Return Airflow tools whose DAG files follow the agent's file_access."""
-    return AirflowTools
+    return _AirflowTools
