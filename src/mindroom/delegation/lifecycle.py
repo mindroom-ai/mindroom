@@ -562,8 +562,7 @@ async def observe_child_event(event: RunEvent) -> None:
         observation.response = record
     elif isinstance(event, ToolCompleted):
         observation.child.tool_started_at.pop(event.call.tool_call_id, None)
-        completed_at = time.time()
-        _publish(delegation_id, lambda feed: feed.tool_completed(event, now=completed_at))
+        _publish(delegation_id, lambda feed: feed.tool_completed(event))
     else:
         return
     await record_child_event(observation.audit, event)

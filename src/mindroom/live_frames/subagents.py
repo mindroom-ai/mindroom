@@ -17,7 +17,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, caller_tool_call_id
 from mindroom.live_frames.frames import FRAME_VERSION, LiveDocs, live_delta, new_publisher_id
 from mindroom.live_frames.transport import (
     RETRY_BACKOFF_SECONDS,
@@ -32,7 +32,7 @@ from mindroom.tool_system.events import (
     append_stream_text,
     complete_pending_tool_block,
     format_tool_started_event,
-    serialize_tool_trace,
+    serialize_tool_trace_entry,
 )
 
 if TYPE_CHECKING:
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.delegation.activity import SubagentSnapshot
-    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -60,8 +59,6 @@ _WORKING_STATUSES = frozenset({"running", "awaiting_approval"})
 _RELAY_OFF_SECONDS = 60.0
 # Each value of a run's model object, which config does not bound, so the frame without any text still fits.
 _MAX_MODEL_CHARACTERS = 200
-# Bound stored caller_tool_call_id metadata so a frame without any text always fits.
-_MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256
 
 type _Frame = dict[str, object]
 
@@ -95,7 +92,7 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, progress: bool = Tr
     always the call's ``started_at``, and ``ended_at`` once completed or settled. The documents stream while the run works.
     """
     md = ""
-    entries: list[ToolTraceEntry] = []
+    tools: list[dict[str, object]] = []
     for item in snapshot.items:
         if item.kind == "text":
             # Text items meet only where a cut or the tool row cap removed what was between them.
@@ -103,37 +100,29 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, progress: bool = Tr
             text_cut = max(0, text_cut - len(item.text))
             continue
         assert item.tool is not None
-        entries.append(item.tool)
+        tool_index = len(tools) + 1
         call = ReportedCall(tool_call_id=item.tool_call_id or "", tool_name=item.tool.tool_name, tool_args=None)
-        marker, _ = format_tool_started_event(call, len(entries))
+        marker, _ = format_tool_started_event(call, tool_index)
         if item.state != "running":
-            marker = complete_pending_tool_block(marker, item.tool.tool_name, len(entries))
+            marker = complete_pending_tool_block(marker, item.tool.tool_name, tool_index)
         md = append_stream_text(md, marker, marker=True)
-    tools = serialize_tool_trace(entries)
-    if not previews:
-        tools = tuple(
-            {
-                "type": entry["type"],
-                "tool_name": entry["tool_name"],
-                **({"is_error": True} if entry.get("is_error") else {}),
+        entry: dict[str, object] = (
+            serialize_tool_trace_entry(item.tool)
+            if previews
+            else {
+                "type": item.tool.type,
+                "tool_name": item.tool.tool_name,
+                **({"is_error": True} if item.tool.is_error and item.tool.type == "tool_call_completed" else {}),
             }
-            for entry in tools
         )
-    tools = tuple(
-        {
-            **entry,
-            "started_at": item.started_at,
-            **({"ended_at": item.ended_at} if item.ended_at is not None else {}),
-            **(
-                {"progress": item.progress}
-                if previews and progress and item.state == "running" and item.progress
-                else {}
-            ),
-        }
-        for entry, item in zip(tools, (item for item in snapshot.items if item.kind == "tool"), strict=True)
-    )
+        entry["started_at"] = item.started_at
+        if item.ended_at is not None:
+            entry["ended_at"] = item.ended_at
+        if previews and progress and item.state == "running" and item.progress:
+            entry["progress"] = item.progress
+        tools.append(entry)
     status = "streaming" if snapshot.status in _WORKING_STATUSES else "pending"
-    return LiveDocs(md=md, reasoning="", tools=tools, status=status, activity="")
+    return LiveDocs(md=md, reasoning="", tools=tuple(tools), status=status, activity="")
 
 
 def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
@@ -152,8 +141,8 @@ def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
         "started_at": snapshot.started_at,
         "ended_at": snapshot.ended_at,
     }
-    if snapshot.caller_tool_call_id:
-        meta["caller_tool_call_id"] = snapshot.caller_tool_call_id[:_MAX_CALLER_TOOL_CALL_ID_CHARACTERS]
+    if caller_id := caller_tool_call_id(snapshot.caller_tool_call_id):
+        meta["caller_tool_call_id"] = caller_id
     if snapshot.interrupted_by_restart:
         meta["interrupted_by_restart"] = True
     if full:
@@ -260,12 +249,8 @@ class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
         ):
             frame, docs = self._fitted_snapshot(snapshot, fits)
         else:
-            docs = _run_docs(
-                snapshot,
-                previews=self.previews and self.fit[0],
-                progress=self.previews and self.fit[1],
-                text_cut=self.fit[2],
-            )
+            previews, progress, text_cut = self.fit
+            docs = _run_docs(snapshot, previews=self.previews and previews, progress=progress, text_cut=text_cut)
             delta = live_delta(landed[1], docs)
             if not delta:
                 return None
@@ -307,12 +292,17 @@ class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
         frame that would fit with previews if it left the usage out keeps both, without that much of the oldest text
         when the text is long enough.
         """
-        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
 
         def built(previews: bool, progress: bool, text_cut: int) -> tuple[_Frame, LiveDocs]:
             self.fit = (previews, progress, text_cut)
             docs = _run_docs(snapshot, previews=previews, progress=progress, text_cut=text_cut)
             return self._frame(snapshot, docs=docs), docs
+
+        frame, docs = built(self.previews, self.previews, 0)
+        if fits(frame):
+            return frame, docs
+
+        text_length = sum(len(item.text) for item in snapshot.items)
 
         def cut(previews: bool, progress: bool) -> tuple[_Frame, LiveDocs]:
             """Return the frame with the least cut of the oldest text that fits, else with a cut that does not."""
@@ -322,16 +312,15 @@ class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
 
             return built(previews, progress, bisect_left(range(text_length + 1), True, lo=1, key=fits_cut))
 
-        frame, docs = built(self.previews, self.previews, 0)
-        if self.previews and not fits(frame):
-            keep_progress = True
-            if any(item.state == "running" and item.progress for item in snapshot.items):
-                keep_progress = False
-                frame, docs = built(True, False, 0)
-            if not fits(frame) and fits({**frame, "meta": _run_meta(snapshot, full=True)}):
-                frame, docs = cut(True, keep_progress)
-            if not fits(frame):
-                frame, docs = built(False, False, 0)
+        if not self.previews:
+            return cut(False, False)
+        has_progress = any("progress" in tool for tool in docs.tools)
+        if has_progress:
+            frame, docs = built(True, False, 0)
+        if not fits(frame) and fits({**frame, "meta": _run_meta(snapshot, full=True)}):
+            frame, docs = cut(True, not has_progress)
+        if not fits(frame):
+            frame, docs = built(False, False, 0)
         # The frame without any text always fits, as the caps bound the rest.
         return (frame, docs) if fits(frame) else cut(False, False)
 

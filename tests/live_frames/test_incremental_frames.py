@@ -204,7 +204,11 @@ def _oracle_docs(streaming: StreamingResponse) -> tuple[str, LiveDocs]:
         tools = tuple(
             {
                 **entry,
-                **({"progress": progress[trace.tool_call_id]} if trace.tool_call_id in progress else {}),
+                **(
+                    {"progress": progress[trace.tool_call_id]}
+                    if trace.type == "tool_call_started" and trace.tool_call_id in progress
+                    else {}
+                ),
                 **(
                     {"started_at": trace.started_at}
                     if trace.type == "tool_call_started" and trace.started_at is not None

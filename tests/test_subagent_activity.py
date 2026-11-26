@@ -222,7 +222,7 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     (running,) = a.snapshot().items
     assert running.state == "running"
     assert "example-secret" not in (_checked_entry(running).args_preview or "")
-    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin))
+    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin), now=2.0)
     (item,) = a.snapshot().items
     assert item.state == "done"
     assert item.tool_call_id == "c1"
@@ -238,7 +238,7 @@ def test_a_call_announced_again_keeps_its_one_row() -> None:
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("Waiting")
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), now=2.0)
     assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
         ("tool", "c1", "done"),
         ("text", None, None),
@@ -279,7 +279,7 @@ def test_a_tool_row_keeps_when_its_call_first_started() -> None:
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
     """An unmatched completion still shows up."""
     a = _activity()
-    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")), now=2.0)
     assert [(i.tool_call_id, i.state) for i in a.snapshot().items] == [("c9", "done")]
 
 
@@ -287,7 +287,7 @@ def test_failed_tool_call_is_an_error_row() -> None:
     """A failed call ends in state error and preserves `is_error` on its public entry."""
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)), now=2.0)
     (item,) = a.snapshot().items
     assert item.tool is not None
     assert (item.state, item.tool.type, item.tool.is_error) == ("error", "tool_call_completed", True)
@@ -360,7 +360,7 @@ def test_subagent_usage_counts_tool_calls_past_the_transcript_cap() -> None:
     a = _activity()
     for n in range(25):
         a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
-        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")))
+        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")), now=2.0)
     snapshot = a.snapshot()
     assert len(snapshot.items) == 20
     assert snapshot.usage is not None
@@ -373,7 +373,7 @@ def test_a_call_announced_again_is_counted_once_and_a_reused_call_id_again() -> 
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_started(ToolStarted(call=_call("c1")), now=2.0)
     assert a.snapshot().usage == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 1}
-    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=2.5)
     a.tool_started(ToolStarted(call=_call("c1")), now=3.0)
     assert a.snapshot().usage == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 2}
 
@@ -384,7 +384,7 @@ def test_a_call_resumed_after_the_cap_removed_its_row_is_counted_once() -> None:
     a.tool_started(ToolStarted(call=_call("gated")), now=1.0)
     for n in range(20):
         a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
-        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")))
+        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")), now=1.5)
     assert all(item.tool_call_id != "gated" for item in a.snapshot().items)
     a.tool_started(ToolStarted(call=_call("gated")), now=2.0)
     usage = a.snapshot().usage
@@ -496,7 +496,7 @@ def test_status_change_settles_only_terminal_running_tools(
     """Terminal statuses settle running tools (keeping `started_at`); non-terminal ones leave them open."""
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=10.0)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")), now=15.0)
     a.tool_started(ToolStarted(call=_call("c2")), now=20.0)
     a.set_status(status, 30.0, interrupted_by_restart=interrupted)
     done_item, item = a.snapshot().items
@@ -817,23 +817,8 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     seen: _Sink,
 ) -> None:
     """A provider may reuse a call id within a run; the later call records a fresh start timestamp."""
-    clock = iter([100.0, 150.0, 200.0, 250.0])
+    clock = iter([100.0, 200.0])
     monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
-    observed_starts: list[float] = []
-    observed_ends: list[float | None] = []
-    orig_start = ActivityFeed.tool_started
-    orig_done = ActivityFeed.tool_completed
-
-    def spy_start(self: ActivityFeed, event: ToolStarted, *, now: float) -> None:
-        observed_starts.append(now)
-        orig_start(self, event, now=now)
-
-    def spy_done(self: ActivityFeed, event: ToolCompleted, *, now: float | None = None) -> None:
-        observed_ends.append(now)
-        orig_done(self, event, now=now)
-
-    monkeypatch.setattr(ActivityFeed, "tool_started", spy_start)
-    monkeypatch.setattr(ActivityFeed, "tool_completed", spy_done)
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
@@ -843,9 +828,9 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
         await ai_response(turn, paths, config)
 
     last = await seen.wait_for_status("completed")
-    assert observed_starts == [100.0, 200.0]
-    assert observed_ends == [150.0, 250.0]
-    assert [(item.started_at, item.ended_at) for item in last.items if item.kind == "tool"] == [(200.0, 250.0)]
+    (tool_item,) = (item for item in last.items if item.kind == "tool")
+    assert tool_item.started_at == 200.0
+    assert tool_item.ended_at is not None
     assert reports[-1] == "\nCalling add (started 00:01:40 UTC)\n\nCalling add (started 00:03:20 UTC)\nDone"
 
 
@@ -1601,7 +1586,7 @@ def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
     activity = _activity()
     activity.tool_started(ToolStarted(call=_call("c1")), now=10.0)
     activity.tool_started(ToolStarted(call=_call("c2")), now=11.0)
-    assert activity.tool_progress("c1", "Authorization: Bearer super-secret-token\n" + "z" * 1_200) is True
+    assert activity.tool_progress("c1", "z" * 1_200 + "\nAuthorization: Bearer super-secret-token") is True
     assert activity.tool_progress("c2", "working on c2") is True
     assert activity.tool_progress("c2", "working on c2") is False
     assert activity.tool_progress("missing", "ignored") is False
@@ -1611,6 +1596,7 @@ def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
     assert c1.ended_at is None
     assert c2.ended_at is None
     assert c1.progress is not None
+    assert c1.progress.endswith("\nAuthorization: Bearer ***redacted***")
     assert "super-secret-token" not in c1.progress
     assert len(c1.progress) == 1_000
     assert c2.progress == "working on c2"
@@ -1630,13 +1616,6 @@ def test_tool_ended_at_and_progress_lifecycle_with_redaction() -> None:
         20.0,
         None,
     )
-
-
-def test_empty_parent_tool_call_id_becomes_none_on_snapshot() -> None:
-    """An empty `parent_tool_call_id` normalizes to `None` on `SubagentSnapshot.caller_tool_call_id`."""
-    child = replace(_child(), parent_tool_call_id="")
-    activity = _SubagentActivity.start(child, parent_delegation_id=None, root_caller_agent_name="lead", now=1.0)
-    assert activity.snapshot().caller_tool_call_id is None
 
 
 @pytest.mark.asyncio
@@ -1700,14 +1679,15 @@ async def test_observe_child_event_forwards_tool_progress_without_auditing(
 
 @pytest.mark.asyncio
 async def test_caller_tool_call_id_is_capped_on_start_and_resume() -> None:
-    """Oversized or non-string stored `parent_tool_call_id` values are bounded on start and resume."""
-    non_string = _SubagentActivity.start(
-        replace(_child(), parent_tool_call_id=3),  # type: ignore[arg-type]
-        parent_delegation_id=None,
-        root_caller_agent_name="lead",
-        now=1.0,
-    )
-    assert non_string.snapshot().caller_tool_call_id is None
+    """Empty, non-string, and oversized stored `parent_tool_call_id` values are normalized on start and resume."""
+    for raw in ("", 3):
+        activity = _SubagentActivity.start(
+            replace(_child(), parent_tool_call_id=raw),  # type: ignore[arg-type]
+            parent_delegation_id=None,
+            root_caller_agent_name="lead",
+            now=1.0,
+        )
+        assert activity.snapshot().caller_tool_call_id is None
 
     seen = _Sink()
     child = replace(_child(), parent_tool_call_id="a" * 500)

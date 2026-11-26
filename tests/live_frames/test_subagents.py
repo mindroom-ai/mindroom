@@ -317,7 +317,7 @@ def test_errored_tool_completion_keeps_is_error_in_run_docs(previews: bool) -> N
     activity = _activity()
     call = ReportedCall("c1", "read_file", {"path": "a.txt"}, result="boom", is_error=True)
     activity.tool_started(ToolStarted(call=call), now=1001.5)
-    activity.tool_completed(ToolCompleted(call=call))
+    activity.tool_completed(ToolCompleted(call=call), now=1002.0)
     docs = _run_docs(activity.snapshot(), previews=previews)
 
     assert "⏳" not in docs.md
@@ -487,7 +487,7 @@ async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) 
     for index in range(20):
         call = ReportedCall(f"call-{index}", "run_shell_command", {"command": character * 400}, result=character * 400)
         activity.tool_started(ToolStarted(call=call), now=1000.0)
-        activity.tool_completed(ToolCompleted(call=call))
+        activity.tool_completed(ToolCompleted(call=call), now=1000.5)
     for index in range(12):
         activity.add_text(character * 500)
         room.publish(activity.snapshot())

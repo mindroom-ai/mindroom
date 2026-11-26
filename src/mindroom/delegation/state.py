@@ -234,9 +234,17 @@ class DelegationChild:
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
 
 
+_MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256
+
+
 def display_title(title: object) -> str:
     """Return ``title`` on one line of at most 80 characters, redacted before it is cut; anything but text is none."""
     return redact_sensitive_text(" ".join(title.split()), max_length=80) if isinstance(title, str) and title else ""
+
+
+def caller_tool_call_id(value: object) -> str | None:
+    """Return ``value`` cut to at most 256 characters, or None when empty or not text."""
+    return value[:_MAX_CALLER_TOOL_CALL_ID_CHARACTERS] if isinstance(value, str) and value else None
 
 
 def interrupted_by_restart(child: DelegationChild) -> bool:
