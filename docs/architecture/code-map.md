@@ -334,7 +334,7 @@ Matrix sync callback
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `knowledge/search.py` | What an agent searches: its published sources, the `search_knowledge_base` tool and its results, and the `<knowledge_base>` prompt block |
-| `knowledge/readers.py` | The Agno document readers and chunkers knowledge indexing reads files with; the only knowledge module that imports Agno |
+| `knowledge/readers.py` | MindRoom-owned file readers and factory knowledge indexing reads files with |
 | `knowledge/collections.py` | Collection naming and ownership for one knowledge base: opening, writing a file's chunk rows, reclaiming superseded collections and legacy Chroma storage |
 | `knowledge/vector_store.py` | One collection as one SQLite file: chunk rows, float32 vectors, an FTS5 keyword index, and the collection's own claims, failures, and lifecycle, changed in one transaction with its rows; in-process search |
 | `knowledge/index_metadata.py` | A base's two state documents: the publication, written only by the publisher under the source-root lock, and the refresh status, written only by the runtime |

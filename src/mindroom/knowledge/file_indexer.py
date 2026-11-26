@@ -100,7 +100,7 @@ def max_concurrent_file_indexes(runtime_paths: RuntimePaths) -> int:
     return value
 
 
-# Agno 3.2's chunkers keep whitespace that every chunk indexed so far had collapsed; each maps to its legacy twin.
+# Default chunkers keep whitespace that every chunk indexed so far had collapsed; each maps to its legacy twin.
 _LEGACY_WHITESPACE_CHUNKING: dict[type, type[LegacyFixedSizeChunking | LegacyDocumentChunking]] = {
     FixedSizeChunking: LegacyFixedSizeChunking,
     DocumentChunking: LegacyDocumentChunking,
@@ -184,7 +184,7 @@ class _SourceReadError(Exception):
 
 @contextmanager
 def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSignature]]:
-    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path.
+    """Copy one listed file into a primary-private directory, because document readers reopen sources by path.
 
     Yields the copy and the signature of the bytes copied into it.
     """
@@ -194,7 +194,7 @@ def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSign
 
 
 def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
-    """Turn the documents an Agno reader produced into owned chunks; reader output crosses into MindRoom only here."""
+    """Turn the documents a reader produced into owned chunks; reader output crosses into MindRoom only here."""
     return [
         KnowledgeChunk(text=document.content, name=document.name, metadata=dict(document.meta_data))
         for document in documents
@@ -313,7 +313,7 @@ class FileIndexer:
         strategy = reader.chunking_strategy
         legacy = _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))
         if legacy is not None and isinstance(strategy, FixedSizeChunking | DocumentChunking):
-            # JSON, PDF, DOCX, and PPTX readers keep Agno's split algorithm and its size, with the legacy whitespace.
+            # JSON, PDF, DOCX, and PPTX readers keep their default split algorithm and size, with the legacy whitespace.
             reader.chunking_strategy = legacy(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
 
         if isinstance(reader, JSONReader):

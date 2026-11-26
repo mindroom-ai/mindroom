@@ -35,11 +35,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.knowledge.readers"
-depends_on = []
+depends_on = ["mindroom.knowledge.chunking"]
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
-depends_on = ["mindroom.knowledge.readers"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.bounded_bytes"

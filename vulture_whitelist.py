@@ -445,6 +445,7 @@ _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/scrip
 _.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)
 _.desktop  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/desktop.py)
 _.tool_search  # Toolkit function its @tool mark offers (src/mindroom/custom_tools/dynamic_tools.py)
+_.read_url  # Toolkit function its @tool mark offers (src/mindroom/custom_tools/website.py)
 _.is_on  # Trafilatura's crawl loop reads it to stop (src/mindroom/tools/agno_compat_trafilatura.py)
 _.is_direct  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
 _.set_modes  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)

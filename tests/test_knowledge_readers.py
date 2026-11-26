@@ -24,30 +24,53 @@ the only way to hold the invariant.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+from datetime import date, datetime
 from importlib.util import find_spec
 from itertools import pairwise
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
+import docx
+import openpyxl
 import pytest
-from agno.knowledge.reader import ReaderFactory
-from agno.knowledge.reader.markdown_reader import MarkdownReader
-from agno.knowledge.reader.text_reader import TextReader
+from pypdf import PdfWriter
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder
-from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
+from mindroom.knowledge.chunking import (
+    DocumentChunking,
+    FixedSizeChunking,
+    LegacyDocumentChunking,
+    LegacyFixedSizeChunking,
+    RowChunking,
+    SafeFixedSizeChunking,
+)
 from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
-from mindroom.knowledge.readers import Document
+from mindroom.knowledge.readers import (
+    CSVReader,
+    Document,
+    DocxReader,
+    ExcelReader,
+    MarkdownReader,
+    PDFReader,
+    PPTXReader,
+    ReaderFactory,
+    TextReader,
+    _clean_page_numbers,
+    _sanitize_pdf_text,
+)
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import _FakeEmbedder
 
 if TYPE_CHECKING:
-    from agno.knowledge.reader.base import Reader
+    from mindroom.knowledge.readers import Reader
 
 #: Chunk settings no factory default could be mistaken for (Agno ships 5000/0).
 _CHUNK_SIZE = 137
@@ -346,3 +369,209 @@ def test_fallback_documents_keep_the_callers_name(indexer: FileIndexer) -> None:
     documents = reader.read(Path("a.json"), name="a")
 
     assert {document.name for document in documents} == {"a"}
+
+
+def test_document_to_dict_matches_serialized_contract() -> None:
+    """``Document.to_dict`` omits ``id`` and ``None`` names while always keeping ``content`` and ``meta_data``."""
+    assert Document(content="hello").to_dict() == {"meta_data": {}, "content": "hello"}
+    assert Document(id="drop-me", name="page", meta_data={"url": "https://example.test"}, content="body").to_dict() == {
+        "name": "page",
+        "meta_data": {"url": "https://example.test"},
+        "content": "body",
+    }
+
+
+def test_fixed_size_chunking_handles_validation_boundaries_and_fallback_ids() -> None:
+    """Fixed-size chunking validates overlap, aligns to spaces, and hashes anonymous chunks deterministically."""
+    with pytest.raises(ValueError, match="overlap"):
+        FixedSizeChunking(chunk_size=10, overlap=10)
+
+    strategy = FixedSizeChunking(chunk_size=12, overlap=3)
+    assert strategy.chunk(Document(content="")) == []
+
+    chunks = strategy.chunk(Document(content="alpha beta gamma delta"))
+    assert [chunk.content for chunk in chunks] == ["alpha beta", "eta gamma", "mma delta"]
+    assert all(chunk.id is not None and chunk.id.startswith("chunk_") for chunk in chunks)
+    assert [chunk.meta_data["chunk"] for chunk in chunks] == [1, 2, 3]
+
+
+def test_document_chunking_splits_oversized_paragraphs_and_applies_overlap() -> None:
+    """``DocumentChunking`` keeps short text intact, splits oversized paragraphs by sentence, and adds overlap."""
+    strategy = DocumentChunking(chunk_size=40, overlap=6)
+    short = Document(id="short", name="short", content="Fits in one chunk.")
+    assert strategy.chunk(short) == [short]
+
+    long_para = "First sentence here. Second sentence here. Third sentence here."
+    chunks = strategy.chunk(Document(id="doc", name="doc", content=f"Intro para.\n\n{long_para}"))
+    assert [chunk.content for chunk in chunks] == [
+        "Intro para.",
+        " para.First sentence here.",
+        " here.Second sentence here.",
+        " here.Third sentence here.",
+    ]
+    assert [chunk.id for chunk in chunks] == ["doc_1", "doc_2", "doc_3", "doc_4"]
+
+
+def test_row_chunking_preserves_row_numbers_and_header_skipping() -> None:
+    """``RowChunking`` skips blank rows without shifting row numbers and respects ``skip_header`` and ``start_row``."""
+    doc = Document(id="csv1", name="data", content="h1, h2\n  a ,  1 \n\nb, 2\n")
+    default_chunks = RowChunking().chunk(doc)
+    assert [(c.meta_data["row_number"], c.content, c.id) for c in default_chunks] == [
+        (1, "h1, h2", "csv1_row_1"),
+        (2, "a , 1", "csv1_row_2"),
+        (4, "b, 2", "csv1_row_4"),
+    ]
+
+    skipped = RowChunking(skip_header=True, clean_rows=False).chunk(doc)
+    assert [(c.meta_data["row_number"], c.content) for c in skipped] == [(2, "a ,  1"), (4, "b, 2")]
+
+    paged = RowChunking(skip_header=True).chunk(
+        Document(id="csv2", name="data", meta_data={"start_row": 11}, content="row11\nrow12\n"),
+    )
+    assert [c.meta_data["row_number"] for c in paged] == [11, 12]
+
+
+def test_csv_reader_normalizes_multiline_cells_and_streams(tmp_path: Path) -> None:
+    """``CSVReader`` flattens newlines inside quoted cells and supports both files and streams."""
+    source = tmp_path / "notes.csv"
+    source.write_text('name,notes\n"Alice","line1\nline2"\n\nBob,42\n', encoding="utf-8")
+
+    docs = CSVReader().read(source, name="notes.csv")
+    assert [(d.name, d.meta_data["row_number"], d.content) for d in docs] == [
+        ("notes.csv", 1, "name, notes"),
+        ("notes.csv", 2, "Alice, line1 line2"),
+        ("notes.csv", 4, "Bob, 42"),
+    ]
+
+    stream_docs = CSVReader().read(io.StringIO("k;v\nalpha;1\n"), delimiter=";")
+    assert [d.content for d in stream_docs] == ["k, v", "alpha, 1"]
+
+
+def test_excel_reader_reads_xlsx_sheets_and_filters(tmp_path: Path) -> None:
+    """``ExcelReader`` normalizes cell types, trims trailing empties, skips empty sheets, and filters sheets."""
+    source = tmp_path / "metrics.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    assert first is not None
+    first.title = "Metrics"
+    first.append(["City", "Count", "Date", "Notes", None])
+    first.append(["Amsterdam", 42.0, date(2026, 11, 25), "line1\r\nline2", ""])
+    first.append(["Berlin", 3.5, datetime(2026, 11, 25, 10, 30), "ok", None])  # noqa: DTZ001
+    workbook.create_sheet("Empty")
+    second = workbook.create_sheet("Summary")
+    second.append(["Key", "Value"])
+    second.append(["total", 2])
+    workbook.save(source)
+
+    docs = ExcelReader().read(source, name="metrics.xlsx")
+    assert [(d.name, d.meta_data["sheet_name"], d.meta_data["sheet_index"], d.content) for d in docs] == [
+        ("metrics", "Metrics", 1, "City, Count, Date, Notes"),
+        ("metrics", "Metrics", 1, "Amsterdam, 42, 2026-11-25T00:00:00, line1 line2"),
+        ("metrics", "Metrics", 1, "Berlin, 3.5, 2026-11-25T10:30:00, ok"),
+        ("metrics", "Summary", 3, "Key, Value"),
+        ("metrics", "Summary", 3, "total, 2"),
+    ]
+
+    filtered = ExcelReader(sheets=["summary"]).read(source)
+    assert {d.meta_data["sheet_name"] for d in filtered} == {"Summary"}
+
+
+def test_docx_reader_extracts_paragraphs(tmp_path: Path) -> None:
+    """``DocxReader`` joins document paragraphs with blank lines and reads both files and streams."""
+    source = tmp_path / "spec.docx"
+    document = docx.Document()
+    document.add_paragraph("First paragraph.")
+    document.add_paragraph("Second paragraph.")
+    document.save(source)
+
+    docs = DocxReader().read(source, name="spec.docx")
+    assert [(d.name, d.content) for d in docs] == [("spec.docx", "First paragraph.\n\nSecond paragraph.")]
+
+
+def test_pdf_reader_helpers_and_password_handling(tmp_path: Path) -> None:
+    """``PDFReader`` sanitizes wrapped lines, cleans sequential page numbers, and handles encrypted PDFs."""
+    assert _sanitize_pdf_text("word1\nword2\n\npara2\nline2") == "word1 word2\n\npara2 line2"
+    cleaned, shift = _clean_page_numbers(["1\nFirst", "2\nSecond", "3\nThird"])
+    assert shift == 1
+    assert cleaned == [
+        "<start page 1>\nFirst\n<end page 1>",
+        "<start page 2>\nSecond\n<end page 2>",
+        "<start page 3>\nThird\n<end page 3>",
+    ]
+
+    encrypted = tmp_path / "secret.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    correct_code = "open-sesame"
+    wrong_code = "wrong"
+    writer.encrypt(correct_code)
+    with encrypted.open("wb") as handle:
+        writer.write(handle)
+
+    assert PDFReader().read(encrypted) == []
+    assert PDFReader().read(encrypted, password=wrong_code) == []
+    unlocked = PDFReader().read(encrypted, name="secret.pdf", password=correct_code)
+    assert len(unlocked) == 1
+    assert unlocked[0].meta_data == {"page": 1}
+
+
+def test_pptx_reader_extracts_grouped_shapes_and_reports_missing_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PPTXReader`` extracts text recursively through group shapes and fails cleanly when ``pptx`` is absent."""
+    monkeypatch.setitem(sys.modules, "pptx", None)
+    with pytest.raises(ImportError, match="python-pptx"):
+        ReaderFactory.get_reader_for_extension(".pptx")
+
+    class _FakeGroupShape:
+        def __init__(self, shapes: list[object]) -> None:
+            self.shapes = shapes
+
+    class _FakeTextShape:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _FakePresentation:
+        def __init__(self, _source: object) -> None:
+            self.slides = [
+                SimpleNamespace(shapes=[_FakeTextShape("Title"), _FakeGroupShape([_FakeTextShape("Grouped")])]),
+                SimpleNamespace(shapes=[]),
+            ]
+
+    fake_pptx = ModuleType("pptx")
+    fake_pptx.Presentation = _FakePresentation  # type: ignore[attr-defined]
+    fake_shapes = ModuleType("pptx.shapes")
+    fake_group = ModuleType("pptx.shapes.group")
+    fake_group.GroupShape = _FakeGroupShape  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pptx", fake_pptx)
+    monkeypatch.setitem(sys.modules, "pptx.shapes", fake_shapes)
+    monkeypatch.setitem(sys.modules, "pptx.shapes.group", fake_group)
+
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"fake")
+    docs = PPTXReader().read(deck, name="deck.pptx")
+    assert [(d.name, d.content) for d in docs] == [
+        ("deck.pptx", "Slide 1:\nTitle\nGrouped\n\nSlide 2:\n(No text content)"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extension", "package"),
+    [
+        (".pdf", "pypdf"),
+        (".docx", "docx"),
+        (".xlsx", "openpyxl"),
+        (".xls", "xlrd"),
+        (".pptx", "pptx"),
+    ],
+)
+def test_reader_factory_raises_import_error_only_when_format_dependency_is_missing(
+    extension: str,
+    package: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing optional format dependencies raise ``ImportError`` when requesting that format's reader."""
+    monkeypatch.setitem(sys.modules, package, None)
+    with pytest.raises(ImportError):
+        ReaderFactory.get_reader_for_extension(extension)
