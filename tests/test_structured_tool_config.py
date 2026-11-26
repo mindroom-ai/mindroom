@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools import Toolkit
-    from agno.tools.exa import ExaTools
     from agno.tools.firecrawl import FirecrawlTools
 
     from mindroom.custom_tools.searxng import SearxngTools
+    from mindroom.tools.exa import ExaTools
 
 
 def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> Toolkit:

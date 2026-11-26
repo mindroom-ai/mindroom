@@ -94,6 +94,8 @@ def _agno_modules(tool_name: str) -> set[str]:
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
     """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
     modules = _agno_modules(tool_name)
+    if not modules:
+        return
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}

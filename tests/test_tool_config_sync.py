@@ -67,8 +67,6 @@ IGNORED_AGNO_PARAMS = {
     # MindRoom sets them from `defaults.allow_shell_without_worker` and the agent's `named_workers`, never from the
     # tool's own settings.
     "shell": {"allow_without_worker", "named_workers"},
-    # Exa crawls the subpages, but Agno's result parser drops them, so the setting would only add crawl cost.
-    "exa": {"subpages"},
 }
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
 # reads the null words as left out.
