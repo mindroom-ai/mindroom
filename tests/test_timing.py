@@ -411,7 +411,7 @@ def test_build_agent_model_provider_preserves_prompt_assembly_subspan() -> None:
 def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     """History compaction model init should keep its dedicated timing label."""
     labels = _timing_probe_labels(
-        module_name="mindroom.history.compaction",
+        module_name="mindroom.history.summarizer",
         call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
         patch_target="mindroom.providers.registry.build_model_provider",
     )
@@ -423,7 +423,7 @@ def test_team_history_preparation_logs_the_history_prepare_label() -> None:
     labels = _timing_probe_labels(
         module_name="mindroom.execution_preparation",
         call_expression=(
-            "with patch('mindroom.execution_preparation.resolve_entity_preparation_inputs'): "
+            "with patch('mindroom.execution_preparation.resolve_history_preparation_inputs'): "
             "asyncio.run(target_module.prepare_bound_team_run_context(Mock(), scope_context=Mock(), "
             "leader_system_messages=(), leader_tools=(), model=Mock(), prompt='', thread_history=None, "
             "runtime_paths=Mock(), config=Mock(), timezone='UTC', "

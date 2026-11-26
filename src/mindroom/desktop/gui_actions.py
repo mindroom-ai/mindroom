@@ -85,9 +85,11 @@ async def execute_fallback_control(
     *,
     app_id: str,
     state_id: str,
+    allow_window_fallback: bool = False,
 ) -> None:
     """Run one pointer, text, scroll, or key-chord input against the observed app state."""
     parameters = command.parameters
+    fallback_kwargs: dict[str, bool] = {"allow_window_fallback": True} if allow_window_fallback else {}
     if command.action in {"click", "double_click"}:
         reject_unexpected_parameters(
             parameters,
@@ -100,6 +102,7 @@ async def execute_fallback_control(
             x=required_int_parameter(parameters, "x"),
             y=required_int_parameter(parameters, "y"),
             button=optional_str_parameter(parameters, "button", default="left"),
+            **fallback_kwargs,
         )
     elif command.action == "hover":
         reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "x", "y"}))
@@ -109,6 +112,7 @@ async def execute_fallback_control(
             state_id=state_id,
             x=required_int_parameter(parameters, "x"),
             y=required_int_parameter(parameters, "y"),
+            **fallback_kwargs,
         )
     elif command.action == "drag":
         reject_unexpected_parameters(
@@ -134,21 +138,27 @@ async def execute_fallback_control(
             end_x=required_int_parameter(parameters, "end_x"),
             end_y=required_int_parameter(parameters, "end_y"),
             duration_ms=required_int_parameter({"duration_ms": 500, **parameters}, "duration_ms"),
+            **fallback_kwargs,
         )
     elif command.action == "type_text":
         reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "text", "element_index"}))
-        targeting = (
-            {"element_index": required_int_parameter(parameters, "element_index")}
-            if "element_index" in parameters
-            else {}
-        )
-        await asyncio.to_thread(
-            provider.type_text,
-            app_id=app_id,
-            state_id=state_id,
-            text=required_str_parameter(parameters, "text"),
-            **targeting,
-        )
+        text = required_str_parameter(parameters, "text")
+        if "element_index" in parameters:
+            await asyncio.to_thread(
+                provider.type_text,
+                app_id=app_id,
+                state_id=state_id,
+                text=text,
+                element_index=required_int_parameter(parameters, "element_index"),
+            )
+        else:
+            await asyncio.to_thread(
+                provider.type_text,
+                app_id=app_id,
+                state_id=state_id,
+                text=text,
+                **fallback_kwargs,
+            )
     elif command.action == "scroll":
         reject_unexpected_parameters(
             parameters,
@@ -162,6 +172,7 @@ async def execute_fallback_control(
             pages=required_int_parameter(parameters, "pages"),
             x=optional_int_parameter(parameters, "x"),
             y=optional_int_parameter(parameters, "y"),
+            **fallback_kwargs,
         )
     elif command.action == "keypress":
         reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "keys"}))
@@ -170,6 +181,7 @@ async def execute_fallback_control(
             app_id=app_id,
             state_id=state_id,
             keys=_required_str_list_parameter(parameters, "keys"),
+            **fallback_kwargs,
         )
     else:
         msg = f"Unsupported fallback desktop action: {command.action}."

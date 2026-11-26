@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
@@ -16,7 +17,7 @@ import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
+from mindroom.agent_loop.model_loop import LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -36,7 +37,8 @@ from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
-from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
+from mindroom.history.summary_message import is_compaction_summary, is_scope_summary, summary_follows
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
@@ -82,7 +84,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage.storage import run_usage_snapshot
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call
 from tests.fakes.summary_model import summary_model
@@ -112,10 +114,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
+    from mindroom.agent_loop.model_loop import BeforeRequestHook, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -137,7 +138,7 @@ class _CancelOnSuccess(RecordingCompactionLifecycle):
 @pytest.fixture
 def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
     calls = SummaryCalls()
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", calls)
     install_model_providers(monkeypatch, {"summary": summary_model()})
     return calls
 
@@ -1505,7 +1506,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
             raise RuntimeError(msg)
         return await summary_calls(**kwargs)
 
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", fail_second)
     model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
@@ -1550,7 +1551,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
         return await summary_calls(**kwargs)
 
     monkeypatch.setattr(mid_turn_compaction, "compact_running_turn", counted_compaction)
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second_chunk_of_second_attempt)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", fail_second_chunk_of_second_attempt)
 
     agent = _scoped_agent(ToolLoopModel(tool_rounds=14), config, paths, storage)
     if stop is asyncio.CancelledError:
@@ -2320,3 +2321,76 @@ async def test_compact_context_tool_when_unavailable_returns_error_without_compa
     )
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
     assert not has_queued_force_compaction(storage, "session-1")
+
+
+@pytest.mark.asyncio
+async def test_scoped_mid_turn_sizing_failure_aborts_before_commit_and_leaves_state_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A sizing failure on the rewritten request aborts before append_fold, leaving SQLite and live state untouched."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    recorder = TurnRecorder()
+    append_calls = 0
+
+    def spy_append(*_args: object, **_kwargs: object) -> bool:
+        nonlocal append_calls
+        append_calls += 1
+        return False
+
+    monkeypatch.setattr("mindroom.history.compaction.append_fold", spy_append)
+    model = ToolLoopModel(tool_rounds=5)
+    real_request_tokens = model.request_tokens
+
+    def fail_on_rewritten(request: ModelRequest, *, start: int = 0) -> int:
+        if any(is_compaction_summary(m) for m in request.messages) and len(request.messages) > 1:
+            msg = "rewritten sizing failed"
+            raise RuntimeError(msg)
+        return real_request_tokens(request, start=start)
+
+    monkeypatch.setattr(model, "request_tokens", fail_on_rewritten)
+
+    output = await _run(
+        _scoped_agent(model, config, paths, storage, lifecycle=lifecycle, turn_recorder=recorder),
+        "Do the task",
+    )
+
+    assert summary_calls.inputs
+    assert append_calls == 0
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+    assert recorder.folded_tool_call_ids == set()
+    assert COMPACTED_REQUESTS_METADATA_KEY not in (output.metadata or {})
+    assert not any(is_compaction_summary(m) for req in model.requests for m in req.messages)
+    assert not any(summary_follows(m) for req in model.requests for m in req.messages)
+    failures = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert len(failures) == 1
+    assert "rewritten sizing failed" in failures[0].failure_reason
+
+
+@pytest.mark.asyncio
+async def test_run_local_mid_turn_budget_error_does_not_mutate_messages_or_record(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """When _require_fit raises HistorySummaryBudgetError on a run-local fold, state.messages and record stay untouched."""
+    config, paths = _config(tmp_path)
+    model = ToolLoopModel(tool_rounds=5)
+    snapshots: list[tuple[LoopState, list[Message], dict[str, Any] | None]] = []
+
+    async def capture(state: LoopState) -> RequestDecision:
+        snapshots.append((state, list(state.messages), deepcopy(state.record.metadata)))
+        return SendRequest()
+
+    agent = _Agent(model, config, paths, before_request=(capture,))
+    with pytest.raises(mid_turn_compaction.HistorySummaryBudgetError):
+        await _run(agent, [Message(role="user", content="p" * 16_000)])
+
+    assert summary_calls.inputs
+    state, before_messages, before_metadata = snapshots[-1]
+    assert state.messages == before_messages
+    assert state.record.metadata == before_metadata
+    assert not any(is_compaction_summary(m) for m in state.messages)
+    assert COMPACTED_REQUESTS_METADATA_KEY not in (state.record.metadata or {})

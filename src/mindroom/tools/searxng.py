@@ -1,4 +1,4 @@
-"""Searxng tool configuration."""
+"""SearxNG tool configuration."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.searxng import Searxng
+    from mindroom.custom_tools.searxng import SearxngTools
 
 
 @register_tool_with_metadata(
@@ -51,19 +51,10 @@ if TYPE_CHECKING:
     ],
     dependencies=[],  # httpx already included in main dependencies
     docs_url="https://docs.mindroom.chat/tools/web-search/#searxng",
-    function_names=(
-        "image_search",
-        "it_search",
-        "map_search",
-        "music_search",
-        "news_search",
-        "science_search",
-        "search_web",
-        "video_search",
-    ),
+    function_names=("searxng_search",),
 )
-def searxng_tools() -> type[Searxng]:
+def searxng_tools() -> type[SearxngTools]:
     """Return SearxNG search tools for web, images, news, and specialized content search."""
-    from agno.tools.searxng import Searxng
+    from mindroom.custom_tools.searxng import SearxngTools
 
-    return Searxng
+    return SearxngTools

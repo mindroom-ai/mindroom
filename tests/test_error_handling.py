@@ -17,11 +17,13 @@ from mindroom.error_handling import (
     model_error_labels,
 )
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     QUOTA_EXHAUSTED,
     STREAM_STALLED,
     TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -108,6 +110,10 @@ def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
     assert get_user_friendly_error_message(error) == f"⚠️ {MODEL_SAFEGUARD_REFUSAL_MESSAGE}"
 
 
+_NETWORK_ERROR_MESSAGE = (
+    "⏰ Network error or timeout — The model request failed with a network error or timeout. "
+    "If this keeps happening, check the MindRoom host's internet connection."
+)
 # How the requests transport starts its report when the Google sign-in host cannot be reached.
 _OAUTH_HOST_UNREACHABLE = (
     "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token"
@@ -118,8 +124,8 @@ _OAUTH_HOST_UNREACHABLE = (
     ("error", "expected"),
     [
         pytest.param(
-            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code="connection_error"),
-            "⚠️ VertexAI unavailable — The model could not complete the reply. Try again shortly.",
+            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code=CONNECTION_ERROR),
+            _NETWORK_ERROR_MESSAGE,
             id="unavailable-host-name-holds-auth",
         ),
         pytest.param(
@@ -600,3 +606,48 @@ def test_empty_response_error_info_matches_notice_and_handles_missing_labels() -
         "retryable": True,
         "action": "retry",
     }
+
+
+@pytest.mark.parametrize("code", [TRANSPORT_TIMEOUT, CONNECTION_ERROR])
+def test_transport_provider_unavailable_says_provider_could_not_be_reached(code: str) -> None:
+    """Transport failures before any HTTP response point to network reachability rather than a provider outage."""
+    error = ProviderUnavailable("Request timed out.", provider="OpenAI", code=code)
+    info = describe_reply_error(error, model_label="GPT-6")
+
+    assert get_user_friendly_error_message(error, model_label="GPT-6") == _NETWORK_ERROR_MESSAGE
+    assert info.to_wire() == {
+        "kind": "timeout",
+        "title": "Network error or timeout",
+        "summary": (
+            "The model request failed with a network error or timeout. "
+            "If this keeps happening, check the MindRoom host's internet connection."
+        ),
+        "detail": "Request timed out.",
+        "code": code,
+        "provider": "OpenAI",
+        "retryable": True,
+        "action": "retry",
+    }
+    assert "OpenAI" not in info.title
+    assert "OpenAI" not in info.summary
+
+
+def test_non_transport_provider_unavailable_keeps_provider_unavailable_message() -> None:
+    """Server 5xx failures, bare google-auth transport errors, and stalled streams keep non-network copy."""
+    server_503 = classify_provider_error("Service Unavailable", provider="OpenAI", status_code=503)
+    assert (
+        get_user_friendly_error_message(server_503)
+        == "⚠️ OpenAI unavailable (503) — The model could not complete the reply. Try again shortly."
+    )
+    assert describe_reply_error(server_503).kind == "provider_unavailable"
+
+    bare_google_transport = ProviderUnavailable("503 Service Unavailable", provider="VertexAI")
+    assert (
+        get_user_friendly_error_message(bare_google_transport)
+        == "⚠️ VertexAI unavailable — The model could not complete the reply. Try again shortly."
+    )
+    assert describe_reply_error(bare_google_transport).kind == "provider_unavailable"
+
+    stalled = ProviderUnavailable("Model stream stalled", provider="OpenAI", status_code=504, code=STREAM_STALLED)
+    assert get_user_friendly_error_message(stalled) == "⚠️ The model stopped responding — OpenAI stopped sending data."
+    assert describe_reply_error(stalled).kind == "stream_stalled"

@@ -22,12 +22,12 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
 )
-from mindroom.history.compaction import load_summarizer
 from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
+from mindroom.history.summarizer import load_summarizer
 from mindroom.history.summary_call import (
     SummaryRetryPolicy,
     _CompactionSummaryTimeoutError,

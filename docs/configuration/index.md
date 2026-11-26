@@ -293,6 +293,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining CPU and memory requests and limits for the `small`, `standard`, and `large` profiles | Built-in profiles |
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Positive seconds to retain finished background-script runs, tool-call receipts, and approval records | `2592000` (30 days) |
+| `MINDROOM_SHELL_SYSTEMD_SLICE` | Linux systemd user slice name (for example `mindroom-shells.slice`) to isolate local `shell` commands outside MindRoom's own service cgroup via `systemd-run --user --scope`; see [Linux resource isolation](../tools/execution-and-coding.md#linux-resource-isolation) | _(unset)_ |
 
 See [Background Scripts](../tools/background-scripts.md#worker-and-network-requirements) for when each script gateway variable is required, and [Sandbox Proxy](../deployment/sandbox-proxy.md#environment-variable-reference) for the other `MINDROOM_SANDBOX_*` and Kubernetes worker variables.
 Credential seed variables are described in [Credential Seeds](../oauth-framework.md#credential-seeds).

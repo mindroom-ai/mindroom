@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
+    CONNECTION_ERROR,
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
     STREAM_STALLED,
     TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
     ModelSafeguardRefusal,
@@ -258,13 +260,26 @@ def _classify_provider_error(  # noqa: PLR0911 - one return per provider error k
             True,
             "retry",
         )
-    if isinstance(error, ProviderUnavailable) and error.code == STREAM_STALLED:
-        duration = _stall_duration_label(raw_error)
-        summary = (
-            f"{provider_text} sent no data for {duration}." if duration else f"{provider_text} stopped sending data."
-        )
-        return ("stream_stalled", f"{model_text} stopped responding", summary, True, "continue")
     if isinstance(error, ProviderUnavailable):
+        if error.code == STREAM_STALLED:
+            duration = _stall_duration_label(raw_error)
+            summary = (
+                f"{provider_text} sent no data for {duration}."
+                if duration
+                else f"{provider_text} stopped sending data."
+            )
+            return ("stream_stalled", f"{model_text} stopped responding", summary, True, "continue")
+        if error.code in (TRANSPORT_TIMEOUT, CONNECTION_ERROR):
+            return (
+                "timeout",
+                "Network error or timeout",
+                (
+                    "The model request failed with a network error or timeout. "
+                    "If this keeps happening, check the MindRoom host's internet connection."
+                ),
+                True,
+                "retry",
+            )
         status = error.status_code
         status_hint = f" ({status})" if status is not None and 500 <= status < 600 else ""
         provider_title = resolved_provider or "Model provider"

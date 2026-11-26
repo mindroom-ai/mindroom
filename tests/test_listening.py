@@ -101,7 +101,7 @@ REPLY = "Everyone, here is what I heard: please read this."
 # Who may reach the agent is what this suite checks, so the suite-wide authorization bypass stays off.
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("enforce_turn_authorization")]
 
-MEMORY_FUNCTIONS = {"add_memory", "search_memories", "list_memories", "get_memory", "update_memory", "delete_memory"}
+MEMORY_FUNCTIONS = {"memory"}
 
 
 def _ms(seconds_after_t0: float) -> int:
@@ -1531,7 +1531,7 @@ async def test_silent_turn_reacts_and_remembers_only_through_its_allowlist(
         [
             calls(
                 tool_call("react", "call-1", event_id="$tea", emoji="👍"),
-                tool_call("add_memory", "call-2", content="Alice prefers tea."),
+                tool_call("memory", "call-2", action="add", content="Alice prefers tea."),
             ),
             answer(REPLY),
         ],

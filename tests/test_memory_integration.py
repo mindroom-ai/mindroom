@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.delegation.personas import inline_persona
+from mindroom.delegation.personas import _inline_persona
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
@@ -268,7 +268,7 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     assert _memory_conversation(ctx, limited, scope_context) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
     assert _memory_conversation(scheduled, config, scope_context) is None
-    persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
+    persona = replace(ctx, persona=_inline_persona("You are a reviewer.", None, None, None))
     assert _memory_conversation(persona, config, scope_context) is None
     # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
     unauthored = Config(

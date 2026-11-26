@@ -1254,9 +1254,9 @@ def test_job_standing_says_what_the_job_runtime_knows(
     saved = [True]
     runtime = SimpleNamespace(
         retained_job=lambda job_id: job if job_id == "job-1" else None,
-        outcome_saved=lambda _job_id: saved[0],
+        _outcome_saved=lambda _job_id: saved[0],
         _job_delivered=lambda j: job_runtime_module.ToolJobRuntime._job_delivered(runtime, j),  # type: ignore[arg-type]
-        job_standing=lambda job_id: job_runtime_module.ToolJobRuntime.job_standing(runtime, job_id),  # type: ignore[arg-type]
+        _job_standing=lambda job_id: job_runtime_module.ToolJobRuntime._job_standing(runtime, job_id),  # type: ignore[arg-type]
     )
     monkeypatch.setattr(job_runtime_module, "get_background_runtime", lambda _paths: runtime)
 

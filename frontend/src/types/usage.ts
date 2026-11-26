@@ -79,9 +79,7 @@ export type UsagePollResult =
 export type ProviderLimitWindowKind = "session" | "weekly" | "monthly";
 
 export type ProviderUnavailableReason =
-  | "unsupported"
-  | "not_signed_in"
-  | "probe_failed";
+  "unsupported" | "not_signed_in" | "probe_failed";
 
 export interface ProviderLimitWindow {
   id: string;

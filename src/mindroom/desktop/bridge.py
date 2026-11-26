@@ -98,9 +98,9 @@ async def _run_macos_application_events() -> None:
         msg = "The macOS desktop bridge must run on the main thread."
         raise RuntimeError(msg)
 
-    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[import-not-found]
-        CFRunLoopRunInMode,
-        kCFRunLoopDefaultMode,
+    from CoreFoundation import (  # noqa: PLC0415
+        CFRunLoopRunInMode,  # ty: ignore[missing-module-member]
+        kCFRunLoopDefaultMode,  # ty: ignore[missing-module-member]
     )
     from objc import autorelease_pool  # noqa: PLC0415
 
@@ -701,11 +701,12 @@ class DesktopBridge:
             return self._error_response(command, "Unexpected desktop parameters: observation.")
         try:
             mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
-            resolved = (
-                self._observations.resolve(command, controller_key=controller_key)
-                if "state_id" in command.parameters
-                else command
-            )
+            if "state_id" in command.parameters:
+                resolved = self._observations.resolve(command, controller_key=controller_key)
+                allow_window_fallback = self._observations.allows_window_fallback(resolved.parameters["state_id"])
+            else:
+                resolved = command
+                allow_window_fallback = False
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
         self._journal.remember_started(command, command_fingerprint, controller_key)
@@ -713,7 +714,12 @@ class DesktopBridge:
             resolved,
             parameters={key: value for key, value in resolved.parameters.items() if key != "observation"},
         )
-        execution = await self._execute_safely(execution_command, controller_key, mode=mode)
+        execution = await self._execute_safely(
+            execution_command,
+            controller_key,
+            mode=mode,
+            allow_window_fallback=allow_window_fallback,
+        )
         return await self._execution_response(command, execution, mode, controller_key)
 
     async def _execution_response(
@@ -802,9 +808,15 @@ class DesktopBridge:
         controller_key: str,
         *,
         mode: DesktopObservationMode,
+        allow_window_fallback: bool = False,
     ) -> _Execution | DesktopResponse:
         try:
-            return await self._execute(command, controller_key, mode=mode)
+            return await self._execute(
+                command,
+                controller_key,
+                mode=mode,
+                allow_window_fallback=allow_window_fallback,
+            )
         except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
             return self._unknown_control_response(command, reason=str(exc))
         except (
@@ -841,7 +853,11 @@ class DesktopBridge:
         if refused is not None:
             return refused
         try:
-            state = await asyncio.to_thread(self._required_gui_provider().get_app_state, app_id)
+            state = await asyncio.to_thread(
+                self._required_gui_provider().get_app_state,
+                app_id,
+                include_elements=mode != "screenshot",
+            )
         except Exception:
             logger.exception(
                 "desktop_control_follow_up_state_failed",
@@ -988,13 +1004,19 @@ class DesktopBridge:
         controller_key: str,
         *,
         mode: DesktopObservationMode,
+        allow_window_fallback: bool = False,
     ) -> _Execution:
         if command.action in DESKTOP_FILE_ACTIONS:
             return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
             return _Execution(await execute_shell(self.client, self.shell, command, controller_key=controller_key))
         self._live_scope(controller_key)
-        return await self._execute_desktop(command, controller_key, mode=mode)
+        return await self._execute_desktop(
+            command,
+            controller_key,
+            mode=mode,
+            allow_window_fallback=allow_window_fallback,
+        )
 
     def _gui_permission_error(self, command: DesktopCommand, *, mode: DesktopObservationMode) -> str | None:
         missing = missing_macos_desktop_permissions()
@@ -1034,6 +1056,7 @@ class DesktopBridge:
         controller_key: str,
         *,
         mode: DesktopObservationMode,
+        allow_window_fallback: bool = False,
     ) -> _Execution:
         parameters = command.parameters
         if command.action in DESKTOP_BROWSER_ACTIONS:
@@ -1082,7 +1105,11 @@ class DesktopBridge:
             )
         if command.action in {"get_app_state", "screenshot"}:
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
-            state = await asyncio.to_thread(provider.get_app_state, required_str_parameter(parameters, "app"))
+            state = await asyncio.to_thread(
+                provider.get_app_state,
+                required_str_parameter(parameters, "app"),
+                include_elements=mode != "screenshot",
+            )
             return _Execution(
                 {"action": command.action},
                 observed_state=state,
@@ -1096,7 +1123,13 @@ class DesktopBridge:
             if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
                 await execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
             else:
-                await execute_fallback_control(provider, command, app_id=app_id, state_id=state_id)
+                await execute_fallback_control(
+                    provider,
+                    command,
+                    app_id=app_id,
+                    state_id=state_id,
+                    allow_window_fallback=allow_window_fallback,
+                )
         return _Execution(
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
@@ -1278,7 +1311,13 @@ class DesktopBridge:
         if fitted is None:
             return self._bounded_fallback_response(command, result, screenshot=screenshot)
         fitted_state, candidate = fitted
-        self._observations.remember(fitted_state, command, controller_key=controller_key)
+        self._observations.remember(
+            fitted_state,
+            command,
+            controller_key=controller_key,
+            screenshot_captured=screenshot is not None,
+            tree_captured=mode != "screenshot",
+        )
         return success_response(command, result=candidate, screenshot=screenshot)
 
     @staticmethod

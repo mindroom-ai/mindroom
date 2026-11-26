@@ -12,16 +12,17 @@ import pytest
 
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.compaction import compact_scope_history
+from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_stored_scope,
     prepare_scope_history,
-    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, with_force_compaction
+from mindroom.history.summarizer import SummaryModel, summarize_chunk
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -34,7 +35,6 @@ from tests.conftest import (
     install_model_providers,
     loop_runs_while_blocked,
     request_frame,
-    runtime_paths_for,
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
@@ -61,12 +61,10 @@ if TYPE_CHECKING:
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs."""
-    return resolve_entity_preparation_inputs(
+    return resolve_history_preparation_inputs(
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
-        runtime_paths=runtime_paths_for(config),
         active_model_name=entity_model_name(config, "test_agent"),
-        active_context_window=None,
     )
 
 
@@ -140,7 +138,7 @@ async def test_history_sizing_allows_loop_progress(
     loop_progress: list[bool] = []
     if stage == "summary":
         monkeypatch.setattr(
-            "mindroom.history.compaction.count",
+            "mindroom.history.summarizer.count",
             _noting_loop_progress(count, loop_progress),
         )
     else:
@@ -155,13 +153,13 @@ async def test_history_sizing_allows_loop_progress(
         await _finalize_prepared_history(prepared_scope_history=prepared, frame=_FRAME)
     else:
         monkeypatch.setattr(
-            "mindroom.history.compaction.generate_compaction_summary",
+            "mindroom.history.summarizer.generate_compaction_summary",
             AsyncMock(return_value="Greeting received."),
         )
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            state=HistoryScopeState(force_compact_before_next_run=True),
+            mode="manual",
             summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
             available_history_budget=1000,
             max_summary_tokens=None,
@@ -199,13 +197,13 @@ async def test_history_storage_work_allows_loop_progress(
     )
     monkeypatch.setattr(target, _noting_loop_progress(operation, loop_progress))
     monkeypatch.setattr(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         AsyncMock(return_value="Greeting received."),
     )
     outcome = await compact_scope_history(
         storage=storage,
         session=session,
-        state=HistoryScopeState(force_compact_before_next_run=True),
+        mode="manual",
         summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
         available_history_budget=1000,
         max_summary_tokens=None,
@@ -248,7 +246,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     monkeypatch.setattr(ResponsesAdapter, "request_tokens", record_request_tokens)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
-        "mindroom.history.compaction.generate_compaction_summary",
+        "mindroom.history.summarizer.generate_compaction_summary",
         AsyncMock(return_value="Greeting received."),
     )
     lifecycle = RecordingCompactionLifecycle()
@@ -308,7 +306,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     lifecycle.start.return_value = "notice"
     hook = AsyncMock()
     monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", generate)
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     task = asyncio.create_task(
@@ -326,7 +324,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
             paths,
             state=HistoryScopeState(force_compact_before_next_run=True),
             history_budget=1000,
-            max_summary_tokens=None,
+            max_summary_tokens=1000,
             before_tokens=11,
             runs_before=1,
             lifecycle=lifecycle,
@@ -439,7 +437,7 @@ async def test_summary_retry_sizing_allows_loop_progress(
     """Every estimate lets queued loop work run, including after a model refusal."""
     loop_progress: list[bool] = []
     monkeypatch.setattr(
-        "mindroom.history.compaction.count",
+        "mindroom.history.summarizer.count",
         _noting_loop_progress(count, loop_progress),
     )
     summary = "Greeting received."
@@ -449,14 +447,14 @@ async def test_summary_retry_sizing_allows_loop_progress(
     elif retry == "shrink":
         responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
     generate = AsyncMock(side_effect=responses)
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
+    monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", generate)
     # A shrink retry needs an input large enough to halve.
     run = _completed_run(
         "run",
         messages=[Message(role="user", content="Hello " * 8000 if retry == "shrink" else "Hello")],
     )
     fallback = SummaryModel(summary_model(model_id="fallback"), "fallback", 1000)
-    result = await _summarize_chunk(
+    result = await summarize_chunk(
         _summarizer(
             summary_model(model_id="primary"),
             10000,

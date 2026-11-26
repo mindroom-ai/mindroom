@@ -697,7 +697,7 @@ async def test_acknowledge_saved_run_retries_transient_errors_and_drops_per_clai
 
         with monkeypatch.context() as patch, capture_logs() as fail_logs:
             intercept_job_saves(patch, before=fail_save)
-            await owner.acknowledge_saved_run(run1)
+            await owner._acknowledge_saved_run(run1)
         assert {e["job_id"] for e in fail_logs if e["event"] == "Tool result persistence was not confirmed"} == {
             "transient-inline",
         }
@@ -706,7 +706,7 @@ async def test_acknowledge_saved_run_retries_transient_errors_and_drops_per_clai
         assert "transient-inline" not in {job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)}
         assert (await runtime.wait("transient-inline", owner=job_owner(), depth=0, timeout=0)).claim is None
 
-        await owner.acknowledge_saved_run(run1)
+        await owner._acknowledge_saved_run(run1)
         persisted = await saved_jobs(tmp_path)
         assert persisted["transient-inline"].consumed
         assert persisted["transient-inline"].returned_inline
@@ -728,7 +728,7 @@ async def test_acknowledge_saved_run_retries_transient_errors_and_drops_per_clai
             tools=[ToolExecution(tool_call_id="call-2", tool_name="job", result="ok")],
         )
         with capture_logs() as error_logs:
-            await owner.acknowledge_saved_run(run2)
+            await owner._acknowledge_saved_run(run2)
         assert {e["job_id"] for e in error_logs if e["event"] == "Tool result persistence was not confirmed"} == {
             "other-waiter",
         }

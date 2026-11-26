@@ -106,7 +106,7 @@ repos:
       # Prettier reads `frontend/.prettierignore`, so this hook needs no exclude list.
       - id: prettier
         name: Prettier
-        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bunx prettier --write "${@#frontend/}"' --
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun x prettier --write "${@#frontend/}"' --
         language: system
         files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
         require_serial: true
@@ -141,4 +141,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json|frontend/src/components/Usage/__fixtures__/providerUsageContract\.json)$

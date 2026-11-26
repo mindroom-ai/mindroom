@@ -3,21 +3,30 @@
 
 from __future__ import annotations
 
+import codecs
+import io
 import math
 import threading
 import time
+import zipfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
 import tiktoken
 
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.llm.media import File
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import families
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.token_counting.families import counter_for_model, load_o200k
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, _file_tokens, file_tokens_within_budget
 from tests.fakes.token_counter import quarter_tokens
+from tests.history_helpers import blank_pdf
 
 if TYPE_CHECKING:
-    import pytest
+    from typing import BinaryIO
 
 
 def _o200k(text: str) -> int:
@@ -175,3 +184,283 @@ def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> 
     assert count(counter, spaced) == _o200k(spaced)
     for run in ("abc" * 6_000, " " * 20_000):
         assert abs(count(counter, run) - _o200k(run)) <= len(run) // 8_192 + 1
+
+
+def test_file_tokens_within_budget_enforces_text_byte_cap_without_reading_or_tokenizing_oversized_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text files >50 KiB skip without reading or tokenizing; <=50 KiB UTF-8/UTF-16/cp1252 match _file_tokens."""
+    threshold = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    export_path = tmp_path / "export.json"
+    export_path.write_bytes(b'{"items": "' + b"a" * 2_100_000 + b'"}')
+    oversized_txt = tmp_path / "big.txt"
+    oversized_txt.write_bytes(b"entry line\n" * 20_000)
+    untyped_log = tmp_path / "app.log"
+    untyped_log.write_bytes(b"entry line\n" * 20_000)
+
+    small_text = "ITEM-001 42.00\n" * 500
+    utf8_path = tmp_path / "report-utf8.txt"
+    utf8_bytes = small_text.encode("utf-8")
+    assert len(utf8_bytes) <= threshold
+    utf8_path.write_bytes(utf8_bytes)
+
+    utf16_path = tmp_path / "report-utf16.txt"
+    utf16_bytes = codecs.BOM_UTF16_LE + small_text.encode("utf-16-le")
+    assert len(utf16_bytes) <= threshold
+    utf16_path.write_bytes(utf16_bytes)
+
+    cp1252_path = tmp_path / "notes.txt"
+    cp1252_bytes = b"smart \x93quotes\x94 " * 20
+    cp1252_path.write_bytes(cp1252_bytes)
+
+    bytes_read_by_path: dict[Path, int] = {}
+    real_open = Path.open
+
+    class _CountingReader:
+        def __init__(self, inner: BinaryIO, target: Path) -> None:
+            self._inner = inner
+            self._target = target
+
+        def read(self, size: int = -1) -> bytes:
+            data = self._inner.read(size)
+            bytes_read_by_path[self._target] = bytes_read_by_path.get(self._target, 0) + len(data)
+            return data
+
+        def __enter__(self) -> _CountingReader:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.close()
+
+    def tracking_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+        if "b" in mode and self in {export_path, oversized_txt, untyped_log}:
+            return _CountingReader(handle, self)  # type: ignore[arg-type]
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    estimate_calls = 0
+
+    def counting_quarter_tokens(text: str) -> int:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        return quarter_tokens(text)
+
+    counter = TokenCounter(estimate=counting_quarter_tokens)
+
+    # Declared text/JSON files over 50 KiB are skipped after a 5-byte %PDF- peek with zero tokenizer calls.
+    for path, mime_type in ((export_path, "application/json"), (oversized_txt, "text/plain")):
+        estimate_calls = 0
+        assert (
+            file_tokens_within_budget(
+                counter,
+                File(filepath=str(path), filename=path.name, mime_type=mime_type),
+                text_byte_budget=threshold,
+                headroom_budget=None,
+            )
+            is None
+        )
+        assert bytes_read_by_path[path] <= 5
+        assert estimate_calls == 0
+
+    # Untyped >50 KiB pure UTF-8 file is omitted without tokenizing; tight headroom skips reading past 5 bytes.
+    estimate_calls = 0
+    assert (
+        file_tokens_within_budget(
+            counter,
+            File(filepath=str(untyped_log), filename="app.log"),
+            text_byte_budget=threshold,
+            headroom_budget=None,
+        )
+        is None
+    )
+    assert estimate_calls == 0
+    bytes_read_by_path[untyped_log] = 0
+    assert (
+        file_tokens_within_budget(
+            counter,
+            File(filepath=str(untyped_log), filename="app.log"),
+            text_byte_budget=threshold,
+            headroom_budget=4_000,
+        )
+        is None
+    )
+    assert bytes_read_by_path[untyped_log] <= 5
+
+    # <=50 KiB UTF-8, UTF-16 BOM, cp1252, and in-memory str files inline and match _file_tokens.
+    for file, expected_bytes in (
+        (File(filepath=str(utf8_path), filename="report-utf8.txt", mime_type="text/plain"), len(utf8_bytes)),
+        (File(filepath=str(utf16_path), filename="report-utf16.txt", mime_type="text/plain"), len(utf16_bytes)),
+        (File(filepath=str(cp1252_path), filename="notes.txt", mime_type="text/plain"), len(cp1252_bytes)),
+        (File(content="café " * 100, filename="inline.txt", mime_type="text/plain"), len(("café " * 100).encode())),
+    ):
+        assert file_tokens_within_budget(
+            counter,
+            file,
+            text_byte_budget=threshold,
+            headroom_budget=None,
+        ) == (_file_tokens(counter, file), expected_bytes)
+
+    assert (
+        file_tokens_within_budget(
+            counter,
+            File(filepath=str(cp1252_path), filename="notes.txt", mime_type="text/plain"),
+            text_byte_budget=threshold,
+            headroom_budget=10,
+        )
+        is None
+    )
+
+
+def test_file_tokens_within_budget_classifies_uncompressed_zip_and_binary_without_tokenizing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uncompressed ZIP or binary file over 50 KiB with a valid-UTF-8 prefix classifies as binary without tokenizing."""
+    threshold = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as archive:
+        info = zipfile.ZipInfo("log.txt", date_time=(1980, 1, 1, 0, 0, 0))
+        archive.writestr(info, ("entry line\n" * 20_000) + "xxxxx")
+    zip_bytes = buf.getvalue()
+    assert len(zip_bytes) > threshold
+    zip_bytes[:200_000].decode("utf-8")
+    with pytest.raises(UnicodeDecodeError):
+        zip_bytes.decode("utf-8")
+
+    zip_path = tmp_path / "bundle.zip"
+    zip_path.write_bytes(zip_bytes)
+
+    early_binary_path = tmp_path / "early.zip"
+    early_binary_path.write_bytes(b"PK\x03\x04\x89\xff" + b"\xff" * 2_100_000)
+    trailing_binary_path = tmp_path / "payload.bin"
+    trailing_binary_path.write_bytes(b"entry line\n" * 10_000 + b"\xff" + b"a" * 2_000_000)
+    truncated_utf8_path = tmp_path / "truncated.bin"
+    truncated_utf8_path.write_bytes(b"entry line\n" * 10_000 + b"\xc3")
+
+    bytes_read_by_path: dict[Path, int] = {}
+    real_open = Path.open
+
+    class _CountingReader:
+        def __init__(self, inner: BinaryIO, target: Path) -> None:
+            self._inner = inner
+            self._target = target
+
+        def read(self, size: int = -1) -> bytes:
+            data = self._inner.read(size)
+            bytes_read_by_path[self._target] = bytes_read_by_path.get(self._target, 0) + len(data)
+            return data
+
+        def __enter__(self) -> _CountingReader:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.close()
+
+    def tracking_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+        if "b" in mode and self in {early_binary_path, trailing_binary_path}:
+            return _CountingReader(handle, self)  # type: ignore[arg-type]
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    estimate_calls = 0
+
+    def counting_quarter_tokens(text: str) -> int:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        return quarter_tokens(text)
+
+    counter = TokenCounter(estimate=counting_quarter_tokens)
+
+    for mime_type in ("application/zip", None):
+        zip_file = File(filepath=str(zip_path), filename="bundle.zip", mime_type=mime_type)
+        assert _file_tokens(counter, zip_file) == MEDIA_ALLOWANCE_TOKENS
+        for byte_budget in (threshold, 0):
+            estimate_calls = 0
+            assert file_tokens_within_budget(
+                counter,
+                zip_file,
+                text_byte_budget=byte_budget,
+                headroom_budget=20_000,
+            ) == (MEDIA_ALLOWANCE_TOKENS, 0)
+            assert estimate_calls == 0
+        assert (
+            file_tokens_within_budget(
+                counter,
+                zip_file,
+                text_byte_budget=threshold,
+                headroom_budget=4_000,
+            )
+            is None
+        )
+
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(early_binary_path), filename="early.zip", mime_type="application/zip"),
+        text_byte_budget=0,
+        headroom_budget=20_000,
+    ) == (MEDIA_ALLOWANCE_TOKENS, 0)
+    assert bytes_read_by_path[early_binary_path] <= 65_541
+
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(trailing_binary_path), filename="payload.bin"),
+        text_byte_budget=threshold,
+        headroom_budget=20_000,
+    ) == (MEDIA_ALLOWANCE_TOKENS, 0)
+    assert bytes_read_by_path[trailing_binary_path] < 300_000
+
+    assert file_tokens_within_budget(
+        counter,
+        File(filepath=str(truncated_utf8_path), filename="truncated.bin"),
+        text_byte_budget=threshold,
+        headroom_budget=20_000,
+    ) == (MEDIA_ALLOWANCE_TOKENS, 0)
+
+
+def test_file_tokens_within_budget_separates_pdf_headroom_from_text_cap_and_handles_missing(
+    tmp_path: Path,
+) -> None:
+    """Multi-MB PDFs obey headroom_budget (not the 50 KiB text cap), and missing files keep the media allowance."""
+    pdf_path = tmp_path / "report.pdf"
+    pdf_bytes = blank_pdf(10, padding_bytes=1_100_000)
+    assert len(pdf_bytes) > 1_000_000
+    pdf_path.write_bytes(pdf_bytes)
+
+    counter = TokenCounter(estimate=quarter_tokens)
+    pdf_file = File(filepath=str(pdf_path), filename="report.pdf", mime_type="application/pdf")
+    missing_file = File(
+        filepath=str(tmp_path / "missing.json"),
+        filename="missing.json",
+        mime_type="application/json",
+        size=2_000_000,
+    )
+
+    assert file_tokens_within_budget(
+        counter,
+        pdf_file,
+        text_byte_budget=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        headroom_budget=90_000,
+    ) == (50_000, 0)
+    assert (
+        file_tokens_within_budget(
+            counter,
+            pdf_file,
+            text_byte_budget=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+            headroom_budget=40_000,
+        )
+        is None
+    )
+    assert file_tokens_within_budget(
+        counter,
+        pdf_file,
+        text_byte_budget=0,
+        headroom_budget=None,
+    ) == (50_000, 0)
+    assert file_tokens_within_budget(counter, missing_file, text_byte_budget=0, headroom_budget=32_000) == (
+        MEDIA_ALLOWANCE_TOKENS,
+        0,
+    )
+    assert file_tokens_within_budget(counter, pdf_file, text_byte_budget=50 * 1024, headroom_budget=0) is None

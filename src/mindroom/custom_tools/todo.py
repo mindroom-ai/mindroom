@@ -680,23 +680,157 @@ def _default_assignee(context_agent_name: str) -> str:
     return context_agent_name if context_agent_name in _configured_agent_names() else ""
 
 
+_ALLOWED_TODO_PARAMS: dict[str, frozenset[str]] = {
+    "plan": frozenset({"tasks"}),
+    "add": frozenset({"title", "priority", "depends_on", "assigned_agent"}),
+    "list": frozenset({"show_all"}),
+    "update": frozenset({"todo_id", "title", "priority", "status", "depends_on", "assigned_agent"}),
+    "apply_template": frozenset({"template_name", "params", "dry_run"}),
+    "list_templates": frozenset(),
+}
+
+
+def _validate_todo_params(
+    action: str,
+    *,
+    tasks: str | None,
+    todo_id: str | None,
+    title: str | None,
+    priority: str | None,
+    status: str | None,
+    depends_on: str | None,
+    assigned_agent: str | None,
+    show_all: bool,
+    template_name: str | None,
+    params: dict[str, str | int | bool] | None,
+    dry_run: bool,
+) -> str | None:
+    """Validate required and allowed parameters for a ``todo`` action."""
+    allowed = _ALLOWED_TODO_PARAMS.get(action)
+    if allowed is None:
+        return (
+            f"Error: unsupported todo action {action!r}. "
+            "Expected one of: plan, add, list, update, apply_template, list_templates."
+        )
+    provided = {
+        "tasks": tasks is not None,
+        "todo_id": todo_id is not None,
+        "title": title is not None,
+        "priority": priority is not None,
+        "status": status is not None,
+        "depends_on": depends_on is not None,
+        "assigned_agent": assigned_agent is not None,
+        "show_all": show_all,
+        "template_name": template_name is not None,
+        "params": params is not None,
+        "dry_run": dry_run,
+    }
+    unexpected = [name for name, is_set in provided.items() if is_set and name not in allowed]
+    if unexpected:
+        names = ", ".join(f"`{name}`" for name in unexpected)
+        return f"Error: parameter(s) {names} cannot be used with action={action!r}."
+    missing_checks = {
+        "plan": ("tasks", tasks is None),
+        "add": ("title", title is None),
+        "update": ("todo_id", todo_id is None or not todo_id.strip()),
+        "apply_template": ("template_name", template_name is None or not template_name.strip()),
+    }
+    if (check := missing_checks.get(action)) is not None and check[1]:
+        return f"Error: `{check[0]}` is required for action={action!r}."
+    return None
+
+
 class TodoTools(Toolkit):
     """Tools for managing per-thread work plans with dependencies."""
 
     def __init__(self) -> None:
         super().__init__(
             name="todo",
-            tools=[
-                self.plan,
-                self.add_todo,
-                self.list_todos,
-                self.update_todo,
-                self.apply_template,
-                self.list_templates,
-            ],
+            tools=[self.todo],
         )
 
-    def plan(self, tasks: str) -> str:  # noqa: C901
+    def todo(  # noqa: PLR0911 - action dispatch across six todo operations
+        self,
+        action: Literal["plan", "add", "list", "update", "apply_template", "list_templates"],
+        tasks: str | None = None,
+        todo_id: str | None = None,
+        title: str | None = None,
+        priority: str | None = None,
+        status: str | None = None,
+        depends_on: str | None = None,
+        assigned_agent: str | None = None,
+        show_all: bool = False,
+        template_name: str | None = None,
+        params: dict[str, str | int | bool] | None = None,
+        dry_run: bool = False,
+    ) -> str:
+        """Manage this thread's visible work plan (tasks, priorities, dependencies, assignees, and reusable templates).
+
+        - `plan`: batch-create from newline-separated `tasks` (optional `[low|medium|high|critical]` prefix).
+        - `add`: add one task (`title`; optional `priority`, `depends_on`, `assigned_agent`).
+        - `list`: list actionable (priority-ordered) and blocked tasks (`show_all=True` adds done/cancelled).
+        - `update`: update `todo_id` (marking `done`/`cancelled` reports newly unblocked tasks).
+        - `apply_template` / `list_templates`: expand (`template_name`, `params`, `dry_run`) or list built-in/workspace templates.
+
+        Args:
+            action: Operation to perform.
+            tasks: Newline-separated lines (`plan`; optional `[low|medium|high|critical]` prefix per line).
+            todo_id: Target ID (`update`).
+            title: Task title (`add` required; `update` empty keeps current).
+            priority: `low`, `medium` (`add` default), `high`, or `critical`.
+            status: `open`, `done`, or `cancelled` (`update`).
+            depends_on: Comma-separated prerequisite IDs (`add`/`update`; cycle-checked; `update`: null keeps current, empty string clears).
+            assigned_agent: Agent name (`add` defaults to caller; `update`: null/empty keeps current, single space " " clears).
+            show_all: Include done/cancelled (`list`).
+            template_name: Template name (`apply_template`).
+            params: Template parameter map (`apply_template`).
+            dry_run: Preview without saving (`apply_template`).
+
+        """
+        if err := _validate_todo_params(
+            action,
+            tasks=tasks,
+            todo_id=todo_id,
+            title=title,
+            priority=priority,
+            status=status,
+            depends_on=depends_on,
+            assigned_agent=assigned_agent,
+            show_all=show_all,
+            template_name=template_name,
+            params=params,
+            dry_run=dry_run,
+        ):
+            return err
+        if action == "plan":
+            assert tasks is not None
+            return self._plan(tasks)
+        if action == "add":
+            assert title is not None
+            return self._add_todo(
+                title=title,
+                depends_on="" if depends_on is None else depends_on,
+                priority="medium" if priority is None else priority,
+                assigned_agent="" if assigned_agent is None else assigned_agent,
+            )
+        if action == "list":
+            return self._list_todos(show_all=show_all)
+        if action == "update":
+            assert todo_id is not None
+            return self._update_todo(
+                todo_id=todo_id,
+                title="" if title is None else title,
+                priority="" if priority is None else priority,
+                status="" if status is None else status,
+                depends_on=depends_on,
+                assigned_agent="" if assigned_agent is None else assigned_agent,
+            )
+        if action == "apply_template":
+            assert template_name is not None
+            return self._apply_template(template_name, params or {}, dry_run=dry_run)
+        return self._list_templates()
+
+    def _plan(self, tasks: str) -> str:  # noqa: C901
         """Append a visible multi-step work plan to this thread.
 
         Args:
@@ -757,7 +891,7 @@ class TodoTools(Toolkit):
             result_lines.append(f"- {marker} `{item['id']}` {item['title']} [{item['priority']}]")
         return "\n".join(result_lines)
 
-    def add_todo(  # noqa: C901
+    def _add_todo(  # noqa: C901
         self,
         title: str,
         depends_on: str = "",
@@ -825,7 +959,7 @@ class TodoTools(Toolkit):
             message += f" assigned to {resolved_agent}"
         return message
 
-    def list_todos(self, show_all: bool = False) -> str:
+    def _list_todos(self, show_all: bool = False) -> str:
         """List this thread's work plan grouped by actionable (priority-ordered) and blocked items.
 
         Args:
@@ -869,7 +1003,7 @@ class TodoTools(Toolkit):
             result_lines.extend(f"- {item['status']} `{item['id']}` {item['title']}" for item in done)
         return "\n".join(result_lines)
 
-    def update_todo(  # noqa: C901, PLR0915
+    def _update_todo(  # noqa: C901, PLR0915
         self,
         todo_id: str,
         title: str = "",
@@ -968,7 +1102,7 @@ class TodoTools(Toolkit):
 
         return locked_update_json(path, do_update)
 
-    def apply_template(
+    def _apply_template(
         self,
         name: str,
         params: dict[str, str | int | bool],
@@ -1038,7 +1172,7 @@ class TodoTools(Toolkit):
             created_items,
         )
 
-    def list_templates(self) -> str:
+    def _list_templates(self) -> str:
         """List available built-in and workspace todo templates with descriptions and parameter schemas when available."""
         templates: list[dict[str, Any]] = []
         remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES

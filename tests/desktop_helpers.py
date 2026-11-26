@@ -192,6 +192,8 @@ class FakeProvider:
     stale_state: bool = False
     state_error_after: int | None = None
     state_count: int = 0
+    include_elements_calls: list[bool] = field(default_factory=list)
+    window_fallback_calls: list[tuple[str, bool]] = field(default_factory=list)
 
     def status(self) -> dict[str, object]:
         """Record status."""
@@ -214,14 +216,20 @@ class FakeProvider:
         """Record one exact allowlisted application launch."""
         self.calls.append(("launch_app", app_id))
 
-    def get_app_state(self, app_id: str) -> AccessibilityState:
+    def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
         """Return a fresh state or fail after the configured number of reads."""
         self.calls.append(("get_app_state", app_id))
+        self.include_elements_calls.append(include_elements)
         if self.state_error_after is not None and self.state_count >= self.state_error_after:
             msg = "App state failed."
             raise AccessibilityError(msg)
         self.state_count += 1
-        return replace(STATE, app_id=app_id, state_id=f"state-{self.state_count}")
+        return replace(
+            STATE,
+            app_id=app_id,
+            state_id=f"state-{self.state_count}",
+            elements=STATE.elements if include_elements else (),
+        )
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
         """Record the exact window crop."""
@@ -262,9 +270,19 @@ class FakeProvider:
         """Record one advertised accessibility action."""
         self.calls.append(("perform_action", (app_id, state_id, element_index, action_name)))
 
-    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Record one normalized fallback click."""
         self.calls.append(("click", (app_id, state_id, x, y, button)))
+        self.window_fallback_calls.append(("click", allow_window_fallback))
         if self.stale_state:
             msg = "Accessibility state is stale; request get_app_state again before acting."
             raise AccessibilityError(msg)
@@ -272,9 +290,18 @@ class FakeProvider:
             msg = "Unexpected click failure."
             raise RuntimeError(msg)
 
-    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
+    def type_text(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        text: str,
+        element_index: int | None = None,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Record fallback text and the element it targets, if any."""
         self.calls.append(("type_text", (app_id, state_id, text, element_index)))
+        self.window_fallback_calls.append(("type_text", allow_window_fallback))
 
     def scroll(
         self,
@@ -285,13 +312,23 @@ class FakeProvider:
         pages: int,
         x: int | None,
         y: int | None,
+        allow_window_fallback: bool = False,
     ) -> None:
         """Record fallback scroll."""
         self.calls.append(("scroll", (app_id, state_id, direction, pages, x, y)))
+        self.window_fallback_calls.append(("scroll", allow_window_fallback))
 
-    def keypress(self, *, app_id: str, state_id: str, keys: list[str]) -> None:
+    def keypress(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        keys: list[str],
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Record fallback keypress."""
         self.calls.append(("keypress", (app_id, state_id, keys)))
+        self.window_fallback_calls.append(("keypress", allow_window_fallback))
 
     def double_click(self, **parameters: object) -> None:
         """Record a double click."""

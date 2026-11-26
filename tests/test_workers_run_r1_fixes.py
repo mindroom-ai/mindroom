@@ -11,7 +11,7 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
@@ -38,7 +38,7 @@ from tests.test_workers_run_small_fixes import _cli_with_stream, _FakeWorkerMana
 from tests.workers_run_frames import FakeStream, command_frames
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
 _TEST_TOKEN = "test-token"  # noqa: S105
@@ -97,12 +97,15 @@ async def test_r1_queued_and_cold_start_cancel_report_never_ran(
     async def local_placeholder(args: str) -> str:
         return args
 
-    proxied_shell = WorkerStandIns(
-        tool_name="shell",
-        runtime_paths=runtime_paths,
-        credentials_manager=None,
-        tools=builtin_tool_registry(),
-    )("run_shell_command", local_placeholder)
+    proxied_shell = cast(
+        "Callable[[str], Awaitable[object]]",
+        WorkerStandIns(
+            tool_name="shell",
+            runtime_paths=runtime_paths,
+            credentials_manager=None,
+            tools=builtin_tool_registry(),
+        )("run_shell_command", local_placeholder),
+    )
 
     outer_entered = asyncio.Event()
     release_outer = asyncio.Event()
@@ -249,6 +252,8 @@ async def test_r3_program_that_is_found_but_cannot_run_is_reported_by_its_spawn_
     """A script whose interpreter is missing, or without the execute bit, is reported from its spawn error alone."""
     # Where the idle policy is refused, a command starts directly, so its spawn error is the one that is reported.
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     script = tmp_path / "script-xyz"
     script.write_text(f"{first_line}echo hi\n")
     script.chmod(mode)
@@ -275,6 +280,8 @@ async def test_r4_program_with_a_trailing_slash_keeps_it_and_is_never_opened(
 ) -> None:
     """A file named as a directory is reported under the name it was given, and what it holds is never read."""
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     program = tmp_path / "script-xyz"
     line = b"#!/bin/sh\n"
     if fifo:

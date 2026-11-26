@@ -883,7 +883,7 @@ class TestInteractiveConfigInit:
         )
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-        probe = setup_matrix.MatrixServerProbeResult(
+        probe = setup_matrix._MatrixServerProbeResult(
             homeserver="https://matrix.corp.example",
             discovered_via_well_known=True,
             reachable=True,
@@ -892,7 +892,7 @@ class TestInteractiveConfigInit:
         answers = "corp.example\n\n\n" if matrix_server == "self-hosted" else "\n\n"
         with (
             patch.object(setup_detection, "detect_available_providers", return_value=snapshot),
-            patch.object(setup_matrix, "probe_matrix_server", return_value=probe),
+            patch.object(setup_matrix, "_probe_matrix_server", return_value=probe),
         ):
             result = runner.invoke(
                 app,

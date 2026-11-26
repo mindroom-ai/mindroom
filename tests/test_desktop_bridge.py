@@ -9,6 +9,7 @@ import shlex
 import signal
 import sys
 import threading
+from collections import UserList
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -81,6 +82,7 @@ from tests.desktop_helpers import (
     _stall_output_uploads,
 )
 from tests.desktop_helpers import selected_root as selected_root  # noqa: PLC0414
+from tests.test_desktop_accessibility import _fake_mac_backend
 from tests.test_olm_to_device import olm_transport
 
 # The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
@@ -660,11 +662,27 @@ class _BlockingClickProvider(FakeProvider):
     started: threading.Event = field(default_factory=threading.Event)
     release: threading.Event = field(default_factory=threading.Event)
 
-    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
         """Block like slow activation and input posting do on a real Mac."""
         self.started.set()
         assert self.release.wait(5)
-        super().click(app_id=app_id, state_id=state_id, x=x, y=y, button=button)
+        super().click(
+            app_id=app_id,
+            state_id=state_id,
+            x=x,
+            y=y,
+            button=button,
+            allow_window_fallback=allow_window_fallback,
+        )
 
 
 @pytest.mark.asyncio
@@ -1182,7 +1200,22 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         isActive=activation_published.is_set,
         activateWithOptions_=lambda _options: activation_requested.set() or True,
     )
-    workspace = SimpleNamespace(runningApplications=lambda: [application] if launch_published.is_set() else [])
+
+    def open_app(_url: object, _config: object, handler: object) -> None:
+        launch_requested.set()
+        assert callable(handler)
+        handler(None, None)
+
+    workspace = SimpleNamespace(
+        runningApplications=lambda: [application] if launch_published.is_set() else [],
+        URLForApplicationWithBundleIdentifier_=lambda _app_id: "file:///Applications/Editor.app",
+        openApplicationAtURL_configuration_completionHandler_=open_app,
+    )
+    open_config = SimpleNamespace(
+        setActivates_=lambda _v: None,
+        setHides_=lambda _v: None,
+        setCreatesNewApplicationInstance_=lambda _v: None,
+    )
 
     def pump(mode: str, seconds: float, _return_after_source: bool) -> None:
         assert threading.current_thread() is threading.main_thread()
@@ -1200,13 +1233,12 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         "CoreFoundation",
         SimpleNamespace(CFRunLoopRunInMode=pump, kCFRunLoopDefaultMode="default"),
     )
-    appkit = SimpleNamespace(NSWorkspace=SimpleNamespace(sharedWorkspace=lambda: workspace))
+    appkit = SimpleNamespace(
+        NSWorkspace=SimpleNamespace(sharedWorkspace=lambda: workspace),
+        NSWorkspaceOpenConfiguration=SimpleNamespace(configuration=lambda: open_config),
+    )
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     monkeypatch.setitem(sys.modules, "ApplicationServices", SimpleNamespace())
-    monkeypatch.setattr(
-        "mindroom.desktop.accessibility._request_application_activation",
-        lambda _app: launch_requested.set(),
-    )
     monkeypatch.setattr("mindroom.desktop.accessibility._LAUNCH_ATTEMPTS", 6)
     backend = MacAccessibilityBackend(frozenset({APP_ID}), lambda: (1920, 1080))
     provider = FakeProvider()
@@ -2254,8 +2286,24 @@ class _EndingProvider(FakeProvider):
 
     bridge: DesktopBridge
 
-    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
-        super().click(app_id=app_id, state_id=state_id, x=x, y=y, button=button)
+    def click(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+        button: str,
+        allow_window_fallback: bool = False,
+    ) -> None:
+        super().click(
+            app_id=app_id,
+            state_id=state_id,
+            x=x,
+            y=y,
+            button=button,
+            allow_window_fallback=allow_window_fallback,
+        )
         self.bridge.revoke_local_control()
 
 
@@ -2986,12 +3034,12 @@ async def test_oversized_ax_state_fits_inline_and_drops_unreturned_elements(
     )
     state_seq = iter(f"big-state-{n}" for n in range(1, 5))
     provider = FakeProvider()
-    provider.get_app_state = lambda _app_id: AccessibilityState(  # type: ignore[method-assign]
+    provider.get_app_state = lambda _app_id, *, include_elements=True: AccessibilityState(  # type: ignore[method-assign]
         next(state_seq),
         APP_ID,
         "Editor",
         WINDOW,
-        big_elements,
+        big_elements if include_elements else (),
         False,
     )
     bridge = DesktopBridge(
@@ -3025,7 +3073,7 @@ async def test_oversized_ax_state_fits_inline_and_drops_unreturned_elements(
     assert not _response(transport).ok
     assert "index" in (_response(transport).error or "")
 
-    # Coordinate fallback is rejected on a wire-truncated observation.
+    # Coordinate fallback succeeds on a wire-truncated observation when its screenshot was delivered.
     fallback_cmd = _command(
         "click",
         request_id="r2b",
@@ -3042,13 +3090,34 @@ async def test_oversized_ax_state_fits_inline_and_drops_unreturned_elements(
     await bridge.on_to_device_event(_event(fallback_cmd))
     await _execute(bridge)
     await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert provider.window_fallback_calls == [("click", True)]
+    tree_only_state_id = _response(transport).result["state"]["state_id"]
+
+    # Tree-only wire-truncated follow-up (no screenshot delivered) still rejects coordinate fallback.
+    tree_fallback_cmd = _command(
+        "click",
+        request_id="r2c",
+        sequence=4,
+        parameters={
+            "app": APP_ID,
+            "state_id": tree_only_state_id,
+            "x": 100,
+            "y": 100,
+            "button": "left",
+            "observation": "tree",
+        },
+    )
+    await bridge.on_to_device_event(_event(tree_fallback_cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
     assert not _response(transport).ok
     assert "stable complete observation" in (_response(transport).error or "")
 
     kept_cmd = _command(
         "click_element",
         request_id="r3",
-        sequence=4,
+        sequence=5,
         parameters={"app": APP_ID, "state_id": "big-state-1", "element_index": kept_count - 1, "observation": "tree"},
     )
     await bridge.on_to_device_event(_event(kept_cmd))
@@ -3197,3 +3266,213 @@ async def test_two_controllers_cannot_cross_reference_observations(
     await bridge.deliver_pending()
     assert not _response(transport).ok
     assert "scope" in (_response(transport).error or "")
+
+
+@pytest.mark.asyncio
+async def test_screenshot_observation_skips_elements_and_failed_screenshot_blocks_fallback(
+    transport: AsyncMock,
+) -> None:
+    """mode=screenshot passes include_elements=False on read and follow-up; failed capture rejects fallback."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+
+    # 1. screenshot + follow-up click both pass include_elements=False and unlock window fallback.
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "screenshot",
+                request_id="shot-1",
+                sequence=1,
+                parameters={"app": APP_ID, "observation": "screenshot"},
+            ),
+        ),
+    )
+    state_id = _response(transport).result["state"]["state_id"]
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "click",
+                request_id="click-1",
+                sequence=2,
+                parameters={"app": APP_ID, "state_id": state_id, "x": 100, "y": 100, "observation": "screenshot"},
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert provider.include_elements_calls == [False, False]
+    assert provider.window_fallback_calls == [("click", True)]
+
+    # 2. get_app_state(observation=screenshot) whose capture fails remembers screenshot_captured=False -> rejects fallback.
+    provider.screenshot_error = True
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "get_app_state",
+                request_id="obs-fail",
+                sequence=3,
+                parameters={"app": APP_ID, "observation": "screenshot"},
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    failed_state_id = _response(transport).result["state"]["state_id"]
+    assert _response(transport).screenshot is None
+
+    provider.screenshot_error = False
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "click",
+                request_id="click-fail",
+                sequence=4,
+                parameters={
+                    "app": APP_ID,
+                    "state_id": failed_state_id,
+                    "x": 100,
+                    "y": 100,
+                    "observation": "screenshot",
+                },
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "stable complete observation" in (_response(transport).error or "")
+
+
+@pytest.mark.asyncio
+async def test_wire_trimmed_screenshot_backed_click_succeeds_after_unrelated_ax_change(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wire-trimmed screenshot-backed observations use window revalidation even when the local AX tree was untruncated."""
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    backend, services, _ = _fake_mac_backend()
+    children = UserList([f"button-{index}" for index in range(120)])
+    services.attributes["window-1"]["children"] = children
+    for index, child in enumerate(children):
+        services.attributes[child] = {
+            "role": "AXButton",
+            "title": f"button-{index:03d}-" + ("n" * 140),
+            "value": "v" * 150,
+            "actions": ["AXPress"],
+        }
+
+    class _MacBackedProvider(FakeProvider):
+        def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
+            return backend.get_app_state(app_id, include_elements=include_elements)
+
+        def click(
+            self,
+            *,
+            app_id: str,
+            state_id: str,
+            x: int,
+            y: int,
+            button: str,
+            allow_window_fallback: bool = False,
+        ) -> None:
+            backend.prepare_fallback(app_id, state_id, allow_window_fallback=allow_window_fallback)
+            super().click(
+                app_id=app_id,
+                state_id=state_id,
+                x=x,
+                y=y,
+                button=button,
+                allow_window_fallback=allow_window_fallback,
+            )
+
+    provider = _MacBackedProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+
+    # 1. Local AX state is untruncated/stable, but bridge wire-trims it while delivering a screenshot.
+    await _handle(
+        bridge,
+        _event(_command("get_app_state", request_id="wire-1", sequence=1, parameters={"app": APP_ID})),
+    )
+    response = _response(transport)
+    assert response.ok
+    assert response.screenshot == MEDIA
+    returned_state = response.result["state"]
+    assert returned_state["truncated"] is True
+    assert returned_state["stability"] == "truncated"
+    state_id = returned_state["state_id"]
+    assert backend._states[state_id].public.truncated is False
+
+    # 2. Unrelated AX element changes while PID/window/bounds stay unchanged -> click still succeeds.
+    services.attributes["button-0"]["title"] = "changed-button-title"
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "click",
+                request_id="wire-click-1",
+                sequence=2,
+                parameters={"app": APP_ID, "state_id": state_id, "x": 100, "y": 100, "observation": "screenshot"},
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert provider.window_fallback_calls == [("click", True)]
+
+    # 3. Window bounds drift on a wire-trimmed state is still rejected.
+    services.attributes["window-1"]["size"] = SimpleNamespace(width=900, height=600)
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "click",
+                request_id="wire-click-drift",
+                sequence=3,
+                parameters={"app": APP_ID, "state_id": state_id, "x": 100, "y": 100, "observation": "screenshot"},
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "window geometry changed" in (_response(transport).error or "")
+
+    # 4. A small untruncated tree that fits inline keeps strict AX revalidation (allow_window_fallback=False).
+    services.attributes["window-1"]["size"] = SimpleNamespace(width=800, height=600)
+    services.attributes["window-1"]["children"] = UserList(["button"])
+    await bridge.on_to_device_event(
+        _event(_command("get_app_state", request_id="small-1", sequence=4, parameters={"app": APP_ID})),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    small_response = _response(transport)
+    assert small_response.ok
+    assert small_response.result["state"]["truncated"] is False
+    small_state_id = small_response.result["state"]["state_id"]
+
+    services.attributes["button"]["title"] = "Save Changed"
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "click",
+                request_id="small-click-1",
+                sequence=5,
+                parameters={"app": APP_ID, "state_id": small_state_id, "x": 100, "y": 100, "observation": "screenshot"},
+            ),
+        ),
+    )
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "Accessibility state changed" in (_response(transport).error or "")

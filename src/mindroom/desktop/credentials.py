@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.credentials.manager import credential_layers, get_runtime_credentials_manager
+from mindroom.credentials.manager import (
+    CredentialsUnreadableError,
+    credential_layers,
+    get_runtime_credentials_manager,
+)
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -48,7 +52,7 @@ def load_desktop_credentials(
         credentials_manager,
         requester_id=requester_id,
         agent_name=agent_name,
-    ).load_credentials(_DESKTOP_SERVICE)
+    ).read_saved_credentials(_DESKTOP_SERVICE)
 
 
 def save_desktop_credentials(
@@ -89,11 +93,14 @@ def has_ready_self_service_desktop(
     """Return whether self-service Desktop pairing is READY for one requester and agent."""
     if config.defaults.desktop_pairing != "self_service" or agent_name not in config.agents or not requester_id:
         return False
-    credentials = load_desktop_credentials(
-        get_runtime_credentials_manager(runtime_paths),
-        requester_id=requester_id,
-        agent_name=agent_name,
-    )
+    try:
+        credentials = load_desktop_credentials(
+            get_runtime_credentials_manager(runtime_paths),
+            requester_id=requester_id,
+            agent_name=agent_name,
+        )
+    except CredentialsUnreadableError:
+        return False
     return desktop_configuration_state(credentials).status is DesktopConfigurationStatus.READY
 
 

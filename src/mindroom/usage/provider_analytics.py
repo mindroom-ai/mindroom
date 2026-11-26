@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AgentUsage7d",
     "DailyAccountUsage",
+    "DailyUsageScan",
     "ModelUsage7d",
     "TokenMix",
     "UsageAttribution",
@@ -31,9 +32,9 @@ __all__ = [
     "strip_rich_analytics",
 ]
 
-type DailyBreakdown = tuple[UsageDailyBreakdownRow, ...]
-type DailyByEntity = dict[str, DailyBreakdown]
-type DailyUsageScan = tuple[DailyBreakdown, DailyByEntity]
+type _DailyBreakdown = tuple[UsageDailyBreakdownRow, ...]
+type _DailyByEntity = dict[str, _DailyBreakdown]
+type DailyUsageScan = tuple[_DailyBreakdown, _DailyByEntity]
 
 _MAX_TOP_ITEMS = 12
 _RICH_TOP_LEVEL_KEYS = ("top_agents_7d", "top_models_7d", "token_mix_7d", "cache_savings_usd_7d")
@@ -296,7 +297,7 @@ def _account_lookups(accounts: list[AccountSpec]) -> tuple[dict[tuple[str, str],
 
 
 def _apply_daily_remainders(
-    daily_breakdown: DailyBreakdown,
+    daily_breakdown: _DailyBreakdown,
     valid_days: set[str],
     days_by_date: dict[str, _DayAccumulator],
 ) -> int:

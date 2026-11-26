@@ -525,13 +525,13 @@ async def test_start_queued_survives_places_cleared_during_budget_check(
 async def test_restated_reads_places_once_on_worker_thread(stack: WorkflowStack) -> None:
     """_restated must read st.places once so clearing it on the event loop cannot raise AttributeError."""
     await stack.start(max_concurrent=1)
-    places = engine_module.Places(limit=1, working={"@0"})
+    places = engine_module._Places(limit=1, working={"@0"})
 
     class _VanishingPlaces:
         reads = 0
 
         @property
-        def places(self) -> engine_module.Places | None:
+        def places(self) -> engine_module._Places | None:
             self.reads += 1
             return places if self.reads == 1 else None
 

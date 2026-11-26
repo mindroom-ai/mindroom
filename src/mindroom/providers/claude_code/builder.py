@@ -42,6 +42,7 @@ def build_provider(
             structured_output="json_mode",
             omitted_media=frozenset({"audio", "video", "file"}),
             provider_default_sampling=True,
+            prompt_cache_ttl_seconds=None,
         ),
         settings=settings,
         storage_root=storage_root,

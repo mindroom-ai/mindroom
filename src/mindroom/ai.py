@@ -64,7 +64,6 @@ from mindroom.llm.request_context import RequestAttribution, bind_llm_request_lo
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
-from mindroom.media_inputs import MediaInputs
 from mindroom.memory import (
     ConversationRef,
     MemoryPromptParts,
@@ -145,6 +144,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
+    from mindroom.media_inputs import MediaInputs
     from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -232,15 +232,16 @@ class _PreparedAgentRun:
     runtime_model_name: str
     cli_context: Mapping[str, str]
     memory_copy: Path | None
+    media: MediaInputs
 
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
         return render_prepared_messages_text(self.turn.in_request_order())
 
-    def run_input(self, media: MediaInputs) -> list[Message]:
+    def run_input(self) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
-        return build_request(summary=self.summary, history=self.history, turn=self.turn, media=media)
+        return build_request(summary=self.summary, history=self.history, turn=self.turn, media=self.media)
 
 
 @dataclass(frozen=True)
@@ -501,7 +502,6 @@ def _begin_attempt(
     run: TurnRunState,
     run_context: _AgentRunContext,
     continuation: TurnContinuationRunState,
-    media: MediaInputs,
     *,
     stream_state: _StreamingAttemptState,
 ) -> tuple[RunStorage, _AgentAttempt]:
@@ -519,7 +519,7 @@ def _begin_attempt(
         usage_kind=run_context.turn.usage_kind,
     )
     attempt = run.attempt = _AgentAttempt(
-        run_input=prepared_run.run_input(media),
+        run_input=prepared_run.run_input(),
         run_id=continuation.active_run_id or str(uuid4()),
         stream_state=stream_state,
         metadata=with_prior_usage(run_context.metadata, run.prior_usage),
@@ -552,6 +552,7 @@ def _agent_loop_hooks(
             # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
             checkpoints=not ctx.inline_tools,
             memory_copy=prepared.memory_copy,
+            history_inputs=prepared.prepared_history.resolved_inputs,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -1048,6 +1049,7 @@ async def _prepare_agent_and_prompt(
         runtime_model_name=runtime_model.model_name,
         cli_context=cli_context,
         memory_copy=memory_conversation.snapshot if memory_conversation is not None else None,
+        media=prepared_execution.media,
     )
 
 
@@ -1472,7 +1474,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
-    media_inputs = ctx.media or MediaInputs()
     show_tool_calls = ctx.show_tool_calls
     try:
         _assert_agent_target(agent_name, config)
@@ -1509,7 +1510,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
-        storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs, stream_state=state)
+        storage, attempt = _begin_attempt(run, run_context, continuation_state, stream_state=state)
         attempt_stream = _stream_agent_attempt_chunks(
             run_context=run_context,
             attempt=attempt,
