@@ -151,7 +151,8 @@ async def test_remote_matrix_outage_waits_and_resumes_on_sync_recovery(
     mark_matrix_sync_loop_started("agent")
     mark_matrix_sync_failure("agent")
     _fast_wait(monkeypatch)
-    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=True))
+    online = False
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=online))
 
     inner = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
@@ -166,7 +167,9 @@ async def test_remote_matrix_outage_waits_and_resumes_on_sync_recovery(
             waiting.set()
 
     async def _recover() -> None:
+        nonlocal online
         await waiting.wait()
+        online = True
         mark_matrix_sync_success("agent")
 
     with connectivity.stream_activity_scope(_record_activity):
@@ -228,6 +231,31 @@ async def test_homeserver_probe_coalesces_classifies_responses_and_recovers_earl
     assert events[-1].message.content == "probe recovered"
     assert len(early.requests) == 2
 
+    # Backoff /versions probe recovers even while matrix_offline() is still True (e.g. /sync still retrying/503),
+    # and a reachable /versions probe prevents a /sync-only failure from falsely corroborating host-offline.
+    mark_matrix_sync_failure("agent")
+    probe_calls = 0
+
+    async def _probe_recovers_while_sync_offline(_cfg: object, _timeout: float) -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        return True
+
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", _probe_recovers_while_sync_offline)
+    assert await connectivity.corroborate_offline() is False
+    loop = asyncio.get_running_loop()
+    assert (
+        await connectivity.wait_for_connectivity(
+            deadline=loop.time() + 1.0,
+            probe_backoff=(0.005,),
+            jitter_range=(0.0, 0.0),
+        )
+        is True
+    )
+    assert probe_calls >= 2
+    assert connectivity.matrix_offline() is True
+    mark_matrix_sync_success("agent")
+
     # HTTP 200, HTTP 503, and SSLCertVerificationError all count as online; ConnectError counts as offline.
     class _FakeClient:
         def __init__(self, outcome: object) -> None:
@@ -272,6 +300,7 @@ async def test_homeserver_probe_coalesces_classifies_responses_and_recovers_earl
 async def test_non_network_errors_never_wait(monkeypatch: pytest.MonkeyPatch, error: ProviderError) -> None:
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     mark_matrix_sync_failure("agent")
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
     waited = False
 
     async def _no_wait(*_a: object, **_kw: object) -> bool:
@@ -326,6 +355,7 @@ async def test_reachable_homeserver_fails_fast(
 async def test_committed_attempt_never_retries(monkeypatch: pytest.MonkeyPatch, commit_event: StreamEvent) -> None:
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     mark_matrix_sync_failure("agent")
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
     _fast_wait(monkeypatch)
     inner = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
@@ -343,6 +373,7 @@ async def test_fallback_chain_cloud_to_local_and_cloud_to_cloud_cooldown_rollbac
     fallback_stage._COOLDOWN_UNTIL.clear()
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     mark_matrix_sync_failure("agent")
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
     wait_calls = 0
 
     async def _track_wait(*_a: object, **_kw: object) -> bool:
@@ -518,6 +549,7 @@ async def test_cooldown_rollback_guards_tls_failover_and_no_urls_in_logs(
     assert healthy.requests[0].messages[0].images == (img,)
 
     # 4. Reconnect logs record only structured metadata (provider/model_id/error_code/attempt/max_attempts), never URLs.
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
     monkeypatch.setattr(connectivity_stage, "corroborate_offline", connectivity.corroborate_offline)
     monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", lambda *_a, **_kw: asyncio.sleep(0, result=True))
     gateway_endpoint = "https://gateway.example.com/opaque-path-xyz/v1"
@@ -542,6 +574,7 @@ async def test_cooldown_rollback_guards_tls_failover_and_no_urls_in_logs(
 async def test_deadline_expiry_reconnect_cap_and_immediate_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     mark_matrix_sync_failure("agent")
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
 
     # 1. Deadline expiry re-raises original ProviderUnavailable and clears activity.
     monkeypatch.setattr(connectivity_stage, "wait_for_connectivity", lambda *_a, **_kw: asyncio.sleep(0, result=False))
@@ -603,6 +636,7 @@ async def test_opt_out_builders_and_usage_attribution(
 ) -> None:
     connectivity.register_matrix_homeserver(_REMOTE_HS)
     mark_matrix_sync_failure("agent")
+    monkeypatch.setattr(connectivity, "_http_probe_homeserver", lambda *_a, **_kw: asyncio.sleep(0, result=False))
 
     # Opt-out default passes straight through.
     opt_out = _Scripted(ModelIdentity(id="m", provider="openai", endpoint=_CLOUD), [[_net_err()]])

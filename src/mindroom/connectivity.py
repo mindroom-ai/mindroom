@@ -147,9 +147,10 @@ async def _probe_homeserver_reachable(
 
 async def corroborate_offline() -> bool:
     """Return whether a provider transport/stall failure is corroborated as a host/network outage."""
-    if matrix_offline():
-        return True
-    return await _probe_homeserver_reachable() is False
+    reachable = await _probe_homeserver_reachable()
+    if reachable is not None:
+        return not reachable
+    return matrix_offline()
 
 
 async def _wait_for_sync_or_sleep(
@@ -177,9 +178,12 @@ async def _wait_for_sync_or_sleep(
 
 
 async def _connectivity_restored(*, deadline: float, loop: asyncio.AbstractEventLoop) -> bool:
-    if matrix_offline() or (remaining := deadline - loop.time()) <= 0:
+    if (remaining := deadline - loop.time()) <= 0:
         return False
-    return await _probe_homeserver_reachable(timeout=min(_PROBE_TIMEOUT_SECONDS, remaining)) is not False
+    reachable = await _probe_homeserver_reachable(timeout=min(_PROBE_TIMEOUT_SECONDS, remaining))
+    if reachable is not None:
+        return reachable
+    return not matrix_offline()
 
 
 async def _sleep_jitter(jitter_range: tuple[float, float], deadline: float, loop: asyncio.AbstractEventLoop) -> None:
