@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.hooks import hook_ingress_policy
@@ -18,7 +19,7 @@ from mindroom.response_sources import ResponseSources, Unclaimed
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_policy import ResponseAction
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import RevisionSnapshotChangedError, canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 from mindroom.turns.dispatch import run_response_action
 
@@ -358,9 +359,13 @@ class EditRegenerator:
         async def regenerate() -> None:
             try:
                 fate = await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
-            except ResponseAdmissionRefusedError:
-                # Refused by a runtime being replaced, the edit stays pending, as it does when cancelled at shutdown,
-                # so the replacement or a restart regenerates again.
+            except (
+                ResponseAdmissionRefusedError,
+                ReplyMembershipPendingError,
+                RevisionSnapshotChangedError,
+            ):
+                # Refused by a runtime being replaced, or awaiting membership or revision refresh, the edit stays
+                # pending (as when cancelled at shutdown) so a retry, replacement, or restart regenerates again.
                 raise
             except Exception:
                 if not claimed:

@@ -4064,6 +4064,7 @@ depends_on = [
     "mindroom.bot_runtime_view",
     "mindroom.orchestration.runtime",
     "mindroom.response_admission",
+    "mindroom.turn_record",
 ]
 visibility = ["mindroom.bot"]
 

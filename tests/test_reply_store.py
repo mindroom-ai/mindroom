@@ -35,6 +35,7 @@ from mindroom.event_journal.replies import (
     PreparedReplyRow,
     ReplyRowRequest,
     ReplyStopped,
+    SourcesSettled,
     WakeApproval,
 )
 from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
@@ -309,7 +310,7 @@ async def test_settling_a_spans_sources_records_its_turn_answered(journal_store:
         ),
     )
 
-    assert applied.post_commit == ()
+    assert applied.post_commit == (SourcesSettled(("$source",)),)
     record = await _turn(journal_store, "$source")
     assert record.completed
     assert record.response_event_id is None
@@ -994,6 +995,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
     principal = journal_store.principal("agent@alice")
     cancelled: list[tuple[str, str | None]] = []
     ended: list[str] = []
+    released: list[tuple[str, ...]] = []
 
     class _Spans(SpanRegistry):
         def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
@@ -1007,6 +1009,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=ended.append,
         reply_stopped=no_reply_jobs,
+        release_sources=released.append,
         spans=_Spans(),
     )
     with (
@@ -1018,10 +1021,16 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         pytest.raises(RuntimeError, match="journal unavailable"),
     ):
         await runtime.run_effects(
-            (WakeApproval("approval-1"), ApprovalEnded("reply-2"), rl.CancelSpan("span-1", by_stop=True)),
+            (
+                WakeApproval("approval-1"),
+                SourcesSettled(("$source",)),
+                ApprovalEnded("reply-2"),
+                rl.CancelSpan("span-1", by_stop=True),
+            ),
         )
     assert cancelled == [("span-1", "user_stop")]
     assert ended == ["reply-2"]
+    assert released == [("$source",)]
 
 
 @pytest.mark.parametrize("ended_by", ["departure", "deletion"])
