@@ -27,11 +27,13 @@ __all__ = [
     "is_webp_transcode_candidate",
     "local_image_ids",
     "media_route",
+    "should_learn_webp_unsupported",
     "transcode_webp_if",
     "transcode_webp_messages",
 ]
 
 _PAYLOAD_TOO_LARGE_STATUS = 413
+_UNSUPPORTED_MEDIA_TYPE_STATUS = 415
 _MAX_SCANNED_ERROR_CHARS = 2000
 _MAX_WEBP_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_WEBP_DECODED_PIXELS = 40_000_000
@@ -42,6 +44,12 @@ _WEBP_TRANSCODE_ERROR_CODES = frozenset({"invalid_image_format", "image_parse_er
 # Standalone format tokens (never .webp/.png/.jpg inside filenames/URLs, while still allowing image/<fmt>).
 _STANDALONE_WEBP_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\bwebp\b")
 _STANDALONE_IMAGE_FORMAT = re.compile(r"(?:(?<![./])|(?<=\bimage/))\b(?:png|jpe?g)\b")
+_REJECTED_WEBP_ERROR = re.compile(
+    r"(?:unsupported|invalid|not supported|disallowed|unrecognized|got|received)"
+    r"[^.;\n]{0,60}(?:(?<![./])|(?<=\bimage/))\bwebp\b"
+    r"|(?:(?<![./])|(?<=\bimage/))\bwebp\b[^.;\n]{0,40}"
+    r"(?:is |are )?(?:not supported|unsupported|invalid|disallowed)",
+)
 _FORMAT_LIST_CONTEXT_MARKERS = (
     "supported",
     "only",
@@ -194,13 +202,13 @@ def is_webp_transcode_candidate(
     if (
         "image" not in remaining
         or not local_images
-        or not isinstance(error, InvalidRequest)
+        or not (isinstance(error, InvalidRequest) or error.status_code == _UNSUPPORTED_MEDIA_TYPE_STATUS)
         or error.status_code == _PAYLOAD_TOO_LARGE_STATUS
         or is_image_capability_gap
         or error.provider_code == _INVALID_IMAGE_URL_CODE
     ):
         return False
-    named = error.rejected_media & sent.keys()
+    named = error.rejected_media & sent.keys() if isinstance(error, InvalidRequest) else frozenset()
     if named and not (named & local_images):
         return False
     text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
@@ -212,3 +220,15 @@ def is_webp_transcode_candidate(
         return True
     implicates_image = bool(named & local_images) or names_image_kind
     return implicates_image and any(marker in text for marker in _IMAGE_FORMAT_ERROR_MARKERS)
+
+
+def should_learn_webp_unsupported(error: ProviderError) -> bool:
+    """Return whether ``error`` proves the route rejects WebP, rather than one malformed or animated image."""
+    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
+    if _REJECTED_WEBP_ERROR.search(text):
+        return True
+    return (
+        not _STANDALONE_WEBP_FORMAT.search(text)
+        and bool(_STANDALONE_IMAGE_FORMAT.search(text))
+        and any(marker in text for marker in _FORMAT_LIST_CONTEXT_MARKERS)
+    )

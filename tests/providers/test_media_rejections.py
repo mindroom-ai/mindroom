@@ -316,11 +316,16 @@ async def test_openrouter_404_video_rejection_preserves_other_media_and_learns_g
     assert not sends(second, b"mp4 video")
 
 
-def _webp_photo() -> Image:
+def _webp_photo(*, animated: bool = False) -> Image:
     from PIL import Image as PILImage  # noqa: PLC0415
 
     buf = io.BytesIO()
-    PILImage.new("RGB", (10, 8), (30, 140, 220)).save(buf, format="WEBP")
+    if animated:
+        frame0 = PILImage.new("RGB", (10, 8), (220, 40, 30))
+        frame1 = PILImage.new("RGB", (10, 8), (30, 40, 220))
+        frame0.save(buf, format="WEBP", save_all=True, append_images=[frame1], duration=50, loop=0)
+    else:
+        PILImage.new("RGB", (10, 8), (30, 140, 220)).save(buf, format="WEBP")
     return Image(id="att_webp", content=buf.getvalue(), mime_type="image/webp")
 
 
@@ -382,6 +387,89 @@ async def test_chat_image_parse_error_code_with_generic_message_transcodes_webp(
     url = user_parts(retry)[1]["image_url"]["url"]
     assert url.startswith("data:image/png;base64,")
     assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_chat_animated_webp_with_allowlist_including_webp_retries_without_learning(
+    tmp_path: Path,
+) -> None:
+    """OpenAI's allowlist naming ``webp`` retries one animated WebP as PNG without learning WebP unsupported."""
+    spec = FAMILIES["openai_chat"]
+    animated = _webp_photo(animated=True)
+    still = _webp_photo()
+    wire = Wire(_rejected(_CHAT_SVG_IMAGE), spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    turn_1 = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[animated])]))
+    turn_2 = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[still])]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert user_parts(wire.body(1))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+    assert (
+        user_parts(wire.body(2))[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(still.content or b'').decode()}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_http_415_webp_rejection_transcodes_preserves_pdf_and_learns(tmp_path: Path) -> None:
+    """HTTP 415 Unsupported Media Type for ``image/webp`` transcodes to PNG, keeps the PDF, and learns."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(415, json={"error": {"message": "Unsupported MIME type: image/webp"}})
+    wire = Wire(rejection, spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn_1 = await complete(provider, ModelRequest(messages=[message]))
+    turn_2 = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    for idx in (1, 2):
+        assert prompt_text(wire.body(idx)) == _PROMPT
+        url = user_parts(wire.body(idx))[1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+        assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+        assert sends(wire.body(idx), b"%PDF-1.4 report")
+    assert webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_learned_webp_route_attributed_413_on_pdf_drops_only_pdf_and_keeps_image(
+    tmp_path: Path,
+) -> None:
+    """An attributed 413 naming an oversized PDF on a learned WebP route drops only the PDF, keeping the image."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(
+        413,
+        json={
+            "error": {
+                "message": "File too large",
+                "type": "invalid_request_error",
+                "param": "messages[0].content[2].file.file_data",
+                "code": "invalid_value",
+            },
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    webp_stage.LEARNED_WEBP_UNSUPPORTED.add(webp_stage.media_route(adapter))
+    provider = pipeline_provider(adapter)
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert prompt_text(wire.body(1)) == _named("report.pdf (att_report)")
+    assert [part["type"] for part in user_parts(wire.body(1))] == ["text", "image_url"]
+    assert user_parts(wire.body(1))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert not sends(wire.body(1), b"%PDF-1.4 report")
 
 
 @pytest.mark.asyncio

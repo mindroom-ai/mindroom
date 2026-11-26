@@ -318,23 +318,30 @@ def _narrowed_removal(
     *,
     transcoded_webp: bool,
 ) -> tuple[list[Message], frozenset[MediaKind], bool] | None:
-    if transcoded_webp and error.status_code == _PAYLOAD_TOO_LARGE_STATUS and remaining != _IMAGES:
+    named = error.rejected_media if isinstance(error, InvalidRequest) else frozenset()
+    if isinstance(error, InvalidRequest):
+        # Only a rejected request body can name its parts; a request too large for the window shrinks as a whole.
+        if (selective := _selective_removal(named, sent, known)) is not None:
+            removed, ids = selective
+            log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
+            messages = _without_media(base, removed, ids, fallback_prompt)
+            stripped = "image" in removed or any(sent.get(mid) == "image" for mid in ids)
+            return messages, remaining - _media_kinds(messages), stripped
+        kinds = _named_media_kinds(error) & remaining
+        if kinds and kinds != remaining and not (named & sent.keys()):
+            log(
+                "Retrying model request without the inline media kinds its failure names",
+                media_kinds=sorted(kinds),
+            )
+            return _without_media(base, known | kinds, frozenset(), fallback_prompt), kinds, "image" in kinds
+    if (
+        transcoded_webp
+        and error.status_code == _PAYLOAD_TOO_LARGE_STATUS
+        and remaining != _IMAGES
+        and not (named & sent.keys())
+    ):
         log("Retrying model request without images after transcoded payload exceeded size limit")
         return _without_media(base, known | _IMAGES, frozenset(), fallback_prompt), _IMAGES, True
-    if not isinstance(error, InvalidRequest):
-        return None
-    # Only a rejected request body can name its parts; a request too large for the window shrinks as a whole.
-    named = error.rejected_media
-    if (selective := _selective_removal(named, sent, known)) is not None:
-        removed, ids = selective
-        log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
-        messages = _without_media(base, removed, ids, fallback_prompt)
-        stripped = "image" in removed or any(sent.get(mid) == "image" for mid in ids)
-        return messages, remaining - _media_kinds(messages), stripped
-    kinds = _named_media_kinds(error) & remaining
-    if kinds and kinds != remaining and not (named & sent.keys()):
-        log("Retrying model request without the inline media kinds its failure names", media_kinds=sorted(kinds))
-        return _without_media(base, known | kinds, frozenset(), fallback_prompt), kinds, "image" in kinds
     return None
 
 
@@ -355,12 +362,13 @@ async def media_fallback_stream(
     sent = _sent_media(first.messages)
     local_images = webp.local_image_ids(first.messages)
     failure: ProviderError | None = None
+    webp_trigger: ProviderError | None = None
     sent_broad = False
     stripped_image = False
     removed_kinds: frozenset[MediaKind] = frozenset()
 
     async def without_rejected_media(error: ProviderError) -> Retry | None:
-        nonlocal base, checked_webp, transcoded_webp, failure, sent_broad, stripped_image, removed_kinds
+        nonlocal base, checked_webp, transcoded_webp, failure, webp_trigger, sent_broad, stripped_image, removed_kinds
         if (
             request.overrides.transient_retries != "pipeline"
             or sent_broad
@@ -392,6 +400,7 @@ async def media_fallback_stream(
             checked_webp = True
             base, transcoded_webp = await webp.transcode_webp_if(True, base)
             if transcoded_webp:
+                webp_trigger = error
                 log("Retrying model request after transcoding WebP images")
                 return Retry(replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt)))
         if failure is None:
@@ -421,7 +430,12 @@ async def media_fallback_stream(
     async with closing_async_stream(events):
         async for event in events:
             yield event
-    if transcoded_webp and not stripped_image:
+    if (
+        transcoded_webp
+        and not stripped_image
+        and webp_trigger is not None
+        and webp.should_learn_webp_unsupported(webp_trigger)
+    ):
         webp.LEARNED_WEBP_UNSUPPORTED.add(route)
     # Successful removal of a whole named kind can teach the route; partial item removal cannot.
     if failure is not None and (learned := _names_capability_gap(failure, removed_kinds)):
