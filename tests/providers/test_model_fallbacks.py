@@ -68,6 +68,7 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.pipeline import fallback as fallback_stage
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.connectivity import connectivity_retry_stream
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.registry import build_model_provider, fallback_chain
@@ -760,8 +761,14 @@ def test_only_a_model_with_fallbacks_gets_the_fallback_stage(runtime_paths: Runt
     plain = build_model_provider(config, runtime_paths, "codex")
 
     assert isinstance(chained, WrappedProvider)
-    assert cast("partial[object]", chained.stage).func is fallback_stream
-    assert not (isinstance(plain, WrappedProvider) and getattr(plain.stage, "func", None) is fallback_stream)
+    assert cast("partial[object]", chained.stage).func is connectivity_retry_stream
+    assert isinstance(chained.inner, WrappedProvider)
+    assert cast("partial[object]", chained.inner.stage).func is fallback_stream
+    assert isinstance(plain, WrappedProvider)
+    assert cast("partial[object]", plain.stage).func is connectivity_retry_stream
+    assert not (
+        isinstance(plain.inner, WrappedProvider) and getattr(plain.inner.stage, "func", None) is fallback_stream
+    )
     [codex] = fallback_chain(config, runtime_paths, "merlin")
     assert codex.build() is codex.build()
 
@@ -1194,7 +1201,10 @@ async def test_cooldown_ownership_committed_reset_and_max_deadline(
     keys = [
         cast(
             "partial[object]",
-            cast("WrappedProvider", build_model_provider(cfg, runtime_paths, "default")).stage,
+            cast(
+                "WrappedProvider",
+                cast("WrappedProvider", build_model_provider(cfg, runtime_paths, "default")).inner,
+            ).stage,
         ).keywords["cooldown_key"]
         for cfg in configs
     ]

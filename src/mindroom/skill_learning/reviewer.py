@@ -238,7 +238,13 @@ def _fork(
         tools=functions,
         # The loop sends its own messages and tools with the response's request settings. It only reads the system
         # prompt the conversation holds, for the cached prefix: the conversation may have moved on.
-        settings=replace(request, messages=(), tools=(), prompt_hold_pin=[]),
+        settings=replace(
+            request,
+            messages=(),
+            tools=(),
+            prompt_hold_pin=[],
+            overrides=replace(request.overrides, wait_for_connectivity=False),
+        ),
         forked=True,
     )
 

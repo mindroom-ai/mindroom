@@ -35,6 +35,7 @@ from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRun
 from mindroom.providers.openai.build import accepted_extra_kwargs as openai_accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.connectivity import connectivity_retry_stream
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.pipeline.wrapped import WrappedProvider
@@ -163,20 +164,22 @@ def build_model_provider(
     """
     provider = _build_single_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
     chain = fallback_chain(config, runtime_paths, model_name, execution_identity=execution_identity)
-    if not chain:
-        return provider
-    bound_requester = execution_identity.requester_id if execution_identity is not None else None
-    allow_fallback = (
-        partial(_budget_allows_fallback, config, runtime_paths, bound_requester) if config.budgets is not None else None
-    )
-    stage = partial(
-        fallback_stream,
-        model_name=model_name,
-        chain=chain,
-        cooldown_key=_cooldown_key(config, model_name),
-        allow_fallback=allow_fallback,
-    )
-    return WrappedProvider(provider, stage)
+    if chain:
+        bound_requester = execution_identity.requester_id if execution_identity is not None else None
+        allow_fallback = (
+            partial(_budget_allows_fallback, config, runtime_paths, bound_requester)
+            if config.budgets is not None
+            else None
+        )
+        stage = partial(
+            fallback_stream,
+            model_name=model_name,
+            chain=chain,
+            cooldown_key=_cooldown_key(config, model_name),
+            allow_fallback=allow_fallback,
+        )
+        provider = WrappedProvider(provider, stage)
+    return WrappedProvider(provider, partial(connectivity_retry_stream, runtime_paths=runtime_paths))
 
 
 def _budget_allows_fallback(

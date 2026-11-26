@@ -160,6 +160,7 @@ class RequestOverrides:
     transient_retries: TransientRetries = "pipeline"
     prompt_cache: bool = True
     omit_thinking_setting: bool = False
+    wait_for_connectivity: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

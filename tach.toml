@@ -7298,6 +7298,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.providers.names",
+    "mindroom.tls_trust",
     "mindroom.tool_system.context_bound_streams",
 ]
 

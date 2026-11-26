@@ -29,6 +29,7 @@ from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     QUOTA_EXHAUSTED,
     SAFEGUARD_REFUSAL,
+    TLS_CERTIFICATE_ERROR,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -67,7 +68,7 @@ _ATTACHMENT_ID_PREFIX = "att_"
 _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 # A retried media-free request must not repeat a failure the media cannot have caused.
 _NOT_MEDIA_RELATED_CODES = frozenset(
-    {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED},
+    {SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED, ENCRYPTED_REPLAY_REJECTED, TLS_CERTIFICATE_ERROR},
 )
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime", "webp")
