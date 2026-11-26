@@ -1,77 +1,147 @@
 """Reactive triggers core models, SQLite store, matching, triage, dispatch, external sources, and service."""
 
-from mindroom.reactive_triggers.dispatch import (
-    DispatchResult,
-    build_reactive_trigger_body,
-    build_reactive_trigger_transaction_id,
-    check_reactive_source_access,
-    check_reactive_target_access,
-    dispatch_reactive_trigger,
-)
-from mindroom.reactive_triggers.event_sources import (
-    EventSource,
-    EventSourceContext,
-    EventSourceDescriptor,
-    EventSourceEmitter,
-    EventSourceInactiveError,
-    EventSourceRegistry,
-    ValidatedSubscription,
-)
-from mindroom.reactive_triggers.external_sources import (
-    ExternalSourceAuthError,
-    ExternalSourceBadRequestError,
-    ExternalSourceForbiddenError,
-    ExternalSourceReplayError,
-    ExternalSourceUnavailableError,
-    check_external_event_source_access,
-    event_source_replay_store,
-    fan_out_external_event,
-    is_source_subscriber_allowed,
-    validate_subscription_against_source,
-    verify_and_normalize_ed25519_event,
-    verify_and_normalize_github_webhook,
-    verify_and_normalize_hmac_webhook,
-)
-from mindroom.reactive_triggers.matching import (
-    REACTIVE_TRIGGER_DEDUPE_KEY,
-    REACTIVE_TRIGGER_ID_KEY,
-    is_reactive_trigger_event_content,
-    matches_external_event,
-    matches_room_message,
-)
-from mindroom.reactive_triggers.models import (
-    TRIGGER_ID_PATTERN,
-    DisabledReason,
-    ExternalEventSourceSpec,
-    FiringRecord,
-    FiringStatus,
-    GitHubPRCheckpoint,
-    GitHubPREventType,
-    GitHubPRSourceSpec,
-    ReactiveTriggerRecord,
-    RoomCursor,
-    RoomMessageSourceSpec,
-    SourceType,
-    ThreadCheckpoint,
-    ThreadTagSourceSpec,
-    TriageSpec,
-    TriggerEvent,
-    TriggerSourceSpec,
-    TriggerTargetSpec,
-    generate_trigger_id,
-)
-from mindroom.reactive_triggers.service import ReactiveTriggerService
-from mindroom.reactive_triggers.store import (
-    ClaimCheckResult,
-    ClaimResult,
-    ReactiveTriggerDuplicateError,
-    ReactiveTriggerLimitError,
-    ReactiveTriggerStore,
-    ReactiveTriggerStoreError,
-    RetryResult,
-    trigger_id_creation_lock,
-)
-from mindroom.reactive_triggers.triage import TriageOutcome, evaluate_triage
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mindroom.reactive_triggers.dispatch import (
+        DispatchResult,
+        build_reactive_trigger_body,
+        build_reactive_trigger_transaction_id,
+        check_reactive_source_access,
+        check_reactive_target_access,
+        dispatch_reactive_trigger,
+    )
+    from mindroom.reactive_triggers.event_sources import (
+        EventSource,
+        EventSourceContext,
+        EventSourceDescriptor,
+        EventSourceEmitter,
+        EventSourceInactiveError,
+        EventSourceRegistry,
+        ValidatedSubscription,
+    )
+    from mindroom.reactive_triggers.external_sources import (
+        ExternalSourceAuthError,
+        ExternalSourceBadRequestError,
+        ExternalSourceForbiddenError,
+        ExternalSourceReplayError,
+        ExternalSourceUnavailableError,
+        check_external_event_source_access,
+        event_source_replay_store,
+        fan_out_external_event,
+        is_source_subscriber_allowed,
+        validate_subscription_against_source,
+        verify_and_normalize_ed25519_event,
+        verify_and_normalize_github_webhook,
+        verify_and_normalize_hmac_webhook,
+    )
+    from mindroom.reactive_triggers.matching import (
+        REACTIVE_TRIGGER_DEDUPE_KEY,
+        REACTIVE_TRIGGER_ID_KEY,
+        is_reactive_trigger_event_content,
+        matches_external_event,
+        matches_room_message,
+    )
+    from mindroom.reactive_triggers.models import (
+        TRIGGER_ID_PATTERN,
+        DisabledReason,
+        ExternalEventSourceSpec,
+        FiringRecord,
+        FiringStatus,
+        GitHubPRCheckpoint,
+        GitHubPREventType,
+        GitHubPRSourceSpec,
+        ReactiveTriggerRecord,
+        RoomCursor,
+        RoomMessageSourceSpec,
+        SourceType,
+        ThreadCheckpoint,
+        ThreadTagSourceSpec,
+        TriageSpec,
+        TriggerEvent,
+        TriggerSourceSpec,
+        TriggerTargetSpec,
+        generate_trigger_id,
+    )
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
+    from mindroom.reactive_triggers.store import (
+        ClaimCheckResult,
+        ClaimResult,
+        ReactiveTriggerDuplicateError,
+        ReactiveTriggerLimitError,
+        ReactiveTriggerStore,
+        ReactiveTriggerStoreError,
+        RetryResult,
+        trigger_id_creation_lock,
+    )
+    from mindroom.reactive_triggers.triage import TriageOutcome, evaluate_triage
+
+_LAZY_EXPORTS: dict[str, str] = {
+    "DispatchResult": "mindroom.reactive_triggers.dispatch",
+    "build_reactive_trigger_body": "mindroom.reactive_triggers.dispatch",
+    "build_reactive_trigger_transaction_id": "mindroom.reactive_triggers.dispatch",
+    "check_reactive_source_access": "mindroom.reactive_triggers.dispatch",
+    "check_reactive_target_access": "mindroom.reactive_triggers.dispatch",
+    "dispatch_reactive_trigger": "mindroom.reactive_triggers.dispatch",
+    "EventSource": "mindroom.reactive_triggers.event_sources",
+    "EventSourceContext": "mindroom.reactive_triggers.event_sources",
+    "EventSourceDescriptor": "mindroom.reactive_triggers.event_sources",
+    "EventSourceEmitter": "mindroom.reactive_triggers.event_sources",
+    "EventSourceInactiveError": "mindroom.reactive_triggers.event_sources",
+    "EventSourceRegistry": "mindroom.reactive_triggers.event_sources",
+    "ValidatedSubscription": "mindroom.reactive_triggers.event_sources",
+    "ExternalSourceAuthError": "mindroom.reactive_triggers.external_sources",
+    "ExternalSourceBadRequestError": "mindroom.reactive_triggers.external_sources",
+    "ExternalSourceForbiddenError": "mindroom.reactive_triggers.external_sources",
+    "ExternalSourceReplayError": "mindroom.reactive_triggers.external_sources",
+    "ExternalSourceUnavailableError": "mindroom.reactive_triggers.external_sources",
+    "check_external_event_source_access": "mindroom.reactive_triggers.external_sources",
+    "event_source_replay_store": "mindroom.reactive_triggers.external_sources",
+    "fan_out_external_event": "mindroom.reactive_triggers.external_sources",
+    "is_source_subscriber_allowed": "mindroom.reactive_triggers.external_sources",
+    "validate_subscription_against_source": "mindroom.reactive_triggers.external_sources",
+    "verify_and_normalize_ed25519_event": "mindroom.reactive_triggers.external_sources",
+    "verify_and_normalize_github_webhook": "mindroom.reactive_triggers.external_sources",
+    "verify_and_normalize_hmac_webhook": "mindroom.reactive_triggers.external_sources",
+    "REACTIVE_TRIGGER_DEDUPE_KEY": "mindroom.reactive_triggers.matching",
+    "REACTIVE_TRIGGER_ID_KEY": "mindroom.reactive_triggers.matching",
+    "is_reactive_trigger_event_content": "mindroom.reactive_triggers.matching",
+    "matches_external_event": "mindroom.reactive_triggers.matching",
+    "matches_room_message": "mindroom.reactive_triggers.matching",
+    "TRIGGER_ID_PATTERN": "mindroom.reactive_triggers.models",
+    "DisabledReason": "mindroom.reactive_triggers.models",
+    "ExternalEventSourceSpec": "mindroom.reactive_triggers.models",
+    "FiringRecord": "mindroom.reactive_triggers.models",
+    "FiringStatus": "mindroom.reactive_triggers.models",
+    "GitHubPRCheckpoint": "mindroom.reactive_triggers.models",
+    "GitHubPREventType": "mindroom.reactive_triggers.models",
+    "GitHubPRSourceSpec": "mindroom.reactive_triggers.models",
+    "ReactiveTriggerRecord": "mindroom.reactive_triggers.models",
+    "RoomCursor": "mindroom.reactive_triggers.models",
+    "RoomMessageSourceSpec": "mindroom.reactive_triggers.models",
+    "SourceType": "mindroom.reactive_triggers.models",
+    "ThreadCheckpoint": "mindroom.reactive_triggers.models",
+    "ThreadTagSourceSpec": "mindroom.reactive_triggers.models",
+    "TriageSpec": "mindroom.reactive_triggers.models",
+    "TriggerEvent": "mindroom.reactive_triggers.models",
+    "TriggerSourceSpec": "mindroom.reactive_triggers.models",
+    "TriggerTargetSpec": "mindroom.reactive_triggers.models",
+    "generate_trigger_id": "mindroom.reactive_triggers.models",
+    "ReactiveTriggerService": "mindroom.reactive_triggers.service",
+    "ClaimCheckResult": "mindroom.reactive_triggers.store",
+    "ClaimResult": "mindroom.reactive_triggers.store",
+    "ReactiveTriggerDuplicateError": "mindroom.reactive_triggers.store",
+    "ReactiveTriggerLimitError": "mindroom.reactive_triggers.store",
+    "ReactiveTriggerStore": "mindroom.reactive_triggers.store",
+    "ReactiveTriggerStoreError": "mindroom.reactive_triggers.store",
+    "RetryResult": "mindroom.reactive_triggers.store",
+    "trigger_id_creation_lock": "mindroom.reactive_triggers.store",
+    "TriageOutcome": "mindroom.reactive_triggers.triage",
+    "evaluate_triage": "mindroom.reactive_triggers.triage",
+}
 
 __all__ = (
     "REACTIVE_TRIGGER_DEDUPE_KEY",
@@ -136,3 +206,17 @@ __all__ = (
     "verify_and_normalize_github_webhook",
     "verify_and_normalize_hmac_webhook",
 )
+
+
+def __getattr__(name: str) -> Any:  # noqa: ANN401
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        msg = f"module {__name__!r} has no attribute {name!r}"
+        raise AttributeError(msg)
+    value = getattr(importlib.import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

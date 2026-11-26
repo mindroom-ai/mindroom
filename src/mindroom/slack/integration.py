@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.slack.delivery import SlackRuntime
 
 _NAME = "slack"
@@ -44,9 +45,12 @@ def _bind(
     api_app: FastAPI,
     bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
+    reactive_triggers: ReactiveTriggerService | None = None,
 ) -> None:
     """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""
     from mindroom.slack.delivery import SlackRuntime  # noqa: PLC0415
+
+    del reactive_triggers
 
     runtime = bound_slack_runtime(api_app)
     if runtime is None or runtime.bots is not bots:

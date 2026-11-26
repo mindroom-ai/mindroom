@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import sys
+import threading
+import uuid
 from contextlib import closing
-from types import SimpleNamespace
+from dataclasses import replace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.requests import Request
 
+from mindroom import integrations, plugin_http
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.app_state import ensure_app_state
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
+from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig, GitHubEventSourceConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_SOURCE_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+from mindroom.plugin_lifecycle import PluginLifecycle, PluginLifespans
 from mindroom.reactive_triggers import (
     DispatchResult,
     EventSource,
@@ -44,7 +58,16 @@ from mindroom.reactive_triggers import (
     dispatch_reactive_trigger,
     matches_external_event,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from mindroom.slack.integration import SLACK_INTEGRATION
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError
+from tests.conftest import (
+    _TEST_PROBE_PREFIX,
+    bind_runtime_paths,
+    publish_test_plugins,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -802,3 +825,240 @@ async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_acc
     # Disabled reactive policy returns 0 on emit.
     config, _ = _make_config(tmp_path, reactive_enabled=False)
     assert await emitter.emit(kind="message", event_id="ev-off", owner_user_ids=[_OWNER], audience={"U_ALICE"}) == 0
+
+
+def _write_event_source_plugin(
+    tmp_path: Path,
+    name: str,
+    *,
+    source_id: str | None = None,
+    probe_name: str | None = None,
+    version: int = 1,
+    fail_before_yield: bool = False,
+    with_routes: bool = False,
+) -> Path:
+    root = tmp_path / "plugins" / name
+    root.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {"name": name}
+    if source_id is not None and probe_name is not None:
+        manifest["lifecycle_module"] = "lifecycle.py"
+        (root / "lifecycle.py").write_text(
+            f"""
+import sys
+from contextlib import asynccontextmanager
+
+from mindroom.plugin_api import EventSource
+
+_probe = sys.modules[{probe_name!r}]
+
+
+class _Source(EventSource):
+    source_id = {source_id!r}
+    description = "Plugin source v{version}"
+    allowed_kinds = ("build.failed",)
+    version = {version}
+
+
+@asynccontextmanager
+async def lifespan(lifecycle):
+    emitter = lifecycle.register_event_source(_Source())
+    _probe.emitters[{version}] = emitter
+    if {fail_before_yield!r}:
+        raise RuntimeError("startup boom")
+    _probe.events.append(("start", {version}))
+    try:
+        yield
+    finally:
+        _probe.events.append(("stop", {version}, lifecycle.stop_reason))
+""",
+            encoding="utf-8",
+        )
+    if with_routes:
+        manifest["routes_module"] = "routes.py"
+        (root / "routes.py").write_text(
+            """
+from fastapi import APIRouter, Request
+
+from mindroom.plugin_http import event_source_emitter
+
+router = APIRouter()
+
+
+@router.post("/emit/{source_id}")
+async def emit_route(request: Request, source_id: str) -> dict[str, int]:
+    emitter = event_source_emitter(request, source_id)
+    enqueued = await emitter.emit(kind="build.failed", event_id=f"http-{source_id}")
+    return {"enqueued": enqueued}
+""",
+            encoding="utf-8",
+        )
+    (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return root
+
+
+def _plugin_probe() -> Any:  # noqa: ANN401
+    probe = ModuleType(f"{_TEST_PROBE_PREFIX}{uuid.uuid4().hex}")
+    probe.events = []  # type: ignore[attr-defined]
+    probe.emitters = {}  # type: ignore[attr-defined]
+    sys.modules[probe.__name__] = probe
+    return probe
+
+
+def _with_plugins(config: Config, runtime_paths: RuntimePaths, *names: str) -> Config:
+    return bind_runtime_paths(
+        config.model_copy(update={"plugins": [PluginEntryConfig(path=f"./plugins/{n}") for n in names]}),
+        runtime_paths,
+    )
+
+
+def _make_service(
+    runtime_paths: RuntimePaths,
+    config_provider: Any,  # noqa: ANN401
+    *,
+    trigger_id: str,
+) -> tuple[ReactiveTriggerStore, ReactiveTriggerService]:
+    store = ReactiveTriggerStore(runtime_paths)
+    store.create_trigger(_make_rule(trigger_id=trigger_id, source_id="acme_builds"))
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=config_provider,
+        bots=lambda: {"research": _bot()},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    return store, service
+
+
+@pytest.mark.asyncio
+async def test_plugin_lifespan_event_source_registration_reload_and_cleanup(tmp_path: Path) -> None:
+    """PluginLifespans registers EventSources, fences reloads by token, and auto-unregisters on failure/disable/stop."""
+    config, runtime_paths = _make_config(tmp_path)
+    _, service = _make_service(runtime_paths, lambda: config, trigger_id="acme_rule")
+    probe = _plugin_probe()
+    lifespans = PluginLifespans(runtime_paths, lambda: config, event_sources=service.event_sources)
+
+    async def publish_acme(version: int, *, fail_before_yield: bool = False) -> None:
+        nonlocal config
+        _write_event_source_plugin(
+            tmp_path,
+            "acme",
+            source_id="acme_builds",
+            probe_name=probe.__name__,
+            version=version,
+            fail_before_yield=fail_before_yield,
+        )
+        config = _with_plugins(config, runtime_paths, "acme")
+        publish_test_plugins(config, runtime_paths)
+        await lifespans.apply_published()
+
+    # Without a primary EventSourceRegistry, register_event_source fails closed.
+    detached = PluginLifecycle("acme", {}, runtime_paths, lambda: config)
+    with pytest.raises(RuntimeError, match="primary runtime"):
+        detached.register_event_source(_CustomSource(source_id="acme_builds"))
+
+    # v1 registers acme_builds and emits.
+    await publish_acme(1)
+    assert getattr(service.event_sources.get("acme_builds"), "version", None) == 1
+    assert await probe.emitters[1].emit(kind="build.failed", event_id="ev-v1") == 1
+
+    # Hot-reload to v2: new lifespan registers before old stops; old teardown never clobbers v2, old emitter fails closed.
+    await publish_acme(2)
+    assert ("stop", 1, "reload") in probe.events
+    assert getattr(service.event_sources.get("acme_builds"), "version", None) == 2
+    with pytest.raises(EventSourceInactiveError):
+        await probe.emitters[1].emit(kind="build.failed", event_id="ev-v1-stale")
+    assert await probe.emitters[2].emit(kind="build.failed", event_id="ev-v2") == 1
+
+    # Startup failure before yield auto-unregisters the registered EventSource.
+    await publish_acme(3, fail_before_yield=True)
+    assert service.event_sources.get("acme_builds") is None
+    with pytest.raises(EventSourceInactiveError):
+        await probe.emitters[3].emit(kind="build.failed", event_id="ev-v3-failed")
+
+    # Disable auto-unregisters.
+    await publish_acme(4)
+    assert service.event_sources.get("acme_builds") is not None
+    config = _with_plugins(config, runtime_paths)
+    publish_test_plugins(config, runtime_paths)
+    await lifespans.apply_published()
+    assert service.event_sources.get("acme_builds") is None
+    assert ("stop", 4, "disabled") in probe.events
+
+    # Shutdown auto-unregisters and rejects post-stop registrations on the ended lifecycle.
+    await publish_acme(5)
+    ended_lifecycle = lifespans._running["acme"].lifecycle
+    await lifespans.stop()
+    assert service.event_sources.get("acme_builds") is None
+    assert ("stop", 5, "shutdown") in probe.events
+    with pytest.raises(RuntimeError, match="lifespan has ended"):
+        ended_lifecycle.register_event_source(_CustomSource(source_id="acme_builds"))
+
+
+@pytest.mark.asyncio
+async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """plugin_http.event_source_emitter enforces active plugin ownership and fails closed when unavailable."""
+    config, runtime_paths = _make_config(tmp_path)
+    store, service = _make_service(runtime_paths, lambda: config, trigger_id="acme_http_rule")
+    service.event_sources.register(_CustomSource(source_id="slack"))
+    probe = _plugin_probe()
+
+    _write_event_source_plugin(tmp_path, "acme", source_id="acme_builds", probe_name=probe.__name__, with_routes=True)
+    _write_event_source_plugin(tmp_path, "other", with_routes=True)
+    config = _with_plugins(config, runtime_paths, "acme", "other")
+
+    app = FastAPI()
+    api_state = ApiState(threading.Lock(), ApiSnapshot(1, runtime_paths, runtime_config=config))
+    ensure_app_state(app).api_state = api_state
+    mount_plugin_routes(app)
+
+    publish_test_plugins(config, runtime_paths)
+    lifespans = PluginLifespans(runtime_paths, lambda: config, event_sources=service.event_sources)
+    await lifespans.apply_published()
+
+    try:
+        with pytest.raises(RuntimeError, match="event_source_emitter"):
+            plugin_http.event_source_emitter(Request({"type": "http", "app": app, "headers": []}), "acme_builds")
+
+        client = TestClient(app)
+        assert client.post("/api/plugins/acme/emit/acme_builds").status_code == 503
+
+        ensure_app_state(app).embedded = SimpleNamespace(reactive_triggers=service)  # type: ignore[assignment]
+        ok = client.post("/api/plugins/acme/emit/acme_builds")
+        assert (ok.status_code, ok.json()) == (200, {"enqueued": 1})
+        assert len(store.list_firings(trigger_id="acme_http_rule")) == 1
+
+        # Unregistered source, built-in source, and another plugin's source all fail closed with 503.
+        for path in (
+            "/api/plugins/acme/emit/acme_missing",
+            "/api/plugins/acme/emit/slack",
+            "/api/plugins/other/emit/acme_builds",
+        ):
+            assert client.post(path).status_code == 503
+
+        # Integration binding forwards reactive_triggers from embedded runtime when omitted.
+        seen_triggers: list[object] = []
+        custom_integration = replace(
+            SLACK_INTEGRATION,
+            name="probe_integration",
+            bind=lambda _app, _bots, _memberships, rt: seen_triggers.append(rt),
+            unbind=lambda _app: None,
+        )
+        monkeypatch.setattr(integrations, "_integrations", lambda: (custom_integration,))
+        integrations.bind_integrations(app, {}, AgentReplyMembershipIndex())
+        assert seen_triggers == [service]
+
+        # Orchestrator wires reactive_triggers into both EmbeddedRuntime and PluginLifespans.
+        orchestrator = ready_runtime(config, runtime_paths)
+        assert orchestrator.embedded_runtime().reactive_triggers is orchestrator.reactive_triggers
+        assert orchestrator._plugin_lifespans.event_sources is orchestrator.reactive_triggers.event_sources
+
+        # When the plugin is no longer active in config, event_source_emitter raises PluginInactiveError.
+        api_state.snapshot = ApiSnapshot(2, runtime_paths, runtime_config=_with_plugins(config, runtime_paths))
+        stale_request = Request({"type": "http", "app": app, "headers": [], PLUGIN_NAME_SCOPE_KEY: "acme"})
+        with pytest.raises(PluginInactiveError):
+            plugin_http.event_source_emitter(stale_request, "acme_builds")
+    finally:
+        await lifespans.stop()

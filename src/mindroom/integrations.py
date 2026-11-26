@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class Integration:
     # Returns the public routes, which authenticate their own requests.
     # Config validation reads the registry, so an integration loads its route and runtime on first use, never at import.
     router: Callable[[], APIRouter]
-    bind: Callable[[FastAPI, Mapping[str, AgentBot], AgentReplyMembershipIndex], None]
+    bind: Callable[[FastAPI, Mapping[str, AgentBot], AgentReplyMembershipIndex, ReactiveTriggerService | None], None]
     unbind: Callable[[FastAPI], object | None]
     # Returns the coroutine that passes a final agent reply on, or None when the reply is not for this integration.
     reply_mirror: Callable[[MessageEnvelope, str, Config, RuntimePaths], Coroutine[Any, Any, None] | None]
@@ -49,10 +50,16 @@ def bind_integrations(
     api_app: FastAPI,
     bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
+    reactive_triggers: ReactiveTriggerService | None = None,
 ) -> None:
     """Let every integration's events reach the orchestrator's live bots."""
+    resolved_triggers = reactive_triggers
+    if resolved_triggers is None:
+        state = getattr(api_app.state, "mindroom_app_state", None)
+        embedded = getattr(state, "embedded", None)
+        resolved_triggers = getattr(embedded, "reactive_triggers", None)
     for integration in _integrations():
-        integration.bind(api_app, bots, agent_reply_memberships)
+        integration.bind(api_app, bots, agent_reply_memberships, resolved_triggers)
 
 
 def unbind_integrations(api_app: FastAPI) -> list[tuple[str, object]]:

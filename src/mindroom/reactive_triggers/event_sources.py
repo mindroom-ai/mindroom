@@ -9,9 +9,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from mindroom.reactive_triggers.matching import matches_external_event
-from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEvent
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
 
@@ -22,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.reactive_triggers.dispatch import DispatchResult
-    from mindroom.reactive_triggers.models import ReactiveTriggerRecord
+    from mindroom.reactive_triggers.models import ReactiveTriggerRecord, TriggerEvent
 
 EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 _RESERVED_BUILTIN_SOURCE_IDS: frozenset[str] = frozenset({"slack"})
@@ -139,6 +136,8 @@ class EventSource:
         if self.allowed_kinds and stripped_kind not in self.allowed_kinds:
             msg = f"Event kind {stripped_kind!r} is not allowed for event source {self.source_id!r}"
             raise ValueError(msg)
+        from mindroom.reactive_triggers.models import ExternalEventSourceSpec  # noqa: PLC0415
+
         normalized = ExternalEventSourceSpec(source_id=self.source_id, kind=stripped_kind, match=dict(match))
         return ValidatedSubscription(
             kind=normalized.kind,
@@ -155,6 +154,9 @@ class EventSource:
         has_thread_binding: bool = False,
     ) -> bool:
         """Return whether event matches rule; defaults to structured external_event matching."""
+        from mindroom.reactive_triggers.matching import matches_external_event  # noqa: PLC0415
+        from mindroom.reactive_triggers.models import ExternalEventSourceSpec  # noqa: PLC0415
+
         del audience, has_thread_binding
         return isinstance(rule.source, ExternalEventSourceSpec) and matches_external_event(rule.source, event)
 
@@ -214,6 +216,8 @@ class EventSourceEmitter:
         if not stripped_kind or not stripped_event_id:
             msg = "Event kind and event_id must be non-empty strings"
             raise ValueError(msg)
+        from mindroom.reactive_triggers.models import TriggerEvent  # noqa: PLC0415
+
         event = TriggerEvent(
             source_type="external_event",
             source_id=self.source_id,

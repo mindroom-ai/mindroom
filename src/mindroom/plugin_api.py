@@ -110,6 +110,14 @@ from mindroom.plugin_worker_services import (
 )
 from mindroom.providers.registry import build_model_provider
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
+from mindroom.reactive_triggers.event_sources import (
+    EventSource,
+    EventSourceContext,
+    EventSourceDescriptor,
+    EventSourceEmitter,
+    EventSourceInactiveError,
+    ValidatedSubscription,
+)
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id as is_human_user
 from mindroom.requester_identity import is_platform_administrator
@@ -200,6 +208,11 @@ __all__ = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "EventSource",
+    "EventSourceContext",
+    "EventSourceDescriptor",
+    "EventSourceEmitter",
+    "EventSourceInactiveError",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
@@ -255,6 +268,7 @@ __all__ = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "ValidatedSubscription",
     "WorkerService",
     "WorkerServiceError",
     "WorkerServiceState",

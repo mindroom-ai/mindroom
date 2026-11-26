@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.history_visibility import RoomHistory
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -72,6 +73,7 @@ class EmbeddedRuntime:
     call_transcripts: Callable[[], CallTranscriptService | None]
     # A room as the agent answering calls in it reads it, with that agent's call there; None if no agent answers there.
     agent_call_room: Callable[[str], AgentCallRoom | None]
+    reactive_triggers: ReactiveTriggerService
 
 
 @dataclass(frozen=True)
