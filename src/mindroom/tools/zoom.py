@@ -21,7 +21,7 @@ _ZoomManageAction = Literal["schedule_meeting", "delete_meeting"]
 _ZoomMeetingType = Literal["scheduled", "live", "upcoming", "previous"]
 
 
-class ZoomTools(Toolkit):
+class _ZoomTools(Toolkit):
     """Read, schedule, and delete Zoom meetings using Server-to-Server OAuth."""
 
     def __init__(
@@ -334,6 +334,6 @@ class ZoomTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#zoom",
     function_names=("zoom_manage", "zoom_read"),
 )
-def zoom_tools() -> type[ZoomTools]:
+def zoom_tools() -> type[_ZoomTools]:
     """Return Zoom tools for video conferencing and meeting management."""
-    return ZoomTools
+    return _ZoomTools

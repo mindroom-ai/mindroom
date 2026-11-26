@@ -14,7 +14,7 @@ _XReadAction = Literal["get_user_info", "get_home_timeline", "search_posts"]
 _XWriteAction = Literal["create_post", "reply_to_post", "send_dm"]
 
 
-class XTools(Toolkit):
+class _XTools(Toolkit):
     """Read X profiles/timelines/posts and publish posts, replies, or DMs via Tweepy."""
 
     def __init__(
@@ -309,6 +309,6 @@ class XTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#x",
     function_names=("x_read", "x_write"),
 )
-def x_tools() -> type[XTools]:
+def x_tools() -> type[_XTools]:
     """Return X (Twitter) tools for posting tweets and social media interaction."""
-    return XTools
+    return _XTools

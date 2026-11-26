@@ -71,7 +71,7 @@ def _decode_media(media_base64: str | None, *, action: str) -> bytes | str:
         return "Invalid base64 media content."
 
 
-class TelegramTools(Toolkit):
+class _TelegramTools(Toolkit):
     """Send messages/media, manage messages, and read chat or file details via a Telegram bot."""
 
     def __init__(
@@ -548,6 +548,6 @@ class TelegramTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#telegram",
     function_names=("telegram_manage", "telegram_read", "telegram_send"),
 )
-def telegram_tools() -> type[TelegramTools]:
+def telegram_tools() -> type[_TelegramTools]:
     """Return Telegram tools for sending messages."""
-    return TelegramTools
+    return _TelegramTools

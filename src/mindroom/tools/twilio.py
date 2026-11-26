@@ -21,7 +21,7 @@ _ReadAction = Literal["get_call_details", "list_messages"]
 _PHONE = re.compile(r"\+[1-9]\d{1,14}", re.ASCII)
 
 
-class TwilioTools(Toolkit):
+class _TwilioTools(Toolkit):
     """Send SMS and read calls or messages via Twilio."""
 
     name = "twilio"
@@ -271,6 +271,6 @@ class TwilioTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
     function_names=("send_sms", "twilio_read"),
 )
-def twilio_tools() -> type[TwilioTools]:
+def twilio_tools() -> type[_TwilioTools]:
     """Return the native twilio toolkit."""
-    return TwilioTools
+    return _TwilioTools

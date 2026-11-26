@@ -11,16 +11,16 @@ import httpx
 import pytest
 
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tools.aws_ses import AWSSESTool
-from mindroom.tools.discord import DiscordTools
-from mindroom.tools.email import EmailTools
-from mindroom.tools.resend import ResendTools
-from mindroom.tools.telegram import TelegramTools
-from mindroom.tools.twilio import TwilioTools
-from mindroom.tools.webex import WebexTools
-from mindroom.tools.whatsapp import WhatsAppTools
-from mindroom.tools.x import XTools
-from mindroom.tools.zoom import ZoomTools
+from mindroom.tools.aws_ses import aws_ses_tools
+from mindroom.tools.discord import discord_tools
+from mindroom.tools.email import email_tools
+from mindroom.tools.resend import resend_tools
+from mindroom.tools.telegram import telegram_tools
+from mindroom.tools.twilio import twilio_tools
+from mindroom.tools.webex import webex_tools
+from mindroom.tools.whatsapp import whatsapp_tools
+from mindroom.tools.x import x_tools
+from mindroom.tools.zoom import zoom_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,7 +32,7 @@ _TELEGRAM_KEY = "0:fixture-credential"
 
 def test_smtp_sends_only_to_configured_recipient() -> None:
     """SMTP constructs a plain-text message for the operator's recipient."""
-    tools = EmailTools("reader@example.test", "Sender", "sender@example.test", "fake-passkey")
+    tools = email_tools()("reader@example.test", "Sender", "sender@example.test", "fake-passkey")
     with patch("smtplib.SMTP_SSL") as smtp_ssl:
         assert tools.smtp_send_email("Status", "Ready") == "Email sent."
     smtp = smtp_ssl.return_value.__enter__.return_value
@@ -40,15 +40,15 @@ def test_smtp_sends_only_to_configured_recipient() -> None:
     message = smtp.send_message.call_args.args[0]
     assert message["To"] == "reader@example.test"
     assert message.get_content().strip() == "Ready"
-    assert not EmailTools(enable_email_user=False).functions
+    assert not email_tools()(enable_email_user=False).functions
 
 
 def test_resend_uses_each_toolkits_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Sending for one toolkit does not change the next toolkit's bearer key."""
     pytest.importorskip("resend")
     monkeypatch.setenv("RESEND_API_KEY", "environment-example")
-    first = ResendTools(api_key="explicit-example", from_email="sender@example.test")
-    second = ResendTools(from_email="other@example.test")
+    first = resend_tools()(api_key="explicit-example", from_email="sender@example.test")
+    second = resend_tools()(from_email="other@example.test")
     with patch("resend.RequestsClient.request", return_value=(b"{}", 200, {})) as request:
         assert first.send_email("reader@example.test", "Status", "<b>Ready</b>") == "Email sent."
         assert second.send_email("reader@example.test", "Status", "Hello") == "Email sent."
@@ -62,7 +62,7 @@ def test_resend_uses_each_toolkits_credentials(monkeypatch: pytest.MonkeyPatch) 
 def test_ses_sends_via_configured_region() -> None:
     """SES uses the configured region and the SDK's normal credential chain."""
     pytest.importorskip("boto3")
-    tools = AWSSESTool(sender_email="sender@example.test", region_name="us-west-2")
+    tools = aws_ses_tools()(sender_email="sender@example.test", region_name="us-west-2")
     with patch("boto3.client") as client:
         assert tools.send_email("Status", "Ready", "reader@example.test") == "Email sent."
     client.assert_called_once_with("ses", region_name="us-west-2")
@@ -72,7 +72,7 @@ def test_ses_sends_via_configured_region() -> None:
 def test_twilio_separates_sms_from_reads() -> None:
     """A disabled read action cannot call Twilio even through the consolidated method."""
     pytest.importorskip("twilio")
-    tools = TwilioTools(
+    tools = twilio_tools()(
         account_sid="ACexample",
         api_key="SKexample",
         api_secret=_CREDENTIAL,
@@ -97,7 +97,7 @@ def test_twilio_separates_sms_from_reads() -> None:
 
 def test_discord_routes_reads_sends_and_deletes_separately() -> None:
     """Read, send, and delete go to their own REST routes and approval names."""
-    tools = DiscordTools(bot_token=_CREDENTIAL)
+    tools = discord_tools()(bot_token=_CREDENTIAL)
     calls: list[tuple[str, str]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -125,7 +125,7 @@ def test_telegram_opt_in_media_is_absent_from_default_schema() -> None:
     """Disabled media never reaches the Telegram bot, even with a direct action dispatch."""
     pytest.importorskip("telebot")
     with patch("telebot.TeleBot") as bot:
-        tools = TelegramTools(token=_TELEGRAM_KEY, chat_id="1234")
+        tools = telegram_tools()(token=_TELEGRAM_KEY, chat_id="1234")
         [send] = adapt_toolkit(tools).functions
         assert send.name == "telegram_send"
         assert send.parameters["properties"]["action"]["enum"] == ["message"]
@@ -146,7 +146,7 @@ def test_telegram_download_stays_in_configured_directory(tmp_path: Path) -> None
             file_size=5,
         )
         bot.return_value.download_file.return_value = b"Hello"
-        tools = TelegramTools(token=_TELEGRAM_KEY, output_directory=str(tmp_path), enable_get_file=True)
+        tools = telegram_tools()(token=_TELEGRAM_KEY, output_directory=str(tmp_path), enable_get_file=True)
         result = json.loads(tools.telegram_read("get_file", file_id="abc"))
     assert existing.read_text(encoding="utf-8") == "untouched"
     saved = tmp_path / result["saved_filename"]
@@ -157,7 +157,7 @@ def test_telegram_download_stays_in_configured_directory(tmp_path: Path) -> None
 
 def test_whatsapp_enabled_actions_constrain_schema_and_send() -> None:
     """Default schemas hide opt-in actions and parameters; calls block them too."""
-    tools = WhatsAppTools(access_token=_CREDENTIAL, phone_number_id="123", recipient_waid="12025550101")
+    tools = whatsapp_tools()(access_token=_CREDENTIAL, phone_number_id="123", recipient_waid="12025550101")
     [send] = adapt_toolkit(tools).functions
     props = send.parameters["properties"]
     assert props["action"]["enum"] == ["text", "template"]
@@ -182,7 +182,7 @@ def test_webex_read_and_send_use_separate_functions() -> None:
         api.return_value.rooms.list.return_value = [
             SimpleNamespace(id="room-id", title="Example", type="group", isPublic=False, isReadOnly=False),
         ]
-        tools = WebexTools(access_token=_CREDENTIAL)
+        tools = webex_tools()(access_token=_CREDENTIAL)
         assert json.loads(tools.webex_read())["rooms"][0]["id"] == "room-id"
         api.return_value.messages.create.assert_not_called()
         api.return_value.messages.create.return_value = SimpleNamespace(json_data={"id": "message-id"})
@@ -192,7 +192,7 @@ def test_webex_read_and_send_use_separate_functions() -> None:
 
 def test_zoom_mints_private_token_and_reuses_it_for_meetings() -> None:
     """Zoom OAuth never appears as a callable or in a successful tool result."""
-    tools = ZoomTools("account-id", "client-id", "fake-secret")
+    tools = zoom_tools()("account-id", "client-id", "fake-secret")
     hosts: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -226,7 +226,7 @@ def test_x_acknowledges_post_and_direct_message() -> None:
     with patch("tweepy.Client") as api:
         api.return_value.create_tweet.return_value = SimpleNamespace(data={"id": "5"})
         api.return_value.create_direct_message.return_value = SimpleNamespace(data={"dm_event_id": "8"})
-        tools = XTools()
+        tools = x_tools()()
         assert json.loads(tools.x_write("create_post", text="Ready"))["url"].endswith("/5")
         assert json.loads(tools.x_write("send_dm", text="Ready", recipient="42"))["dm_id"] == "8"
     api.return_value.get_me.assert_not_called()

@@ -65,16 +65,17 @@ def _env_reads(source: str) -> set[str]:
 
 
 def _module_env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads, from its source file."""
+    """Return the variables one toolkit module reads, from its source file."""
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     assert spec.origin is not None
     return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
-def _agno_modules(tool_name: str) -> set[str]:
-    """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
-    factory = builtin_tool_registry().entries[tool_name].factory
+def _toolkit_env_modules(tool_name: str) -> set[str]:
+    """Find the vendor modules or native module that implements a toolkit's config fallbacks."""
+    metadata = builtin_tool_registry().entries[tool_name]
+    factory = metadata.factory
     if factory is None:
         return set()
     try:
@@ -87,13 +88,16 @@ def _agno_modules(tool_name: str) -> set[str]:
             for node in ast.walk(registration)
             if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
         }
+    # Native toolkits with no config fallbacks can still read unrelated infrastructure variables.
+    if issubclass(toolkit_class, Toolkit) and any(field.env for field in metadata.config_fields or ()):
+        return {toolkit_class.__module__}
     return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
 
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
-    modules = _agno_modules(tool_name)
+    """Toolkit config fallbacks and declared names agree, except for allowlisted vendor reads."""
+    modules = _toolkit_env_modules(tool_name)
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}

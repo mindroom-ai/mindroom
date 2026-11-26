@@ -43,7 +43,7 @@ def _safe_http_error(exc: Exception, *, secret: str | None) -> str:
     return f"Discord request failed: {type(exc).__name__}"
 
 
-class DiscordTools(Toolkit):
+class _DiscordTools(Toolkit):
     """Interact with Discord guilds, channels, and messages via the Discord REST API."""
 
     def __init__(
@@ -274,6 +274,6 @@ class DiscordTools(Toolkit):
         "discord_send",
     ),
 )
-def discord_tools() -> type[DiscordTools]:
+def discord_tools() -> type[_DiscordTools]:
     """Return Discord tools for interacting with Discord channels and servers."""
-    return DiscordTools
+    return _DiscordTools

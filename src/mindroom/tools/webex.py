@@ -10,7 +10,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
-class WebexTools(Toolkit):
+class _WebexTools(Toolkit):
     """List Webex rooms and send messages via the Webex SDK."""
 
     def __init__(
@@ -133,6 +133,6 @@ class WebexTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#webex",
     function_names=("webex_read", "webex_send"),
 )
-def webex_tools() -> type[WebexTools]:
+def webex_tools() -> type[_WebexTools]:
     """Return Webex tools for video conferencing and messaging."""
-    return WebexTools
+    return _WebexTools

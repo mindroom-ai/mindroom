@@ -12,7 +12,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
-class EmailTools(Toolkit):
+class _EmailTools(Toolkit):
     """Send email to a configured recipient via Gmail SMTP."""
 
     name = "email_tools"
@@ -111,6 +111,6 @@ class EmailTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#email",
     function_names=("smtp_send_email",),
 )
-def email_tools() -> type[EmailTools]:
+def email_tools() -> type[_EmailTools]:
     """Return the native email toolkit."""
-    return EmailTools
+    return _EmailTools

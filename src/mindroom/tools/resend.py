@@ -9,7 +9,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
-class ResendTools(Toolkit):
+class _ResendTools(Toolkit):
     """Send transactional email through Resend."""
 
     name = "resend_tools"
@@ -101,6 +101,6 @@ class ResendTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#resend",
     function_names=("send_email",),
 )
-def resend_tools() -> type[ResendTools]:
+def resend_tools() -> type[_ResendTools]:
     """Return the native resend toolkit."""
-    return ResendTools
+    return _ResendTools

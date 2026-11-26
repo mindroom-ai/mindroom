@@ -241,7 +241,7 @@ def _build_reaction_payload(to: str, *, message_id: str | None, emoji: str | Non
     }
 
 
-class WhatsAppTools(Toolkit):
+class _WhatsAppTools(Toolkit):
     """Send messages via the WhatsApp Business Cloud API."""
 
     def __init__(
@@ -596,6 +596,6 @@ class WhatsAppTools(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#whatsapp",
     function_names=("whatsapp_send",),
 )
-def whatsapp_tools() -> type[WhatsAppTools]:
+def whatsapp_tools() -> type[_WhatsAppTools]:
     """Return WhatsApp Business API tools for messaging."""
-    return WhatsAppTools
+    return _WhatsAppTools

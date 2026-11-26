@@ -7,7 +7,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
-class AWSSESTool(Toolkit):
+class _AWSSESTool(Toolkit):
     """Send plain-text email through Amazon SES."""
 
     name = "aws_ses_tool"
@@ -110,6 +110,6 @@ class AWSSESTool(Toolkit):
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_ses",
     function_names=("send_email",),
 )
-def aws_ses_tools() -> type[AWSSESTool]:
+def aws_ses_tools() -> type[_AWSSESTool]:
     """Return the native aws ses toolkit."""
-    return AWSSESTool
+    return _AWSSESTool
