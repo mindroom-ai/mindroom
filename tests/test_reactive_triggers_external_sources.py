@@ -34,6 +34,8 @@ from mindroom.reactive_triggers import (
     ExternalSourceForbiddenError,
     ExternalSourceReplayError,
     ExternalSourceUnavailableError,
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     ReactiveTriggerStore,
     TriggerEvent,
@@ -1023,6 +1025,35 @@ def test_event_sources_endpoint_github_fan_out_dedupe_and_wake_callback(tmp_path
                 headers={**headers, "X-Hub-Signature-256": "sha256=deadbeef"},
             )
             assert bad_sig.status_code == 401
+
+            # Nudging a webhook-backed github_pr watch wakes the reactive loop without inflating matched_rules.
+            store.create_trigger(
+                ReactiveTriggerRecord(
+                    trigger_id="gh_pr_watch_7",
+                    owner_user_id="@alice:example.org",
+                    source=GitHubPRSourceSpec(repo="mindroom-ai/mindroom", number=7, webhook_source_id="github"),
+                    target=TriggerTargetSpec(agent="dev", room_id="!room:example.org", prompt="Watch PR"),
+                    created_at=1000.0,
+                    updated_at=1000.0,
+                ),
+                initial_github_pr_checkpoint=GitHubPRCheckpoint(seeded=True, updated_at=1000.0),
+            )
+            ic_body = json.dumps(
+                {"action": "created", "repository": {"full_name": "mindroom-ai/mindroom"}},
+            ).encode("utf-8")
+            ic_resp = client.post(
+                "/api/event-sources/github",
+                content=ic_body,
+                headers={
+                    "X-GitHub-Delivery": "delivery-http-pr-nudge",
+                    "X-GitHub-Event": "issue_comment",
+                    "X-Hub-Signature-256": _github_signature(ic_body),
+                },
+            )
+            assert ic_resp.status_code == 202
+            assert ic_resp.json()["matched_rules"] == 0
+            assert len(woke) == 2
+            assert [r.trigger_id for r, _ in store.list_due_github_pr_triggers()] == ["gh_pr_watch_7"]
 
             # Non-ASCII signature -> 401 (never 500 from hmac.compare_digest TypeError)
             non_ascii_sig = client.post(

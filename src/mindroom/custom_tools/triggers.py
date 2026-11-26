@@ -29,7 +29,7 @@ from mindroom.custom_tools.external_trigger_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.policy import is_external_trigger_administrator, is_source_subscriber_allowed
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -39,9 +39,9 @@ from mindroom.external_triggers.store import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.state import resolve_room_id
+from mindroom.reactive_triggers import github_pr as ghpr
 from mindroom.reactive_triggers.external_sources import (
     check_external_event_source_access,
-    is_source_subscriber_allowed,
     validate_subscription_against_source,
 )
 from mindroom.reactive_triggers.management import (
@@ -57,6 +57,9 @@ from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
     ExternalEventSourceSpec,
     FiringRecord,
+    GitHubPRCheckpoint,
+    GitHubPREventType,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -64,6 +67,7 @@ from mindroom.reactive_triggers.models import (
     ThreadTagSourceSpec,
     TriageSpec,
     TriggerEvent,
+    TriggerSourceSpec,
     TriggerTargetSpec,
     generate_trigger_id,
 )
@@ -102,6 +106,7 @@ _TOOL_ERRORS = (
     ExternalTriggerStoreError,
     ReactiveTriggerStoreError,
     ThreadTagsError,
+    TypeError,
     ValueError,
 )
 
@@ -120,6 +125,7 @@ _UPDATABLE_FIELDS: tuple[str, ...] = (
     "cooldown_seconds",
     "max_fires_per_hour",
     "expires_in_hours",
+    "reopen_on_fire",
     "once",
     "enabled",
 )
@@ -133,6 +139,7 @@ _COMMON_REACTIVE_PARAMS: frozenset[str] = frozenset(
         "target_thread_id",
         "new_thread",
         "thread_key",
+        "reopen_on_fire",
         "once",
         "max_fires_per_hour",
         "cooldown_seconds",
@@ -163,6 +170,7 @@ _ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
             "target_room_id",
             "target_thread_id",
             "new_thread",
+            "reopen_on_fire",
             "allowed_kinds",
             "replay_window_seconds",
             "max_body_bytes",
@@ -194,7 +202,7 @@ class TriggersTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name=self._TOOL_NAME,
-            tools=[self.triggers],
+            tools=[self.triggers, self.watch_pr],
         )
 
     @classmethod
@@ -262,24 +270,43 @@ class TriggersTools(Toolkit):
         target_room_id = args["target_room_id"]
         target_thread_id = args["target_thread_id"]
         new_thread = args["new_thread"]
+        reopen_on_fire = False if args["reopen_on_fire"] is None else args["reopen_on_fire"]
         is_admin = cls._is_admin(context)
         if not is_admin and target_agent not in (None, context.agent_name):
             msg = "Only external trigger admins can target a different agent or team."
             raise ExternalTriggerStoreError(msg)
-        target = ExternalTriggerTarget(
-            room_id=target_room_id or context.room_id,
-            thread_id=target_thread_id,
-            agent=target_agent or context.agent_name,
-            new_thread=new_thread,
-        )
-        resolved_room_id = resolve_room_id(target.room_id, context.runtime_paths)
-        if not is_admin and resolved_room_id != context.room_id:
+        if new_thread and target_thread_id is not None:
+            msg = "target_thread_id and new_thread are mutually exclusive"
+            raise ValueError(msg)
+        raw_room_id = target_room_id or context.room_id
+        resolved_room_id = resolve_room_id(raw_room_id, context.runtime_paths)
+        current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
+        if not is_admin and resolved_room_id != current_room_id:
             msg = "Only external trigger admins can target a different room."
             raise ExternalTriggerStoreError(msg)
-        if target.thread_id is None:
-            return target
-        thread_root = await explicit_thread_root(context, room_id=resolved_room_id, thread_id=target.thread_id)
-        return ExternalTriggerTarget.model_validate({**target.model_dump(), "thread_id": thread_root})
+        resolved_thread_id: str | None
+        if new_thread or target_thread_id == "room":
+            resolved_thread_id = None
+        elif target_thread_id is None:
+            resolved_thread_id = (
+                (context.resolved_thread_id or context.thread_id) if resolved_room_id == current_room_id else None
+            )
+        else:
+            if not target_thread_id.strip():
+                msg = "thread_id must not be empty"
+                raise ValueError(msg)
+            resolved_thread_id = await explicit_thread_root(
+                context,
+                room_id=resolved_room_id,
+                thread_id=target_thread_id,
+            )
+        return ExternalTriggerTarget(
+            room_id=raw_room_id,
+            thread_id=resolved_thread_id,
+            agent=target_agent or context.agent_name,
+            new_thread=new_thread,
+            reopen_on_fire=reopen_on_fire,
+        )
 
     @classmethod
     async def _resolve_reactive_target(
@@ -296,6 +323,7 @@ class TriggersTools(Toolkit):
         target_thread_id = args["target_thread_id"]
         new_thread = args["new_thread"]
         thread_key = args["thread_key"]
+        reopen_on_fire = False if args["reopen_on_fire"] is None else args["reopen_on_fire"]
         if new_thread and target_thread_id is not None:
             msg = "target_thread_id and new_thread are mutually exclusive"
             raise ValueError(msg)
@@ -351,7 +379,7 @@ class TriggersTools(Toolkit):
         )
 
         resolved_thread_id: str | None
-        if new_thread:
+        if new_thread or target_thread_id == "room":
             resolved_thread_id = None
         elif target_thread_id is None:
             resolved_thread_id = default_thread_id(resolved_target_room_id)
@@ -370,6 +398,7 @@ class TriggersTools(Toolkit):
             thread_id=resolved_thread_id,
             new_thread=new_thread,
             thread_key=thread_key,
+            reopen_on_fire=reopen_on_fire,
             prompt=prompt,
         )
 
@@ -467,19 +496,21 @@ class TriggersTools(Toolkit):
             room_access_cache[resolved_room_id] = True
             return True
 
-        source_config = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
-        if source_config is None or not is_source_subscriber_allowed(
-            source_config,
+        if isinstance(rule.source, GitHubPRSourceSpec):
+            return _gh_pr_allowed(context, context.requester_id, rule.source)
+        cfg = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
+        allowed = cfg is not None and is_source_subscriber_allowed(
+            cfg,
             context.requester_id,
             context.config,
             context.runtime_paths,
-        ):
-            return False
-        try:
-            validate_subscription_against_source(source_config, kind=rule.source.kind, match=rule.source.match)
-        except ValueError:
-            return False
-        return True
+        )
+        if allowed and cfg is not None:
+            try:
+                validate_subscription_against_source(cfg, kind=rule.source.kind, match=rule.source.match)
+            except ValueError:
+                allowed = False
+        return allowed
 
     @staticmethod
     def _firing_allowed_for_history(
@@ -489,6 +520,8 @@ class TriggersTools(Toolkit):
     ) -> bool:
         if firing.rule_uid != rule.rule_uid:
             return False
+        if isinstance(rule.source, GitHubPRSourceSpec):
+            return _gh_pr_allowed(context, rule.owner_user_id, rule.source)
         if not isinstance(rule.source, ExternalEventSourceSpec):
             return True
         return (
@@ -556,12 +589,14 @@ class TriggersTools(Toolkit):
         *,
         policy: ExternalTriggerPolicyConfig,
         common: tuple[str | None, TriageSpec | None, float | None, int, int],
-        source: RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec,
+        source: TriggerSourceSpec,
         target: TriggerTargetSpec,
         default_once: bool,
         now: float,
         initial_cursor: RoomCursor | None = None,
         initial_checkpoint: ThreadCheckpoint | None = None,
+        initial_github_pr_checkpoint: GitHubPRCheckpoint | None = None,
+        max_github_pr_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord:
         validated_trigger_id, triage, expires_at, max_fires_per_hour, cooldown_seconds = common
         external_store = ExternalTriggerStore(context.runtime_paths)
@@ -592,12 +627,103 @@ class TriggersTools(Toolkit):
                     record,
                     initial_cursor=initial_cursor,
                     initial_checkpoint=initial_checkpoint,
+                    initial_github_pr_checkpoint=initial_github_pr_checkpoint,
                     max_per_owner=policy.max_reactive_triggers_per_owner,
+                    max_github_pr_per_owner=max_github_pr_per_owner,
                 )
 
         created = await run_blocking_until_complete(_create)
         self._notify_reactive_service(context)
         return created
+
+    async def watch_pr(
+        self,
+        repo: str,
+        number: int,
+        events: list[Literal["activity", "ci", "merge", "close"]] | None = None,
+        prompt: str | None = None,
+        description: str | None = None,
+        ignore_actors: list[str] | None = None,
+        ignore_bots: bool = True,
+        auto_disable_on_close: bool = True,
+        reopen_on_fire: bool = True,
+        poll_interval_seconds: int | None = None,
+        target_agent: str | None = None,
+        target_room_id: str | None = None,
+        target_thread_id: str | None = None,
+        new_thread: bool = False,
+        once: bool = False,
+        expires_in_hours: float | None = 720.0,
+        trigger_id: str | None = None,
+    ) -> str:
+        """Watch one open GitHub PR for activity, CI (GitHub Check Runs) failures/all-green, merge, or close.
+
+        Uses ETag-backed GitHub REST polling (nudged immediately by an authorized shared GitHub webhook source covering
+        `repo` with zero idle polling). CI events track GitHub Check Runs (not legacy Commit Statuses). Auto-reopens
+        resolved target threads (`reopen_on_fire=True`) and auto-disables on PR merge/close.
+        """
+        try:
+            ctx = require_external_trigger_owner_context(self._CONTEXT_LABEL)
+            pol, now = self._require_reactive_policy(ctx), time.time()
+            tid, exp = _validate_optional_trigger_id(trigger_id), _validate_expires_in_hours(expires_in_hours, now=now)
+            if isinstance(poll_interval_seconds, bool):
+                msg = "poll_interval_seconds must be an integer."
+                raise TypeError(msg)
+            raw_p = 300 if poll_interval_seconds is None else poll_interval_seconds
+            poll_s = max(pol.min_github_pr_poll_interval_seconds, min(raw_p, 86400))
+            evs: list[GitHubPREventType] = ["activity", "ci", "merge", "close"] if events is None else list(events)
+            sd: dict[str, Any] = {"repo": repo, "number": number, "events": evs, "ignore_bots": ignore_bots}
+            sd |= {"ignore_actors": list(ignore_actors or ()), "auto_disable_on_close": auto_disable_on_close}
+            src = GitHubPRSourceSpec.model_validate({**sd, "poll_interval_seconds": poll_s})
+            find_wh = ghpr.find_covering_github_webhook_source
+            wh_id = find_wh(ctx.requester_id, src.repo, src.events, ctx.config, ctx.runtime_paths)
+            src = src.model_copy(update={"webhook_source_id": wh_id})
+            p_def = f"GitHub PR {src.repo}#{src.number} had new activity. Inspect the event data below and take any needed action."
+            p_text = p_def if prompt is None else _require_non_empty_arg(prompt, "prompt", "watch_pr")
+            desc = f"Watch PR {src.repo}#{src.number}" if description is None else description
+            ta: dict[str, Any] = {"target_agent": target_agent, "target_room_id": target_room_id, "once": once}
+            ta |= {"target_thread_id": target_thread_id, "new_thread": new_thread, "thread_key": None}
+            ta |= {"reopen_on_fire": reopen_on_fire, "description": desc}
+            rm_id, th_id = resolve_room_id(ctx.room_id, ctx.runtime_paths), ctx.resolved_thread_id or ctx.thread_id
+
+            def _dth(d: str) -> str | None:
+                return th_id if d == rm_id else None
+
+            fn = self._resolve_reactive_target
+            target = await fn(ctx, ta, prompt=p_text, default_thread_id=_dth, allow_origin=False)
+            if wh_id is None and not pol.github_pr_polling_enabled:
+                msg = f"GitHub PR polling is disabled and no webhook source covers {src.repo}."
+                raise ReactiveTriggerStoreError(msg)
+            seeded = await ghpr.seed_github_pr_watch(
+                src.repo,
+                src.number,
+                src.events,
+                owner_user_id=ctx.requester_id,
+                config=ctx.config,
+                runtime_paths=ctx.runtime_paths,
+                poll_interval_seconds=poll_s,
+                webhook_source_id=wh_id,
+                now=now,
+            )
+            created = await self._create_reactive_rule(
+                ctx,
+                ta,
+                policy=pol,
+                common=(tid, None, exp, min(10, pol.max_fires_per_hour), 0),
+                source=src,
+                target=target,
+                default_once=False,
+                now=now,
+                initial_github_pr_checkpoint=seeded.checkpoint,
+                max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
+            )
+            out: dict[str, Any] = {"action": "watch_pr", "trigger": self._reactive_record_payload(created)}
+            out |= {"delivery_mode": "webhook" if wh_id is not None else "poll", "webhook_source_id": wh_id}
+            cp = seeded.checkpoint
+            out |= {"auth_mode": seeded.auth_mode, "pr_state": cp.pr_state, "head_sha": cp.head_sha}
+            return self._payload("ok", **out)
+        except _TOOL_ERRORS as exc:
+            return self._payload("error", message=str(exc))
 
     async def triggers(
         self,
@@ -636,6 +762,7 @@ class TriggersTools(Toolkit):
         target_thread_id: str | None = None,
         new_thread: bool = False,
         thread_key: str | None = None,
+        reopen_on_fire: bool | None = None,
         once: bool | None = None,
         max_fires_per_hour: int | None = None,
         cooldown_seconds: int | None = None,
@@ -665,7 +792,7 @@ class TriggersTools(Toolkit):
         - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
         - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 
-        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`). Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
+        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'room'` (room timeline) or `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
         Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
@@ -966,10 +1093,13 @@ class TriggersTools(Toolkit):
                     now=now,
                     refreshed_tag_present=refreshed_tag_present,
                 )
+            pol = context.config.external_trigger_policy
             updated = reactive_store.update_trigger(
                 validated,
                 expected_rule_uid=existing.rule_uid,
                 update_enabled=args["enabled"] is not None,
+                max_per_owner=pol.max_reactive_triggers_per_owner,
+                max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
             )
             if updated is None:
                 msg = f"Reactive trigger not found: {resolved_trigger_id}"
@@ -1433,10 +1563,15 @@ def _build_updated_reactive_record(
         if args["expires_in_hours"] is None
         else _validate_expires_in_hours(args["expires_in_hours"], now=now)
     )
+    target_updates: dict[str, Any] = {}
+    if args["prompt"] is not None:
+        target_updates["prompt"] = args["prompt"]
+    if args["reopen_on_fire"] is not None:
+        target_updates["reopen_on_fire"] = args["reopen_on_fire"]
     new_target = (
         existing.target
-        if args["prompt"] is None
-        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), "prompt": args["prompt"]})
+        if not target_updates
+        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), **target_updates})
     )
     if args["enabled"] is None:
         new_enabled, new_disabled_reason = existing.enabled, existing.disabled_reason
@@ -1472,7 +1607,7 @@ def _resolve_updated_source(
     *,
     existing: ReactiveTriggerRecord,
     args: _TriggerParams,
-) -> RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec:
+) -> TriggerSourceSpec:
     if any(args[name] is not None for name in ("pattern", "senders", "include_bots")) and not isinstance(
         existing.source,
         RoomMessageSourceSpec,
@@ -1643,6 +1778,9 @@ def _build_dry_run_event_and_match(
         )
         return event, matches_external_event(rule.source, event), None
 
+    if isinstance(rule.source, GitHubPRSourceSpec):
+        return _dry_run_github_pr(rule.source, args, extra_data, raw_kind, now)
+
     raw_tag_val = extra_data.get("tag")
     raw_tag = raw_tag_val if isinstance(raw_tag_val, str) else rule.source.tag
     sample_tag = _normalize_watch_thread_tag(raw_tag)
@@ -1680,6 +1818,96 @@ def _build_dry_run_event_and_match(
         and sample_transition == rule.source.transition
     )
     return event, matched, None
+
+
+def _gh_pr_allowed(ctx: ToolRuntimeContext, owner: str, src: GitHubPRSourceSpec) -> bool:
+    fn = ghpr.check_github_pr_source_access
+    return fn(owner_user_id=owner, source_spec=src, config=ctx.config, runtime_paths=ctx.runtime_paths) is None
+
+
+_GH_PR_DRY_RUN_CATEGORIES: dict[str, GitHubPREventType] = {
+    "activity": "activity",
+    "comment": "activity",
+    "review": "activity",
+    "review_comment": "activity",
+    "review_comments": "activity",
+    "ci": "ci",
+    "ci_failure": "ci",
+    "ci_passing": "ci",
+    "merge": "merge",
+    "merged": "merge",
+    "github_pr.merged": "merge",
+    "close": "close",
+    "closed": "close",
+    "github_pr.closed": "close",
+}
+_GH_PR_IGNORED_NOTE = "Dry run only (no state changed or message sent); activity from this actor is ignored."
+
+
+def _dry_run_github_pr(
+    src: GitHubPRSourceSpec,
+    args: _TriggerParams,
+    extra: Mapping[str, Any],
+    raw_kind: str | None,
+    now: float,
+) -> tuple[TriggerEvent, bool, str | None]:
+    norm = raw_kind.strip().lower() if isinstance(raw_kind, str) and raw_kind.strip() else None
+    explicit_cat = (
+        _GH_PR_DRY_RUN_CATEGORIES.get(str(extra["category"]).strip().lower()) if "category" in extra else None
+    )
+    raw_items = extra.get("items")
+    items = [item for item in raw_items if isinstance(item, Mapping)] if isinstance(raw_items, list) else []
+
+    if norm == "github_pr.update":
+        ekind = "github_pr.update"
+        cat = explicit_cat or next((e for e in src.events if e in {"activity", "ci"}), None)
+    else:
+        cat = _GH_PR_DRY_RUN_CATEGORIES.get(norm) if norm else (explicit_cat or src.events[0])
+        ekind = "github_pr.merged" if cat == "merge" else ("github_pr.closed" if cat == "close" else "github_pr.update")
+
+    data: dict[str, Any] = {"repo": src.repo, "number": src.number, "terminal": ekind != "github_pr.update", **extra}
+    event = TriggerEvent.model_validate(
+        {
+            "source_type": "github_pr",
+            "source_id": src.repo.lower(),
+            "kind": ekind,
+            "data": data,
+            "event_id": "dry_run",
+            "timestamp": now,
+            "actor": args["actor"],
+            "title": f"{src.repo}#{src.number}",
+            "text": args["text"],
+        },
+    )
+    repo_ok = isinstance(data.get("repo"), str) and data["repo"].lower() == src.repo.lower()
+    if not (repo_ok and type(data.get("number")) is int and data["number"] == src.number):
+        return event, False, None
+
+    top_actor_type = extra.get("actor_type") if isinstance(extra.get("actor_type"), str) else None
+    if norm in {None, "github_pr.update"} and items:
+        ignored_activity = False
+        for item in items:
+            item_type = str(item.get("type") or "").strip().lower()
+            item_cat = _GH_PR_DRY_RUN_CATEGORIES.get(item_type, "activity" if item_type else None)
+            if item_cat not in src.events:
+                continue
+            item_actor = item.get("actor") if isinstance(item.get("actor"), str) else args["actor"]
+            item_actor_type = item.get("actor_type") if isinstance(item.get("actor_type"), str) else top_actor_type
+            if item_cat == "activity" and ghpr.is_ignored_activity_actor(
+                src,
+                actor=item_actor,
+                actor_type=item_actor_type,
+            ):
+                ignored_activity = True
+                continue
+            return event, True, None
+        return event, False, (_GH_PR_IGNORED_NOTE if ignored_activity else None)
+
+    if cat not in src.events:
+        return event, False, None
+    if cat == "activity" and ghpr.is_ignored_activity_actor(src, actor=args["actor"], actor_type=top_actor_type):
+        return event, False, _GH_PR_IGNORED_NOTE
+    return event, True, None
 
 
 async def _read_thread_tag_present(

@@ -18,9 +18,11 @@ from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
 from mindroom.reactive_triggers.external_sources import check_external_event_source_access
+from mindroom.reactive_triggers.github_pr import check_github_pr_source_access
 from mindroom.reactive_triggers.matching import REACTIVE_TRIGGER_DEDUPE_KEY, REACTIVE_TRIGGER_ID_KEY
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
+    GitHubPRSourceSpec,
     RoomMessageSourceSpec,
     ThreadTagSourceSpec,
 )
@@ -31,6 +33,7 @@ from mindroom.requester_identity import (
     is_persisted_managed_entity_id,
     managed_entity_user_ids,
 )
+from mindroom.thread_tags import reopen_thread_if_resolved
 
 if TYPE_CHECKING:
     import nio
@@ -143,6 +146,11 @@ async def check_reactive_source_access(
             runtime_paths=runtime_paths,
         )
         return DispatchResult(status="skipped", reason=reason) if reason is not None else None
+
+    if isinstance(source, GitHubPRSourceSpec):
+        fn = check_github_pr_source_access
+        r = fn(owner_user_id=rule.owner_user_id, source_spec=source, config=config, runtime_paths=runtime_paths)
+        return DispatchResult(status="skipped", reason=r) if r is not None else None
 
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
         return await _check_room_source_access(
@@ -368,6 +376,23 @@ async def dispatch_reactive_trigger(
         config=config,
         runtime_paths=runtime_paths,
     )
+    if rule.target.reopen_on_fire and resolved_thread.thread_event_id is not None and not resolved_thread.per_fire_root:
+        try:
+            await reopen_thread_if_resolved(
+                target_bot.client,
+                rule.target.room_id,
+                resolved_thread.thread_event_id,
+                requester_user_id=rule.owner_user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to auto-reopen resolved thread before reactive trigger delivery",
+                trigger_id=rule.trigger_id,
+                room_id=rule.target.room_id,
+                thread_id=resolved_thread.thread_event_id,
+                exc_info=True,
+            )
+
     transaction_id = build_reactive_trigger_transaction_id(firing)
     delivered = await send_matrix_message(
         target_bot.client,
