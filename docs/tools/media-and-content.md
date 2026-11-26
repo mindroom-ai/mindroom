@@ -149,15 +149,15 @@ unsplash("random", query="workspace desk", count=3)
 
 `brandfetch` returns brand identity data such as logos, colors, and fonts.
 
-- `search_by_identifier(identifier)` looks up a domain, Brandfetch brand ID, ISIN, or stock ticker and needs `api_key`.
-- `search_by_brand(name)` finds brands by name when you do not know the domain, needs `client_id`, and is off by default.
+- `brandfetch_lookup(query, action="by_identifier")` looks up a domain, Brandfetch brand ID, ISIN, or stock ticker and needs `api_key`.
+- `brandfetch_lookup(query, action="by_brand")` finds brands by name when you do not know the domain, needs `client_id`, and is off by default.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | Brand API key for `search_by_identifier()`; falls back to `BRANDFETCH_API_KEY`. |
-| `client_id` | `text` | `null` | Brand Search client ID for `search_by_brand()`; falls back to `BRANDFETCH_CLIENT_ID`. |
-| `enable_search_by_identifier` | `boolean` | `true` | Enable `search_by_identifier()`. |
-| `enable_search_by_brand` | `boolean` | `false` | Enable `search_by_brand()`. |
+| `api_key` | `password` | `null` | Brand API key for `brandfetch_lookup(action="by_identifier")`; falls back to `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `null` | Brand Search client ID for `brandfetch_lookup(action="by_brand")`; falls back to `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `true` | Enable `brandfetch_lookup(action="by_identifier")`. |
+| `enable_search_by_brand` | `boolean` | `false` | Enable `brandfetch_lookup(action="by_brand")`. |
 | `base_url` | `url` | `https://api.brandfetch.io/v2` | Brandfetch API base URL. |
 | `timeout` | `number` | `20.0` | Request timeout in seconds. |
 | `all` | `boolean` | `false` | Enable all functions. |
@@ -173,14 +173,14 @@ agents:
 ```
 
 ```python
-search_by_identifier("openai.com")
-search_by_brand("OpenAI")
+brandfetch_lookup("openai.com", action="by_identifier")
+brandfetch_lookup("OpenAI", action="by_brand")
 ```
 
 ## [`spotify`]
 
 `spotify` acts on the connected Spotify account.
-It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
+It provides `spotify_search()` (`search`, `recommendations`, `album_tracks`, `artist_top_tracks`), `spotify_library()` (`current_user`, `currently_playing`, `user_playlists`, `playlist`, `my_top_tracks`, `my_top_artists`), `spotify_playlist_write()` (`create`, `update`, `add_tracks`, `remove_tracks`), and `spotify_play()`.
 
 ### Connect Spotify
 
@@ -219,15 +219,15 @@ agents:
 ```
 
 ```python
-search_tracks("ambient coding music", max_results=5)
-create_playlist("MindRoom Picks", description="Tracks from this week's chat")
+spotify_search(action="search", query="ambient coding music", limit=5)
+spotify_playlist_write(action="create", name="MindRoom Picks", description="Tracks from this week's chat")
 ```
 
 ### Troubleshooting
 
 - If playlist changes or playback control fail with a permissions error, disconnect and reconnect Spotify to grant the current scopes.
-- `play_track()` needs an active Spotify device and returns a `NO_ACTIVE_DEVICE` error when no device can play.
-- `get_track_recommendations()` also needs a Spotify app with access to the Recommendations endpoint, which OAuth scopes cannot grant; Spotify [restricts this endpoint](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) for new and affected Development Mode apps.
+- `spotify_play()` needs an active Spotify device and returns a `NO_ACTIVE_DEVICE` error when no device can play.
+- `spotify_search(action="recommendations")` also needs a Spotify app with access to the Recommendations endpoint, which OAuth scopes cannot grant; Spotify [restricts this endpoint](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) for new and affected Development Mode apps.
 
 ## Related Docs
 

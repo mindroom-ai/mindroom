@@ -103,7 +103,7 @@ google_tasks_update_task("dGFzay0x", completed=True)
 ## [`cal_com`]
 
 `cal_com` uses the Cal.com v2 API at `https://api.cal.com/v2` to look up availability and manage bookings.
-It provides `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`.
+It provides `cal_com_read()` (`available_slots`, `upcoming_bookings`) and `cal_com_write()` (`create_booking`, `reschedule_booking`, `cancel_booking`).
 Slot lookup and new bookings use the configured `event_type_id`.
 Returned times are converted from UTC into `user_timezone`.
 Use the per-function `enable_*` flags when an agent should, for example, only check availability or only manage existing bookings.
@@ -114,11 +114,11 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `event_type_id` | `number` | `no` | `null` | Cal.com event type ID used for slot lookup and new bookings. |
 | `user_timezone` | `text` | `no` | `null` | IANA timezone for returned booking times; `America/New_York` when unset. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
-| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
-| `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
-| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
-| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `reschedule_booking()`. |
-| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
+| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `cal_com_read(action="available_slots")`. |
+| `enable_create_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="create_booking")`. |
+| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `cal_com_read(action="upcoming_bookings")`. |
+| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="reschedule_booking")`. |
+| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cal_com_write(action="cancel_booking")`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
 Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
@@ -134,13 +134,14 @@ agents:
 ```
 
 ```python
-get_available_slots(start_date="2026-04-01", end_date="2026-04-07")
-create_booking(
+cal_com_read(action="available_slots", start_date="2026-04-01", end_date="2026-04-07")
+cal_com_write(
+    action="create_booking",
     start_time="2026-04-03T17:00:00+00:00",
     name="Alex Example",
     email="alex@example.com",
 )
-get_upcoming_bookings(email="alex@example.com")
+cal_com_read(action="upcoming_bookings", email="alex@example.com")
 ```
 
 ## Related Docs

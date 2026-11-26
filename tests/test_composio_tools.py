@@ -1,19 +1,24 @@
-"""Composio action registration through the installed SDK, without external calls."""
+"""Composio action registration through the native `composio-core` wrapper, without external calls."""
+
+from __future__ import annotations
 
 import json
 import socket
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools import Toolkit
+from composio import ComposioToolSet
 from composio.client.collections import ActionModel
-from composio_agno import ComposioToolSet
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.composio import composio_tools
 from tests.agent_tool_helpers import toolkit_offers
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -72,9 +77,9 @@ def offline_composio(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def _assert_registered_actions(tool: Toolkit) -> None:
-    """Exercise the same Toolkit protocol agent assembly consumes."""
+    """Exercise the same native Toolkit protocol agent assembly consumes."""
     assert isinstance(tool, Toolkit)
-    assert set(tool.get_functions()) == {"github_get_a_repository", "github_get_the_authenticated_user"}
+    assert set(tool.functions) == {"github_get_a_repository", "github_get_the_authenticated_user"}
     function = toolkit_offers(tool, "github_get_a_repository")
     assert function.parameters["properties"]["owner"]["type"] == "string"
     assert "owner" in function.parameters["required"]
@@ -87,7 +92,7 @@ def _assert_registered_actions(tool: Toolkit) -> None:
 
 @pytest.mark.usefixtures("offline_composio")
 def test_composio_factory_exposes_selected_sdk_actions() -> None:
-    """Returning the raw SDK toolset loses the callable Agno tool surface."""
+    """Native Composio toolkit wraps selected composio-core action schemas cleanly."""
     tool = composio_tools()(
         api_key="test-key",
         entity_id="test-user",
@@ -127,3 +132,63 @@ def test_composio_requires_explicit_action_selection(selection: dict[str, list[s
     """Missing selection should explain configuration instead of returning an unusable tool."""
     with pytest.raises(ValueError, match="actions"):
         composio_tools()(api_key="test-key", lock=False, **selection)
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_requires_scoped_api_key_and_ignores_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing API key fails closed instead of falling back to host COMPOSIO_API_KEY."""
+    monkeypatch.setenv("COMPOSIO_API_KEY", "host-secret")
+    with pytest.raises(ValueError, match="Composio API key"):
+        composio_tools()(actions=["GITHUB_GET_A_REPOSITORY"], lock=False)
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_pins_default_base_url_against_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitted base_url pins to Composio vendor default instead of ambient COMPOSIO_BASE_URL."""
+    monkeypatch.setenv("COMPOSIO_BASE_URL", "https://evil.example/api")
+    seen_base_urls: list[str] = []
+
+    def capture_validate(self: ComposioToolSet, **_kwargs: object) -> None:
+        seen_base_urls.append(self._base_url)
+
+    monkeypatch.setattr(ComposioToolSet, "validate_tools", capture_validate)
+
+    composio_tools()(api_key="test-key", actions=["GITHUB_GET_A_REPOSITORY"], lock=False)
+    composio_tools()(
+        api_key="test-key",
+        base_url="https://custom.composio.example/api",
+        actions=["GITHUB_GET_A_REPOSITORY"],
+        lock=False,
+    )
+
+    assert seen_base_urls == [
+        "https://backend.composio.dev/api",
+        "https://custom.composio.example/api",
+    ]
+
+
+@pytest.mark.usefixtures("offline_composio")
+def test_composio_truncates_long_action_names_and_rejects_collisions() -> None:
+    """Action names >64 chars publish <=64-char tool names, dispatch full action IDs, and reject collisions."""
+    long_action = "GITHUB_CREATE_REPOSITORY_DISPATCH_EVENT_FOR_LONG_WORKFLOW_AUTOMATION_V1"
+    assert len(long_action) > 64
+
+    tool = composio_tools()(api_key="test-key", entity_id="test-user", actions=[long_action], lock=False)
+    (published_name,) = tuple(tool.functions)
+    assert len(published_name) <= 64
+    assert published_name == long_action.lower()[:64]
+
+    function = toolkit_offers(tool, published_name)
+    assert json.loads(function.entrypoint(owner="example")) == {
+        "action": long_action,
+        "params": {"owner": "example"},
+        "entity_id": "test-user",
+    }
+
+    colliding_action = "GITHUB_CREATE_REPOSITORY_DISPATCH_EVENT_FOR_LONG_WORKFLOW_AUTOMATION_V2"
+    with pytest.raises(ValueError, match="collide"):
+        composio_tools()(
+            api_key="test-key",
+            actions=[long_action, colliding_action],
+            lock=False,
+        )

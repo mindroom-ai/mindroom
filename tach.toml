@@ -9935,16 +9935,7 @@ expose = ["VisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.mem0"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_mem0"]
-
-[[modules]]
-path = "mindroom.tools.agno_compat_mem0"
-depends_on = ["mindroom.failure_text"]
-visibility = ["mindroom.tools.mem0"]
-
-[[interfaces]]
-from = ["mindroom.tools.agno_compat_mem0"]
-expose = ["UserFilterMem0Tools"]
+depends_on = ["mindroom.failure_text", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tools.browser_mcp"
@@ -10795,16 +10786,7 @@ expose = ["GroqTools"]
 
 [[modules]]
 path = "mindroom.tools.airflow"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_airflow"]
-
-[[modules]]
-path = "mindroom.tools.agno_compat_airflow"
-depends_on = ["mindroom.file_access", "mindroom.path_confinement"]
-visibility = ["mindroom.tools.airflow"]
-
-[[interfaces]]
-from = ["mindroom.tools.agno_compat_airflow"]
-expose = ["MindRoomAirflowTools"]
+depends_on = ["mindroom.file_access", "mindroom.path_confinement", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 [[modules]]
 path = "mindroom.agent_cli.cli_approval_waits"

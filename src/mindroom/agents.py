@@ -73,7 +73,6 @@ from mindroom.tool_system.catalog import get_tool_by_name
 from mindroom.tool_system.construction import (
     ToolConstruction,
     bind_toolkit_construction,
-    get_toolkit_construction,
     tool_config_signature,
 )
 from mindroom.tool_system.declarations import ToolFileAccess
@@ -1345,13 +1344,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             resumable=supports_native_tool_approval,
             approvals_as_jobs=toolkit_calls_as_jobs,
         )
-        # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
-        construction = get_toolkit_construction(toolkit)
-        adapted = with_offered_instructions(
-            toolkit,
-            adapted,
-            authored_instructions=construction is not None and construction.authored_instructions,
-        )
+        # Instructions describe only the functions offered by the toolkit.
+        adapted = with_offered_instructions(toolkit, adapted)
         entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
         if persona_tools is not None:
             persona_built[tool_name] = filtered

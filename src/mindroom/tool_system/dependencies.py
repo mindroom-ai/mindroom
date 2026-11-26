@@ -102,6 +102,7 @@ def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None
 # Only includes cases where replacing dashes with underscores is insufficient.
 _PIP_TO_IMPORT: dict[str, str] = {
     "beautifulsoup4": "bs4",
+    "composio-core": "composio",
     "firecrawl-py": "firecrawl",
     "linkup-sdk": "linkup",
     "mem0ai": "mem0",

@@ -377,9 +377,6 @@ _.exchange_authorization_code  # MCP SDK OAuth provider callback (src/mindroom/m
 _.exchange_refresh_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 _.revoke_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 
-_.save_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
-_.read_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
-
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)

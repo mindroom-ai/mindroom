@@ -13,7 +13,6 @@ MindRoom modules outside the tool and toolkit packages import Agno's tool types 
 from __future__ import annotations
 
 import inspect
-import re
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -218,21 +217,6 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 }
 
 
-# AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
-# Reason: Agno 3.2.1's ZepTools builds default
-# instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
-# construction can remove any named function, so the prompt would tell the model to call a function it does not have.
-# Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
-# Upstream PR: No matching fix has been verified.
-# Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
-# the check in with_offered_instructions with the last row; instructions set in a tool's settings must still show.
-# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered.
-# Each toolkit class, by import path and including subclasses, maps to the functions its default instructions can name.
-_DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
-    "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
-}
-
-
 @runtime_checkable
 class FunctionScopedInstructions(Protocol):
     """A toolkit whose instructions describe its functions, so they name only the ones an agent is offered."""
@@ -339,31 +323,17 @@ def _agno_functions(
 def with_offered_instructions(
     toolkit: AnyToolkit,
     adapted: AdaptedToolkit,
-    *,
-    authored_instructions: bool,
 ) -> AdaptedToolkit:
     """Return ``adapted``, the functions an agent offers of ``toolkit``, with the instructions ``toolkit`` gives for them.
 
     A toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives the ones for those
-    functions. Agno's default instructions of a toolkit in ``_DEFAULT_INSTRUCTION_FUNCTIONS`` show only while every
-    function they name is offered. ``authored_instructions`` says the toolkit was built with instructions from its
-    settings, in ``config.yaml`` or saved for the tool, instead of its defaults; those always show.
+    functions. Instructions set in a tool's settings or returned by any other toolkit stay intact.
     """
-    offered = [function.name for function in adapted.functions]
     if isinstance(toolkit, FunctionScopedInstructions):
+        offered = [function.name for function in adapted.functions]
         instructions = toolkit.instructions_for(offered) or None
         return replace(adapted, instructions=instructions, guidance=instructions)
-    if authored_instructions or not adapted.instructions or _default_named(toolkit, adapted.instructions) <= {*offered}:
-        return adapted
-    return replace(adapted, instructions=None, guidance=None)
-
-
-def _default_named(toolkit: AnyToolkit, instructions: str) -> frozenset[str]:
-    """Return the functions ``instructions``, the default ones of ``toolkit``, name of those its table row lists."""
-    for cls in type(toolkit).__mro__:
-        if (names := _DEFAULT_INSTRUCTION_FUNCTIONS.get(f"{cls.__module__}.{cls.__qualname__}")) is not None:
-            return names.intersection(re.findall(r"\w+", instructions))
-    return frozenset()
+    return adapted
 
 
 def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
