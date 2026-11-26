@@ -674,7 +674,9 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
     meta = registry.entries["triggers"]
     assert meta.requires_primary_runtime is True
     assert meta.requires_room_context is True
-    assert meta.function_names == ("triggers", "watch_pr")
+    assert meta.function_names == ("triggers",)
+    assert meta.approval_aliases == {}
+    assert "GitHub PRs" in meta.description
 
     runtime_paths = _runtime_paths(tmp_path)
     built_by_alias = get_tool_by_name(
@@ -1101,7 +1103,7 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
     _record_rooms(tmp_path)
     tool = TriggersTools()
     adapted = adapt_toolkit(tool)
-    assert [fn.name for fn in adapted.functions] == ["triggers", "watch_pr"]
+    assert [fn.name for fn in adapted.functions] == ["triggers"]
     serialized_schema = json.dumps(
         {
             "name": adapted.functions[0].name,
@@ -1115,6 +1117,10 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
         cases: list[tuple[dict[str, Any], str]] = [
             ({"action": "watch_room"}, "prompt is required"),
             ({"action": "watch_thread"}, "prompt is required"),
+            ({"action": "watch_pr"}, "repo is required"),
+            ({"action": "watch_pr", "repo": "org/repo"}, "number is required"),
+            ({"action": "watch_pr", "repo": "org/repo", "number": True}, "positive integer"),
+            ({"action": "watch_pr", "repo": "org/repo", "number": 0}, "positive integer"),
             ({"action": "subscribe_event", "kind": "push", "prompt": "Go"}, "source_id is required"),
             ({"action": "subscribe_event", "source_id": "gh", "prompt": "Go"}, "kind is required"),
             ({"action": "subscribe_event", "source_id": "gh", "kind": "push"}, "prompt is required"),
@@ -1168,6 +1174,37 @@ async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path
         assert bool_defaults_res["status"] == "error"
         assert bool_defaults_res["message"] == (
             "Unsupported parameter(s) for triggers(action='delete'): include_disabled, new_thread"
+        )
+
+        watch_pr_unsup = _payload(
+            await tool.triggers(
+                action="watch_pr",
+                repo="org/repo",
+                number=1,
+                room_id="!lobby:example.org",
+                triage_instructions="Only prod",
+            ),
+        )
+        assert watch_pr_unsup["status"] == "error"
+        assert watch_pr_unsup["message"] == (
+            "Unsupported parameter(s) for triggers(action='watch_pr'): room_id, triage_instructions"
+        )
+
+        list_pr_unsup = _payload(
+            await tool.triggers(
+                action="list",
+                repo="org/repo",
+                number=1,
+                events=["ci"],
+                ignore_actors=["bot"],
+                auto_disable_on_close=False,
+                poll_interval_seconds=60,
+            ),
+        )
+        assert list_pr_unsup["status"] == "error"
+        assert list_pr_unsup["message"] == (
+            "Unsupported parameter(s) for triggers(action='list'): "
+            "auto_disable_on_close, events, ignore_actors, number, poll_interval_seconds, repo"
         )
 
 

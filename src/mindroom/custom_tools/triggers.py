@@ -159,6 +159,27 @@ _ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
     | _TRIAGE_PARAMS
     | frozenset({"room_id", "thread_id", "senders", "pattern", "include_bots"}),
     "watch_thread": _COMMON_REACTIVE_PARAMS | frozenset({"room_id", "thread_id", "tag", "transition"}),
+    "watch_pr": frozenset(
+        {
+            "trigger_id",
+            "repo",
+            "number",
+            "events",
+            "prompt",
+            "description",
+            "ignore_actors",
+            "include_bots",
+            "auto_disable_on_close",
+            "reopen_on_fire",
+            "poll_interval_seconds",
+            "target_agent",
+            "target_room_id",
+            "target_thread_id",
+            "new_thread",
+            "once",
+            "expires_in_hours",
+        },
+    ),
     "subscribe_event": _COMMON_REACTIVE_PARAMS | _TRIAGE_PARAMS | frozenset({"source_id", "kind", "match"}),
     "create": frozenset(
         {
@@ -202,7 +223,7 @@ class TriggersTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name=self._TOOL_NAME,
-            tools=[self.triggers, self.watch_pr],
+            tools=[self.triggers],
         )
 
     @classmethod
@@ -636,100 +657,12 @@ class TriggersTools(Toolkit):
         self._notify_reactive_service(context)
         return created
 
-    async def watch_pr(
-        self,
-        repo: str,
-        number: int,
-        events: list[Literal["activity", "ci", "merge", "close"]] | None = None,
-        prompt: str | None = None,
-        description: str | None = None,
-        ignore_actors: list[str] | None = None,
-        ignore_bots: bool = True,
-        auto_disable_on_close: bool = True,
-        reopen_on_fire: bool = True,
-        poll_interval_seconds: int | None = None,
-        target_agent: str | None = None,
-        target_room_id: str | None = None,
-        target_thread_id: str | None = None,
-        new_thread: bool = False,
-        once: bool = False,
-        expires_in_hours: float | None = 720.0,
-        trigger_id: str | None = None,
-    ) -> str:
-        """Watch one open GitHub PR for activity, CI (GitHub Check Runs) failures/all-green, merge, or close.
-
-        Uses ETag-backed GitHub REST polling (nudged immediately by an authorized shared GitHub webhook source covering
-        `repo` with zero idle polling). CI events track GitHub Check Runs (not legacy Commit Statuses). Auto-reopens
-        resolved target threads (`reopen_on_fire=True`) and auto-disables on PR merge/close.
-        """
-        try:
-            ctx = require_external_trigger_owner_context(self._CONTEXT_LABEL)
-            pol, now = self._require_reactive_policy(ctx), time.time()
-            tid, exp = _validate_optional_trigger_id(trigger_id), _validate_expires_in_hours(expires_in_hours, now=now)
-            if isinstance(poll_interval_seconds, bool):
-                msg = "poll_interval_seconds must be an integer."
-                raise TypeError(msg)
-            raw_p = 300 if poll_interval_seconds is None else poll_interval_seconds
-            poll_s = max(pol.min_github_pr_poll_interval_seconds, min(raw_p, 86400))
-            evs: list[GitHubPREventType] = ["activity", "ci", "merge", "close"] if events is None else list(events)
-            sd: dict[str, Any] = {"repo": repo, "number": number, "events": evs, "ignore_bots": ignore_bots}
-            sd |= {"ignore_actors": list(ignore_actors or ()), "auto_disable_on_close": auto_disable_on_close}
-            src = GitHubPRSourceSpec.model_validate({**sd, "poll_interval_seconds": poll_s})
-            find_wh = ghpr.find_covering_github_webhook_source
-            wh_id = find_wh(ctx.requester_id, src.repo, src.events, ctx.config, ctx.runtime_paths)
-            src = src.model_copy(update={"webhook_source_id": wh_id})
-            p_def = f"GitHub PR {src.repo}#{src.number} had new activity. Inspect the event data below and take any needed action."
-            p_text = p_def if prompt is None else _require_non_empty_arg(prompt, "prompt", "watch_pr")
-            desc = f"Watch PR {src.repo}#{src.number}" if description is None else description
-            ta: dict[str, Any] = {"target_agent": target_agent, "target_room_id": target_room_id, "once": once}
-            ta |= {"target_thread_id": target_thread_id, "new_thread": new_thread, "thread_key": None}
-            ta |= {"reopen_on_fire": reopen_on_fire, "description": desc}
-            rm_id, th_id = resolve_room_id(ctx.room_id, ctx.runtime_paths), ctx.resolved_thread_id or ctx.thread_id
-
-            def _dth(d: str) -> str | None:
-                return th_id if d == rm_id else None
-
-            fn = self._resolve_reactive_target
-            target = await fn(ctx, ta, prompt=p_text, default_thread_id=_dth, allow_origin=False)
-            if wh_id is None and not pol.github_pr_polling_enabled:
-                msg = f"GitHub PR polling is disabled and no webhook source covers {src.repo}."
-                raise ReactiveTriggerStoreError(msg)
-            seeded = await ghpr.seed_github_pr_watch(
-                src.repo,
-                src.number,
-                src.events,
-                owner_user_id=ctx.requester_id,
-                config=ctx.config,
-                runtime_paths=ctx.runtime_paths,
-                poll_interval_seconds=poll_s,
-                webhook_source_id=wh_id,
-                now=now,
-            )
-            created = await self._create_reactive_rule(
-                ctx,
-                ta,
-                policy=pol,
-                common=(tid, None, exp, min(10, pol.max_fires_per_hour), 0),
-                source=src,
-                target=target,
-                default_once=False,
-                now=now,
-                initial_github_pr_checkpoint=seeded.checkpoint,
-                max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
-            )
-            out: dict[str, Any] = {"action": "watch_pr", "trigger": self._reactive_record_payload(created)}
-            out |= {"delivery_mode": "webhook" if wh_id is not None else "poll", "webhook_source_id": wh_id}
-            cp = seeded.checkpoint
-            out |= {"auth_mode": seeded.auth_mode, "pr_state": cp.pr_state, "head_sha": cp.head_sha}
-            return self._payload("ok", **out)
-        except _TOOL_ERRORS as exc:
-            return self._payload("error", message=str(exc))
-
     async def triggers(
         self,
         action: Literal[
             "watch_room",
             "watch_thread",
+            "watch_pr",
             "subscribe_event",
             "create",
             "list",
@@ -750,6 +683,12 @@ class TriggersTools(Toolkit):
         include_bots: bool | None = None,
         tag: str | None = None,
         transition: Literal["added", "removed"] | None = None,
+        repo: str | None = None,
+        number: int | None = None,
+        events: list[GitHubPREventType] | None = None,
+        ignore_actors: list[str] | None = None,
+        auto_disable_on_close: bool | None = None,
+        poll_interval_seconds: int | None = None,
         source_id: str | None = None,
         kind: str | None = None,
         match: dict[str, str | bool | int] | None = None,
@@ -779,11 +718,12 @@ class TriggersTools(Toolkit):
         actor: str | None = None,
         sample_data: dict[str, Any] | None = None,
     ) -> str:
-        """Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
+        """Manage reactive triggers (GitHub PRs, room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
 
         Actions (key params):
         - watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
         - watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
+        - watch_pr (`repo` 'owner/repo', `number`): watch one open GitHub PR (`events`=['activity','ci','merge','close'] — Check Runs; `ignore_actors`, `include_bots`=False, `auto_disable_on_close`=True, `reopen_on_fire`=True, `expires_in_hours`=720, `poll_interval_seconds`).
         - subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
         - create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
         - list (optional `include_disabled`=True): list triggers and authorized `event_sources`.
@@ -792,7 +732,7 @@ class TriggersTools(Toolkit):
         - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
         - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
 
-        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'room'` (room timeline) or `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
+        Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. Omitting `target_thread_id` defaults to the current thread in the current room (`'room'` for room timeline, `'origin'` for same-room `watch_room`); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
         Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
@@ -801,6 +741,7 @@ class TriggersTools(Toolkit):
             handlers: dict[str, Callable[[ToolRuntimeContext, _TriggerParams], Awaitable[str]]] = {
                 "watch_room": self._watch_room,
                 "watch_thread": self._watch_thread,
+                "watch_pr": self._watch_pr,
                 "subscribe_event": self._subscribe_event,
                 "create": self._create_trigger,
                 "list": self._list_triggers,
@@ -934,6 +875,89 @@ class TriggersTools(Toolkit):
             action="watch_thread",
             trigger=self._reactive_record_payload(created),
             **extra,
+        )
+
+    async def _watch_pr(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_repo = _require_non_empty_arg(args["repo"], "repo", "watch_pr")
+        raw_number = args["number"]
+        if raw_number is None:
+            msg = "number is required for action='watch_pr'."
+            raise ValueError(msg)
+        if isinstance(raw_number, bool) or not isinstance(raw_number, int) or raw_number < 1:
+            msg = "number must be a positive integer for action='watch_pr'."
+            raise ValueError(msg)
+        pol, now = self._require_reactive_policy(context), time.time()
+        tid = _validate_optional_trigger_id(args["trigger_id"])
+        raw_expires = 720.0 if args["expires_in_hours"] is None else args["expires_in_hours"]
+        exp = _validate_expires_in_hours(raw_expires, now=now)
+        src = _build_github_pr_source_spec(args, repo=resolved_repo, number=raw_number, policy=pol)
+        wh_id = ghpr.find_covering_github_webhook_source(
+            context.requester_id,
+            src.repo,
+            src.events,
+            context.config,
+            context.runtime_paths,
+        )
+        src = src.model_copy(update={"webhook_source_id": wh_id})
+        p_def = f"GitHub PR {src.repo}#{src.number} had new activity. Inspect the event data below and take any needed action."
+        p_text = p_def if args["prompt"] is None else _require_non_empty_arg(args["prompt"], "prompt", "watch_pr")
+        desc = f"Watch PR {src.repo}#{src.number}" if args["description"] is None else args["description"]
+        reopen_on_fire = True if args["reopen_on_fire"] is None else args["reopen_on_fire"]
+        ta: dict[str, Any] = {
+            "target_agent": args["target_agent"],
+            "target_room_id": args["target_room_id"],
+            "target_thread_id": args["target_thread_id"],
+            "new_thread": args["new_thread"],
+            "thread_key": None,
+            "reopen_on_fire": reopen_on_fire,
+            "once": args["once"],
+            "description": desc,
+        }
+        rm_id = resolve_room_id(context.room_id, context.runtime_paths)
+        th_id = context.resolved_thread_id or context.thread_id
+        target = await self._resolve_reactive_target(
+            context,
+            ta,
+            prompt=p_text,
+            default_thread_id=lambda dest_room: th_id if dest_room == rm_id else None,
+            allow_origin=False,
+        )
+        if wh_id is None and not pol.github_pr_polling_enabled:
+            msg = f"GitHub PR polling is disabled and no webhook source covers {src.repo}."
+            raise ReactiveTriggerStoreError(msg)
+        seeded = await ghpr.seed_github_pr_watch(
+            src.repo,
+            src.number,
+            src.events,
+            owner_user_id=context.requester_id,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            poll_interval_seconds=src.poll_interval_seconds,
+            webhook_source_id=wh_id,
+            now=now,
+        )
+        created = await self._create_reactive_rule(
+            context,
+            ta,
+            policy=pol,
+            common=(tid, None, exp, min(10, pol.max_fires_per_hour), 0),
+            source=src,
+            target=target,
+            default_once=False,
+            now=now,
+            initial_github_pr_checkpoint=seeded.checkpoint,
+            max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
+        )
+        cp = seeded.checkpoint
+        return self._payload(
+            "ok",
+            action="watch_pr",
+            trigger=self._reactive_record_payload(created),
+            delivery_mode="webhook" if wh_id is not None else "poll",
+            webhook_source_id=wh_id,
+            auth_mode=seeded.auth_mode,
+            pr_state=cp.pr_state,
+            head_sha=cp.head_sha,
         )
 
     async def _subscribe_event(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
@@ -1448,6 +1472,43 @@ def _require_non_empty_arg(value: str | None, name: str, action: str) -> str:
         msg = f"{name} is required for action={action!r}."
         raise ValueError(msg)
     return value.strip()
+
+
+def _build_github_pr_source_spec(
+    args: _TriggerParams,
+    *,
+    repo: str,
+    number: int,
+    policy: ExternalTriggerPolicyConfig,
+) -> GitHubPRSourceSpec:
+    raw_poll = args["poll_interval_seconds"]
+    if raw_poll is not None and (isinstance(raw_poll, bool) or not isinstance(raw_poll, int)):
+        msg = "poll_interval_seconds must be an integer."
+        raise TypeError(msg)
+    raw_include_bots = args["include_bots"]
+    if raw_include_bots is not None and not isinstance(raw_include_bots, bool):
+        msg = "include_bots must be a boolean."
+        raise TypeError(msg)
+    raw_auto_disable = args["auto_disable_on_close"]
+    if raw_auto_disable is not None and not isinstance(raw_auto_disable, bool):
+        msg = "auto_disable_on_close must be a boolean."
+        raise TypeError(msg)
+    raw_p = 300 if raw_poll is None else raw_poll
+    poll_s = max(policy.min_github_pr_poll_interval_seconds, min(raw_p, 86400))
+    evs: list[GitHubPREventType] = (
+        ["activity", "ci", "merge", "close"] if args["events"] is None else list(args["events"])
+    )
+    return GitHubPRSourceSpec.model_validate(
+        {
+            "repo": repo,
+            "number": number,
+            "events": evs,
+            "ignore_bots": not bool(raw_include_bots),
+            "ignore_actors": list(args["ignore_actors"] or ()),
+            "auto_disable_on_close": True if raw_auto_disable is None else raw_auto_disable,
+            "poll_interval_seconds": poll_s,
+        },
+    )
 
 
 def _validate_max_fires_per_hour(max_fires_per_hour: int, *, policy: ExternalTriggerPolicyConfig) -> None:

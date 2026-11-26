@@ -10363,14 +10363,13 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Watch rooms and shared event sources (with optional LLM triage), thread tags, or direct signed webhooks to wake agents automatically",
+      "description": "Watch GitHub PRs, rooms, thread tags, shared event sources (with optional LLM triage), or direct signed webhooks to wake agents automatically",
       "display_name": "Triggers",
       "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "triggers",
-        "watch_pr"
+        "triggers"
       ],
       "helper_text": null,
       "icon": "Webhook",

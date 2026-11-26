@@ -28693,7 +28693,7 @@
     "functions": [
       {
         "name": "triggers",
-        "description": "Manage reactive triggers (room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).\nActions (key params):\n- watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).\n- watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).\n- subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).\n- create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).\n- list (optional `include_disabled`=True): list triggers and authorized `event_sources`.\n- update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).\n- set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).\n- history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.\n- test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.\n\nDelivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. `target_thread_id` accepts `'room'` (room timeline) or `'origin'` (same-room watch_room); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).\nTriage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).",
+        "description": "Manage reactive triggers (GitHub PRs, room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).\nActions (key params):\n- watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).\n- watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).\n- watch_pr (`repo` 'owner/repo', `number`): watch one open GitHub PR (`events`=['activity','ci','merge','close'] — Check Runs; `ignore_actors`, `include_bots`=False, `auto_disable_on_close`=True, `reopen_on_fire`=True, `expires_in_hours`=720, `poll_interval_seconds`).\n- subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).\n- create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).\n- list (optional `include_disabled`=True): list triggers and authorized `event_sources`.\n- update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).\n- set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).\n- history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.\n- test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.\n\nDelivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. Omitting `target_thread_id` defaults to the current thread in the current room (`'room'` for room timeline, `'origin'` for same-room `watch_room`); `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).\nTriage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -28702,6 +28702,7 @@
               "enum": [
                 "watch_room",
                 "watch_thread",
+                "watch_pr",
                 "subscribe_event",
                 "create",
                 "list",
@@ -28811,6 +28812,78 @@
               "enum": [
                 "added",
                 "removed"
+              ]
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "number": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "activity",
+                      "ci",
+                      "merge",
+                      "close"
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ignore_actors": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "auto_disable_on_close": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "poll_interval_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "source_id": {
@@ -29115,167 +29188,6 @@
           },
           "required": [
             "action"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "watch_pr",
-        "description": "Watch one open GitHub PR for activity, CI (GitHub Check Runs) failures/all-green, merge, or close.\nUses ETag-backed GitHub REST polling (nudged immediately by an authorized shared GitHub webhook source covering\n`repo` with zero idle polling). CI events track GitHub Check Runs (not legacy Commit Statuses). Auto-reopens\nresolved target threads (`reopen_on_fire=True`) and auto-disables on PR merge/close.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "repo": {
-              "type": "string"
-            },
-            "number": {
-              "type": "integer"
-            },
-            "events": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "activity",
-                      "ci",
-                      "merge",
-                      "close"
-                    ]
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "prompt": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "description": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "ignore_actors": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "ignore_bots": {
-              "type": "boolean"
-            },
-            "auto_disable_on_close": {
-              "type": "boolean"
-            },
-            "reopen_on_fire": {
-              "type": "boolean"
-            },
-            "poll_interval_seconds": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "target_agent": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "target_room_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "target_thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "new_thread": {
-              "type": "boolean"
-            },
-            "once": {
-              "type": "boolean"
-            },
-            "expires_in_hours": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "trigger_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-            }
-          },
-          "required": [
-            "repo",
-            "number"
           ]
         },
         "strict": false,
