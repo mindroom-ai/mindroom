@@ -14914,6 +14914,17 @@
               "type": "boolean",
               "description": "Start a separate thread; send only, cannot combine with thread_id."
             },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pinned thread title; send + new_thread only."
+            },
             "event_id": {
               "anyOf": [
                 {

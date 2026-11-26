@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, THREAD_SUMMARY_CONTENT_KEY
 from mindroom.contacts.parties import remote_party
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactStatus
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 CONTACT_ROOM = "!contact:localhost"
@@ -52,6 +53,7 @@ PERSONAL_ROOM = "!personal-alice:localhost"
 THREAD_ID = "$thread:localhost"
 EVENT_ID = "$event:localhost"
 CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
+CONTACT_ROOM_TITLE_ERROR = "Error: title cannot be used in a contact room"
 CONTACT_TURN_ERROR = (
     "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
     "idempotency_key to your owner's personal room, in its timeline or a new thread"
@@ -803,3 +805,66 @@ async def test_another_deployments_agent_is_a_recipient_by_its_matrix_id(tmp_pat
     assert payload["status"] == "ok"
     (content,) = _sent(context)
     assert content["m.mentions"] == {"user_ids": [remote]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("room_id", [CONTACT_ROOM, PERSONAL_ROOM])
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_no_send_into_a_contact_room_takes_a_title(
+    tmp_path: Path,
+    room_id: str,
+    status: ContactStatus,
+) -> None:
+    """Thread titles bypass the contact policy, so contact rooms reject title before checking or sending."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, status=status)
+    seen: list[str] = []
+    context = _context(config, paths, _recorder(seen), room_id=room_id)
+
+    payload = await _call(
+        context,
+        message="Dinner at eight?",
+        room_id=CONTACT_ROOM,
+        new_thread=True,
+        title="Dinner plans",
+    )
+
+    assert payload == {
+        "status": "error",
+        "tool": "matrix_message",
+        "room_id": CONTACT_ROOM,
+        "message": CONTACT_ROOM_TITLE_ERROR,
+    }
+    assert seen == []
+    assert _sent(context) == []
+
+
+@pytest.mark.asyncio
+async def test_contact_turn_can_report_to_owner_personal_room_with_new_thread_title(
+    tmp_path: Path,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Reporting from a contact turn to the owner's personal room may start a titled thread."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    context = _context(config, paths)
+
+    payload = await _call(
+        context,
+        message="Bob asked about Saturday.",
+        room_id=PERSONAL_ROOM,
+        new_thread=True,
+        title="Dinner request",
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == PERSONAL_ROOM
+    assert payload["title"] == "Dinner request"
+    assert payload["title_event_id"]
+    assert thread_summary_baselines.count(PERSONAL_ROOM, payload["thread_id"]) == 1
+    root_content, notice_content = _sent(context)
+    assert root_content["body"] == "Bob asked about Saturday."
+    assert notice_content["msgtype"] == "m.notice"
+    assert notice_content[THREAD_SUMMARY_CONTENT_KEY]["summary"] == "Dinner request"
+    assert notice_content[THREAD_SUMMARY_CONTENT_KEY]["pinned"] is True

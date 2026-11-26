@@ -26,6 +26,7 @@ from mindroom.custom_tools.matrix_message_idempotency import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, validate_thread_summary_text
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 
 
 _CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
+_CONTACT_ROOM_TITLE_ERROR = "Error: title cannot be used in a contact room"
 _CONTACT_TURN_ERROR = (
     "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
     "idempotency_key to your owner's personal room, in its timeline or a new thread"
@@ -49,18 +51,25 @@ def _contact_target_error(
     recipient: str | None,
     thread_id: str | None,
     idempotency_key: str | None,
+    title: str | None,
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
-    A keyed retry into a room that is or was a contact room would deliver a message prepared under outdated rules.
+    A keyed retry into a room that is or was a contact room would deliver a message prepared under outdated rules,
+    and a thread title bypasses the contact policy.
     A turn in such a room is a contact turn, even after a removal mid-turn, and beyond its room it may only report to
     its owner's personal room: a recipient, one of the owner's threads, or a key shared with the owner's keyed sends
     would act with the owner's authority.
     """
     config = context.current_config
     paths = context.runtime_paths
-    if idempotency_key is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
-        return _CONTACT_ROOM_KEY_ERROR
+    blocked_error = (
+        _CONTACT_ROOM_KEY_ERROR
+        if idempotency_key is not None
+        else (_CONTACT_ROOM_TITLE_ERROR if title is not None else None)
+    )
+    if blocked_error is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
+        return blocked_error
     contact = contact_room(config, paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
         return None
@@ -128,6 +137,7 @@ class MatrixMessageTools(Toolkit):
         room_id: str | None = None,
         thread_id: str | None = None,
         new_thread: bool = False,
+        title: str | None = None,
         event_id: str | None = None,
         attachments: list[str] | None = None,
         limit: int | None = None,
@@ -150,6 +160,7 @@ class MatrixMessageTools(Toolkit):
             room_id: Room ID, alias, or configured room name; current room by default.
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
+            title: Pinned thread title; send + new_thread only.
             event_id: Message event ID to edit or react to.
             attachments: Ordered att_* IDs or workspace file paths; send only, maximum 5.
             limit: Messages to read, 1-50; default 20.
@@ -173,6 +184,13 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", message="attachments cannot exceed 5 per call.")
         if action != "send" and (recipient is not None or new_thread or references):
             return self._payload("error", message="recipient, new_thread, and attachments are only supported for send.")
+        if title is not None:
+            if action != "send" or not new_thread:
+                return self._payload("error", message="title is only supported for send with new_thread=True.")
+            try:
+                title = validate_thread_summary_text(title, field_name="title")
+            except ThreadSummaryWriteError as exc:
+                return self._payload("error", action=action, message=str(exc))
         if idempotency_key is not None:
             if not idempotency_key.strip() or len(idempotency_key) > 256:
                 return self._payload("error", message="idempotency_key must be nonblank and at most 256 characters.")
@@ -195,6 +213,7 @@ class MatrixMessageTools(Toolkit):
             recipient=recipient,
             thread_id=thread_id,
             idempotency_key=idempotency_key,
+            title=title,
         )
         if target_error is not None:
             return self._payload("error", room_id=resolved_room_id, message=target_error)
@@ -208,6 +227,7 @@ class MatrixMessageTools(Toolkit):
             room_id=resolved_room_id,
             thread_id=thread_id,
             new_thread=new_thread,
+            title=title,
             event_id=event_id,
             attachments=references,
             limit=limit,
@@ -230,6 +250,7 @@ class MatrixMessageTools(Toolkit):
         room_id: str,
         thread_id: str | None,
         new_thread: bool,
+        title: str | None,
         event_id: str | None,
         attachments: list[str],
         limit: int | None,
@@ -240,6 +261,7 @@ class MatrixMessageTools(Toolkit):
             recipient = stored_intent.recipient
             thread_id = stored_intent.thread_id
             new_thread = stored_intent.starts_thread
+            title = stored_intent.title
         if (rate_error := self._check_rate_limit(context, room_id, weight=1 + len(attachments))) is not None:
             return self._payload("error", room_id=room_id, message=rate_error)
         recipient_user_id = None
@@ -304,6 +326,7 @@ class MatrixMessageTools(Toolkit):
             new_thread=new_thread or (recipient is not None and not room_mode and effective_thread_id is None),
             send_claim=send_claim,
             recipient_name=recipient,
+            title=title,
             read_limit=max(1, min(limit if limit is not None else self._DEFAULT_READ_LIMIT, self._MAX_READ_LIMIT)),
         )
         return self._payload(result.status, **result.fields)

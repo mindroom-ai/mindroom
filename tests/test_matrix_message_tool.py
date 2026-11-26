@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -26,6 +27,8 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_VISIBLE_BODY_KEY,
+    SUPPRESS_PUSH_KEY,
+    THREAD_SUMMARY_CONTENT_KEY,
 )
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult
@@ -41,6 +44,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
+from mindroom.thread_summary import automatic as thread_summary_automatic
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
@@ -77,6 +81,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 
 
 _DEFAULT_RESOLVED_THREAD_ID = object()
@@ -2620,3 +2625,268 @@ async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matr
     assert payloads[0] == payloads[1]
     assert payloads[1]["messages"][0]["body"] == "After."
     assert payloads[1]["edit_options"][0]["body_preview"] == "After."
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_new_thread_with_title_pins_summary(
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """new_thread=True with title pins an initial manual thread summary and advances baselines."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+    sent_events = ["$root_evt", "$title_evt"]
+    ctx.client.room_send = AsyncMock(
+        side_effect=[nio.RoomSendResponse(event_id, ctx.room_id) for event_id in sent_events],
+    )
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Investigate deploy failure",
+                new_thread=True,
+                title="🚀 Deploy fix",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert ctx.conversation_reader.latest_thread_event_id.await_args_list == [
+        call(room_id=ctx.room_id, thread_id=None, known_latest_thread_event_id=None),
+    ]
+    assert payload["event_id"] == "$root_evt"
+    assert payload["thread_id"] == "$root_evt"
+    assert payload["title"] == "🚀 Deploy fix"
+    assert payload["title_event_id"] == "$title_evt"
+    assert thread_summary_baselines.count(ctx.room_id, "$root_evt") == 1
+    assert ctx.client.room_send.await_count == 2
+    notice_content = ctx.client.room_send.await_args_list[1].kwargs["content"]
+    assert notice_content["msgtype"] == "m.notice"
+    assert notice_content["body"] == "🚀 Deploy fix"
+    assert notice_content[SUPPRESS_PUSH_KEY] is True
+    assert notice_content["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$root_evt",
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": "$root_evt"},
+    }
+    summary_meta = notice_content[THREAD_SUMMARY_CONTENT_KEY]
+    assert summary_meta["pinned"] is True
+    assert summary_meta["model"] == "manual"
+    assert summary_meta["message_count"] == 1
+    assert summary_meta["summary"] == "🚀 Deploy fix"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_new_thread_title_normalizes_markdown_and_handles_attachments_only(
+    tmp_path: Path,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Title strips markdown/newlines, and attachments-only new threads count and link all uploaded files."""
+    tool = MatrixMessageTools()
+    first_file = tmp_path / "one.txt"
+    second_file = tmp_path / "two.txt"
+    first_file.write_text("one", encoding="utf-8")
+    second_file.write_text("two", encoding="utf-8")
+    assert register_local_attachment(tmp_path, first_file, kind="file", attachment_id="att_one") is not None
+    assert register_local_attachment(tmp_path, second_file, kind="file", attachment_id="att_two") is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_one", "att_two"))
+    ctx.client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$title_evt", ctx.room_id))
+
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message_outcome",
+            new=AsyncMock(side_effect=[delivered_matrix_event("$att_evt_1"), delivered_matrix_event("$att_evt_2")]),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachments=["att_one", "att_two"],
+                new_thread=True,
+                title="**Deploy** fix\nnow",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$att_evt_1"
+    assert payload["thread_id"] == "$att_evt_1"
+    assert payload["attachment_event_ids"] == ["$att_evt_1", "$att_evt_2"]
+    assert payload["title"] == "Deploy fix now"
+    assert payload["title_event_id"] == "$title_evt"
+    assert thread_summary_baselines.count(ctx.room_id, "$att_evt_1") == 2
+    notice_content = ctx.client.room_send.await_args.kwargs["content"]
+    assert notice_content[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 2
+    assert notice_content[THREAD_SUMMARY_CONTENT_KEY]["summary"] == "Deploy fix now"
+    assert notice_content["m.relates_to"]["event_id"] == "$att_evt_1"
+    assert notice_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$att_evt_2"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_message"),
+    [
+        ({"action": "read", "title": "Title"}, "title is only supported for send with new_thread=True."),
+        (
+            {"action": "edit", "event_id": "$e", "message": "x", "title": "Title"},
+            "title is only supported for send with new_thread=True.",
+        ),
+        (
+            {"action": "react", "event_id": "$e", "message": "👍", "title": "Title"},
+            "title is only supported for send with new_thread=True.",
+        ),
+        (
+            {"action": "send", "message": "hello", "new_thread": False, "title": "Title"},
+            "title is only supported for send with new_thread=True.",
+        ),
+        (
+            {"action": "send", "message": "hello", "new_thread": True, "title": "   "},
+            "title must be a non-empty string.",
+        ),
+        (
+            {"action": "send", "message": "hello", "new_thread": True, "title": "****"},
+            "title must be a non-empty string.",
+        ),
+        (
+            {"action": "send", "message": "hello", "new_thread": True, "title": "x" * 301},
+            "title must be 300 characters or fewer after whitespace normalization.",
+        ),
+    ],
+)
+async def test_matrix_message_title_validation_rejects_before_sending(
+    kwargs: dict[str, Any],
+    expected_message: str,
+) -> None:
+    """Invalid title usage or text fails before any Matrix send."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(**kwargs))
+
+    assert payload["status"] == "error"
+    assert payload["message"] == expected_message
+    ctx.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary_side_effect",
+    [AsyncMock(return_value=None), AsyncMock(side_effect=RuntimeError("homeserver down"))],
+    ids=["none", "exception"],
+)
+async def test_matrix_message_title_failure_keeps_delivered_root_ok(
+    summary_side_effect: AsyncMock,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Title delivery failure degrades to a warning without losing the delivered root event."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$root_evt", ctx.room_id))
+
+    with (
+        patch("mindroom.thread_summary.notices.send_thread_summary_notice", new=summary_side_effect),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Important report",
+                new_thread=True,
+                title="🚀 Deploy fix",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$root_evt"
+    assert payload["thread_id"] == "$root_evt"
+    assert "title" not in payload
+    assert "title_event_id" not in payload
+    assert "Message sent, but failed to set thread title:" in payload["warning"]
+    assert thread_summary_baselines.count(ctx.room_id, "$root_evt") == 0
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_new_thread_title_skips_automatic_prompt_summary(
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Setting an initial title via matrix_message prevents maybe_generate_prompt_summary from calling the LLM."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse("$root_evt", ctx.room_id),
+            nio.RoomSendResponse("$title_evt", ctx.room_id),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Investigate deploy failure",
+                new_thread=True,
+                title="🚀 Deploy fix",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert thread_summary_baselines.count(ctx.room_id, "$root_evt") == 1
+    with patch.object(thread_summary_automatic, "generate_summary", new=AsyncMock()) as mock_generate:
+        await thread_summary_automatic.maybe_generate_prompt_summary(
+            ctx.client,
+            ctx.room_id,
+            "$root_evt",
+            ctx.config,
+            ctx.runtime_paths,
+            prompt_event_ids=("$root_evt",),
+            prompt="Investigate deploy failure",
+            conversation_reader=ctx.conversation_reader,
+            entity_name="general",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+    mock_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_new_thread_recipient_with_attachments_and_title(
+    tmp_path: Path,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """When recipient sends files before text, the title counts all events and links to the text event sent last."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "log.txt"
+    sample_file.write_text("trace", encoding="utf-8")
+    assert register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_log") is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_log",))
+    ctx.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse("$dispatch_evt", ctx.room_id),
+            nio.RoomSendResponse("$title_evt", ctx.room_id),
+        ],
+    )
+
+    with (
+        patch_send_file_outcome("$att_root"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Check this log",
+                recipient="general",
+                attachments=["att_log"],
+                new_thread=True,
+                title="Debug trace",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$att_root"
+    assert payload["event_id"] == "$dispatch_evt"
+    assert payload["title"] == "Debug trace"
+    assert payload["title_event_id"] == "$title_evt"
+    assert thread_summary_baselines.count(ctx.room_id, "$att_root") == 2
+    notice_content = ctx.client.room_send.await_args_list[1].kwargs["content"]
+    assert notice_content[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 2
+    assert notice_content["m.relates_to"]["event_id"] == "$att_root"
+    assert notice_content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$dispatch_evt"}
