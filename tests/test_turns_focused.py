@@ -186,7 +186,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.coalescing.ingress_ticket import IngressTicket
@@ -419,7 +419,14 @@ class _RecordingDeliveryGateway:
         """Report that no reply holds the sources, as no reply records exist here."""
         return False
 
-    async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
+    async def fail_reply_dispatch(
+        self,
+        event_id: str,
+        error_text: str,
+        *,
+        error_info: Mapping[str, Any] | None = None,
+    ) -> bool:
+        del error_info
         """Record the failure a reply shows, when the fixture says a reply owns the event."""
         if not self.replies_own_events:
             return False
@@ -7162,7 +7169,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
 
     assert harness.runner.requests == []
     assert len(harness.gateway.sent) == 1
-    assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "[general] ⚠️ Error: attachment lookup failed")]
+    assert harness.gateway.failed_dispatches == [("$sent-1:localhost", "⚠️ attachment lookup failed")]
     assert await harness.turn_store.is_handled(_ROOM_ID, selection.question_event_id) is True
     assert await harness.turn_store.is_handled(_ROOM_ID, "$selection:localhost") is True
 

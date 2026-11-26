@@ -505,12 +505,13 @@ def retired_consolidated_approval_error(
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
+    renames: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
-    renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
-    if renames is None:
+    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
+    if not effective_renames:
         return None
-    for old, new in renames.items():
+    for old, new in effective_renames.items():
         if (
             error := _retired_approval_pair_error(
                 rules,

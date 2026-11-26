@@ -63,6 +63,7 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     SendTextRequest,
 )
+from mindroom.error_handling import StructuredReplyError, describe_reply_error, model_error_labels
 from mindroom.event_journal import (
     ApprovalAdvance,
     ApprovalContinuation,
@@ -1437,7 +1438,24 @@ class ApprovalContinuationRunner:
                 raise
             return False
         except Exception as error:
-            failure = ApprovalFailure(ApprovalFailureKind.ERROR, str(error) or None)
+            if isinstance(error, StructuredReplyError):
+                error_info = error.error_info
+            else:
+                handle = current_span()
+                live_model = handle.reply_model if handle is not None else None
+                fallback_model = (
+                    model_payload(self.deps.runtime.config, claimed.runtime_model_name)
+                    if live_model is None and claimed.runtime_model_name is not None
+                    else None
+                )
+                model_label, provider = model_error_labels(live_model if live_model is not None else fallback_model)
+                error_info = describe_reply_error(
+                    error,
+                    runtime_paths=self.deps.runtime_paths,
+                    model_label=model_label,
+                    provider=provider,
+                ).to_wire()
+            failure = ApprovalFailure(ApprovalFailureKind.ERROR, str(error) or None, error_info=error_info)
             if not current_task_is_process_shutdown():
                 await self._end_live_resume_span()
             await self._end_resume(claimed, Resumed("raised", failure), target=target)
@@ -1652,6 +1670,7 @@ class ApprovalContinuationRunner:
             text=failure.reason,
             target=continuation_target(current),
             model_name=current.runtime_model_name,
+            error_info=failure.error_info if failure.kind is ApprovalFailureKind.ERROR else None,
         )
         # The reply's records show the note; the finish ends the reply.
         return written and await self.deps.replies.finish_approval(current.approval_id)

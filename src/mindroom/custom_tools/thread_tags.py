@@ -333,6 +333,7 @@ class ThreadTagsTools(Toolkit):
     ) -> str:
         """List Matrix thread tags for one thread or across a room (filters normalize like `tag_thread`).
 
+        Omitting `thread_id` inspects the current thread only when no `room_id`, tag filter, or `include_untagged=True` is provided; passing any filter, `room_id`, or `include_untagged=True` without `thread_id` queries room-wide.
         For unresolved threads, call `list_thread_tags(exclude_tag="resolved", include_untagged=True)`.
 
         Args:
@@ -384,11 +385,14 @@ class ThreadTagsTools(Toolkit):
                 message=str(exc),
             )
 
+        has_tag_filter = (
+            normalized_tag is not None or normalized_include_tag is not None or normalized_exclude_tag is not None
+        )
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            allow_context_fallback=room_id is None and not include_untagged,
+            allow_context_fallback=room_id is None and not include_untagged and not has_tag_filter,
         )
         if effective_thread_id is None:
             try:

@@ -10,13 +10,14 @@ from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
-from agno.knowledge.chunking.fixed import FixedSizeChunking
-from agno.knowledge.document import Document
-from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.knowledge.chunking import Document, FixedSizeChunking
+from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url_sync
-from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.authoring import Toolkit, tool
+
+logger = get_logger(__name__)
 
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
@@ -213,12 +214,12 @@ class _MindRoomWebsiteReader:
         """Fetch one crawl URL and return the number of content pages recorded."""
         safe_current_url = _safe_url_for_log(current_url)
         try:
-            log_debug(f"Crawling: {safe_current_url}")
+            logger.debug(f"Crawling: {safe_current_url}")
             page = fetch_public_url_sync(current_url, max_bytes=_MAX_PAGE_BYTES)
             # Links resolve against the page's own URL, which can name the requested one differently.
             self._visited.add(page.url)
             if current_url != starting_url and not _url_matches_crawl_host(page.url, crawl_host):
-                log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(page.url)}")
+                logger.debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(page.url)}")
                 return 0
             return self._record_response_content(
                 page,
@@ -227,11 +228,11 @@ class _MindRoomWebsiteReader:
                 crawler_result=crawler_result,
             )
         except PublicFetchError as e:
-            log_warning(f"Failed to fetch {safe_current_url} while crawling: {e}")
+            logger.warning(f"Failed to fetch {safe_current_url} while crawling: {e}")
             if current_url == starting_url and not crawler_result:
                 raise
         except Exception as e:
-            log_warning(f"Failed to crawl {safe_current_url}: {e.__class__.__name__}")
+            logger.warning(f"Failed to crawl {safe_current_url}: {e.__class__.__name__}")
             if current_url == starting_url and not crawler_result:
                 raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
 
@@ -243,7 +244,6 @@ class _MindRoomWebsiteReader:
         for crawled_url, crawled_content in crawler_result.items():
             document = Document(
                 name=url,
-                id=str(crawled_url),
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )
@@ -302,11 +302,11 @@ class _MindRoomWebsiteReader:
 
     def read(self, url: str) -> list[Document]:
         """Read a website while logging only sanitized URL forms."""
-        log_debug(f"Reading: {_safe_url_for_log(url)}")
+        logger.debug(f"Reading: {_safe_url_for_log(url)}")
         try:
             return self._documents_from_crawl(self.crawl(url), url=url)
         except (PublicFetchError, httpx.RequestError) as e:
-            log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
+            logger.error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")  # noqa: TRY400
             raise
 
     def _extract_main_content(self, soup: BeautifulSoup) -> str:
@@ -333,12 +333,13 @@ class WebsiteTools(Toolkit):
     """Website toolkit using MindRoom's fixed extractor."""
 
     def __init__(self) -> None:
-        super().__init__(name="website_tools", tools=[self.read_url])
+        super().__init__(name="website_tools")
 
+    @tool
     def read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""
         website = _MindRoomWebsiteReader()
 
-        log_debug(f"Reading website: {_safe_url_for_log(url)}")
+        logger.debug(f"Reading website: {_safe_url_for_log(url)}")
         relevant_docs: list[Document] = website.read(url=url)
         return json.dumps([doc.to_dict() for doc in relevant_docs])

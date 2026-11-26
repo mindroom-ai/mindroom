@@ -52,6 +52,8 @@ from mindroom.streaming import (
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     CANCELLED_RESPONSE_NOTE,
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     PausePresentationError,
     ProgressPermission,
     ReplacementStreamingResponse,
@@ -872,6 +874,29 @@ class TestStreamingBehavior:
     def test_clean_partial_reply_text_normalises_each_stop_label_to_interrupted_marker(self, body: str) -> None:
         """User-stop, restart, and generic interruption labels collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(body) == f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
+
+    def test_build_restart_interrupted_body_does_not_stack_duplicate_notes(self) -> None:
+        """Repeated restart interruptions must not stack duplicate consecutive restart notes."""
+        once = build_restart_interrupted_body("Draft answer")
+        assert once == f"Draft answer\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+        assert build_restart_interrupted_body(once) == once
+        assert build_restart_interrupted_body(f"{once}\n\n") == once
+        assert build_restart_interrupted_body(RESTART_INTERRUPTED_RESPONSE_NOTE) == RESTART_INTERRUPTED_RESPONSE_NOTE
+
+        custom_once = build_restart_interrupted_body("Draft answer", note=CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE)
+        assert build_restart_interrupted_body(custom_once, note=CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE) == custom_once
+
+    def test_clean_partial_reply_text_strips_repeated_trailing_notes(self) -> None:
+        """Historical messages with stacked restart notes are cleaned back to the underlying partial text."""
+        stacked = (
+            f"Draft answer\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n"
+            f"{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n{CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE}"
+        )
+        assert clean_partial_reply_text(stacked) == "Draft answer"
+        assert (
+            clean_partial_reply_text(f"{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}")
+            == ""
+        )
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
