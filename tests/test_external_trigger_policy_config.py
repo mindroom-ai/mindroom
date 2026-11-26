@@ -251,6 +251,18 @@ def test_external_trigger_policy_github_pr_fields_defaults_and_bounds() -> None:
     assert pol.github_pr_polling_enabled is True
     assert pol.min_github_pr_poll_interval_seconds == 60
     assert pol.max_github_pr_watches_per_owner == 20
+    gh_cfg = Config.model_validate(
+        {
+            **_base_config(),
+            "external_trigger_policy": {
+                "event_sources": {
+                    "gh": {"kind": "github", "secret_env": "GH_SECRET", "allowed_repos": ["org/repo"]},
+                },
+            },
+        },
+    ).external_trigger_policy.event_sources["gh"]
+    assert gh_cfg.kind == "github"
+    assert {"issue_comment", "pull_request_review_comment", "check_run"} <= set(gh_cfg.allowed_events)
 
     with pytest.raises(ValueError, match="min_github_pr_poll_interval_seconds"):
         Config.model_validate(

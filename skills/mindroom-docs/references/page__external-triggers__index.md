@@ -252,7 +252,7 @@ external_trigger_policy:
 | `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
 | `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
 | `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
-| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `allowed_events` | `["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
 | `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 
@@ -405,14 +405,16 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
 | `description` | `""` | Human-readable purpose. |
 | `target_agent` | current agent | Agent or team to wake; only administrators can choose another. |
 | `target_room_id` | current room | Room to post in; only administrators can choose another. |
-| `target_thread_id` | none | Post every delivery into this existing thread. |
+| `target_thread_id` | current thread (in current room) | Post every delivery into this existing thread, or pass `"room"` to explicitly post to the room's main timeline. |
 | `new_thread` | `false` | Post each delivery as a new room-level message so the agent answers in a fresh thread with a fresh session. |
+| `reopen_on_fire` | `false` | Automatically clear the `resolved` tag on a fixed target thread before delivering a trigger firing. |
 | `allowed_kinds` | any | Accepted `kind` values; others are rejected. |
 | `replay_window_seconds` | policy default | Maximum signature age, capped by policy. |
 | `max_body_bytes` | policy default | Request body limit, capped by policy. |
 
 `target_thread_id` and `new_thread` are mutually exclusive.
-Without either, deliveries post to the room's main timeline.
+When `target_thread_id` is omitted and the target room is the current room, deliveries default to the current thread (or the room's main timeline when called outside a thread).
+Pass `target_thread_id="room"` to force room-timeline delivery from inside a thread.
 
 The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
 An administrator who creates a trigger for another agent or room still owns it.
@@ -431,6 +433,16 @@ The `triggers(action=...)` tool provides unified lifecycle, observability, and t
 - `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
 - `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+
+### Watching GitHub Pull Requests (`watch_pr`)
+
+The `triggers` toolkit also exposes `watch_pr(repo, number, events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+
+- **Delivery modes (`delivery_mode`):**
+  - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
+  - **`"poll"`:** Selected at creation when no covering webhook source exists and `external_trigger_policy.github_pr_polling_enabled` is `true` (interval clamped to `min_github_pr_poll_interval_seconds..86400`, default `300s`).
+- **Auth modes (`auth_mode`):** Uses the watch owner's connected GitHub credentials (`"oauth"` or `"token"`), falling back to `"anonymous"` only when no owner credentials exist. Unreadable owner credential stores fail closed and never downgrade to anonymous requests.
+- **Auto-disable (`pr_closed`):** When `auto_disable_on_close=True` (default), closing or merging the PR disables the watch with `disabled_reason="pr_closed"` once any terminal firing settles (or immediately if close/merge is not subscribed). Retired `pr_closed` watches do not consume `max_reactive_triggers_per_owner` or `max_github_pr_watches_per_owner`, and re-enabling enforces both quotas and silently re-seeds the checkpoint.
 
 ## Sending Events
 

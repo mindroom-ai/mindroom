@@ -29,7 +29,7 @@ from mindroom.custom_tools.external_trigger_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.policy import is_external_trigger_administrator, is_source_subscriber_allowed
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -42,7 +42,6 @@ from mindroom.matrix.state import resolve_room_id
 from mindroom.reactive_triggers import github_pr as ghpr
 from mindroom.reactive_triggers.external_sources import (
     check_external_event_source_access,
-    is_source_subscriber_allowed,
     validate_subscription_against_source,
 )
 from mindroom.reactive_triggers.management import (
@@ -676,7 +675,8 @@ class TriggersTools(Toolkit):
             sd: dict[str, Any] = {"repo": repo, "number": number, "events": evs, "ignore_bots": ignore_bots}
             sd |= {"ignore_actors": list(ignore_actors or ()), "auto_disable_on_close": auto_disable_on_close}
             src = GitHubPRSourceSpec.model_validate({**sd, "poll_interval_seconds": poll_s})
-            wh_id = ghpr.find_covering_github_webhook_source(ctx.requester_id, src.repo, ctx.config, ctx.runtime_paths)
+            find_wh = ghpr.find_covering_github_webhook_source
+            wh_id = find_wh(ctx.requester_id, src.repo, src.events, ctx.config, ctx.runtime_paths)
             src = src.model_copy(update={"webhook_source_id": wh_id})
             p_def = f"GitHub PR {src.repo}#{src.number} had new activity. Inspect the event data below and take any needed action."
             p_text = p_def if prompt is None else _require_non_empty_arg(prompt, "prompt", "watch_pr")
@@ -719,7 +719,8 @@ class TriggersTools(Toolkit):
             )
             out: dict[str, Any] = {"action": "watch_pr", "trigger": self._reactive_record_payload(created)}
             out |= {"delivery_mode": "webhook" if wh_id is not None else "poll", "webhook_source_id": wh_id}
-            out |= {"auth_mode": seeded.auth_mode, "pr_state": seeded.pr_state, "head_sha": seeded.head_sha}
+            cp = seeded.checkpoint
+            out |= {"auth_mode": seeded.auth_mode, "pr_state": cp.pr_state, "head_sha": cp.head_sha}
             return self._payload("ok", **out)
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
@@ -1092,11 +1093,13 @@ class TriggersTools(Toolkit):
                     now=now,
                     refreshed_tag_present=refreshed_tag_present,
                 )
+            pol = context.config.external_trigger_policy
             updated = reactive_store.update_trigger(
                 validated,
                 expected_rule_uid=existing.rule_uid,
                 update_enabled=args["enabled"] is not None,
-                max_github_pr_per_owner=context.config.external_trigger_policy.max_github_pr_watches_per_owner,
+                max_per_owner=pol.max_reactive_triggers_per_owner,
+                max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
             )
             if updated is None:
                 msg = f"Reactive trigger not found: {resolved_trigger_id}"

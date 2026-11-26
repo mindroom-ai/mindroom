@@ -130,9 +130,12 @@ def set_trigger_enabled_sync(
             now=time.time(),
             refreshed_tag_present=refreshed_tag_present,
         )
-    cap = config.external_trigger_policy.max_github_pr_watches_per_owner
-    fn = reactive_store.set_enabled
-    updated = fn(trigger_id, enabled, expected_rule_uid=record.rule_uid, max_github_pr_per_owner=cap)
+    pol = config.external_trigger_policy
+    caps = {
+        "max_per_owner": pol.max_reactive_triggers_per_owner,
+        "max_github_pr_per_owner": pol.max_github_pr_watches_per_owner,
+    }
+    updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=record.rule_uid, **caps)
     if updated is None:
         raise _not_found(trigger_id)
     return updated

@@ -191,6 +191,9 @@ class GitHubEventSourceConfig(BaseModel):
         default_factory=lambda: [
             "pull_request",
             "pull_request_review",
+            "pull_request_review_comment",
+            "issue_comment",
+            "check_run",
             "check_suite",
             "release",
             "issues",

@@ -54,9 +54,15 @@ _ROOM, _THREAD = "!lobby:example.org", "$thread_root"
 _GH_ENV_NAME, _GH_HMAC_KEY = "TEST_GH_WEBHOOK_SECRET", "super-secret-webhook-key"
 
 
-def _gh_source(allowed_repos: list[str], *, subscribers: list[str] | None = None) -> GitHubEventSourceConfig:
+def _gh_source(
+    allowed_repos: list[str],
+    *,
+    subscribers: list[str] | None = None,
+    allowed_events: list[str] | None = None,
+) -> GitHubEventSourceConfig:
     subs = [_OWNER] if subscribers is None else subscribers
-    return GitHubEventSourceConfig(secret_env=_GH_ENV_NAME, allowed_repos=allowed_repos, subscribers=subs)
+    kw: dict[str, Any] = {} if allowed_events is None else {"allowed_events": allowed_events}
+    return GitHubEventSourceConfig(secret_env=_GH_ENV_NAME, allowed_repos=allowed_repos, subscribers=subs, **kw)
 
 
 def _config(
@@ -65,6 +71,7 @@ def _config(
     event_sources: dict[str, Any] | None = None,
     github_pr_polling_enabled: bool = True,
     min_poll: int = 60,
+    max_triggers: int = 50,
     max_watches: int = 20,
 ) -> tuple[Config, RuntimePaths]:
     paths = resolve_primary_runtime_paths(
@@ -79,6 +86,7 @@ def _config(
         event_sources=event_sources or {},
         github_pr_polling_enabled=github_pr_polling_enabled,
         min_github_pr_poll_interval_seconds=min_poll,
+        max_reactive_triggers_per_owner=max_triggers,
         max_github_pr_watches_per_owner=max_watches,
     )
     dev = {"display_name": "Dev", "model": "default", "rooms": ["lobby"], "access": {"users": [_OWNER, _OTHER]}}
@@ -188,11 +196,20 @@ def _rule(store: ReactiveTriggerStore, tid: str) -> ReactiveTriggerRecord:
     return rec
 
 
-def _pr(repo: str, number: int, *, state: str = "open", merged: bool = False, sha: str = "sha1") -> dict[str, Any]:
+def _pr(
+    repo: str,
+    number: int,
+    *,
+    state: str = "open",
+    merged: bool = False,
+    sha: str = "sha1",
+    closed_at: str | None = None,
+) -> dict[str, Any]:
     return {
         "state": "closed" if merged else state,
         "merged": merged,
         "merged_at": "2026-11-25T12:00:00Z" if merged else None,
+        "closed_at": closed_at,
         "title": f"PR {number}",
         "html_url": f"https://github.com/{repo}/pull/{number}",
         "head": {"sha": sha},
@@ -207,8 +224,22 @@ def _cmt(cid: int, body: str, login: str = "alice", *, user_type: str = "User") 
     return {"id": cid, "event": "commented", "body": body, "user": {"login": login, "type": user_type}}
 
 
-def _rc(cid: int, rid: int | None, path: str, body: str, login: str = "alice") -> dict[str, Any]:
-    return {"id": cid, "pull_request_review_id": rid, "path": path, "body": body, "user": {"login": login}}
+def _rc(
+    cid: int,
+    rid: int | None,
+    path: str,
+    body: str,
+    login: str = "alice",
+    updated_at: str = "2026-11-25T10:00:00Z",
+) -> dict[str, Any]:
+    return {
+        "id": cid,
+        "pull_request_review_id": rid,
+        "path": path,
+        "body": body,
+        "updated_at": updated_at,
+        "user": {"login": login},
+    }
 
 
 class _FakeGitHub:
@@ -243,8 +274,9 @@ class _FakeGitHub:
     def seed_open(self, repo: str, number: int, *, sha: str = "sha1", tag: str = "e") -> None:
         self.set_json(f"/repos/{repo}/pulls/{number}", _pr(repo, number, sha=sha), etag=f'"{tag}p"')
         self.set_json(f"/repos/{repo}/issues/{number}/timeline?per_page=100&page=1", [], etag=f'"{tag}t"')
-        rc_p = f"/repos/{repo}/pulls/{number}/comments?sort=created&direction=desc&per_page=100"
-        self.set_json(rc_p, [], etag=f'"{tag}c"')
+        rc_base = f"/repos/{repo}/pulls/{number}/comments?sort=updated"
+        self.set_json(f"{rc_base}&direction=desc&per_page=100", [], etag=f'"{tag}cs"')
+        self.set_json(f"{rc_base}&direction=asc&per_page=100", [], etag=f'"{tag}c"')
         chk_p = f"/repos/{repo}/commits/{sha}/check-runs?per_page=100&page=1"
         self.set_json(chk_p, {"check_runs": []}, etag=f'"{tag}k"')
 
@@ -255,7 +287,12 @@ class _FakeGitHub:
                 await self.on_request(path)
             inm = request.headers.get("if-none-match")
             self.calls.append((path, inm, request.headers.get("authorization")))
-            status, payload, hdrs = self.routes.get(path, (404, {"message": "Not Found"}, {}))
+            route = self.routes.get(path)
+            if route is None and "&since=" in path:
+                prefix, _, rest = path.partition("&since=")
+                tail = f"&{rest.partition('&')[2]}" if "&" in rest else ""
+                route = self.routes.get(f"{prefix}{tail}")
+            status, payload, hdrs = route or (404, {"message": "Not Found"}, {})
             if status == 200 and inm and hdrs.get("ETag") == inm:
                 return httpx.Response(304, headers=hdrs, request=request)
             return httpx.Response(status, json=payload, headers=hdrs, request=request)
@@ -483,12 +520,13 @@ async def test_poller_etag_304_timeline_pagination_and_grouped_review_comments(
     """Seeding jumps directly to rel='last', 304 PR still polls collections, and timeline/review pagination advances cleanly."""
     fake = _FakeGitHub()
     tl = "/repos/ext/repo/issues/10/timeline?per_page=100&page="
-    rc1 = "/repos/ext/repo/pulls/10/comments?sort=created&direction=desc&per_page=100"
+    rc_seed = "/repos/ext/repo/pulls/10/comments?sort=updated&direction=desc&per_page=100"
+    rc1 = "/repos/ext/repo/pulls/10/comments?sort=updated&direction=asc&per_page=100&since=2026-11-25T10:00:00Z"
     rc2 = f"{rc1}&page=2"
     fake.set_json("/repos/ext/repo/pulls/10", _pr("ext/repo", 10), etag='"pr10"')
     fake.set_json(f"{tl}1", [_cmt(1, "old")], last_path=f"{tl}10")
     fake.set_json(f"{tl}10", [_cmt(100, "seed tail")], etag='"tl10"')
-    fake.set_json(rc1, [_rc(500, None, "a.py", "old inline", "bob")], etag='"rc1"')
+    fake.set_json(rc_seed, [_rc(500, None, "a.py", "old inline", "bob", "2026-11-25T10:00:00Z")], etag='"rc0"')
     http = _patch_github(monkeypatch, fake)
 
     cfg, paths = _config(tmp_path)
@@ -522,8 +560,26 @@ async def test_poller_etag_304_timeline_pagination_and_grouped_review_comments(
     )
     fake.set_json(f"{tl}12", [_cmt(105, "page 12", "carol")], next_path=f"{tl}13")
     fake.set_json(f"{tl}13", [_cmt(106, "page 13", "dave")], etag='"tl13"')
-    fake.set_json(rc1, [_rc(503, 77, "b.py", "Second"), _rc(502, 77, "a.py", "First")], etag='"rc-new"', next_path=rc2)
-    fake.set_json(rc2, [_rc(501, None, "c.py", "Solo", "erin"), _rc(500, None, "a.py", "old inline", "bob")])
+    fake.set_json(
+        rc1,
+        [
+            _rc(500, None, "a.py", "old inline", "bob", "2026-11-25T10:00:00Z"),
+            _rc(501, None, "c.py", "Solo", "erin", "2026-11-25T10:01:00Z"),
+        ],
+        etag='"rc-new"',
+        next_path=rc2,
+    )
+    fake.set_json(
+        rc2,
+        [
+            _rc(502, 77, "a.py", "First", updated_at="2026-11-25T10:02:00Z"),
+            _rc(503, 77, "b.py", "Second", updated_at="2026-11-25T10:03:00Z"),
+        ],
+    )
+    fake.set_json(
+        "/repos/ext/repo/pulls/10/comments?sort=updated&direction=asc&per_page=100&since=2026-11-25T10:03:00Z",
+        [_rc(503, 77, "b.py", "Second", updated_at="2026-11-25T10:03:00Z")],
+    )
 
     poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
     t0 = time.time() + 1_000
@@ -600,7 +656,7 @@ async def test_poller_rate_limit_buckets_adaptive_backoff_and_unreadable_pat(
     fake.set_json("/repos/ext/r1/pulls/1", {}, status=429, headers={"Retry-After": "180"})
     fake.set_json("/repos/ext/r2/pulls/2", _pr("ext/r2", 2), headers={"x-ratelimit-remaining": "5"})
     fake.set_json("/repos/ext/r2/issues/2/timeline?per_page=100&page=1", [])
-    fake.set_json("/repos/ext/r2/pulls/2/comments?sort=created&direction=desc&per_page=100", [])
+    fake.set_json("/repos/ext/r2/pulls/2/comments?sort=updated&direction=asc&per_page=100", [])
 
     async def _tok(owner: str, _cfg: Config, _paths: RuntimePaths) -> tuple[str | None, ghc.GitHubAuthMode]:
         if owner == "@broken:example.org":
@@ -664,7 +720,11 @@ async def test_terminal_pr_close_lifecycle_reopen_thread_and_auto_disable_false(
     poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
     fake.set_json("/repos/ext/repo/pulls/30", _pr("ext/repo", 30, merged=True), etag='"p30-m"')
     for n in (31, 32, 33, 34):
-        fake.set_json(f"/repos/ext/repo/pulls/{n}", _pr("ext/repo", n, state="closed"), etag=f'"p{n}-c"')
+        fake.set_json(
+            f"/repos/ext/repo/pulls/{n}",
+            _pr("ext/repo", n, state="closed", sha="sha1", closed_at="2026-11-25T12:00:00Z"),
+            etag=f'"p{n}-c"',
+        )
     t0 = time.time() + 1_000
     assert await poller.poll_due_once(now=t0) == 4
 
@@ -709,10 +769,15 @@ async def test_terminal_pr_close_lifecycle_reopen_thread_and_auto_disable_false(
     )
 
     assert _rule(store, "pr-keep").enabled is True
-    fake.set_json("/repos/ext/repo/pulls/32", _pr("ext/repo", 32, state="open"), etag='"p32-o"')
+    fake.set_json("/repos/ext/repo/pulls/32", _pr("ext/repo", 32, state="open", sha="sha1"), etag='"p32-o"')
     assert await poller.poll_due_once(now=t0 + 10_000) == 0
-    fake.set_json("/repos/ext/repo/pulls/32", _pr("ext/repo", 32, state="closed", sha="sha2"), etag='"p32-c2"')
+    fake.set_json(
+        "/repos/ext/repo/pulls/32",
+        _pr("ext/repo", 32, state="closed", sha="sha1", closed_at="2026-11-25T13:00:00Z"),
+        etag='"p32-c2"',
+    )
     assert await poller.poll_due_once(now=t0 + 20_000) == 1
+    assert len(store.list_firings(trigger_id="pr-keep")) == 2
 
 
 @pytest.mark.asyncio
@@ -836,3 +901,181 @@ async def test_service_notify_work_repoll_and_stop_cancels_inflight_poll(
         await service.stop()
     assert cancelled is True
     assert service._github_pr_poll_task is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_allowed_events_coverage_and_owner_quota_on_pr_closed_revive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Webhook binding requires allowed_events coverage, and reviving pr_closed enforces max_reactive_triggers_per_owner."""
+    fake = _FakeGitHub()
+    for n in (1, 2, 3):
+        fake.seed_open("org/owned", n, tag=f"ev{n}")
+    _patch_github(monkeypatch, fake)
+
+    narrow_src = _gh_source(["org/owned"], allowed_events=["pull_request"])
+    cfg, paths = _config(tmp_path, event_sources={"gh": narrow_src}, max_triggers=1, max_watches=5)
+    tool, store = TriggersTools(), ReactiveTriggerStore(paths)
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        m_only = await _watch(tool, repo="org/owned", number=1, events=["merge", "close"], trigger_id="pr-narrow-wh")
+        assert (m_only["status"], m_only["delivery_mode"], m_only["webhook_source_id"]) == ("ok", "webhook", "gh")
+        assert (await _trig(tool, action="delete", trigger_id="pr-narrow-wh"))["status"] == "ok"
+
+        act_poll = await _watch(tool, repo="org/owned", number=2, events=["activity"], trigger_id="pr-act-poll")
+        assert (act_poll["status"], act_poll["delivery_mode"], act_poll["webhook_source_id"]) == ("ok", "poll", None)
+        assert (await _trig(tool, action="delete", trigger_id="pr-act-poll"))["status"] == "ok"
+
+        ci_poll = await _watch(tool, repo="org/owned", number=3, events=["ci"], trigger_id="pr-ci-poll")
+        assert (ci_poll["status"], ci_poll["delivery_mode"], ci_poll["webhook_source_id"]) == ("ok", "poll", None)
+
+        cp = _cp(store, "pr-ci-poll").model_copy(update={"pr_state": "closed", "updated_at": time.time()})
+        store.update_github_pr_checkpoint_and_enqueue("pr-ci-poll", cp, disable_reason="pr_closed")
+        assert (await _trig(tool, action="watch_room", trigger_id="room-1", prompt="Watch"))["status"] == "ok"
+        rev1 = await _trig(tool, action="set_enabled", trigger_id="pr-ci-poll", enabled=True)
+        assert (rev1["status"], "reactive trigger limit" in rev1["message"]) == ("error", True)
+        rev2 = await _trig(tool, action="update", trigger_id="pr-ci-poll", enabled=True)
+        assert (rev2["status"], "reactive trigger limit" in rev2["message"]) == ("error", True)
+
+    np_cfg, np_paths = _config(tmp_path / "np", event_sources={"gh": narrow_src}, github_pr_polling_enabled=False)
+    with tool_runtime_context(_tool_ctx(np_cfg, np_paths)):
+        assert (await _watch(tool, repo="org/owned", number=1, events=["activity"]))["status"] == "error"
+        assert (await _watch(tool, repo="org/owned", number=1, events=["ci"]))["status"] == "error"
+        assert (await _watch(tool, repo="org/owned", number=1, events=["merge"]))["delivery_mode"] == "webhook"
+
+    full_src = _gh_source(["org/owned"])
+    f_cfg, f_paths = _config(tmp_path / "full", event_sources={"gh": full_src}, github_pr_polling_enabled=False)
+    f_store = ReactiveTriggerStore(f_paths)
+    with tool_runtime_context(_tool_ctx(f_cfg, f_paths)):
+        all_wh = await _watch(tool, repo="org/owned", number=1, trigger_id="pr-all")
+        assert (all_wh["status"], all_wh["delivery_mode"], all_wh["webhook_source_id"]) == ("ok", "webhook", "gh")
+    assert _deliver_gh(full_src, f_cfg, f_paths, f_store, "issue_comment", "org/owned", "d-ic1", 2050.0) == (
+        ["pr-all"],
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_only_rows_do_not_starve_webhook_watches_when_polling_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When github_pr_polling_enabled=False, >50 due poll-only watches do not starve a nudged webhook watch."""
+    fake = _FakeGitHub()
+    fake.seed_open("org/owned", 7, tag="wh7")
+    fake.set_json("/repos/org/owned/issues/7/timeline?per_page=100&page=1", [_cmt(70, "ping!")], etag='"wh7t-2"')
+    http = _patch_github(monkeypatch, fake)
+
+    cfg, paths = _config(tmp_path, event_sources={"gh": _gh_source(["org/owned"])}, github_pr_polling_enabled=False)
+    store = ReactiveTriggerStore(paths)
+    for idx in range(55):
+        rec = ReactiveTriggerRecord(
+            trigger_id=f"poll-{idx:02d}",
+            owner_user_id=_OWNER,
+            source=GitHubPRSourceSpec(repo="ext/repo", number=idx + 1, events=["activity"]),
+            target=TriggerTargetSpec(agent="dev", room_id=_ROOM, prompt="Watch"),
+            created_at=100.0,
+            updated_at=100.0,
+        )
+        cp = GitHubPRCheckpoint(head_sha="sha1", seeded=True, next_poll_at=100.0 + idx, updated_at=100.0)
+        store.create_trigger(rec, initial_github_pr_checkpoint=cp)
+
+    wh_rec = ReactiveTriggerRecord(
+        trigger_id="wh-target",
+        owner_user_id=_OWNER,
+        source=GitHubPRSourceSpec(repo="org/owned", number=7, events=["activity"], webhook_source_id="gh"),
+        target=TriggerTargetSpec(agent="dev", room_id=_ROOM, prompt="Watch"),
+        created_at=100.0,
+        updated_at=100.0,
+    )
+    wh_cp = GitHubPRCheckpoint(head_sha="sha1", seeded=True, next_poll_at=999.0, updated_at=100.0)
+    store.create_trigger(wh_rec, initial_github_pr_checkpoint=wh_cp)
+
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    assert await poller.poll_due_once(now=1000.0) == 1
+    assert [f.event.summary for f in store.list_firings(trigger_id="wh-target")] == ["Comment by alice: ping!"]
+    assert all("/ext/repo/" not in p for p, _, _ in fake.calls)
+
+
+@pytest.mark.asyncio
+async def test_review_comment_updated_cursor_draft_id_pagination_cap_and_full_timeline_seed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review comments handle out-of-order draft IDs and 3-page caps via updated_at, and 100-item timeline seeds advance."""
+    fake = _FakeGitHub()
+    tl = "/repos/ext/repo/issues/60/timeline?per_page=100&page="
+    rc_base = "/repos/ext/repo/pulls/60/comments?sort=updated"
+    fake.set_json("/repos/ext/repo/pulls/60", _pr("ext/repo", 60), etag='"pr60"')
+    fake.set_json(f"{tl}1", [_cmt(i, f"seed-{i}") for i in range(1, 101)], etag='"tl1-full"')
+    fake.set_json(
+        f"{rc_base}&direction=desc&per_page=100",
+        [_rc(500, None, "a.py", "baseline", "bob", "2026-11-25T10:00:00Z")],
+        etag='"rc-seed"',
+    )
+    http = _patch_github(monkeypatch, fake)
+
+    cfg, paths = _config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    with tool_runtime_context(_tool_ctx(cfg, paths)):
+        assert (await _watch(TriggersTools(), repo="ext/repo", number=60, events=["activity"], trigger_id="pr-60"))[
+            "status"
+        ] == "ok"
+
+    cp0 = _cp(store, "pr-60")
+    assert (cp0.state["timeline_page"], cp0.state["timeline_etag"]) == (2, None)
+    assert (cp0.state["review_comments_since"], cp0.state["review_comments_etag"]) == ("2026-11-25T10:00:00Z", None)
+
+    fake.set_json(f"{tl}2", [_cmt(101, "on page 2", "carol")], etag='"tl2"')
+    s0 = f"{rc_base}&direction=asc&per_page=100&since=2026-11-25T10:00:00Z"
+    fake.set_json(
+        s0,
+        [
+            _rc(500, None, "a.py", "baseline", "bob", "2026-11-25T10:00:00Z"),
+            _rc(400, None, "draft.py", "published draft", "alice", "2026-11-25T10:01:00Z"),
+        ],
+        etag='"rc-p1"',
+        next_path=f"{s0}&page=2",
+    )
+    fake.set_json(
+        f"{s0}&page=2",
+        [_rc(502, None, "b.py", "p2", "alice", "2026-11-25T10:02:00Z")],
+        next_path=f"{s0}&page=3",
+    )
+    fake.set_json(
+        f"{s0}&page=3",
+        [_rc(503, None, "c.py", "p3", "alice", "2026-11-25T10:03:00Z")],
+        next_path=f"{s0}&page=4",
+    )
+    fake.set_json(f"{s0}&page=4", [_rc(504, None, "d.py", "p4", "alice", "2026-11-25T10:04:00Z")])
+
+    poller = GitHubPRPoller(store=store, config_provider=lambda: cfg, runtime_paths=paths, client=http)
+    t0 = time.time() + 1_000
+    assert await poller.poll_due_once(now=t0) == 1
+    items1 = store.list_firings(trigger_id="pr-60")[0].event.data["items"]
+    assert [it["id"] for it in items1] == [101, 400, 502, 503]
+    cp1 = _cp(store, "pr-60")
+    assert (cp1.state["review_comments_since"], cp1.state["review_comments_etag"]) == ("2026-11-25T10:03:00Z", None)
+
+    s3 = f"{rc_base}&direction=asc&per_page=100&since=2026-11-25T10:03:00Z"
+    fake.set_json(
+        s3,
+        [
+            _rc(503, None, "c.py", "p3", "alice", "2026-11-25T10:03:00Z"),
+            _rc(504, None, "d.py", "p4", "alice", "2026-11-25T10:04:00Z"),
+        ],
+        etag='"rc-s3"',
+    )
+    assert await poller.poll_due_once(now=t0 + 10_000) == 1
+    items2 = store.list_firings(trigger_id="pr-60")[0].event.data["items"]
+    assert [it["id"] for it in items2] == [504]
+    cp2 = _cp(store, "pr-60")
+    assert (cp2.state["review_comments_since"], cp2.state["review_comments_etag"]) == ("2026-11-25T10:04:00Z", None)
+
+    s4 = f"{rc_base}&direction=asc&per_page=100&since=2026-11-25T10:04:00Z"
+    fake.set_json(s4, [_rc(504, None, "d.py", "p4", "alice", "2026-11-25T10:04:00Z")], etag='"rc-s4"')
+    assert await poller.poll_due_once(now=t0 + 20_000) == 0
+    assert _cp(store, "pr-60").state["review_comments_etag"] == '"rc-s4"'
+    fake.calls.clear()
+    assert await poller.poll_due_once(now=t0 + 30_000) == 0
+    assert any(p == s4 and inm == '"rc-s4"' for p, inm, _ in fake.calls)

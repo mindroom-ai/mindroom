@@ -239,8 +239,11 @@ async def github_get_json(
     hdrs |= ({"Authorization": f"Bearer {token}"} if token else {}) | ({"If-None-Match": etag} if etag else {})
     method = "GET"
     async with asyncio.timeout(timeout_seconds), AsyncExitStack() as stack:
-        cm = httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False)
-        http = client if client is not None else await stack.enter_async_context(cm)
+        http = (
+            client
+            if client is not None
+            else await stack.enter_async_context(httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False))
+        )
         for hops in range(_MAX_REDIRECTS + 1):
             async with http.stream(method, url, headers=hdrs, follow_redirects=False) as resp:
                 if (hop := github_redirect_next(resp, method, None) if hops < _MAX_REDIRECTS else None) is None:

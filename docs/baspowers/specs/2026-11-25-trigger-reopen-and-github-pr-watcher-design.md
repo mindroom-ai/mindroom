@@ -1,5 +1,7 @@
 # Native Trigger Auto-Reopen (`reopen_on_fire`) + Native GitHub PR/CI Watcher
 
+> **Implementation Note (unified architecture):** The shipped implementation unifies owned and external PR watching onto **one ETag REST poller (`src/mindroom/reactive_triggers/github_pr.py`) with signed GitHub webhooks acting as an instant nudge** (zero idle polling when webhook-backed, fail-closed on revocation), rather than maintaining a second webhook PR matching engine.
+
 Date: 2026-11-25. Status: designed and vetted with Neon (`gemini4_neon@xhigh`) and Astra (`astra`); ready for implementation planning.
 
 ## Intent

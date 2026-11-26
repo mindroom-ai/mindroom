@@ -179,6 +179,9 @@ def test_github_and_ed25519_event_source_configs_and_yaml_roundtrip() -> None:
     assert github.allowed_events == [
         "pull_request",
         "pull_request_review",
+        "pull_request_review_comment",
+        "issue_comment",
+        "check_run",
         "check_suite",
         "release",
         "issues",
@@ -1222,10 +1225,8 @@ def test_github_pr_checkpoint_terminal_claim_and_owner_quota(tmp_path: Path) -> 
     assert store.update_github_pr_checkpoint_and_enqueue(
         "gh_pr_42",
         merged_cp,
-        dedupe_key="deliv_merge",
         event=merged_event,
         expected_rule_uid=rec.rule_uid,
-        now=1200.0,
     )
     before_claim = store.get_trigger("gh_pr_42")
     assert before_claim is not None
@@ -1295,9 +1296,22 @@ def test_pr_closed_and_expired_watches_do_not_consume_owner_quotas(tmp_path: Pat
         cp1.model_copy(update={"pr_state": "closed", "updated_at": 1020.0}),
         disable_reason="pr_closed",
         expected_rule_uid=rec1.rule_uid,
-        now=1020.0,
     )
     store.create_trigger(rec2, max_per_owner=1, max_github_pr_per_owner=1)
+
+    # Reviving pr_closed enforces overall max_per_owner (even when max_github_pr_per_owner has headroom).
+    with pytest.raises(ReactiveTriggerLimitError, match="reactive trigger limit"):
+        store.set_enabled("gh_pr_1", enabled=True, max_per_owner=1, max_github_pr_per_owner=5)
+    with pytest.raises(ReactiveTriggerLimitError, match="reactive trigger limit"):
+        store.update_trigger(
+            rec1.model_copy(update={"enabled": True, "disabled_reason": None, "updated_at": 1060.0}),
+            update_enabled=True,
+            max_per_owner=1,
+            max_github_pr_per_owner=5,
+        )
+    still_closed = store.set_enabled("gh_pr_1", enabled=False)
+    assert still_closed is not None
+    assert still_closed.disabled_reason == "pr_closed"
 
     # Expired PR watch does not consume max_github_pr_per_owner.
     store.delete_trigger("gh_pr_2")

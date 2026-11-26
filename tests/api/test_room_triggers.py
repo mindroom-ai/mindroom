@@ -68,6 +68,7 @@ class _Harness:
         admins: list[str] | None = None,
         aliases: dict[str, list[str]] | None = None,
         room_state_events: dict[str, list[dict[str, object]]] | None = None,
+        max_reactive_triggers_per_owner: int = 50,
         max_github_pr_watches_per_owner: int = 20,
     ) -> None:
         self.paths: RuntimePaths = test_runtime_paths(tmp_path)
@@ -76,6 +77,7 @@ class _Harness:
             authorization=AuthorizationConfig(aliases=aliases or {}),
             external_trigger_policy=ExternalTriggerPolicyConfig(
                 admin_users=admins or [],
+                max_reactive_triggers_per_owner=max_reactive_triggers_per_owner,
                 max_github_pr_watches_per_owner=max_github_pr_watches_per_owner,
             ),
             agents={
@@ -500,3 +502,15 @@ def test_reenabling_github_pr_trigger_over_quota_returns_409(tmp_path: Path) -> 
     paused = h.reactive_store.get_trigger("tr_pr_paused")
     assert paused is not None
     assert paused.enabled is False
+
+    h2 = _Harness(tmp_path / "owner_cap", max_reactive_triggers_per_owner=1, max_github_pr_watches_per_owner=5)
+    h2.add_reactive(
+        "tr_pr_closed",
+        GitHubPRSourceSpec(repo="matrix-org/synapse", number=1),
+        enabled=False,
+        disabled_reason="pr_closed",
+    )
+    h2.add_reactive("tr_room_active", RoomMessageSourceSpec(room_id=ROOM_A), enabled=True)
+    resp2 = h2.req("PATCH", ROOM_A, ALICE, "tr_pr_closed", {"enabled": True})
+    assert resp2.status_code == 409
+    assert "reactive trigger limit" in resp2.json()["detail"]
