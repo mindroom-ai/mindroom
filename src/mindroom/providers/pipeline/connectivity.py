@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import ssl
+import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -50,6 +51,8 @@ def _now() -> float:
     """Return monotonic seconds including host suspend time where supported."""
     if hasattr(time, "CLOCK_BOOTTIME"):
         return time.clock_gettime(time.CLOCK_BOOTTIME)
+    if sys.platform == "darwin" and hasattr(time, "CLOCK_MONOTONIC"):
+        return time.clock_gettime(time.CLOCK_MONOTONIC)
     return time.monotonic()
 
 

@@ -464,6 +464,19 @@ async def test_deadline_expiry_suspend_cap_and_immediate_cancellation(
 
     # 1. Deadline expiry (including jump past deadline on suspend/wake before reissue) re-raises original error.
     now = 100.0
+    with monkeypatch.context() as mp:
+        mp.delattr(connectivity_stage.time, "CLOCK_BOOTTIME", raising=False)
+        mp.setattr(connectivity_stage.sys, "platform", "darwin")
+        mp.setattr(connectivity_stage.time, "CLOCK_MONOTONIC", 99, raising=False)
+        seen_clocks: list[int] = []
+        mp.setattr(
+            connectivity_stage.time,
+            "clock_gettime",
+            lambda cid: (seen_clocks.append(cid), 42.0)[1],
+            raising=False,
+        )
+        assert connectivity_stage._now() == 42.0
+        assert seen_clocks == [99]
     monkeypatch.setattr(connectivity_stage, "_now", lambda: now)
     monkeypatch.setattr(connectivity_stage, "_CONNECTIVITY_WAIT_LIMIT_SECONDS", 10.0)
     probes = iter([False, True])
