@@ -504,3 +504,5 @@ _.validate_optional_text  # Pydantic field validator (src/mindroom/reactive_trig
 _.validate_trigger_id  # Pydantic field validator (src/mindroom/reactive_triggers/models.py)
 _.validate_rule_uid  # Pydantic field validator (src/mindroom/reactive_triggers/models.py)
 _.validate_origin_target  # Pydantic model validator (src/mindroom/reactive_triggers/models.py)
+_.get_github_pr_checkpoint  # Public store inspection method exercised by tests (src/mindroom/reactive_triggers/store.py)
+_._validate_spec  # Pydantic model validator (src/mindroom/reactive_triggers/models.py)

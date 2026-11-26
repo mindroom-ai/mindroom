@@ -188,7 +188,7 @@ def is_github_rate_limited(response: httpx.Response) -> bool:
     return response.status_code == 429 or (response.status_code == 403 and limited)
 
 
-def parse_retry_after_seconds(headers: Mapping[str, str], *, now: float | None = None) -> float | None:
+def _parse_retry_after_seconds(headers: Mapping[str, str], *, now: float | None = None) -> float | None:
     """Return positive wait seconds from ``Retry-After`` or ``X-RateLimit-Reset`` (when remaining is 0)."""
     norm, cur = {k.lower(): v.strip() for k, v in headers.items()}, time.time() if now is None else now
     if raw := norm.get("retry-after", ""):
@@ -227,7 +227,7 @@ async def _build_get_result(response: httpx.Response, request_etag: str | None, 
     if (body := await read_bounded_body(response, max_bytes)) is None:
         msg = f"GitHub API response exceeded {max_bytes} bytes"
         raise GitHubClientError(msg)
-    limited, retry, etag = is_github_rate_limited(response), parse_retry_after_seconds(headers), headers.get("etag")
+    limited, retry, etag = is_github_rate_limited(response), _parse_retry_after_seconds(headers), headers.get("etag")
     if response.status_code == 200:
         try:
             data = json.loads(body)

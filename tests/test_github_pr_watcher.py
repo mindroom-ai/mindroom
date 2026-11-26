@@ -654,8 +654,19 @@ async def test_poller_ci_check_runs_transitions_cancelled_truncation_and_sha_res
     assert await poller.poll_due_once(now=t0 + 40_000) == 0
     fake.set_json(c_c, {"check_runs": [_chk(31, "unit", "success"), _chk(32, "opt", "skipped")]}, etag='"kC2"')
     assert await poller.poll_due_once(now=t0 + 50_000) == 1
-    assert store.list_firings(trigger_id="pr-ci")[0].event.data["items"][0]["type"] == "ci_passing"
+    first_pass = store.list_firings(trigger_id="pr-ci")[0].event
+    assert first_pass.data["items"][0]["type"] == "ci_passing"
+    assert "GitHub Check Runs passed" in first_pass.data["items"][0]["summary"]
     assert await poller.poll_due_once(now=t0 + 60_000) == 0
+    # Pass -> fail -> pass recovery on the same SHA must not be dropped by event dedupe.
+    fake.set_json(c_c, {"check_runs": [_chk(31, "unit", "success"), _chk(33, "opt", "failure")]}, etag='"kC3"')
+    assert await poller.poll_due_once(now=t0 + 70_000) == 1
+    assert store.list_firings(trigger_id="pr-ci")[0].event.data["items"][0]["type"] == "ci_failure"
+    fake.set_json(c_c, {"check_runs": [_chk(31, "unit", "success"), _chk(34, "opt", "success")]}, etag='"kC4"')
+    assert await poller.poll_due_once(now=t0 + 80_000) == 1
+    recovery_pass = store.list_firings(trigger_id="pr-ci")[0].event
+    assert recovery_pass.data["items"][0]["type"] == "ci_passing"
+    assert recovery_pass.event_id != first_pass.event_id
 
 
 @pytest.mark.asyncio
@@ -703,6 +714,14 @@ async def test_poller_rate_limit_buckets_adaptive_backoff_and_unreadable_pat(
     assert anon_nxt >= 1180.0
     assert (_cp(store, "r-bad").consecutive_errors, _cp(store, "r-bad").next_poll_at) == (1, 1200.0)
     assert all("/ext/r3/" not in p for p, _, _ in fake.calls)
+
+    # Raising min_github_pr_poll_interval_seconds takes effect immediately and jitter never dips below the floor.
+    fake.set_json("/repos/ext/r2/pulls/2", _pr("ext/r2", 2), headers={"x-ratelimit-remaining": "500"})
+    raised_cfg, _ = _config(tmp_path, min_poll=240)
+    monkeypatch.setattr("mindroom.reactive_triggers.github_pr.random.uniform", lambda _a, _b: 0.9)
+    raised_poller = GitHubPRPoller(store=store, config_provider=lambda: raised_cfg, runtime_paths=paths, client=http)
+    assert await raised_poller.poll_due_once(now=2000.0) == 0
+    assert _cp(store, "r-anon").next_poll_at == 2240.0
 
 
 @pytest.mark.asyncio

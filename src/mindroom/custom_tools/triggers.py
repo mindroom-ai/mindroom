@@ -656,11 +656,11 @@ class TriggersTools(Toolkit):
         expires_in_hours: float | None = 720.0,
         trigger_id: str | None = None,
     ) -> str:
-        """Watch one open GitHub PR for activity, CI failures/all-green, merge, or close.
+        """Watch one open GitHub PR for activity, CI (GitHub Check Runs) failures/all-green, merge, or close.
 
         Uses ETag-backed GitHub REST polling (nudged immediately by an authorized shared GitHub webhook source covering
-        `repo` with zero idle polling). Auto-reopens resolved target threads (`reopen_on_fire=True`) and auto-disables
-        on PR merge/close.
+        `repo` with zero idle polling). CI events track GitHub Check Runs (not legacy Commit Statuses). Auto-reopens
+        resolved target threads (`reopen_on_fire=True`) and auto-disables on PR merge/close.
         """
         try:
             ctx = require_external_trigger_owner_context(self._CONTEXT_LABEL)

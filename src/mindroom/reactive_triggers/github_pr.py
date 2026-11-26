@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Excludes "cancelled" so cancel-in-progress workflows on new pushes never wake as CI failures or all-green passes.
-CI_FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
-CI_PASS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_CI_FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
+_CI_PASS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _ACTIVITY_WEBHOOK_EVENTS = frozenset({"issue_comment", "pull_request_review", "pull_request_review_comment"})
 _CI_WEBHOOK_EVENTS = frozenset({"check_run", "check_suite"})
 _IGNORED_TIMELINE_EVENTS = frozenset(
@@ -60,7 +60,7 @@ type _EventPairs = list[tuple[_JsonDict, str]]
 type _SyncResult = tuple[Literal["open", "closed", "merged"], str | None, _JsonDict, _EventPairs]
 
 
-class GitHubPRWatchError(ValueError):
+class _GitHubPRWatchError(ValueError):
     """Raised when a GitHub PR watch cannot be created or seeded."""
 
 
@@ -68,7 +68,7 @@ class _RateLimitedError(RuntimeError):
     """Internal signal that a credential bucket is rate-limited until ``args[0]``."""
 
 
-class SeededPRState(NamedTuple):
+class _SeededPRState(NamedTuple):
     """Initial checkpoint and auth mode captured when creating a github_pr watch."""
 
     checkpoint: rm.GitHubPRCheckpoint
@@ -173,7 +173,7 @@ async def seed_github_pr_watch(
     webhook_source_id: str | None,
     now: float,
     client: httpx.AsyncClient | None = None,
-) -> SeededPRState:
+) -> _SeededPRState:
     """Validate an open PR and seed initial checkpoint state so baseline history does not replay."""
     try:
         token, auth_mode = await ghc.resolve_owner_github_token(owner_user_id, config, runtime_paths)
@@ -209,7 +209,7 @@ async def seed_github_pr_watch(
         state=state,
         updated_at=now,
     )
-    return SeededPRState(checkpoint=checkpoint, auth_mode=auth_mode)
+    return _SeededPRState(checkpoint=checkpoint, auth_mode=auth_mode)
 
 
 class GitHubPRPoller:
@@ -345,9 +345,11 @@ class GitHubPRPoller:
             _fetch,
             now=now,
         )
+        min_poll = float(config.external_trigger_policy.min_github_pr_poll_interval_seconds)
+        base_interval = max(min_poll, float(source_spec.poll_interval_seconds))
         low_quota = 10 if auth_mode == "anonymous" else 100
         slowdown = 2.0 if remaining_limits and min(remaining_limits) < low_quota else 1.0
-        delay = max(1.0, source_spec.poll_interval_seconds * slowdown * random.uniform(0.9, 1.1))  # noqa: S311
+        delay = max(min_poll, base_interval * slowdown * random.uniform(0.9, 1.1))  # noqa: S311
         next_poll_at = None if source_spec.webhook_source_id is not None else now + delay
         next_checkpoint = rm.GitHubPRCheckpoint(
             head_sha=head_sha,
@@ -620,9 +622,10 @@ async def _poll_check_runs(
         failure_item: _JsonDict = {"type": "ci_failure", "id": key, "sha": head_sha, "summary": summary, **failed[key]}
         out.append((failure_item, f"ci:fail:{head_sha}:{key}"))
     if not seed_only and overall == "passing" and state.get("last_ci_overall") != "passing":
-        summary = f"All {len(runs)} CI checks passed for {head_sha[:7]}"
+        run_ids_digest = hashlib.sha256(",".join(sorted(runs)).encode()).hexdigest()[:16]
+        summary = f"All {len(runs)} GitHub Check Runs passed for {head_sha[:7]}"
         pass_item: _JsonDict = {"type": "ci_passing", "sha": head_sha, "total": len(runs), "summary": summary}
-        out.append((pass_item, f"ci:pass:{head_sha}"))
+        out.append((pass_item, f"ci:pass:{head_sha}:{run_ids_digest}"))
     state["checks_etag"] = single_page_etag
     state["notified_failed_checks"] = sorted(notified_failed | set(failed))
     state["last_ci_overall"] = overall
@@ -637,10 +640,10 @@ def _tally_checks(runs: dict[str, Mapping[str, Any]], *, truncated: bool) -> tup
         conclusion = (_clean_str(run.get("conclusion")) or "").lower()
         if status != "completed":
             has_pending = True
-        elif conclusion in CI_FAIL_CONCLUSIONS:
+        elif conclusion in _CI_FAIL_CONCLUSIONS:
             url = _clean_str(run.get("html_url") or run.get("url"))
             failed[key] = {"name": _clean_str(run.get("name")) or "check", "conclusion": conclusion, "url": url}
-        elif conclusion not in CI_PASS_CONCLUSIONS:
+        elif conclusion not in _CI_PASS_CONCLUSIONS:
             has_non_passing = True
     if not runs or failed:
         return failed, "failing" if failed else "none"
@@ -762,7 +765,7 @@ async def _resolve_http_client(stack: AsyncExitStack, client: httpx.AsyncClient 
 
 
 def _fail(msg: str, cause: Exception | None = None) -> NoReturn:
-    raise GitHubPRWatchError(msg) from cause
+    raise _GitHubPRWatchError(msg) from cause
 
 
 def _as_mapping(value: object) -> Mapping[str, Any]:

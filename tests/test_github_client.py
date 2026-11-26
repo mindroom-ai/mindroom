@@ -18,10 +18,10 @@ from mindroom.github_client import (
     GITHUB_DEFAULT_ACCEPT,
     GITHUB_USER_TOKEN_SERVICE,
     GitHubClientError,
+    _parse_retry_after_seconds,
     build_user_github_oauth_context,
     github_get_json,
     github_user_token_store,
-    parse_retry_after_seconds,
     resolve_owner_github_token,
 )
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -125,27 +125,27 @@ def test_parse_retry_after_seconds_variants() -> None:
     future_http_date = format_datetime(datetime.fromtimestamp(now + 75, tz=UTC), usegmt=True)
     past_http_date = format_datetime(datetime.fromtimestamp(now - 30, tz=UTC), usegmt=True)
 
-    assert parse_retry_after_seconds({"Retry-After": "42"}, now=now) == 42.0
-    assert parse_retry_after_seconds({"retry-after": future_http_date}, now=now) == pytest.approx(75.0, abs=1.0)
-    assert parse_retry_after_seconds({"Retry-After": past_http_date}, now=now) is None
-    assert parse_retry_after_seconds({"Retry-After": "0"}, now=now) is None
-    assert parse_retry_after_seconds({"Retry-After": "-5"}, now=now) is None
-    assert parse_retry_after_seconds({"Retry-After": "NaN"}, now=now) is None
-    assert parse_retry_after_seconds({"Retry-After": "not-a-date"}, now=now) is None
+    assert _parse_retry_after_seconds({"Retry-After": "42"}, now=now) == 42.0
+    assert _parse_retry_after_seconds({"retry-after": future_http_date}, now=now) == pytest.approx(75.0, abs=1.0)
+    assert _parse_retry_after_seconds({"Retry-After": past_http_date}, now=now) is None
+    assert _parse_retry_after_seconds({"Retry-After": "0"}, now=now) is None
+    assert _parse_retry_after_seconds({"Retry-After": "-5"}, now=now) is None
+    assert _parse_retry_after_seconds({"Retry-After": "NaN"}, now=now) is None
+    assert _parse_retry_after_seconds({"Retry-After": "not-a-date"}, now=now) is None
 
-    assert parse_retry_after_seconds(
+    assert _parse_retry_after_seconds(
         {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(now + 90))},
         now=now,
     ) == pytest.approx(90.0, abs=1.0)
     assert (
-        parse_retry_after_seconds(
+        _parse_retry_after_seconds(
             {"X-RateLimit-Remaining": "5", "X-RateLimit-Reset": str(int(now + 90))},
             now=now,
         )
         is None
     )
     assert (
-        parse_retry_after_seconds(
+        _parse_retry_after_seconds(
             {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(now - 5))},
             now=now,
         )
@@ -153,7 +153,7 @@ def test_parse_retry_after_seconds_variants() -> None:
     )
     # Retry-After takes precedence over X-RateLimit-Reset.
     assert (
-        parse_retry_after_seconds(
+        _parse_retry_after_seconds(
             {
                 "Retry-After": "15",
                 "X-RateLimit-Remaining": "0",
