@@ -94,7 +94,7 @@ def test_exa_configures_sdk_timeout_and_runs_research_via_agent_runs(monkeypatch
             "output_schema": output_schema,
         },
     ]
-    assert fake_runs.poll_calls == [("run_123", 45_000)]
+    assert fake_runs.poll_calls == [("run_123", None)]
     assert parsed == {
         "id": "run_123",
         "status": "completed",
