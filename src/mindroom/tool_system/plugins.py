@@ -305,6 +305,31 @@ class ConfigPlugins:
                 return plugin.entry_config
         return None
 
+    def plugin_tool_source(
+        self,
+        tool_name: str,
+        factory_origin: list[str] | None,
+    ) -> tuple[Path, ToolMetadata] | None:
+        """Return the loaded plugin root and metadata supplying ``tool_name`` with ``factory_origin``."""
+        if factory_origin is None:
+            return None
+        for plugin in self._configured:
+            if plugin.loaded is None:
+                continue
+            metadata = plugin.loaded.tools.get(tool_name)
+            factory = metadata.factory if metadata is not None else None
+            if (
+                metadata is not None
+                and inspect.isfunction(factory)
+                and [factory.__module__, factory.__qualname__] == factory_origin
+            ):
+                return plugin.loaded.root, metadata
+        return None
+
+    def has_unloaded_plugin_root(self, root: Path) -> bool:
+        """Return whether ``root`` is an enabled configured plugin that did not load in this generation."""
+        return any(plugin.root == root and plugin.loaded is None for plugin in self._configured)
+
 
 class _CachedConfigPlugins(NamedTuple):
     config: weakref.ref[Config]
