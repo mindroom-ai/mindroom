@@ -19,6 +19,7 @@ from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.tool_system.events import FailedReply
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.team_turn_helpers import (
     PROBE_TOOL,
@@ -188,8 +189,60 @@ async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_
 
     text = await team.respond(run_metadata_collector=collector)
 
-    assert "team start failed" in text
-    assert collector == {AI_RUN_METADATA_KEY: {"version": 1, "status": "error"}}
+    assert text == "[Team (GeneralAgent)] ⚠️ team start failed"
+    assert collector == {
+        AI_RUN_METADATA_KEY: {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "team start failed",
+                "retryable": False,
+                "provider": "Synthetic",
+                "fallback": "[Team (GeneralAgent)] ⚠️ team start failed",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_team_setup_value_error_redacts_secrets_in_reply_and_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team setup ValueError redacts credentials in both FailedReply.text and ai_run.error.fallback."""
+    api_key = "sk-ant-api03-supersecret1234567890"
+    bearer_value = "bearer-credential-987654321"
+
+    def fail_resolve(*_args: object, **_kwargs: object) -> object:
+        msg = f"Team setup failed with {api_key} and Bearer {bearer_value}"
+        raise ValueError(msg)
+
+    team = _team(tmp_path, monkeypatch, leader=[answer("Unused")], general=[answer("Unused")])
+    monkeypatch.setattr("mindroom.teams.envelope.resolve_team_members", fail_resolve)
+    collector: dict[str, Any] = {}
+
+    [failed] = await team.stream(run_metadata_collector=collector)
+
+    assert isinstance(failed, FailedReply)
+    assert api_key not in failed.text
+    assert bearer_value not in failed.text
+    expected_text = "Team setup failed with [redacted] and Bearer [redacted]"
+    assert failed.text == expected_text
+    assert collector == {
+        AI_RUN_METADATA_KEY: {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": expected_text,
+                "retryable": False,
+                "fallback": expected_text,
+            },
+        },
+    }
 
 
 def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices(tmp_path: Path) -> None:

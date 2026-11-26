@@ -2463,8 +2463,21 @@ class TestAgentBot(AgentBotTestBase):
         sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
         assert [content.get("m.new_content", content)["body"] for content in sent] == [
             "Thinking...",
-            "[calculator] ⚠️ Error: Failed to download image",
+            "⚠️ Failed to download image",
         ]
+        expected_ai_run = {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "Failed to download image",
+                "retryable": False,
+                "fallback": "⚠️ Failed to download image",
+            },
+        }
+        assert sent[-1]["io.mindroom.ai_run"] == expected_ai_run
+        assert sent[-1]["m.new_content"]["io.mindroom.ai_run"] == expected_ai_run
         answered = await unwrap_extracted_collaborator(bot._turn_store).get_turn_record("$img_event_fail")
         assert answered is not None
         assert answered.completed
@@ -2495,11 +2508,78 @@ class TestAgentBot(AgentBotTestBase):
         bot._delivery_gateway.send_text.assert_awaited_once_with(
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                response_text="[calculator] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                response_text="⚠️ boom",
+                extra_content={
+                    STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+                    "io.mindroom.ai_run": {
+                        "version": 1,
+                        "status": "error",
+                        "error": {
+                            "kind": "runtime_error",
+                            "title": "Reply failed",
+                            "summary": "boom",
+                            "retryable": False,
+                            "fallback": "⚠️ boom",
+                        },
+                    },
+                },
             ),
         )
         await assert_turn_answered(bot, TurnRecord.create(["$event"], response_event_id="$error"))
+
+    @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_edits_owned_reply_with_structured_error_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An owned selection acknowledgement edited via OwedWrite emits structured io.mindroom.ai_run.error."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client)
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        target = MessageTarget.resolve("!test:localhost", "$thread_root", "$event")
+        ack_event_id, _span_id = await bot._visible_responses.deliver_selection_acknowledgement(
+            TurnRecord.create(["$event"], requester_id="@user:localhost"),
+            target=target,
+            response_text="Thinking...",
+            delivery_turn_id="$event",
+            ai_run_content={},
+        )
+        assert ack_event_id is not None
+
+        resolution = await bot._interactive_selections._finalize_dispatch_failure(
+            target=target,
+            error=TimeoutError("selection timed out"),
+            handled_turn=TurnRecord.create(["$event"], completed=False),
+            existing_event_id=ack_event_id,
+        )
+
+        assert resolution == ack_event_id
+        sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
+        assert [content.get("m.new_content", content)["body"] for content in sent] == [
+            "Thinking...",
+            "⏰ Request timed out — The model timed out waiting for a response. Try again shortly.",
+        ]
+        expected_ai_run = {
+            "version": 1,
+            "status": "error",
+            "error": {
+                "kind": "timeout",
+                "title": "Request timed out",
+                "summary": "The model timed out waiting for a response. Try again shortly.",
+                "detail": "selection timed out",
+                "retryable": True,
+                "action": "retry",
+                "fallback": "⏰ Request timed out — The model timed out waiting for a response. Try again shortly.",
+            },
+        }
+        assert sent[-1]["io.mindroom.ai_run"] == expected_ai_run
+        assert sent[-1]["m.new_content"]["io.mindroom.ai_run"] == expected_ai_run
 
     @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_uses_system_response_kind_for_team_bot(
@@ -2554,8 +2634,21 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._delivery_gateway.send_text.await_args.args == (
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                response_text="[team_bot] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                response_text="⚠️ boom",
+                extra_content={
+                    STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+                    "io.mindroom.ai_run": {
+                        "version": 1,
+                        "status": "error",
+                        "error": {
+                            "kind": "runtime_error",
+                            "title": "Reply failed",
+                            "summary": "boom",
+                            "retryable": False,
+                            "fallback": "⚠️ boom",
+                        },
+                    },
+                },
             ),
         )
 
@@ -2618,7 +2711,7 @@ class TestAgentBot(AgentBotTestBase):
         sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
         assert [content.get("m.new_content", content)["body"] for content in sent] == [
             "Thinking...",
-            "[calculator] ⚠️ Error: setup failed",
+            "⚠️ setup failed",
         ]
         # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)

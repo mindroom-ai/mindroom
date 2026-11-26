@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from google.api_core.exceptions import GoogleAPICallError
 from google_auth_httplib2 import AuthorizedHttp
@@ -13,10 +13,11 @@ from googleapiclient.http import build_http
 
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.google import google_service_scopes
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection, Iterable, Sequence
 
     from google.api_core.exceptions import GoogleAPIError
     from googleapiclient.errors import HttpError
@@ -89,7 +90,42 @@ def google_http_error_result(
     return json.dumps({"error": message})
 
 
-class ThreadLocalGoogleServiceMixin:
+def visible_google_function_map(
+    function_names: Collection[str],
+    base_names: Iterable[str],
+) -> dict[str, str]:
+    """Map base Google tool function names to offered names, including workspace prefixes."""
+    offered = list(function_names)
+    mapping: dict[str, str] = {}
+    for base in base_names:
+        if base in offered:
+            mapping[base] = base
+            continue
+        suffix = f"_{base}"
+        for name in offered:
+            if name.endswith(suffix):
+                mapping[base] = name
+                break
+    return mapping
+
+
+def filter_google_tools(
+    tools: Sequence[Callable[..., str]],
+    include_tools: Sequence[str] | None = None,
+    exclude_tools: Sequence[str] | None = None,
+) -> list[Callable[..., str]]:
+    """Filter Google toolkit methods by optional include and exclude name lists."""
+    selected = list(tools)
+    if include_tools is not None:
+        included = set(include_tools)
+        selected = [tool for tool in selected if getattr(tool, "__name__", "") in included]
+    if exclude_tools is not None:
+        excluded = set(exclude_tools)
+        selected = [tool for tool in selected if getattr(tool, "__name__", "") not in excluded]
+    return selected
+
+
+class _ThreadLocalGoogleServiceMixin:
     """Own Google credentials and service objects in one worker thread."""
 
     def _google_service_state(self) -> _GoogleServiceThreadState:
@@ -115,15 +151,6 @@ class ThreadLocalGoogleServiceMixin:
 
     @service.setter
     def service(self, value: Any | None) -> None:  # noqa: ANN401
-        self._google_service_state().service = value
-
-    @property
-    def _service(self) -> Any | None:  # noqa: ANN401
-        """Expose the same per-thread service under the name Agno's auth decorator reads."""
-        return self._google_service_state().service
-
-    @_service.setter
-    def _service(self, value: Any | None) -> None:  # noqa: ANN401
         self._google_service_state().service = value
 
     @property
@@ -177,8 +204,10 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().user_email = value
 
 
-class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
+class _GoogleOAuthToolkit(ScopedOAuthClientMixin, _ThreadLocalGoogleServiceMixin, Toolkit):
     """Google toolkit with scoped OAuth credentials and optional service-account fallback."""
+
+    _require_delegated_user_for_service_account: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -192,6 +221,8 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         provided_creds = kwargs.pop("creds", None)
+        instructions = cast("str | None", kwargs.pop("instructions", None))
+        quota_project_id = cast("str | None", kwargs.pop("quota_project_id", None))
         if credentials_manager is None:
             msg = f"{type(self).__name__} requires an explicit credentials_manager"
             raise RuntimeError(msg)
@@ -212,8 +243,9 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
+            quota_project_id=quota_project_id,
         )
-        super().__init__(name=name, tools=tools)
+        super().__init__(name=name, tools=tools, instructions=instructions)
         self._set_original_auth(_GoogleOAuthToolkit._service_account_auth)
         self._wrap_oauth_function_entrypoints()
 
@@ -222,6 +254,10 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         for name, function in tuple(self.functions.items()):
             self.functions[name] = self._oauth_entrypoint(function)
             setattr(self, name, self.functions[name])
+
+    def _service_account_scopes(self) -> tuple[str, ...]:
+        """Return API scopes for service-account token minting, separate from user OAuth sign-in scopes."""
+        return google_service_scopes(self._oauth_provider)
 
     def _service_account_auth(self) -> Any:  # noqa: ANN401
         """Return Google credentials built from the configured service-account file."""
@@ -233,12 +269,16 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
                 "requires GOOGLE_SERVICE_ACCOUNT_FILE"
             )
             raise RuntimeError(msg)
+        delegated_user = self.delegated_user.strip() if self.delegated_user else None
+        if self._require_delegated_user_for_service_account and not delegated_user:
+            msg = f"{self._oauth_provider.display_name} service-account authentication requires GOOGLE_DELEGATED_USER"
+            raise RuntimeError(msg)
         creds = service_account.Credentials.from_service_account_file(
             self.service_account_path,
-            scopes=self._oauth_provider.scopes,
+            scopes=self._service_account_scopes(),
         )
-        if self.delegated_user:
-            creds = creds.with_subject(self.delegated_user)
+        if delegated_user:
+            creds = creds.with_subject(delegated_user)
         return creds
 
 
@@ -248,16 +288,20 @@ class GoogleApiToolkit(_GoogleOAuthToolkit):
     _google_api_name: str
     _google_api_version: str
 
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
+        """Build the authenticated Google API service for creds."""
+        return build(
+            self._google_api_name,
+            self._google_api_version,
+            http=self._google_authorized_http(creds),
+            cache_discovery=False,
+        )
+
     def _google_api_service(self) -> Any:  # noqa: ANN401
         """Return the per-thread authenticated Google API service."""
         self._authenticate()
         if self.service is None:
-            self.service = build(
-                self._google_api_name,
-                self._google_api_version,
-                http=self._google_authorized_http(self.creds),
-                cache_discovery=False,
-            )
+            self.service = self._build_service(self.creds)
         return self.service
 
 

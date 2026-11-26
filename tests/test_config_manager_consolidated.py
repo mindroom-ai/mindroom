@@ -1646,7 +1646,7 @@ class TestConsolidatedConfigManager:
                 "test_agent": AgentConfig(
                     display_name="Test Agent",
                     role="Test role",
-                    tools=["openclaw_compat", "python"],
+                    tools=["openclaw_compat", "calculator"],
                 ),
             },
         )

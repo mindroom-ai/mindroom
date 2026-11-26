@@ -58,6 +58,7 @@ from tests.conftest import (
     make_relation_lookup,
     message_origin,
     patch_response_runner_module,
+    patch_send_file_outcome,
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
@@ -888,10 +889,7 @@ async def test_matrix_message_attachments_suppress_push_only_for_agent_handoffs(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
         ) as mock_send,
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(return_value="$file_evt"),
-        ) as mock_send_file,
+        patch_send_file_outcome() as mock_send_file,
         tool_runtime_context(context),
     ):
         payload = json.loads(

@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_run_metadata import (
+    build_ai_run_metadata_content,
     build_prepared_history_metadata_content,
     build_streaming_ai_run_metadata_content,
     build_terminal_note_ai_run_metadata_content,
@@ -42,8 +43,10 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, EventClass, EventKind, InboundEvent
+from mindroom.llm.errors import STREAM_STALLED, ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -415,6 +418,24 @@ def test_streaming_and_terminal_note_ai_run_metadata_helpers(tmp_path: Path) -> 
         assert with_model == {AI_RUN_METADATA_KEY: {"version": 1, "status": status, "model": expected_model}}
         without_model = build_terminal_note_ai_run_metadata_content(status, model=None)
         assert without_model == {AI_RUN_METADATA_KEY: {"version": 1, "status": status}}
+
+    sample_error = {"kind": "timeout", "title": "Request timed out", "summary": "Primary timed out.", "retryable": True}
+    assert build_terminal_note_ai_run_metadata_content("error", model=expected_model, error_info=sample_error) == {
+        AI_RUN_METADATA_KEY: {"version": 1, "status": "error", "model": expected_model, "error": sample_error},
+    }
+    full_error = build_ai_run_metadata_content(
+        config=config,
+        model_name="default",
+        run_id="run-1",
+        session_id="sess-1",
+        status=RunStatus.error,
+        model="gpt-primary",
+        model_provider="OpenAI",
+        prices={},
+        tool_count=0,
+        error_info=sample_error,
+    )
+    assert full_error[AI_RUN_METADATA_KEY]["error"] == sample_error
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +940,13 @@ async def test_mid_turn_switch_to_a_model_that_fails_to_build_reports_the_error_
         "version": 1,
         "status": "error",
         "model": model_payload(turn.bot.config, "large"),
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "no provider installed for model 'large'",
+            "retryable": False,
+            "fallback": "⚠️ no provider installed for model 'large'",
+        },
     }
 
 
@@ -957,6 +985,13 @@ async def test_team_attempt_that_fails_to_build_reports_the_error_on_its_resolve
         "version": 1,
         "status": "error",
         "model": model_payload(turn.bot.config, "large"),
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "team build boom",
+            "retryable": False,
+            "fallback": "[Team (Writer, Checker)] ⚠️ team build boom",
+        },
     }
 
 
@@ -1128,10 +1163,18 @@ async def test_terminal_notes_always_carry_terminal_ai_run_status(
 
     error_final = turn_error.homeserver.writes[-1]
     assert _stream_status(error_final) == STREAM_STATUS_ERROR
+    assert _visible_content(error_final).get("body") == "**[Response interrupted by an error: boom]**"
     assert _ai_run(error_final) == {
         "version": 1,
         "status": "error",
         "model": model_payload(turn_error.bot.config, "default"),
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "boom",
+            "retryable": False,
+            "fallback": "**[Response interrupted by an error: boom]**",
+        },
     }
 
     # (c) Post-crash restart owed note (_flush_owed_write with write.handle=None)
@@ -1427,6 +1470,129 @@ async def test_approval_failure_note_prefers_live_span_model_over_stale_continua
         await shutdown_approval_runtime()
 
 
+@pytest.mark.asyncio
+async def test_provider_failure_after_tool_approval_emits_structured_ai_run_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """A provider exception during an approval resume emits structured io.mindroom.ai_run['error'] and friendly text."""
+    del echo_tool
+    secret = "sk-" + "live" + "-secret1234567890"
+    resume_gate = asyncio.Event()
+
+    async def fail_with_provider_error() -> None:
+        await resume_gate.wait()
+        message = f"upstream gateway failed with {secret}"
+        raise ProviderUnavailable(message, provider="openrouter", status_code=503)
+
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [
+                calls(tool_call("echo", "call-1", text="hi")),
+                [Await(fail_with_provider_error)],
+            ],
+        },
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+
+        resumed_writes = await _approve_and_resume(turn, continuation, resume_gate)
+        assert resumed_writes
+        final_write = resumed_writes[-1]
+        assert _stream_status(final_write) == STREAM_STATUS_ERROR
+        assert _ai_run(final_write) == {
+            "version": 1,
+            "status": "error",
+            "model": model_payload(turn.bot.config, "default"),
+            "error": {
+                "kind": "provider_unavailable",
+                "title": "OpenRouter unavailable (503)",
+                "summary": "Primary could not complete the reply. Try again shortly.",
+                "detail": "upstream gateway failed with [redacted]",
+                "status_code": 503,
+                "provider": "OpenRouter",
+                "retryable": True,
+                "action": "continue",
+                "fallback": "⚠️ OpenRouter unavailable (503) — Primary could not complete the reply. Try again shortly.",
+            },
+        }
+        visible_body = str(_visible_content(final_write).get("body", ""))
+        assert (
+            "⚠️ OpenRouter unavailable (503) — Primary could not complete the reply. Try again shortly." in visible_body
+        )
+        assert secret not in visible_body
+        assert "***redacted***" not in visible_body
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("note_kind", "expected_stream_status", "expected_ai_run_status"),
+    [
+        pytest.param(NoteKind.CANCELLED, STREAM_STATUS_CANCELLED, "cancelled", id="cancelled"),
+        pytest.param(NoteKind.RESTART, STREAM_STATUS_ERROR, "error", id="restart"),
+    ],
+)
+async def test_approval_cancellation_and_restart_notes_omit_structured_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+    note_kind: NoteKind,
+    expected_stream_status: str,
+    expected_ai_run_status: str,
+) -> None:
+    """Cancellation and restart approval notes never emit io.mindroom.ai_run['error']."""
+    del echo_tool
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        assert await gateway.write_approval_failure_note(
+            continuation.response_event_id,
+            approval_id=continuation.approval_id,
+            note=note_kind,
+            text="",
+            target=continuation_target(continuation),
+            model_name=continuation.runtime_model_name,
+            error_info={"kind": "runtime_error", "title": "Reply failed", "summary": "ignored", "retryable": False},
+        )
+        note_write = turn.homeserver.writes[-1]
+        assert _stream_status(note_write) == expected_stream_status
+        assert _ai_run(note_write) == {
+            "version": 1,
+            "status": expected_ai_run_status,
+            "model": model_payload(turn.bot.config, "default"),
+        }
+    finally:
+        await shutdown_approval_runtime()
+
+
 # ---------------------------------------------------------------------------
 # 6. Rejected team regeneration and handled FailedReply without metadata builder
 # ---------------------------------------------------------------------------
@@ -1514,7 +1680,18 @@ async def test_handled_failed_reply_without_metadata_builder_reports_error_ai_ru
 
     writes = turn.homeserver.writes
     assert "prep boom" in str(_visible_content(writes[-1]).get("body", ""))
-    assert _ai_run(writes[-1]) == {"version": 1, "status": "error", "model": model}
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model,
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "prep boom",
+            "retryable": False,
+            "fallback": "⚠️ prep boom",
+        },
+    }
     _assert_only_final_write_reports_error(writes, model)
     if streaming:
         # The failure text reaches the room in a progress edit, after the turn settled its error metadata.
@@ -1601,6 +1778,13 @@ async def test_collected_failure_after_preparation_keeps_prepared_context_and_co
         **prepared_ai_run,
         "status": "error",
         "model": model_payload(turn.bot.config, "default"),
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "post-prep boom",
+            "retryable": False,
+            "fallback": "⚠️ post-prep boom",
+        },
     }
 
 
@@ -1642,10 +1826,319 @@ async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
         **records.hooks(),
     )
     writes = homeserver.writes
-    expected: dict[str, Any] = {"version": 1, "status": "error"}
+    expected: dict[str, Any] = {
+        "version": 1,
+        "status": "error",
+        "error": {
+            "kind": "runtime_error",
+            "title": "Reply failed",
+            "summary": "prep failed",
+            "retryable": False,
+            "fallback": "[general] ⚠️ Error: prep failed",
+        },
+    }
     if model is not None:
         expected["model"] = model
     assert _ai_run(writes[-1]) == expected
     _assert_only_final_write_reports_error(writes, model)
     # A progress edit showed the failure after the error metadata settled, and stayed status-less.
     assert any("prep failed" in str(_visible_content(write).get("body", "")) for write in writes[:-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "collected"])
+async def test_full_run_stream_stalled_emits_structured_ai_run_error_and_omits_agent_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    streaming: bool,
+) -> None:
+    """A full-run stream stall emits structured ai_run.error with model display name and clean own-user copy."""
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        scripts={"default": [[raising(stall)]]},
+    )
+
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+
+    writes = turn.homeserver.writes
+    final_body = str(_visible_content(writes[-1]).get("body", ""))
+    assert final_body == "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min."
+    assert not final_body.startswith("[general]")
+    final_ai_run = _ai_run(writes[-1])
+    assert final_ai_run is not None
+    assert final_ai_run["status"] == "error"
+    assert final_ai_run["run_id"]
+    assert final_ai_run["error"] == {
+        "kind": "stream_stalled",
+        "title": "Primary stopped responding",
+        "summary": "OpenRouter sent no data for 5 min.",
+        "detail": "Model stream stalled: no provider event for 300s",
+        "code": STREAM_STALLED,
+        "status_code": 504,
+        "provider": "OpenRouter",
+        "retryable": True,
+        "action": "continue",
+        "fallback": "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
+    }
+    _assert_only_final_write_reports_error(writes, model_payload(turn.bot.config, "default"))
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_failed_reply_without_extra_content_populates_ai_run_error(tmp_path: Path) -> None:
+    """A FailedReply stream with no caller metadata collector still emits terminal ai_run.error on its final write."""
+    config = _config(tmp_path)
+    config.defaults.streaming.update_interval = 0.0
+    config.defaults.streaming.min_update_interval = 0.0
+    config.defaults.streaming.max_idle = 0.0
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    homeserver = _Homeserver()
+    client.room_send = AsyncMock(side_effect=homeserver.room_send)
+    records = FakeReplyRecords()
+    model = model_payload(config, "default")
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+
+    async def chunks() -> AsyncIterator[str | FailedReply]:
+        yield "Partial answer."
+        await asyncio.sleep(0.02)
+        yield FailedReply(
+            "\n\n⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
+            stall,
+        )
+
+    await send_streaming_response(
+        client,
+        MessageTarget.resolve(_ROOM, None, None, room_mode=True),
+        config,
+        runtime_paths_for(config),
+        chunks(),
+        extra_content=None,
+        active_model=lambda: model,
+        **records.hooks(),
+    )
+
+    writes = homeserver.writes
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model,
+        "error": {
+            "kind": "stream_stalled",
+            "title": "Primary stopped responding",
+            "summary": "OpenRouter sent no data for 5 min.",
+            "detail": "Model stream stalled: no provider event for 300s",
+            "code": STREAM_STALLED,
+            "status_code": 504,
+            "provider": "OpenRouter",
+            "retryable": True,
+            "action": "continue",
+            "fallback": "⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
+        },
+    }
+    _assert_only_final_write_reports_error(writes, model)
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_empty_failed_reply_omits_error_fallback(tmp_path: Path) -> None:
+    """An empty FailedReply omits io.mindroom.ai_run.error.fallback instead of synthesizing plain_text."""
+    config = _config(tmp_path)
+    config.defaults.streaming.update_interval = 0.0
+    config.defaults.streaming.min_update_interval = 0.0
+    config.defaults.streaming.max_idle = 0.0
+    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    homeserver = _Homeserver()
+    client.room_send = AsyncMock(side_effect=homeserver.room_send)
+    records = FakeReplyRecords()
+    model = model_payload(config, "default")
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+
+    async def chunks() -> AsyncIterator[str | FailedReply]:
+        yield "Partial answer."
+        await asyncio.sleep(0.02)
+        yield FailedReply("", stall)
+
+    await send_streaming_response(
+        client,
+        MessageTarget.resolve(_ROOM, None, None, room_mode=True),
+        config,
+        runtime_paths_for(config),
+        chunks(),
+        extra_content=None,
+        active_model=lambda: model,
+        **records.hooks(),
+    )
+
+    writes = homeserver.writes
+    assert _visible_content(writes[-1]).get("body") == "Partial answer."
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model,
+        "error": {
+            "kind": "stream_stalled",
+            "title": "Primary stopped responding",
+            "summary": "OpenRouter sent no data for 5 min.",
+            "detail": "Model stream stalled: no provider event for 300s",
+            "code": STREAM_STALLED,
+            "status_code": 504,
+            "provider": "OpenRouter",
+            "retryable": True,
+            "action": "continue",
+        },
+    }
+    _assert_only_final_write_reports_error(writes, model)
+
+
+@pytest.mark.asyncio
+async def test_team_run_failure_emits_structured_ai_run_error_with_model_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed team turn populates io.mindroom.ai_run.error with the resolved team model display name."""
+    stall = ProviderUnavailable(
+        "Model stream stalled: no provider event for 300s",
+        provider="OpenRouter",
+        status_code=504,
+        code=STREAM_STALLED,
+    )
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=True,
+        scripts={"default": [[raising(stall)]]},
+    )
+
+    assert (
+        await turn.runner.generate_team_response_helper(
+            _plain_request(_target()),
+            member_names=["writer", "checker"],
+            team_mode="collaborate",
+        )
+        == Owned()
+    )
+
+    writes = turn.homeserver.writes
+    final_body = str(_visible_content(writes[-1]).get("body", ""))
+    assert final_body == ("[Team (Writer, Checker)] ⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.")
+    final_ai_run = _ai_run(writes[-1])
+    assert final_ai_run is not None
+    assert final_ai_run["status"] == "error"
+    assert final_ai_run["error"] == {
+        "kind": "stream_stalled",
+        "title": "Primary stopped responding",
+        "summary": "OpenRouter sent no data for 5 min.",
+        "detail": "Model stream stalled: no provider event for 300s",
+        "code": STREAM_STALLED,
+        "status_code": 504,
+        "provider": "OpenRouter",
+        "retryable": True,
+        "action": "continue",
+        "fallback": "[Team (Writer, Checker)] ⚠️ Primary stopped responding — OpenRouter sent no data for 5 min.",
+    }
+    _assert_only_final_write_reports_error(writes, model_payload(turn.bot.config, "default"))
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_error_notes_override_fallback_with_rendered_note_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """Owed and approval NoteKind.ERROR rows override stale error.fallback with the rendered note text."""
+    del echo_tool
+    stale_error = {
+        "kind": "runtime_error",
+        "title": "Reply failed",
+        "summary": "boom",
+        "retryable": False,
+        "fallback": "stale fallback",
+    }
+
+    # (a) Approval NoteKind.ERROR overrides stale fallback with the rendered approval note text.
+    turn = await _setup_turn(
+        tmp_path / "approval",
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+        assert continuation is not None
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        assert await gateway.write_approval_failure_note(
+            continuation.response_event_id,
+            approval_id=continuation.approval_id,
+            note=NoteKind.ERROR,
+            text="Rendered approval error note.",
+            target=continuation_target(continuation),
+            model_name=continuation.runtime_model_name,
+            error_info=stale_error,
+        )
+        approval_write = turn.homeserver.writes[-1]
+        assert "Rendered approval error note." in str(_visible_content(approval_write).get("body", ""))
+        assert (_ai_run(approval_write) or {})["error"] == {**stale_error, "fallback": "Rendered approval error note."}
+    finally:
+        await shutdown_approval_runtime()
+
+    # (b) Owed NoteKind.ERROR overrides stale fallback with the rendered owed note text.
+    turn_owed = await _setup_turn(tmp_path / "owed", monkeypatch, scripts={"default": [answer("unused")]})
+    gateway_owed = unwrap_extracted_collaborator(turn_owed.bot._delivery_gateway)
+    request = _plain_request(_target())
+    async with turn_owed.bot._reply_runtime.span_scope() as slot:
+        handle = await turn_owed.bot._reply_runtime.claim(
+            sources=request.sources,
+            room_id=_ROOM,
+            thread_id=None,
+            placeholder=AGENT_PLACEHOLDER,
+            show_tool_calls=True,
+        )
+        assert isinstance(handle, SpanHandle)
+        slot.handle = handle
+        await turn_owed.runner._send_placeholder(
+            request,
+            history_scope=turn_owed.bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
+            execution_identity=turn_owed.runner.deps.tool_runtime.build_execution_identity(
+                target=_target(),
+                user_id=request.user_id,
+            ),
+            placeholder_message=AGENT_PLACEHOLDER,
+        )
+        reply_id, span = handle.reply_id, handle.span
+    await turn_owed.bot.journal_principal().replies.update(
+        reply_id,
+        lambda current: rl.dispatch_failed(
+            current,
+            span,
+            error_text="Rendered owed error note.",
+            error_info=stale_error,
+            now_ns=time.time_ns(),
+        ),
+    )
+    await gateway_owed._flush_owed_write(reply_id)
+    owed_write = turn_owed.homeserver.writes[-1]
+    assert _visible_content(owed_write).get("body") == "Rendered owed error note."
+    assert (_ai_run(owed_write) or {})["error"] == {**stale_error, "fallback": "Rendered owed error note."}

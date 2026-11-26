@@ -59,7 +59,6 @@ chat_ui.open_panel(panel="computer")  # shows it again, for example for a login
 ```
 
 To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
-`web_browser_tools` opens a browser on the host operating system and does not show anything in Chat.
 
 The Computer panel needs an enabled [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/), which owns the worker, browser, proxy, and Chat configuration and describes watching, taking control, and handing back.
 If the computer is unavailable, Chat shows an unavailable state in the notice.

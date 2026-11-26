@@ -791,17 +791,17 @@ async def test_a_worker_call_of_another_tool_carries_no_hook_variables(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Only the shell tool's commands receive the changes, so a worker-routed `python` call sends none."""
-    python = _worker_tool(monkeypatch, tmp_path, "python", "run_python_code")
+    """Only the shell tool's commands receive the changes, so a worker-routed `filesystem` call sends none."""
+    filesystem = _worker_tool(monkeypatch, tmp_path, "filesystem", "ls")
 
     @hook(EVENT_TOOL_ENVIRONMENT)
     async def every_call(ctx: ToolEnvironmentContext) -> None:
         ctx.set_env("PLUGIN_VALUE", "from-hook")
 
-    outcome = await python.call(_registry(every_call), {"code": "print('ran')"})
+    outcome = await filesystem.call(_registry(every_call), {})
 
     assert not outcome.is_error, outcome.content
-    assert "PLUGIN_VALUE" not in python.sent[-1].get("execution_env", {})
+    assert "PLUGIN_VALUE" not in filesystem.sent[-1].get("execution_env", {})
 
 
 def _shell_environment_context(tmp_path: Path) -> ToolEnvironmentContext:

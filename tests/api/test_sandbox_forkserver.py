@@ -755,42 +755,6 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         assert response.ok is True
         assert (workdir / "out.txt").read_text(encoding="utf-8") == "hello forkserver"
 
-        response = sandbox_runner_module._execute_request_subprocess_sync(
-            execute_call(
-                runtime_paths,
-                config,
-                tool_name="python",
-                function_name="run_python_code",
-                args=['import os\nresult = os.environ.get("TEST_EXECUTION_ENV")', "result"],
-                kwargs={},
-                execution_env={"TEST_EXECUTION_ENV": "explicit-value"},
-            ),
-        )
-        assert response.ok is True
-        assert response.result == "explicit-value"
-
-        # Python-tool code can import modules saved into its workspace, which
-        # only follows installed modules on sys.path.
-        (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
-        response = sandbox_runner_module._execute_request_subprocess_sync(
-            execute_call(
-                runtime_paths,
-                config,
-                tool_name="python",
-                function_name="run_python_code",
-                args=[
-                    "import os, sys\n"
-                    "import helper\n"
-                    "cwd = os.getcwd()\n"
-                    "result = f'{helper.VALUE}|{sys.path[-1] == cwd}|{cwd in sys.path[:-1]}'",
-                    "result",
-                ],
-                kwargs={},
-                base_dir=str(workdir),
-            ),
-        )
-        assert response.ok is True
-        assert response.result == "helper-value|True|False"
     finally:
         manager.shutdown()
 

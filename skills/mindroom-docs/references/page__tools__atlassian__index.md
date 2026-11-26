@@ -10,7 +10,6 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
   <source src="https://github.com/user-attachments/assets/5a12e5b4-f8cd-4e88-9837-80e2f7678036" type="video/mp4">
 </video>
 
-The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
 Their function names do not collide with the `atlassian` functions, so an agent can have both.
 
 ## What It Does
@@ -145,7 +144,7 @@ agents:
 - A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
 - `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
-- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
 
 ## Connect An Account
 

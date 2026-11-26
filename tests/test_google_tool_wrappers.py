@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
-import logging
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,13 +14,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
-from agno.tools.function import Function
-from agno.tools.google.gmail import GmailTools as AgnoGmailTools
-from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient import http as google_http_module
 from googleapiclient.errors import HttpError
+from structlog.testing import capture_logs
 
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -33,10 +29,11 @@ from mindroom.credentials.manager import (
 )
 from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
+from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.custom_tools.google_service import _ThreadLocalGoogleServiceMixin
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.custom_tools.google_tasks import GoogleTasksTools
 from mindroom.oauth import client as oauth_client_module
@@ -215,7 +212,7 @@ def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(google_service, "_GoogleServiceThreadState", RacingThreadState)
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -246,7 +243,7 @@ def test_google_account_cache_clears_when_credential_key_changes(
 ) -> None:
     """Account-derived identifiers must not survive a requester credential switch."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -263,7 +260,7 @@ def test_google_account_cache_clears_when_credential_key_changes(
 def test_google_refresh_revision_adoption_preserves_active_service_and_account_caches() -> None:
     """Same-account refresh must not invalidate service state midway through one tool call."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -291,7 +288,7 @@ def test_google_refresh_revision_adoption_preserves_active_service_and_account_c
 def test_google_account_cache_is_thread_local(cache_field: str, values: tuple[object, object]) -> None:
     """Concurrent requester workers must not share account-derived identifiers."""
 
-    class Tool(ThreadLocalGoogleServiceMixin):
+    class Tool(_ThreadLocalGoogleServiceMixin):
         pass
 
     tool = Tool()
@@ -876,26 +873,17 @@ def test_google_final_401_provider_text_is_redacted_before_toolkit_logging(
 
     monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
     tool.service = RejectedRequest()
-    agno_log_output = io.StringIO()
-    agno_logger = agno_log_module.team_logger
-    agno_handler = logging.StreamHandler(agno_log_output)
-    agno_logger.addHandler(agno_handler)
-    monkeypatch.setattr(agno_log_module, "logger", agno_logger)
-
-    try:
+    with capture_logs() as captured_logs:
         if operation == "calendar":
             result = tool.list_events(limit=1, start_date="2026-01-01T00:00:00")
         else:
             result = tool.get_latest_emails(1)
-    finally:
-        agno_logger.removeHandler(agno_handler)
-        agno_handler.close()
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "access_rejected"
     assert "provider-controlled-final-401-secret" not in result
-    assert "provider-controlled-final-401-secret" not in agno_log_output.getvalue()
+    assert "provider-controlled-final-401-secret" not in repr(captured_logs)
 
 
 def test_gmail_batch_tracks_final_item_401() -> None:
@@ -967,12 +955,11 @@ def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
         return json.dumps({"error": "provider-controlled 401 detail"})
 
     tool.functions = {
-        operation_name: Function(name=operation_name, entrypoint=swallowed_resource_401),
+        operation_name: swallowed_resource_401,
     }
     tool._wrap_oauth_function_entrypoints()
 
-    entrypoint = tool.functions[operation_name].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions[operation_name]
     result = entrypoint()
     assert isinstance(result, str)
     payload = json.loads(result)
@@ -1157,8 +1144,8 @@ def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
         return json.dumps({"error": inner_payload["error"]})
 
     tool.functions = {
-        "inner_operation": Function(name="inner_operation", entrypoint=inner_operation),
-        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+        "inner_operation": inner_operation,
+        "outer_operation": outer_operation,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -1221,8 +1208,8 @@ def test_google_wrapper_answers_raised_auth_failure_at_outermost_call(
 
     failing_operation = raise_refresh_rejection if reason == "refresh_rejected" else raise_final_401
     tool.functions = {
-        "failing_operation": Function(name="failing_operation", entrypoint=failing_operation),
-        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+        "failing_operation": failing_operation,
+        "outer_operation": outer_operation,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -1406,7 +1393,7 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
             return f"Unexpected error: {exc}"
         return "unexpected success"
 
-    tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+    tool.functions = {"swallowed_failure": swallowed_failure}
     tool._wrap_oauth_function_entrypoints()
 
     payload = json.loads(tool.swallowed_failure())
@@ -1468,7 +1455,9 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
         _version: str,
         *,
         http: Any,  # noqa: ANN401
+        cache_discovery: bool = False,
     ) -> object:
+        del cache_discovery
         built_http.append(http)
         return object()
 
@@ -2128,7 +2117,7 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         message = "refresh rejected"
         raise RefreshError(message, {"error": "invalid_grant"})
 
-    def swallowed_upload(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def upload_file(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         try:
             self.creds.refresh(object())
         except RefreshError as exc:
@@ -2136,14 +2125,13 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         return "unexpected success"
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
-    monkeypatch.setattr(GoogleDriveTools, "_upload_file", swallowed_upload)
+    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions["google_drive_upload_file"]
 
     payload = json.loads(entrypoint("unused"))
 
@@ -2205,8 +2193,8 @@ def test_google_wrapper_keeps_refresh_rejection_state_per_call(
         return "success"
 
     tool.functions = {
-        "swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure),
-        "successful_call": Function(name="successful_call", entrypoint=successful_call),
+        "swallowed_failure": swallowed_failure,
+        "successful_call": successful_call,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -2271,7 +2259,7 @@ def test_google_wrapper_reports_missing_connection_after_terminal_deletion(
                 return f"Unexpected error: {exc}"
             return "unexpected success"
 
-        tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+        tool.functions = {"swallowed_failure": swallowed_failure}
         tool._wrap_oauth_function_entrypoints()
 
     first_payload = json.loads(tools[0].swallowed_failure())
@@ -2389,23 +2377,17 @@ def test_google_wrappers_read_the_service_account_from_env_file_under_a_blank_ex
 
     service_account_path = str(runtime_paths.config_dir / "google" / "sa.json")
     assert tool.creds is None
-    if isinstance(tool, GmailTools):
-        assert (tool._get_service_account_path(), tool._get_delegated_user()) == (
-            service_account_path,
-            "alice@example.com",
-        )
-    else:
-        assert (tool.service_account_path, tool.delegated_user) == (service_account_path, "alice@example.com")
+    assert (tool.service_account_path, tool.delegated_user) == (service_account_path, "alice@example.com")
     assert tool._should_fallback_to_original_auth() is True
 
 
 @pytest.mark.parametrize(
     ("toolkit_class", "auth_owner", "auth_name"),
     [
-        (GmailTools, AgnoGmailTools, "_resolve_creds"),
+        (GmailTools, google_service._GoogleOAuthToolkit, "_service_account_auth"),
         (GoogleDocsTools, google_service._GoogleOAuthToolkit, "_service_account_auth"),
     ],
-    ids=["agno-based", "owned"],
+    ids=["gmail", "google-docs"],
 )
 def test_a_service_account_toolkit_authenticates_through_its_class_own_auth(
     monkeypatch: pytest.MonkeyPatch,
@@ -2620,8 +2602,8 @@ def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_wo
         creds=_valid_credentials(),
     )
     tool.functions = {
-        "inner": Function(name="inner", entrypoint=lambda: "inner"),
-        "outer": Function(name="outer", entrypoint=lambda: tool.inner()),
+        "inner": lambda: "inner",
+        "outer": lambda: tool.inner(),
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -2649,7 +2631,7 @@ def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_wo
         active_calls -= 1
         return "done"
 
-    tool.functions = {"serialized": Function(name="serialized", entrypoint=serialized_call)}
+    tool.functions = {"serialized": serialized_call}
     tool._wrap_oauth_function_entrypoints()
 
     def second_call() -> str:
@@ -2682,7 +2664,7 @@ def test_google_wrapper_supplied_credentials_authenticate_other_worker_threads(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
     )
-    tool.functions = {"read_token": Function(name="read_token", entrypoint=lambda: tool.creds.token)}
+    tool.functions = {"read_token": lambda: tool.creds.token}
     tool._wrap_oauth_function_entrypoints()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -2705,7 +2687,7 @@ def test_google_wrapper_keeps_supplied_credentials_final_401_as_tool_error(
         tool._mark_google_authorization_rejected()
         return rejected
 
-    tool.functions = {"rejected_operation": Function(name="rejected_operation", entrypoint=rejected_operation)}
+    tool.functions = {"rejected_operation": rejected_operation}
     tool._wrap_oauth_function_entrypoints()
 
     assert tool.rejected_operation() == rejected
@@ -2733,18 +2715,17 @@ def test_google_drive_supplied_credentials_write_without_scope_upgrade_prompt(
         worker_target=None,
     )
 
-    def upload(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def upload_file(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         return "uploaded"
 
-    monkeypatch.setattr(GoogleDriveTools, "_upload_file", upload)
+    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
         creds=_valid_credentials(),
     )
-    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions["google_drive_upload_file"]
 
     assert entrypoint("unused") == "uploaded"
 
@@ -2801,12 +2782,193 @@ def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_err
         )
 
 
-def test_agno_resolve_creds_routes_through_mindroom_auth(runtime_paths: RuntimePaths, tmp_path: Path) -> None:
-    """Agno's auth decorator resolves credentials via MindRoom's policy, never its own OAuth flow."""
+_GOOGLE_IDENTITY_SCOPES = frozenset(
+    {
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("toolkit_factory", "expected_scopes", "delegated_user"),
+    [
+        pytest.param(
+            lambda rp, cm: GoogleDriveTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/drive",),
+            None,
+            id="drive-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleDriveTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                write=False,
+                scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            ),
+            ("https://www.googleapis.com/auth/drive.readonly",),
+            None,
+            id="drive-explicit-scopes",
+        ),
+        pytest.param(
+            lambda rp, cm: GmailTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ),
+            "alice@example.com",
+            id="gmail-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GmailTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                include_tools=["get_latest_emails"],
+                scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            ),
+            ("https://www.googleapis.com/auth/gmail.readonly",),
+            "alice@example.com",
+            id="gmail-explicit-scopes",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleSheetsTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/spreadsheets",
+            ),
+            None,
+            id="sheets-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleSheetsTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                read=True,
+                create=False,
+                update=False,
+            ),
+            ("https://www.googleapis.com/auth/spreadsheets.readonly",),
+            None,
+            id="sheets-read-only",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleCalendarTools(runtime_paths=rp, credentials_manager=cm),
+            (
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/calendar",
+            ),
+            None,
+            id="calendar-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleDocsTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/documents",),
+            None,
+            id="docs-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleTasksTools(runtime_paths=rp, credentials_manager=cm),
+            ("https://www.googleapis.com/auth/tasks",),
+            None,
+            id="tasks-default",
+        ),
+        pytest.param(
+            lambda rp, cm: GoogleBigQueryTools(
+                runtime_paths=rp,
+                credentials_manager=cm,
+                dataset="analytics",
+                project="example-project",
+                location="US",
+            ),
+            ("https://www.googleapis.com/auth/cloud-platform.read-only",),
+            None,
+            id="bigquery-default",
+        ),
+    ],
+)
+def test_google_service_account_auth_requests_only_toolkit_api_scopes(
+    toolkit_factory: Callable[[RuntimePaths, CredentialsManager], google_service._GoogleOAuthToolkit],
+    expected_scopes: tuple[str, ...],
+    delegated_user: str | None,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service-account token minting must never request user OIDC sign-in scopes and must honor toolkit scopes."""
+    from google.oauth2 import service_account  # noqa: PLC0415
+
+    service_account_path = str(tmp_path / "service-account.json")
+    env_overrides: dict[str, str] = {"GOOGLE_SERVICE_ACCOUNT_FILE": service_account_path}
+    if delegated_user is not None:
+        env_overrides["GOOGLE_DELEGATED_USER"] = delegated_user
+    sa_runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, **env_overrides},
+    )
+
+    recorded: list[tuple[str, tuple[str, ...]]] = []
+    delegated_subjects: list[str] = []
+
+    class _FakeServiceAccountCreds:
+        valid = True
+
+        def with_subject(self, subject: str) -> _FakeServiceAccountCreds:
+            delegated_subjects.append(subject)
+            return self
+
+    def fake_from_file(path: str, *, scopes: tuple[str, ...]) -> _FakeServiceAccountCreds:
+        recorded.append((path, tuple(scopes)))
+        return _FakeServiceAccountCreds()
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_file", fake_from_file)
+    tool = toolkit_factory(sa_runtime_paths, CredentialsManager(tmp_path / "credentials"))
+
+    tool._authenticate()
+
+    assert recorded == [(service_account_path, expected_scopes)]
+    assert _GOOGLE_IDENTITY_SCOPES.isdisjoint(recorded[0][1])
+    if delegated_user is not None:
+        assert delegated_subjects == [delegated_user]
+    else:
+        assert delegated_subjects == []
+
+
+@pytest.mark.parametrize("delegated_user_env", [None, "", "   "])
+def test_gmail_service_account_auth_requires_delegated_user(
+    delegated_user_env: str | None,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gmail service-account auth must fail before minting credentials when GOOGLE_DELEGATED_USER is unset."""
+    from google.oauth2 import service_account  # noqa: PLC0415
+
+    process_env = {
+        **runtime_paths.process_env,
+        "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+    }
+    if delegated_user_env is not None:
+        process_env["GOOGLE_DELEGATED_USER"] = delegated_user_env
+    else:
+        process_env.pop("GOOGLE_DELEGATED_USER", None)
+    sa_runtime_paths = replace(runtime_paths, process_env=process_env)
+
+    called = False
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_file", fail_if_called)
     tool = GmailTools(
-        runtime_paths=runtime_paths,
+        runtime_paths=sa_runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
     )
 
-    with pytest.raises(OAuthConnectionRequired):
-        tool._resolve_creds()
+    with pytest.raises(RuntimeError, match="GOOGLE_DELEGATED_USER"):
+        tool._authenticate()
+
+    assert called is False

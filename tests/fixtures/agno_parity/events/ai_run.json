@@ -218,6 +218,14 @@
       },
       "tools": {
         "count": 0
+      },
+      "error": {
+        "kind": "runtime_error",
+        "title": "Reply failed",
+        "summary": "Rate limited",
+        "retryable": false,
+        "provider": "Synthetic",
+        "fallback": "⚠️ Rate limited"
       }
     }
   },

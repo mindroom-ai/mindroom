@@ -20,6 +20,8 @@ from mindroom.config.main import Config
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers.models import (
+    GitHubPRCheckpoint,
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
@@ -65,12 +67,18 @@ class _Harness:
         admins: list[str] | None = None,
         aliases: dict[str, list[str]] | None = None,
         room_state_events: dict[str, list[dict[str, object]]] | None = None,
+        max_reactive_triggers_per_owner: int = 50,
+        max_github_pr_watches_per_owner: int = 20,
     ) -> None:
         self.paths: RuntimePaths = test_runtime_paths(tmp_path)
         self.config = Config(
             administrators=admins or [],
             authorization=AuthorizationConfig(aliases=aliases or {}),
-            external_trigger_policy=ExternalTriggerPolicyConfig(admin_users=admins or []),
+            external_trigger_policy=ExternalTriggerPolicyConfig(
+                admin_users=admins or [],
+                max_reactive_triggers_per_owner=max_reactive_triggers_per_owner,
+                max_github_pr_watches_per_owner=max_github_pr_watches_per_owner,
+            ),
             agents={
                 "assistant": AgentConfig(display_name="Assistant", rooms=["lobby", ROOM_A, ROOM_B, ROOM_C]),
                 "ops": AgentConfig(display_name="Ops", rooms=[ROOM_B]),
@@ -120,6 +128,7 @@ class _Harness:
             room_id=room_id,
             thread_id=extra.pop("thread_id", None),
             new_thread=extra.pop("new_thread", False),
+            reopen_on_fire=extra.pop("reopen_on_fire", False),
             agent="assistant",
         )
         base: dict[str, Any] = {
@@ -153,11 +162,13 @@ class _Harness:
         ts = float(extra.pop("created_at", 1_764_000_100.0))
         cursor: RoomCursor | None = extra.pop("initial_cursor", None)
         checkpoint: ThreadCheckpoint | None = extra.pop("initial_checkpoint", None)
+        gh_checkpoint: GitHubPRCheckpoint | None = extra.pop("initial_github_pr_checkpoint", None)
         target = TriggerTargetSpec(
             agent=agent,
             room_id=target_room,
             thread_id=extra.pop("thread_id", None),
             new_thread=extra.pop("new_thread", False),
+            reopen_on_fire=extra.pop("reopen_on_fire", False),
             prompt=prompt,
         )
         record = ReactiveTriggerRecord(
@@ -169,7 +180,12 @@ class _Harness:
             updated_at=ts,
             **extra,
         )
-        return self.reactive_store.create_trigger(record, initial_cursor=cursor, initial_checkpoint=checkpoint)
+        return self.reactive_store.create_trigger(
+            record,
+            initial_cursor=cursor,
+            initial_checkpoint=checkpoint,
+            initial_github_pr_checkpoint=gh_checkpoint,
+        )
 
     def req(
         self,
@@ -206,6 +222,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "wh_deploy",
         room_id="lobby",
         thread_id="$deploy_thread",
+        reopen_on_fire=True,
         public_key=pub_key,
         key_id="deploy-key-secret-id",
         description="Deploy notifications",
@@ -230,6 +247,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         target_room=ROOM_B,
         agent="ops",
         thread_id="$ops_thread",
+        reopen_on_fire=True,
         description="Private ops escalation",
         prompt="Secret escalation instructions",
         created_at=2.0,
@@ -262,6 +280,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "target_room_id": ROOM_A,
         "target_thread_id": "$deploy_thread",
         "thread_mode": "thread",
+        "reopen_on_fire": True,
         "enabled": True,
         "disabled_reason": None,
         "once": False,
@@ -295,6 +314,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "prompt": "Triage urgent",
         "target_thread_id": None,
         "thread_mode": "origin",
+        "reopen_on_fire": False,
         "enabled": False,
         "disabled_reason": "once_consumed",
         "once": True,
@@ -308,10 +328,12 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "can_manage": False,
     }.items() <= alice_rows["wh_once"].items()
     assert alice_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
+    assert alice_rows["tr_watch_msg"]["reopen_on_fire"] is True
     assert alice_rows["tr_watch_unreachable"]["prompt"] == "Secret tag prompt"
 
     bob_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, BOB).json()["triggers"]}
     assert bob_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
+    assert bob_rows["tr_watch_msg"]["reopen_on_fire"] is True
     assert bob_rows["tr_watch_unreachable"]["prompt"] is None
     assert bob_rows["tr_watch_unreachable"]["target_room_id"] is None
 
@@ -324,6 +346,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "target_room_id": None,
         "target_thread_id": None,
         "thread_mode": "thread",
+        "reopen_on_fire": False,
         "can_manage": False,
     }.items() <= {row["trigger_id"]: row for row in carol_resp.json()["triggers"]}["tr_watch_msg"].items()
     for leaked in ("Secret escalation instructions", "Private ops escalation", ROOM_B, "$ops_thread"):
@@ -418,3 +441,75 @@ def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag
     h.client.room_get_state = _never_answers
     monkeypatch.setattr(room_reads, "_ROOM_READ_TIMEOUT_SECONDS", 0.05)
     assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503
+
+
+def test_github_pr_trigger_projects_with_pr_closed_reopen_on_fire_and_reenable_reseeds(tmp_path: Path) -> None:
+    """Room triggers API surfaces github_pr rows cleanly and re-enabling resets seeded=False on the checkpoint."""
+    h = _Harness(tmp_path)
+    h.add_reactive(
+        "tr_pr_42",
+        GitHubPRSourceSpec(repo="matrix-org/synapse", number=42),
+        description="Watch PR matrix-org/synapse#42",
+        prompt="Inspect PR #42 update",
+        thread_id="$thread_root",
+        reopen_on_fire=True,
+        enabled=False,
+        disabled_reason="pr_closed",
+        initial_github_pr_checkpoint=GitHubPRCheckpoint(
+            head_sha="deadbeef",
+            pr_state="closed",
+            seeded=True,
+            next_poll_at=9_999_999_999.0,
+            consecutive_errors=3,
+            updated_at=1_764_000_100.0,
+        ),
+    )
+
+    resp = h.req("GET", ROOM_A, ALICE)
+    assert resp.status_code == 200
+    rows = resp.json()["triggers"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["trigger_id"] == "tr_pr_42"
+    assert row["kind"] == "github_pr"
+    assert row["relation"] == "target"
+    assert row["reopen_on_fire"] is True
+    assert row["enabled"] is False
+    assert row["disabled_reason"] == "pr_closed"
+    assert row["target_thread_id"] == "$thread_root"
+
+    reenable = h.req("PATCH", ROOM_A, ALICE, "tr_pr_42", {"enabled": True})
+    assert reenable.status_code == 200
+    assert (reenable.json()["enabled"], reenable.json()["disabled_reason"]) == (True, None)
+    cp = h.reactive_store.get_github_pr_checkpoint("tr_pr_42")
+    assert cp is not None
+    assert cp.seeded is False
+    assert cp.consecutive_errors == 0
+    assert cp.next_poll_at <= time.time() + 1.0
+    assert h.wake_reactive.call_count == 1
+
+
+def test_reenabling_github_pr_trigger_over_quota_returns_409(tmp_path: Path) -> None:
+    """PATCH enabling a paused github_pr watch returns 409 when max_github_pr_watches_per_owner is reached."""
+    h = _Harness(tmp_path, max_github_pr_watches_per_owner=1)
+    h.add_reactive("tr_pr_paused", GitHubPRSourceSpec(repo="matrix-org/synapse", number=1), enabled=False)
+    h.add_reactive("tr_pr_active", GitHubPRSourceSpec(repo="matrix-org/synapse", number=2), enabled=True)
+
+    resp = h.req("PATCH", ROOM_A, ALICE, "tr_pr_paused", {"enabled": True})
+    assert resp.status_code == 409
+    assert "GitHub PR watch limit" in resp.json()["detail"]
+    paused = h.reactive_store.get_trigger("tr_pr_paused")
+    assert paused is not None
+    assert paused.enabled is False
+
+    h2 = _Harness(tmp_path / "owner_cap", max_reactive_triggers_per_owner=1, max_github_pr_watches_per_owner=5)
+    h2.add_reactive(
+        "tr_pr_closed",
+        GitHubPRSourceSpec(repo="matrix-org/synapse", number=1),
+        enabled=False,
+        disabled_reason="pr_closed",
+    )
+    h2.add_reactive("tr_room_active", RoomMessageSourceSpec(room_id=ROOM_A), enabled=True)
+    resp2 = h2.req("PATCH", ROOM_A, ALICE, "tr_pr_closed", {"enabled": True})
+    assert resp2.status_code == 409
+    assert "reactive trigger limit" in resp2.json()["detail"]

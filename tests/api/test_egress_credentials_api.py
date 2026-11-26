@@ -105,13 +105,13 @@ def _signed_headers(key: Any, name: str) -> dict[str, str]:  # noqa: ANN401
     }
 
 
-# A static runner's URL; without one, shell and python calls run in the primary and no agent uses the broker.
+# A static runner's URL; without one, shell calls run in the primary and no agent uses the broker.
 _RUNNER_URL = "http://sandbox-runner.test"
 
 
 @pytest.fixture
 def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
-    """Serve the real API with signed users and agents that use Agent Keys (shell or python and `egress_credentials`)."""
+    """Serve the real API with signed users and agents that use Agent Keys (shell and `egress_credentials`)."""
     key = _trust_signed_users(monkeypatch)
     env = {
         **trusted_upstream_env(),
@@ -145,13 +145,13 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
                 "Personal assistant",
                 private="user_agent",
                 users=("@alice:example.org", "@bob:example.org"),
-                tools=("shell", "python", "egress_credentials"),
+                tools=("shell", "egress_credentials"),
             ),
             "shared_dev": _agent_config(
                 "Shared Dev",
                 "Team agent",
                 users=("@alice:example.org", "@bob:example.org"),
-                tools=("shell", "python", "egress_credentials"),
+                tools=("shell", "egress_credentials"),
                 worker_scope="shared",
                 credential_managers=["@bob:example.org", "@carol:example.org"],
             ),
@@ -594,7 +594,7 @@ def test_every_route_is_a_404_while_the_broker_is_off(
 
 
 def test_lists_only_usable_agents_that_opted_into_agent_keys(egress_portal: dict[str, Any]) -> None:
-    """Only agents the user may use that have shell or python and the `egress_credentials` tool appear."""
+    """Only agents the user may use that have shell and the `egress_credentials` tool appear."""
     egress_portal["payload"]["agents"]["shell_only"] = _agent_config("Shell Only", "No opt-in", tools=("shell",))
     _republish(egress_portal)
     response = _listing(egress_portal, "alice")
@@ -821,7 +821,7 @@ def test_response_never_contains_secret(egress_portal: dict[str, Any]) -> None:
         pytest.param(_put_key, "unknown", "github", id="put-unknown-agent"),
         pytest.param(_put_key, "personal", "unknown", id="put-unknown-service"),
         pytest.param(_delete_key, "personal", "unknown", id="delete-unknown-service"),
-        pytest.param(_put_key, "no_shell", "github", id="without-shell-or-python"),
+        pytest.param(_put_key, "no_shell", "github", id="without-shell"),
         pytest.param(_put_key, "other_private", "github", id="no-access"),
     ],
 )
@@ -831,7 +831,7 @@ def test_unknown_agent_or_service_404(
     agent: str,
     service: str,
 ) -> None:
-    """An unknown agent or service, or an agent the user may not use or that has no shell or python, is a 404."""
+    """An unknown agent or service, or an agent the user may not use or that has no shell, is a 404."""
     response = write(egress_portal, "alice", agent, service)
     assert response.status_code == 404, response.text
 
@@ -2946,7 +2946,7 @@ def test_a_non_manager_cannot_write_services_or_keys_of_an_unscoped_agent(unscop
 
 @pytest.mark.parametrize("agent", ["no_shell", "other_private", "unknown"])
 def test_service_routes_hide_ineligible_agents(egress_portal: dict[str, Any], agent: str) -> None:
-    """Unknown agents, agents without a shell or python tool, and agents the user may not use are all 404."""
+    """Unknown agents, agents without a shell tool, and agents the user may not use are all 404."""
     portal = egress_portal
     assert _put_service(portal, "alice", agent, "notes").status_code == 404
     assert _get_service(portal, "alice", agent, "notes").status_code == 404

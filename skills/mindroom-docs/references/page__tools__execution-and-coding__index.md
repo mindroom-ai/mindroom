@@ -13,7 +13,6 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
-- [`python`] - Python code execution and package installation.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
@@ -29,18 +28,17 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 
 ### Where these tools run
 
-`filesystem`, `shell`, `python`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+`filesystem`, `shell` and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
-With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls and worker-routed `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
-Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
+Only a worker isolates `shell` and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
 
 Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
-It is the working directory (`base_dir`) of `filesystem`, `shell`, and worker-routed `python`, and generated files and charts are saved inside it.
-`python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
+It is the working directory (`base_dir`) of `filesystem` and `shell`, and generated files and charts are saved inside it.
 `base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; a [headless run](https://docs.mindroom.chat/headless/#files) can point it at a directory the caller chooses.
 
 Supported tools also take an optional `mindroom_output_path` argument.
@@ -310,7 +308,7 @@ Errors:
 
 ### Per-workspace environment
 
-An agent can set its own environment variables for worker-routed `shell` and `python`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
+An agent can set its own environment variables for worker-routed `shell`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
 The hook's behavior, limits, and the variables it cannot override are described in [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh).
 
 ```bash
@@ -388,29 +386,6 @@ agents:
       - temporary_secrets
 ```
 
-## [`python`]
-
-`python` provides `run_python_code()`, `save_to_file_and_run()`, `run_python_file_return_variable()`, `pip_install_package()`, `uv_pip_install_package()`, `read_file()`, and `list_files()`.
-It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
-Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
-Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - python
-```
-
-```python
-run_python_code("total = sum(i * i for i in range(10))", variable_to_return="total")
-save_to_file_and_run("scripts/demo.py", "result = 6 * 7", variable_to_return="result")
-run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
-pip_install_package("rich")
-```
-
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
@@ -422,7 +397,7 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
    Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
    Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
 2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell` or `filesystem`.
-3. Give each reading agent `shell`, `python`, or `filesystem`.
+3. Give each reading agent `shell` or `filesystem`.
    It also needs `shared_directories` to accept invitations from users who cannot use it, as in [Sharing between personal agents](#sharing-between-personal-agents).
 4. When the user who asks for the invitation can use the reading agent outside the current room, the invitation applies at once, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
@@ -501,7 +476,7 @@ Where tools run decides who reaches a shared directory:
 | Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
 | No workers, through `filesystem` under `file_access: workspace` | Read and write | Read only | No access |
 
-`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+`shell` and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
 The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.
 A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
@@ -535,7 +510,7 @@ get_container_logs("postgres", tail=50)
 
 ## [`calculator`]
 
-`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without the risk of `python`.
+`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without running arbitrary code.
 Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
 `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
 `calculator` has no configuration fields.

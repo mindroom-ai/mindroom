@@ -8,7 +8,7 @@ The `script` tool lets an agent start a Python program that keeps running after 
 Use it for watchers, polling loops, and other small automations that should wake the agent only when something changes.
 The script can call a chosen subset of the agent's tools through the `MindRoomTools` SDK, with the same hooks, approval rules, worker routing, and audit trail as an ordinary tool call.
 
-Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `script` as trusted arbitrary code with authority comparable to `shell`.
 `allowed_tools` limits only calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script.
 
 ## Enable The Tool

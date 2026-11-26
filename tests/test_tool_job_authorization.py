@@ -93,7 +93,7 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "add" in toolkit.get_functions()
+    assert "add" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:

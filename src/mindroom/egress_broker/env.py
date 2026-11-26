@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote, urlsplit
 
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RuntimePaths
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
 from mindroom.tool_system.tool_environment import git_config_env
@@ -15,6 +14,7 @@ from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agent_tools import AgentTools
 
 __all__ = [
@@ -28,7 +28,6 @@ __all__ = [
     "egress_agent_scope",
     "egress_broker_enabled",
     "egress_tool_unavailable",
-    "egress_tool_with_only_primary_python",
     "personal_page_served",
     "primary_callback_hosts",
 ]
@@ -83,11 +82,9 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
     """Return whose store an agent's egress services and keys live in, or None when it does not use the broker.
 
     An agent opts in by listing the `egress_credentials` tool, and its brokered traffic only comes from a command tool
-    that gets the broker environment: `shell`, wherever it runs, or any `EXECUTION_ENV_TOOL_NAMES` tool in a worker.
-    Both must be among its resolved tools, presets and defaults included. The sandbox proxy adds the broker
-    environment to worker-routed calls and the tool-call policy to shell calls in the primary; a primary `python`
-    runs in-process, where no call can get an environment of its own, so it alone does not qualify. A name the config
-    has no agent for does not use it. The store is one `user_agent` agent's own per requester, every `user` agent's
+    that gets the broker environment: `shell`. Both must be among its resolved tools, presets and defaults included.
+    The sandbox proxy adds the broker environment to worker-routed calls and the tool-call policy to shell calls
+    in the primary. The store is one `user_agent` agent's own per requester, every `user` agent's
     of a requester, everyone's on a `shared` agent, or the global one all agents without a worker scope share
     (`unscoped`).
     The sandbox proxy, the tool-call policy, and both egress APIs decide here which agents use the broker.
@@ -117,26 +114,7 @@ def _primary_shell_uses_broker(agent_tools: AgentTools, runtime_paths: RuntimePa
     return (
         _EGRESS_TOOL_NAME in tool_names
         and "shell" in tool_names
-        and not _runs_in_a_worker(agent_tools, ("shell",), runtime_paths)
-    )
-
-
-def egress_tool_with_only_primary_python(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
-    """Return whether an agent lists `egress_credentials`, and its only command tool is a `python` in the primary.
-
-    The broker then never reaches the agent's commands, so `egress_agent_scope` leaves it out. An agent with no command
-    tool is not named: it has nothing to route, as with `egress_credentials` in `defaults.tools`.
-    """
-    if agent_name not in config.agents:
-        return False
-    agent_tools = _agent_tools(config, agent_name, runtime_paths)
-    command_tools = EXECUTION_ENV_TOOL_NAMES.intersection(agent_tools.tool_names)
-    return (
-        _EGRESS_TOOL_NAME in agent_tools.tool_names
-        and bool(command_tools)
-        and not _uses_broker(agent_tools, runtime_paths)
-        # A worker-routed command misses only the default broker's worker-facing URL, not a python in the primary.
-        and not _runs_in_a_worker(agent_tools, command_tools, runtime_paths)
+        and not _shell_runs_in_a_worker(agent_tools, runtime_paths)
     )
 
 
@@ -149,27 +127,23 @@ def _agent_tools(config: Config, agent_name: str, runtime_paths: RuntimePaths) -
 
 
 def _uses_broker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
-    """Return whether the agent lists `egress_credentials` and a `shell`, or another command tool in a worker.
+    """Return whether the agent lists `egress_credentials` and a `shell` that can reach the broker.
 
     The default broker, without a port, has no worker-facing URL, so only a `shell` in the primary uses it.
     """
-    tool_names = agent_tools.tool_names
     if not runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"], default="").strip():
         return _primary_shell_uses_broker(agent_tools, runtime_paths)
-    return _EGRESS_TOOL_NAME in tool_names and (
-        "shell" in tool_names
-        or _runs_in_a_worker(agent_tools, EXECUTION_ENV_TOOL_NAMES.intersection(tool_names), runtime_paths)
-    )
+    return _EGRESS_TOOL_NAME in agent_tools.tool_names and "shell" in agent_tools.tool_names
 
 
-def _runs_in_a_worker(agent_tools: AgentTools, tool_names: Iterable[str], runtime_paths: RuntimePaths) -> bool:
-    """Return whether any of the agent's own `tool_names` runs in a worker."""
+def _shell_runs_in_a_worker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the agent's shell runs in a worker."""
     # Deferred: the sandbox proxy imports this module.
     from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
 
     try:
         placement = tool_placement(runtime_paths, agent_tools.tools)
-        return any(agent_tools.runs_in_worker(tool_name, placement) for tool_name in tool_names)
+        return agent_tools.runs_in_worker("shell", placement)
     except WorkerBackendError:
         # An unreadable worker backend never runs the tool in the primary, so the agent stays listed and each page
         # degrades per service instead of failing.

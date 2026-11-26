@@ -834,6 +834,7 @@ def _sandbox_shell_execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+# Keep the retired "python" name for compatibility with sandbox execution requests.
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
 

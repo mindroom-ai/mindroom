@@ -33,7 +33,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
-from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
+from mindroom.error_handling import MinimalModeUnavailableError, describe_reply_error
 from mindroom.hooks import EnrichmentItem
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.events import RunFinished
@@ -245,8 +245,8 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
 
-    message = get_user_friendly_error_message(raised.value, "helper")
-    assert f"Error: {reason}. " in message
+    message = describe_reply_error(raised.value).plain_text
+    assert f"⚠️ {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
     assert ("Start a new subagent without minimal." if delegation_depth else "/mode helper standard") in message
     assert raised.value.__cause__ is failure
@@ -602,17 +602,15 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
+    """Minimal turns skip eager memory recall while keeping optional enrichment in CLI context."""
     runtime = _runtime_context(tmp_path)
-    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="none")
+    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
 
-    async def memory(*args, **kwargs):
-        return MemoryPromptParts(
-            session_preamble="optional preamble " * 100,
-            transient_turn_context="optional memory " * 100,
-        )
+    async def fail_memory_recall(*_args: object, **_kwargs: object) -> MemoryPromptParts:
+        msg = "minimal mode must not recall memory automatically"
+        raise AssertionError(msg)
 
-    monkeypatch.setattr(ai, "build_memory_prompt_parts", memory)
+    monkeypatch.setattr(ai, "build_memory_prompt_parts", fail_memory_recall)
     ctx = replace(
         _turn_context(),
         agent_mode="minimal",
@@ -634,16 +632,12 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         message for message in prepared.turn.in_request_order() if "required current target" in str(message.content)
     )
     assert is_transient_context(turn_context.get_content_string())
-    assert "optional memory" not in prepared.prompt_text
     assert "optional plugin" not in prepared.prompt_text
     assert prepared.spec.system_messages
     assert "optional system" not in system_text(prepared.spec.system_messages)
-    assert "optional preamble" not in system_text(prepared.spec.system_messages)
-    documents = "\n".join(prepared.cli_context.values())
-    assert "optional memory" in documents
-    assert "optional preamble" in documents
-    assert "optional plugin" in documents
-    assert "optional system" in documents
+    assert "memory" not in prepared.cli_context
+    assert "optional plugin" in prepared.cli_context["enrichment"]
+    assert "optional system" in prepared.cli_context["enrichment"]
 
 
 @pytest.mark.asyncio

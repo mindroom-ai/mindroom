@@ -538,7 +538,7 @@ See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the q
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](https://docs.mindroom.chat/cli/#doctor).
 
 See [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `docker`, `filesystem`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+To run worker-routed execution tools such as `docker`, `filesystem`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 
 
@@ -1482,7 +1482,6 @@ Not included:
         tools:
           - openclaw_compat
           - memory
-          - python
 
     memory:
       search:
@@ -1937,7 +1936,7 @@ agents:
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](https://docs.mindroom.chat/streaming/#reasoning) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell` and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
 | `terminals` | string | `none` | What people in the agent's rooms may do with its [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none` shows them nothing, `watch` lets them watch, and `type` also lets people who may post open, close, and type in them where the agent's shell runs in a worker that mounts its workspace, and lets them only watch in a worker that does not. It applies to this agent only and is not inherited from `defaults`; the agent's own use of the `terminal` toolkit does not depend on it |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
@@ -2091,7 +2090,7 @@ A silent turn calls only the tools it names, but each keeps its usual effects, h
 
 - `scheduler`, one of the default agent tools, schedules a later turn of the agent, and can edit or cancel any pending task in the room; an edited task becomes the agent's own.
   A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
-- `filesystem`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
+- `filesystem` and `shell` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script` and `shell` run code with the agent's worker and credentials.
 - A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
 - `report_publishing` publishes workspace files at a public link.
 - A tool that starts a turn starts it with all of the agent's tools, as the agent's own account, and a tool that checks who asked sees that account, because no person asked for a silent turn.
@@ -2150,7 +2149,7 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 defaults:
   tools: [scheduler]
   max_tool_calls_per_turn: 200
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   enable_streaming: true
   max_preload_file_chars: 30000
 ```
@@ -2921,16 +2920,16 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, a conflict (409), or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
 Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
-A request that still fails ends the turn, if no eligible fallback answers, with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, "⚠️ The model request failed with a network error or timeout. If this keeps happening, check the MindRoom host's internet connection." when a network error or timeout interrupts the request (a timeout, DNS failure, or refused or dropped connection), or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
-A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; if no eligible fallback answers, it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and if no eligible fallback answers the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
+A request that still fails ends the turn, if no eligible fallback answers, with "⏱️ Rate limit reached — <model> hit <provider>'s rate limit. Try again shortly." for a rate limit, "⏰ Network error or timeout — The model request failed with a network error or timeout. If this keeps happening, check the MindRoom host's internet connection." when a network error or timeout interrupts the request (a timeout, DNS failure, or refused or dropped connection), or "⚠️ <provider> unavailable — <model> could not complete the reply. Try again shortly." (with the HTTP 5xx status code when known) otherwise.
+A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; if no eligible fallback answers, it ends the turn with "⚠️ Request too large for rate limit — This request exceeded the account's tokens-per-minute limit. Compact the thread or start a new one."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and if no eligible fallback answers the turn ends with "💳 Account quota reached — <provider> rejected this request because the account's quota or credits are exhausted. Add credit, renew the plan, or raise the spending limit, then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
 
 ## Stalled Streams
 
 A provider sometimes accepts a streamed request and then sends nothing more, which would leave the agent busy and queue every follow-up message behind it.
 MindRoom ends a streamed request when the provider sends no event for `stream_idle_timeout_seconds`.
 If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
-A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ <model> stopped responding — <provider> sent no data for <duration>."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
 It applies to every model request, also when `defaults.enable_streaming` is off, except compaction summaries, which their own [`timeout_seconds`](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) bounds.
 
@@ -3880,11 +3879,11 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 
 | Backend | What it does | Use it when |
 |---|---|---|
-| `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
+| `mem0` (default) | Vector memory: relevant memories are retrieved before each standard-mode reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
-Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+In standard mode, before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt (in minimal mode, agents read memory files or call the `memory` tool on demand instead).
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
 With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](https://docs.mindroom.chat/knowledge/#reranking), a reranker chooses the semantic matches instead.
 `memory(action="search", ...)` returns up to its own `limit` in every mode.
@@ -3943,7 +3942,7 @@ A `file` member of a team that uses Mem0 does not see that team's Mem0 memories 
 
 ## Backend: `mem0`
 
-Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
+Before each standard-mode reply, Mem0 retrieves memories relevant to the message and adds them to the prompt (in minimal mode, automatic recall is skipped; on-demand recall uses the `memory` tool when configured).
 After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
@@ -4091,7 +4090,7 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+Before each standard-mode reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message (in minimal mode, agents read `MEMORY.md` and `memory/` or call the `memory` tool on demand instead).
 An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
@@ -4138,8 +4137,8 @@ Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker
 With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `memory(action="search", ...)` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
-A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
-So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every standard-mode reply.
+So with an `openai_decisions` or `typesafe` reranker, every standard-mode reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false` (minimal turns skip automatic recall; explicit memory and knowledge searches can still rerank).
 With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
@@ -6639,7 +6638,7 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem` or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
@@ -7204,10 +7203,10 @@ What a person may do there follows the agent's tools, as its turns build them wi
 
 | Access | When |
 |--------|------|
-| `read` | The agent has a tool that takes local file paths or runs code, such as `filesystem`, `shell`, or `python` |
+| `read` | The agent has a tool that takes local file paths or runs code, such as `filesystem` or `shell` |
 | `write` | One of those tools can change files in the workspace, and the person may post messages in the room |
 
-A tool can change files when the agent's settings leave on one of its writing functions, such as `write_file` or `edit_file` of `filesystem`, or when it runs code, as `shell`, `python`, and `script` do.
+A tool can change files when the agent's settings leave on one of its writing functions, such as `write_file` or `edit_file` of `filesystem`, or when it runs code, as `shell` and `script` do.
 So `filesystem` with `exclude_tools: [write_file, edit_file]` gives only `read`, with or without `enable_delete_file: true`.
 A tool changes files in the workspace where it runs in the primary process, in a dedicated Docker or Kubernetes worker, or on a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); on a `static_runner` that sees only its own storage it changes that storage instead, so it gives only `read`.
 An agent with none of these tools opens no workspace.
@@ -9348,12 +9347,12 @@ mcp_servers:
   team_wiki:
     display_name: Team Wiki
     summary: Search and edit team documentation
-    icon: SiConfluence
+    icon: SiAtlassian
     transport: streamable-http
     url: https://wiki.example.com/mcp
 ```
 
-`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
+`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiAtlassian` or `SiGooglecalendar`.
 Without a usable icon, Connections picks one matching the server's name, or a plug icon.
 
 ## Server Options
@@ -9937,7 +9936,7 @@ The `script` tool lets an agent start a Python program that keeps running after 
 Use it for watchers, polling loops, and other small automations that should wake the agent only when something changes.
 The script can call a chosen subset of the agent's tools through the `MindRoomTools` SDK, with the same hooks, approval rules, worker routing, and audit trail as an ordinary tool call.
 
-Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `script` as trusted arbitrary code with authority comparable to `shell`.
 `allowed_tools` limits only calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script.
 
 ## Enable The Tool
@@ -10222,7 +10221,7 @@ Every `agent()`, `tool()` and `shell()` call of the script is saved with its res
 A run that stopped or failed can be resumed: its saved calls are reused, and only what changed or failed runs again.
 A run that a MindRoom restart interrupts is resumed the same way on its own.
 
-Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
+Treat `workflow` as trusted arbitrary code with authority comparable to `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
 Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
 Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
@@ -11654,7 +11653,6 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
-- [`python`] - Python code execution and package installation.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
@@ -11670,18 +11668,17 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 
 ### Where these tools run
 
-`filesystem`, `shell`, `python`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+`filesystem`, `shell` and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
-With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls and worker-routed `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
-Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
+Only a worker isolates `shell` and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
 
 Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
-It is the working directory (`base_dir`) of `filesystem`, `shell`, and worker-routed `python`, and generated files and charts are saved inside it.
-`python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
+It is the working directory (`base_dir`) of `filesystem` and `shell`, and generated files and charts are saved inside it.
 `base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; a [headless run](https://docs.mindroom.chat/headless/#files) can point it at a directory the caller chooses.
 
 Supported tools also take an optional `mindroom_output_path` argument.
@@ -11951,7 +11948,7 @@ Errors:
 
 ### Per-workspace environment
 
-An agent can set its own environment variables for worker-routed `shell` and `python`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
+An agent can set its own environment variables for worker-routed `shell`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
 The hook's behavior, limits, and the variables it cannot override are described in [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh).
 
 ```bash
@@ -12029,29 +12026,6 @@ agents:
       - temporary_secrets
 ```
 
-## [`python`]
-
-`python` provides `run_python_code()`, `save_to_file_and_run()`, `run_python_file_return_variable()`, `pip_install_package()`, `uv_pip_install_package()`, `read_file()`, and `list_files()`.
-It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
-Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
-Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - python
-```
-
-```python
-run_python_code("total = sum(i * i for i in range(10))", variable_to_return="total")
-save_to_file_and_run("scripts/demo.py", "result = 6 * 7", variable_to_return="result")
-run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
-pip_install_package("rich")
-```
-
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
@@ -12063,7 +12037,7 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
    Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
    Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
 2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell` or `filesystem`.
-3. Give each reading agent `shell`, `python`, or `filesystem`.
+3. Give each reading agent `shell` or `filesystem`.
    It also needs `shared_directories` to accept invitations from users who cannot use it, as in [Sharing between personal agents](#sharing-between-personal-agents).
 4. When the user who asks for the invitation can use the reading agent outside the current room, the invitation applies at once, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
@@ -12142,7 +12116,7 @@ Where tools run decides who reaches a shared directory:
 | Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
 | No workers, through `filesystem` under `file_access: workspace` | Read and write | Read only | No access |
 
-`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+`shell` and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
 The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.
 A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
@@ -12176,7 +12150,7 @@ get_container_logs("postgres", tail=50)
 
 ## [`calculator`]
 
-`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without the risk of `python`.
+`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without running arbitrary code.
 Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
 `factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
 `calculator` has no configuration fields.
@@ -13062,7 +13036,6 @@ Use it to pick a tool, configure it, and understand why a URL was refused.
 | [`agentql`](#agentql) | AgentQL query extraction in a local browser | `AGENTQL_API_KEY` |
 | [`browserbase`](#browserbase) | Hosted remote browser sessions for navigation, screenshots, and page reads | `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` |
 | [`browser`](#browser) | Multi-step automation of MindRoom's browser or the user's own signed-in browser | None |
-| [`web_browser_tools`](#web_browser_tools) | Opening a URL in the host computer's browser for a person | None |
 
 Each credential can be stored as the tool's `api_key` (or `apify_api_token`, `username`, and `password`) through the dashboard or credential store, or supplied as the environment variable shown.
 Keep password fields out of inline YAML.
@@ -13459,17 +13432,6 @@ browser_control(action="open", target="desktop", targetUrl="https://matrix.org/b
 browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
-### [`web_browser_tools`]
-
-`web_browser_tools` exposes `open_page(url, new_window=False)`, which opens an `http` or `https` URL in a tab or window of the host computer's browser for a person to use.
-It refuses `file:` paths, other schemes, and scheme-less strings, and returns no page content, so it is not a scraper.
-It only works on a host with a desktop browser.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `enable_open_page` | `boolean` | `true` | Enable `open_page()`. |
-| `all` | `boolean` | `false` | Enable every function. |
-
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
@@ -13506,7 +13468,7 @@ Use [Web Search](https://docs.mindroom.chat/tools/web-search/) for broader web d
 | `enable_search_arxiv` | `boolean` | `true` | Enable `search_arxiv_and_return_articles(query, num_articles=10)`. |
 | `enable_read_arxiv_papers` | `boolean` | `true` | Enable `read_arxiv_papers(id_list, pages_to_read=None)`. |
 | `all` | `boolean` | `false` | Enable both functions. |
-| `download_dir` | `text` | unset | Directory where downloaded PDFs are stored; when unset, PDFs go to an `arxiv_pdfs` directory inside the installed Agno package. |
+| `download_dir` | `text` | unset | Directory that retains downloaded PDFs when set; when unset, PDFs use a writable temporary directory that is cleaned up after extraction. |
 
 Search returns JSON with each paper's title, ID, authors, categories, publish date, PDF URL, summary, and comment.
 `read_arxiv_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
@@ -14473,7 +14435,7 @@ It only does so when the first threshold below is 1 or 2, so the first reply wou
 MindRoom checks a thread's title after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`), and posts a summary notice when the title changes.
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 ordinary messages with non-empty text after tool-marker removal, the summary model sees the first 5, 12 evenly spaced messages from the middle, and the last 5 (with omission notes for each gap), and overlong message bodies in that sample are clipped to 600 characters while keeping both head and tail.
-A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, up to 3 attempts in all, and posts no title if every attempt is too long. The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
+A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, accumulating prior rejections across up to 3 attempts; if no attempt passes validation on an untitled thread's post-reply pass, it uses the shortest complete title within 80 characters instead of leaving the thread untitled, while a provisional title or an already-titled thread posts nothing (keeping its current title). The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
 Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
 A check shows the model the current title, and the model keeps it unless the thread moved to a different subject or goal outside the current title's scope and persisted on it for a large share of the thread (same-domain goal changes count, while follow-up steps like PRs, reviews, deploys, and related fixes do not): a kept title usually posts nothing, and the next check is a full interval later.
 Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
@@ -14500,14 +14462,14 @@ These models always use their provider's default: Vertex AI Claude, Claude Opus 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
 They are the room's `thread_summary_instructions` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), which moderators and admins change and agent tools cannot write.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
-Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, up to 3 attempts, with no title posted if all fail.
+Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, accumulating prior rejections across up to 3 attempts, with the same untitled fallback or already-titled skip if all fail.
 A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.
 Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
 Values are trimmed and cut to 2,000 characters.
 To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags; when that refresh keeps the title, it posts the title again unchanged with the tags.
-Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model. An override's own length rules still meet the six-word limit: an overlong title is sent back with the reason, up to 3 attempts, and no title is posted if all fail.
+Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model. An override's own length rules still meet the six-word limit: retries accumulate prior rejections across up to 3 attempts, and for an untitled thread if no attempt passes validation the shortest complete title within 80 characters is used instead of leaving the thread untitled (while an already-titled thread keeps its current title and posts nothing).
 Later summaries never change tags, so tags someone removed are not re-added.
 These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 
@@ -14726,7 +14688,6 @@ chat_ui.open_panel(panel="computer")  # shows it again, for example for a login
 ```
 
 To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
-`web_browser_tools` opens a browser on the host operating system and does not show anything in Chat.
 
 The Computer panel needs an enabled [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/), which owns the worker, browser, proxy, and Chat configuration and describes watching, taking control, and handing back.
 If the computer is unavailable, Chat shows an unavailable state in the notice.
@@ -15056,10 +15017,8 @@ Use it to choose a tool, connect its account, and understand its limits.
 - [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, templates, and automatic nudges for idle agents.
 - [`bitbucket`] - One Bitbucket repository's details, commits, pull requests, and issues.
 - [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
-- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs with one shared account.
 - [`linear`] - Linear teams, issues, and issue updates.
 - [`clickup`] - ClickUp spaces, lists, and tasks.
-- [`confluence`] - Confluence spaces and page lookup, creation, and updates with one shared account.
 - [`notion`] - Pages in one Notion database.
 - [`trello`] - Trello boards, lists, cards, and card moves.
 - [`todoist`] - Todoist tasks and projects.
@@ -15254,37 +15213,6 @@ agents:
 - Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
 - `create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
-## [`jira`]
-
-`jira` provides `get_issue()`, `create_issue()`, `search_issues()` with JQL, `add_comment()`, and `add_worklog()` through one shared Jira account.
-For per-requester Jira Cloud access, use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`; required unless `JIRA_SERVER_URL` is set. |
-| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. Also read from `JIRA_USERNAME`. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Jira. Also read from `JIRA_PASSWORD`. |
-| `token` | `password` | `no` | `null` | Jira or Atlassian API token; used instead of `password` when both are set. Also read from `JIRA_TOKEN`. |
-| `enable_get_issue` | `boolean` | `no` | `true` | Enable `get_issue()`. |
-| `enable_create_issue` | `boolean` | `no` | `true` | Enable `create_issue()`. |
-| `enable_search_issues` | `boolean` | `no` | `true` | Enable `search_issues()`. |
-| `enable_add_comment` | `boolean` | `no` | `true` | Enable `add_comment()`. |
-| `enable_add_worklog` | `boolean` | `no` | `true` | Enable `add_worklog()`. |
-| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
-
-```yaml
-agents:
-  delivery:
-    tools:
-      - jira:
-          server_url: https://example.atlassian.net
-          username: bot@example.com
-          enable_add_worklog: false
-```
-
-- For Atlassian Cloud, use `username` plus `token`.
-- Without `username` and a `token` or `password`, the tool connects anonymously, which most Jira sites reject.
-
 ## [`linear`]
 
 `linear` reads the current user, teams, issues, assigned issues, workflow-state issues, and high-priority issues, and creates and updates issues.
@@ -15326,32 +15254,6 @@ agents:
 - `list_tasks()` returns tasks from every list in a space.
 - `create_task()` always creates the task in the first list of the matched space, so check `list_lists()` when placement matters.
 - `update_task()` passes any field updates through to the ClickUp API.
-
-## [`confluence`]
-
-`confluence` lists spaces and their pages, and reads, creates, and updates pages through one shared account.
-Spaces can be named by title or key.
-For per-requester Confluence Cloud access, use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) instead.
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `url` | `url` | `no` | `null` | Confluence base URL; required unless `CONFLUENCE_URL` is set. |
-| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email; required unless `CONFLUENCE_USERNAME` is set. |
-| `password` | `password` | `no` | `null` | Password for self-hosted Confluence. Also read from `CONFLUENCE_PASSWORD`. |
-| `api_key` | `password` | `no` | `null` | Confluence API key; used instead of `password` when both are set. Also read from `CONFLUENCE_API_KEY`. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates; disable only for self-signed internal deployments. |
-
-```yaml
-agents:
-  docs:
-    tools:
-      - confluence:
-          url: https://example.atlassian.net/wiki
-          username: docs@example.com
-```
-
-- One of `api_key` or `password` is required; use `api_key` for Atlassian Cloud.
-- Page bodies are read and written in Confluence storage format, such as `<p>Initial draft</p>`.
 
 ## [`notion`]
 
@@ -15461,7 +15363,6 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
   <source src="https://github.com/user-attachments/assets/5a12e5b4-f8cd-4e88-9837-80e2f7678036" type="video/mp4">
 </video>
 
-The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
 Their function names do not collide with the `atlassian` functions, so an agent can have both.
 
 ## What It Does
@@ -15596,7 +15497,7 @@ agents:
 - A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
 - `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
-- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
 
 ## Connect An Account
 
@@ -16833,7 +16734,7 @@ These built-in tools let an agent hand tasks to other agents, publish reports th
 Related tools documented elsewhere:
 
 - [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` calls and worker-routed `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -16962,7 +16863,7 @@ Common errors:
 
 ### Dedicated Workers
 
-With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
+With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell` and `filesystem`, in a worker of its own instead of the worker it shares with its agent's other subagents.
 Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
 Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
 The runtime must also run idle-worker cleanup, because every such subagent gets a new worker: the API server runs it when `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is above 0, which both Helm charts set, so `mindroom run --no-api` offers no dedicated workers.
@@ -16973,7 +16874,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem]
 ```
 
 ```python
@@ -18662,7 +18563,7 @@ Services whose access the user does not grant on the consent screen stay unconne
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
-An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
+An agent's shell commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
 Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored).
 While the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) is on, the portal and its Agent Keys page link to each other.
@@ -18919,7 +18820,7 @@ To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
 Without `GOOGLE_DELEGATED_USER`, Google Cloud tools run as the service account itself, so grant it the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
-With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only` plus the OpenID, email, and profile identity scopes.
+With `GOOGLE_DELEGATED_USER` set, Google Cloud tools also run as the impersonated user, so IAM is evaluated for that user rather than for the service account, and domain-wide delegation must authorize `https://www.googleapis.com/auth/cloud-platform.read-only`.
 
 ## Production Verification Follow-up
 
@@ -18967,7 +18868,7 @@ Tools that run arbitrary programs cannot be confined inside their own process, b
 MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure; it isolates them only by routing them to a worker with `worker_tools`.
 
 An agent whose code-execution tools run in the primary process is trusted with everything that process can reach, so restricting its other tools protects nothing.
-The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; `python` and the other code-execution tools have no such setting.
+The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; other code-execution tools have no such setting.
 
 An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
 Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive` run in the primary process by default even then, so they follow the agent's [`file_access`](#file-access) setting, which by default keeps them inside the agent workspace.
@@ -19012,7 +18913,7 @@ Knowledge indexes, including private agents' indexes and their publication and r
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
-When the broker is enabled, the `shell` calls and worker-routed `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
+When the broker is enabled, the `shell` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
 Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
@@ -19163,14 +19064,14 @@ Every tool, including plugin tools, must declare one of these file access classe
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `slack` uploads, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `filesystem` | Follow the agent's `file_access`; reads, writes, edits, and deletes refuse replaced workspace roots and swapped files, while listing and searches walk by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
-| Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
+| Unconfined tools | Code-execution tools (`shell`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Other tools | Everything else | Take no local file paths |
 
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above, `script`, `workflow`, and `terminal` carry it.
-A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
+A worker isolates the unconfined tools that support worker routing (`shell`, `docker`, `csv`, `postgres`, `redshift`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
 `script` also runs in the primary process, but there it only reads the one source file it launches, from the agent workspace through no-follow descriptors whatever the agent's `file_access`, so it declares no file access; its scripts run on the worker backend.
 `workflow` runs in the primary process in the same way: it reads only the one source file a run starts from, and declares no file access.
@@ -19274,6 +19175,8 @@ So any page holding a user's session can act on GitHub as that user: with a save
 Such a page can also replace the saved token, so later calls go out as the account of a token it chose, or remove it, so they fall back to the App connection.
 `GET /api/github/status` reports which of the two calls go out with, and its login, from stored state, without refreshing it or calling GitHub.
 The route's own log lines name the method, the path's kind (such as `/repos/{owner}/{repo}/pulls`), and GitHub's status, never the token or a body; httpx and httpcore may log the full URL, including the repository and query, as they do for every outbound call.
+`github_pr` reactive triggers created with `watch_pr` (which shares the `triggers` tool approval alias)—whether poll-backed or webhook-nudged—reuse the same owner-scoped credential resolution on the primary: they authenticate with the trigger owner's own `github_user_token` or GitHub App OAuth connection—never another user's credentials or a process environment token—fail closed when a saved personal access token is unreadable, and fall back to anonymous public requests only when neither is configured.
+Their outbound ETag REST polls stay pinned to `https://api.github.com` with at most 3 same-host redirects (no userinfo or non-default port), webhook-nudged watches recheck their bound webhook source grant fail-closed without falling back to periodic polling, and observed PR facts are delivered inside `<untrusted_event_data>` boundaries only to Matrix rooms and agents the trigger owner is authorized to address.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
@@ -19345,7 +19248,7 @@ Do not report or "fix" these; they are deliberate.
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
-- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
+- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a workflow `agent()` call, runs as its caller with the caller's tools, credentials, workspace, and approval rules; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, start time, and the subagent ID and run ID of a subagent job or the tool call ID of a tool job, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the owner account also publishes, while the API is on and the origin is usable, its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, also in an encrypted room.
@@ -19534,17 +19437,16 @@ Python `urllib` and Node `fetch` only send `Proxy-Authorization` when both the u
 The password is not a secret.
 
 **Agents opt in with the `egress_credentials` tool, not by having a shell.**
-Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
+Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
 
-**A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
+**A shell that runs in the primary process gets the broker environment too.**
 Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
 The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment, so the broker adds convenience there and no new exposure.
 Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
 It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
 Those files keep the certificates of the CA files the primary's own variables name, because they replace those variables for the command.
-A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
 
 **A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
 The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
@@ -22672,11 +22574,11 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with the unified `triggers(action=...)` tool (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `subscribe_event`) or `watch_pr(...)`, to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes a single `triggers(action=...)` function.
+`triggers` is the canonical toolkit name and exposes `triggers(action=...)` and `watch_pr(...)`.
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](https://docs.mindroom.chat/tools/dynamic-tools/).
 
@@ -22920,7 +22822,7 @@ external_trigger_policy:
 | `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
 | `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
 | `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
-| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `allowed_events` | `["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
 | `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 
@@ -23073,14 +22975,16 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
 | `description` | `""` | Human-readable purpose. |
 | `target_agent` | current agent | Agent or team to wake; only administrators can choose another. |
 | `target_room_id` | current room | Room to post in; only administrators can choose another. |
-| `target_thread_id` | none | Post every delivery into this existing thread. |
+| `target_thread_id` | current thread (in current room) | Post every delivery into this existing thread, or pass `"room"` to explicitly post to the room's main timeline. |
 | `new_thread` | `false` | Post each delivery as a new room-level message so the agent answers in a fresh thread with a fresh session. |
+| `reopen_on_fire` | `false` | Automatically clear the `resolved` tag on a fixed target thread before delivering a trigger firing. |
 | `allowed_kinds` | any | Accepted `kind` values; others are rejected. |
 | `replay_window_seconds` | policy default | Maximum signature age, capped by policy. |
 | `max_body_bytes` | policy default | Request body limit, capped by policy. |
 
 `target_thread_id` and `new_thread` are mutually exclusive.
-Without either, deliveries post to the room's main timeline.
+When `target_thread_id` is omitted and the target room is the current room, deliveries default to the current thread (or the room's main timeline when called outside a thread).
+Pass `target_thread_id="room"` to force room-timeline delivery from inside a thread.
 
 The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
 An administrator who creates a trigger for another agent or room still owns it.
@@ -23099,6 +23003,17 @@ The `triggers(action=...)` tool provides unified lifecycle, observability, and t
 - `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
 - `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+
+### Watching GitHub Pull Requests (`watch_pr`)
+
+The `triggers` toolkit also exposes `watch_pr(repo, number, events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+
+- **Delivery modes (`delivery_mode`):**
+  - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
+  - **`"poll"`:** Selected at creation when no covering webhook source exists and `external_trigger_policy.github_pr_polling_enabled` is `true` (interval clamped to `min_github_pr_poll_interval_seconds..86400`, default `300s`).
+- **CI scope (`"ci"`):** Tracks GitHub Check Runs (fail-fast on failed runs and one all-green notification when every Check Run passes); legacy GitHub Commit Statuses are not tracked.
+- **Auth modes (`auth_mode`):** Uses the watch owner's connected GitHub credentials (`"app"` or `"token"`), falling back to `"anonymous"` only when no owner credentials exist. Unreadable owner credential stores fail closed and never downgrade to anonymous requests.
+- **Auto-disable (`pr_closed`):** When `auto_disable_on_close=True` (default), closing or merging the PR disables the watch with `disabled_reason="pr_closed"` once any terminal firing settles (or immediately if close/merge is not subscribed). Retired `pr_closed` watches do not consume `max_reactive_triggers_per_owner` or `max_github_pr_watches_per_owner`, and re-enabling enforces both quotas and silently re-seeds the checkpoint.
 
 ## Sending Events
 
@@ -23519,7 +23434,7 @@ print(result.text)
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
-| `workdir` | The existing directory where `shell` runs and `filesystem` and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
+| `workdir` | The existing directory where `shell` runs and `filesystem` resolves paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 | `request_headers` | A function that takes a `HeadlessRun` and returns the headers that run's model requests carry; see [Request headers](#request-headers). |
 
@@ -23595,16 +23510,15 @@ They run in standard mode; [minimal mode](https://docs.mindroom.chat/tools/agent
 ## Files
 
 With a `workdir`, the files that `shell` and `filesystem` write land there, and MindRoom's own files stay under `storage`.
-Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `filesystem` to the `workdir` instead of the workspace.
 An agent with the [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `filesystem` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.
-The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
+The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` given absolute paths.
 In `shell` commands, `$MINDROOM_AGENT_WORKSPACE` holds the agent's workspace, not the `workdir`.
 
-All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
+All tools run with the calling process's permissions, and `shell` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
 
 ## Logging
 
@@ -24487,7 +24401,7 @@ Optional features:
 
 ## Worker Backends
 
-Worker-routed tools such as `docker`, `filesystem`, `python`, and `shell` run in one of two backends.
+Worker-routed tools such as `docker`, `filesystem`, and `shell` run in one of two backends.
 Which tools are routed and how `worker_scope` shares workers are described in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 | Helm value | Behavior | Best for |
@@ -24763,7 +24677,7 @@ See [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/#secrets
 
 # Sandbox Proxy Isolation
 
-Code-execution tools such as `shell`, `file`, and `python` can read and modify anything their process can reach, including config files, credentials, and application code.
+Code-execution tools such as `shell` can read and modify anything their process can reach, including config files, credentials, and application code.
 The **sandbox proxy** runs these tools in a separate worker runtime that has none of the primary runtime's secrets.
 Use it whenever agents may run untrusted code; without it, the operator trusts every agent with code-execution tools completely.
 This page covers the worker backends and how to deploy them, which tools run in workers, worker scopes and isolation, the shell environment inside workers, credential leases, brokered egress, and the environment variable reference.
@@ -24808,7 +24722,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
     networks:
       - mindroom-network
 
@@ -24883,7 +24797,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem
 mindroom run
 ```
 
@@ -24930,15 +24844,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, filesystem, python]
+  worker_tools: [shell, filesystem]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 
   research:
-    tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -25029,13 +24943,13 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, filesystem, python]
-    worker_tools: [shell, filesystem, python]
+    tools: [shell, filesystem]
+    worker_tools: [shell, filesystem]
 ```
 
 
 
-The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, `python`, and `shell`.
+The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
@@ -25093,7 +25007,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-`shell`, `filesystem`, and `python` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell` and `filesystem` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -25119,7 +25033,6 @@ Configured MCP `mcp_<server_id>` tools work on every worker scope (see [MCP](htt
 
 Worker-routed `shell` receives only a small non-secret system environment by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale, proxy, and certificate path variables.
 Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are not forwarded.
-Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
@@ -25129,7 +25042,7 @@ A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-com
 
 ### Workspace home contract
 
-For worker-routed `shell` and `python` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
+For worker-routed `shell` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
 As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
@@ -25137,7 +25050,7 @@ For example, after `get_attachment("att_...", mindroom_output_path="incoming/fil
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
 
-Agents can set custom environment variables for worker-routed `shell` and `python` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
+Agents can set custom environment variables for worker-routed `shell` calls, such as `PATH` entries, package indexes, or npm cache locations, by writing a script to `.mindroom/worker-env.sh` at the root of the agent workspace, without changing config or redeploying.
 It works the same with every worker backend.
 For an example, see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
@@ -25182,7 +25095,7 @@ For shell authentication, use [environment passthrough](#shell-environment-and-p
 
 ## Agent Keys (egress broker)
 
-To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
+To let worker-routed `shell` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
 There are two supported shapes:
 
@@ -25198,7 +25111,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 
 ## Stopping and background commands
 
-Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+Stopping a response also stops its in-flight worker calls, such as `run_shell_command`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
 By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
@@ -25478,7 +25391,7 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool), and each of its `python` calls that runs in a worker, gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool) gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
@@ -25834,7 +25747,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`, or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -26003,7 +25916,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
 Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
-The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
+The provider's tools ask for approval before they write, but an allowed account lets the agent's shell commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or requester-scoped Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
@@ -26133,10 +26046,9 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: such an agent's `shell` calls, wherever they run, and its `python` calls that run in a worker go through the broker and get keys, and only such agents appear on the Agent Keys pages.
+Adding the `egress_credentials` tool to an agent with `shell` opts it into Agent Keys: its `shell` calls go through the broker and get keys, and only such agents appear on the Agent Keys pages.
 A `shell` in the primary process, for example under `worker_tools: []`, works the same as one in a worker, but there the broker keeps nothing from the agent (see [Code in the primary process](#what-the-broker-cannot-protect-against)).
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
-So does an agent whose only command tool is `python` running in the primary process, which runs inside MindRoom itself where the broker cannot reach it: the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 
 ```yaml
@@ -26374,7 +26286,7 @@ A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
 
-**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), or its `shell` and `python` run in the primary process, so its calls get no broker environment; add the tool, or route `shell` or `python` to a worker with `worker_tools`.
+**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool) or does not have `shell`; add both tools, and make sure the broker listener is reachable from where `shell` runs.
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.
@@ -26420,7 +26332,7 @@ The default is passthrough; you may have explicitly set it to `deny`.
 
 Approved egress blocks direct internet access from dedicated Kubernetes workers and sends their traffic through a policy-enforcing HTTP proxy.
 A worker can reach a hostname only when it is on the static allowlist or a human has approved a temporary grant in Matrix.
-Use it when worker-routed tools such as `shell` and `python` must not reach arbitrary hosts.
+Use it when worker-routed tools such as `shell` must not reach arbitrary hosts.
 
 ## Enable with the Runtime Chart
 
@@ -27354,7 +27266,7 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` and `worker_cold_start` are `info` records, so keep `LOG_LEVEL` at `INFO` or lower, or raise only their loggers with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO,mindroom.workers.progress:INFO`.
-`agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
+`event_loop_stall_detected` and `event_loop_stall_ongoing` are `error` records, `agent_error` is `warning` for `ModelSafeguardRefusal` and `error` otherwise, and the other stable events below are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
@@ -27676,7 +27588,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
 - `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
-- `ModelSafeguardRefusal`: the model's safeguards refused the request.
+- `ModelSafeguardRefusal`: the model's safeguards refused the request (logged at `warning` rather than `error`).
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
 - `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 
@@ -27738,6 +27650,16 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading from retired browser, Atlassian, and Python toolkits
+
+Remove the old names from `tools` and `worker_tools` before upgrading. MindRoom does not grant replacement capabilities automatically.
+
+- Replace `web_browser_tools` with [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) and configure the Chromium or desktop target you intend to use.
+- Replace the shared-token `jira` and `confluence` tools with [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) and connect the requester's Atlassian Cloud account. Old API tokens and Data Center configurations do not carry over.
+- Run Python through a worker-routed [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell), and use [`filesystem`](https://docs.mindroom.chat/tools/execution-and-coding/#filesystem) to read and write files.
+
+Recheck approval rules and any saved scripts that called the old functions.
+
 ## Upgrading to the `filesystem` toolkit
 
 The `file` and `coding` tools are now one toolkit, [`filesystem`](https://docs.mindroom.chat/tools/execution-and-coding/#filesystem), with the functions `coding` had.
@@ -27746,7 +27668,7 @@ An agent whose `tools`, together with the `defaults.tools` it takes, name the to
 Nothing saved for the old tools is translated, so before upgrading, change what the list below names:
 
 - A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` are removed and, where they were off, become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; remove `all`, and set `enable_delete_file: true` only if `all` had turned deletion on and you still want it; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
-- [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
+- [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules fail config loading when the first rule that matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` is not also the first rule that matches its replacement, naming that rule and the new function; a `list_files` rule loads, because other toolkits still offer that function, and no longer covers `ls`.
 - Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you delete them, saving any you still want under `filesystem`; settings of the earlier `file` toolkit saved under `filesystem` stop it the same way.
 - A contact's tools, a saved subagent profile, the tools chosen for a created agent, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
 - A `script` `allowed_tools` list that names `file` or `coding` makes every script launch fail until it names `filesystem`.

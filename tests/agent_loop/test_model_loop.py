@@ -25,7 +25,7 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_li
 from mindroom.agent_loop.run import resumed_record, run_agent
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES
 from mindroom.constants import TOOL_TRACE_CONTENT_KEY
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import describe_reply_error
 from mindroom.llm.errors import (
     ContextWindowExceeded,
     ModelOutputLimitError,
@@ -1463,7 +1463,7 @@ async def test_reasoning_only_content_filter_after_tool_call_fails_and_keeps_his
 
     assert raised.value.provider_code == "RECITATION"
     assert "RECITATION" in str(raised.value)
-    assert "(RECITATION)" in get_user_friendly_error_message(raised.value, "code")
+    assert "(RECITATION)" in describe_reply_error(raised.value).plain_text
     assert all(message.reasoning_content is None for message in loop_messages)
     assert loop_record.metrics is not None
     assert (loop_record.metrics.tokens.input_tokens, loop_record.metrics.tokens.output_tokens) == (30, 10)

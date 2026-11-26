@@ -169,8 +169,16 @@ class TestMemoryIntegration:
                 config,
             )
 
-            # Should return user-friendly error message with the actual error
-            assert "Error: Model error" in response.text
+            # Should return user-friendly error message and structured error metadata
+            assert response.text == "⚠️ Model error"
+            assert response.failed is not None
+            assert response.failed.error_info == {
+                "kind": "runtime_error",
+                "title": "Reply failed",
+                "summary": "Model error",
+                "retryable": False,
+                "fallback": "⚠️ Model error",
+            }
 
     @pytest.mark.asyncio
     async def test_memory_persistence_across_calls(
