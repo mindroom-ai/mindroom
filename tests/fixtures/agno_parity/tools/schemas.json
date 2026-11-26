@@ -14852,7 +14852,7 @@
     "functions": [
       {
         "name": "matrix_message",
-        "description": "Send, read, edit, or react to Matrix messages.\n`send` and `read` use the current conversation. Set new_thread=True to start a separate thread (optionally with title), thread_id to continue another thread, or thread_id=\"room\" for the room timeline. Another room never inherits the current thread.\n\nSet recipient to an agent/team name from matrix_room(action=\"agents\") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.\n\nSend text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.\n\nedit/react require event_id; react uses message as emoji (default 👍). Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.",
+        "description": "Send, read, edit, or react to Matrix messages.\n`send` and `read` use the current conversation. Set new_thread=True to start a separate thread, thread_id to continue another thread, or thread_id=\"room\" for the room timeline. Another room never inherits the current thread.\n\nSet recipient to an agent/team name from matrix_room(action=\"agents\") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.\n\nSend text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.\n\nedit/react require event_id; react uses message as emoji (default 👍). Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14923,7 +14923,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional plain-text thread title (max 300 chars) pinned immediately; send with new_thread=True only."
+              "description": "Pinned thread title; send + new_thread only."
             },
             "event_id": {
               "anyOf": [

@@ -63,10 +63,13 @@ def _contact_target_error(
     """
     config = context.current_config
     paths = context.runtime_paths
-    if idempotency_key is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
-        return _CONTACT_ROOM_KEY_ERROR
-    if title is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
-        return _CONTACT_ROOM_TITLE_ERROR
+    blocked_error = (
+        _CONTACT_ROOM_KEY_ERROR
+        if idempotency_key is not None
+        else (_CONTACT_ROOM_TITLE_ERROR if title is not None else None)
+    )
+    if blocked_error is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
+        return blocked_error
     contact = contact_room(config, paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
         return None
@@ -142,7 +145,7 @@ class MatrixMessageTools(Toolkit):
     ) -> str:
         """Send, read, edit, or react to Matrix messages.
 
-        `send` and `read` use the current conversation. Set new_thread=True to start a separate thread (optionally with title), thread_id to continue another thread, or thread_id="room" for the room timeline. Another room never inherits the current thread.
+        `send` and `read` use the current conversation. Set new_thread=True to start a separate thread, thread_id to continue another thread, or thread_id="room" for the room timeline. Another room never inherits the current thread.
 
         Set recipient to an agent/team name from matrix_room(action="agents") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.
 
@@ -157,7 +160,7 @@ class MatrixMessageTools(Toolkit):
             room_id: Room ID, alias, or configured room name; current room by default.
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
-            title: Optional plain-text thread title (max 300 chars) pinned immediately; send with new_thread=True only.
+            title: Pinned thread title; send + new_thread only.
             event_id: Message event ID to edit or react to.
             attachments: Ordered att_* IDs or workspace file paths; send only, maximum 5.
             limit: Messages to read, 1-50; default 20.

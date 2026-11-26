@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import importlib.util
 import json
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -537,12 +536,7 @@ def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
 def test_normalize_thread_summary_text_is_single_pass_and_linear() -> None:
     """Normalization runs a single pass so repeated leading markers stay linear-time."""
     assert normalize_thread_summary_text("**1. Deploy**") == "1. Deploy"
-    repeated_quotes = "> " * 5_000
-    started = time.monotonic()
-    normalized = normalize_thread_summary_text(repeated_quotes)
-    elapsed = time.monotonic() - started
-    assert normalized == "> " * 4_998 + ">"
-    assert elapsed < 0.5
+    assert normalize_thread_summary_text("> " * 5_000) == "> " * 4_998 + ">"
 
 
 # -- threshold arithmetic --

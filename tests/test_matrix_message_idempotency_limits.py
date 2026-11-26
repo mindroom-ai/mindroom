@@ -335,9 +335,7 @@ async def test_stalled_title_send_preserves_confirmed_root_and_recovers_deduplic
         assert first["event_id"] == first["thread_id"]
         assert "title_event_id" not in first
         assert first["warning"] == "Message sent, but failed to set thread title: timed out"
-        root = context.runtime_paths.control_state_root
-        assert root is not None
-        assert not file_lock_is_held(next((root / "matrix_message_sends").glob("*.lock")))
+        assert not file_lock_is_held(_state_path(context).with_suffix(".lock"))
 
         monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 60, raising=False)
         cast("AsyncMock", context.client.room_send).side_effect = transport.room_send

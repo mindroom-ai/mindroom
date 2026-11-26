@@ -225,7 +225,6 @@ async def _send_and_record_manual_summary(
     *,
     message_count: int,
     conversation_reader: ConversationReader,
-    baselines: schedule._ThreadSummaryBaselines,
     pinned: bool,
     generated_at: datetime | None = None,
     known_latest_thread_event_id: str | None = None,
@@ -254,7 +253,7 @@ async def _send_and_record_manual_summary(
         msg = "Failed to send thread summary event."
         raise ThreadSummaryWriteError(msg)
 
-    baselines.record(room_id, thread_id, message_count)
+    schedule.THREAD_SUMMARY_BASELINES.record(room_id, thread_id, message_count)
     return _ThreadSummaryWriteResult(
         event_id=event_id,
         message_count=message_count,
@@ -277,8 +276,7 @@ async def set_initial_thread_summary(
     """Write one validated pinned initial summary for a newly started thread without waiting for sync echo."""
     normalized_summary = validate_thread_summary_text(summary, already_normalized=already_normalized)
     effective_count = max(1, message_count)
-    baselines = schedule.THREAD_SUMMARY_BASELINES
-    async with baselines.lock(room_id, thread_id):
+    async with schedule.THREAD_SUMMARY_BASELINES.lock(room_id, thread_id):
         return await _send_and_record_manual_summary(
             client,
             room_id,
@@ -286,7 +284,6 @@ async def set_initial_thread_summary(
             normalized_summary,
             message_count=effective_count,
             conversation_reader=conversation_reader,
-            baselines=baselines,
             pinned=True,
             known_latest_thread_event_id=known_latest_thread_event_id,
             transaction_id=transaction_id,
@@ -314,8 +311,7 @@ async def set_manual_thread_summary(
     """
     normalized_summary = validate_thread_summary_text(summary)
 
-    baselines = schedule.THREAD_SUMMARY_BASELINES
-    async with baselines.lock(room_id, thread_id):
+    async with schedule.THREAD_SUMMARY_BASELINES.lock(room_id, thread_id):
         try:
             thread_history = await load_complete_thread_history(conversation_reader, room_id, thread_id)
         except TruncatedThreadHistoryError as exc:
@@ -347,7 +343,6 @@ async def set_manual_thread_summary(
             normalized_summary,
             message_count=state.message_count,
             conversation_reader=conversation_reader,
-            baselines=baselines,
             pinned=pin,
             generated_at=generated_at,
         )

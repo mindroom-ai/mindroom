@@ -296,21 +296,15 @@ class MatrixMessageOperations:
         context: ToolRuntimeContext,
         *,
         room_id: str,
-        thread_id: str | None,
-        title: str | None,
+        thread_id: str,
+        title: str,
         message_count: int,
         known_latest_thread_event_id: str | None,
         send_claim: MatrixMessageSendClaim | None = None,
     ) -> dict[str, object]:
-        if title is None or thread_id is None:
-            return {}
-        if send_claim is not None and send_claim.intent is not None and send_claim.intent.title_event_id is not None:
-            return {"title": title, "title_event_id": send_claim.intent.title_event_id}
-        title_transaction_id = (
-            f"{send_claim.intent.transaction_id}-title"
-            if send_claim is not None and send_claim.intent is not None
-            else None
-        )
+        intent = send_claim.intent if send_claim is not None else None
+        if intent is not None and intent.title_event_id is not None:
+            return {"title": title, "title_event_id": intent.title_event_id}
         timeout_scope = asyncio.timeout(send_claim.title_timeout_seconds) if send_claim is not None else nullcontext()
         try:
             async with timeout_scope:
@@ -322,7 +316,7 @@ class MatrixMessageOperations:
                     message_count=message_count,
                     conversation_reader=context.conversation_reader,
                     known_latest_thread_event_id=known_latest_thread_event_id,
-                    transaction_id=title_transaction_id,
+                    transaction_id=f"{intent.transaction_id}-title" if intent is not None else None,
                     already_normalized=True,
                 )
         except Exception as exc:
@@ -349,6 +343,38 @@ class MatrixMessageOperations:
                 )
         return {"title": written.summary, "title_event_id": written.event_id}
 
+    async def _complete_send(
+        self,
+        context: ToolRuntimeContext,
+        state: _MessageSendState,
+        *,
+        title: str | None,
+        message_count: int,
+        latest_event_id: str | None,
+        send_claim: MatrixMessageSendClaim | None = None,
+        contact_verdict: ContactVerdict | None = None,
+    ) -> MatrixMessageOperationResult:
+        title_fields = (
+            await self._apply_initial_title(
+                context,
+                room_id=state.room_id,
+                thread_id=state.thread_id,
+                title=title,
+                message_count=message_count,
+                known_latest_thread_event_id=latest_event_id,
+                send_claim=send_claim,
+            )
+            if title is not None and state.thread_id is not None
+            else {}
+        )
+        return self._result(
+            "ok",
+            action="send",
+            **asdict(state),
+            **_contact_policy_fields(contact_verdict, "Sent"),
+            **title_fields,
+        )
+
     async def _message_send(  # noqa: C901, PLR0911, PLR0912
         self,
         context: ToolRuntimeContext,
@@ -366,26 +392,13 @@ class MatrixMessageOperations:
     ) -> MatrixMessageOperationResult:
         if send_claim is not None and send_claim.intent is not None:
             event_id, resolved_thread_id = await send_claim.deliver()
-            title_fields = await self._apply_initial_title(
+            return await self._complete_send(
                 context,
-                room_id=room_id,
-                thread_id=resolved_thread_id,
+                _MessageSendState(room_id=room_id, thread_id=resolved_thread_id, event_id=event_id),
                 title=send_claim.intent.title,
                 message_count=1,
-                known_latest_thread_event_id=event_id,
+                latest_event_id=event_id,
                 send_claim=send_claim,
-            )
-            return self._result(
-                "ok",
-                action="send",
-                **asdict(
-                    _MessageSendState(
-                        room_id=room_id,
-                        thread_id=resolved_thread_id,
-                        event_id=event_id,
-                    ),
-                ),
-                **title_fields,
             )
         text = (message or "").strip() or None
         if text is None and not attachments:
@@ -488,29 +501,19 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        title_fields: dict[str, object] = {}
-        if title is not None and state.thread_id is not None:
-            delivered_count = int(sent_text) + len(state.attachment_event_ids)
-            latest_event_id = (
-                state.attachment_event_ids[-1]
-                if recipient_user_id is None and state.attachment_event_ids
-                else (state.event_id or state.attachment_event_ids[-1])
-            )
-            title_fields = await self._apply_initial_title(
-                context,
-                room_id=room_id,
-                thread_id=state.thread_id,
-                title=title,
-                message_count=delivered_count,
-                known_latest_thread_event_id=latest_event_id,
-                send_claim=send_claim,
-            )
-        return self._result(
-            "ok",
-            action="send",
-            **asdict(state),
-            **_contact_policy_fields(contact_verdict, "Sent"),
-            **title_fields,
+        latest_event_id = (
+            state.attachment_event_ids[-1]
+            if recipient_user_id is None and state.attachment_event_ids
+            else state.event_id
+        )
+        return await self._complete_send(
+            context,
+            state,
+            title=title,
+            message_count=int(sent_text) + len(state.attachment_event_ids),
+            latest_event_id=latest_event_id,
+            send_claim=send_claim,
+            contact_verdict=contact_verdict,
         )
 
     async def _message_react(

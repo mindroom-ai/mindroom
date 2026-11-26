@@ -633,6 +633,12 @@ async def test_keyed_new_thread_with_title_recovers_after_lost_root_response(
     assert transport.attempts[2]["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == "🚀 Ship"
 
 
+def _receipt_store_path(context: ToolRuntimeContext) -> Path:
+    root = context.runtime_paths.control_state_root
+    assert root is not None
+    return next((root / "matrix_message_sends").glob("*.json"))
+
+
 async def test_receipt_store_accepts_v1_without_title_fields_and_rejects_orphan_title_event_id(
     context: ToolRuntimeContext,
     transport: MatrixTransport,
@@ -640,9 +646,7 @@ async def test_receipt_store_accepts_v1_without_title_fields_and_rejects_orphan_
     """Existing v1 receipts lacking title keys replay cleanly, while orphan title_event_id fails closed."""
     with tool_runtime_context(context):
         first = json.loads(await MatrixMessageTools().matrix_message(message="legacy", idempotency_key="v1-row"))
-        root = context.runtime_paths.control_state_root
-        assert root is not None
-        state_path = next((root / "matrix_message_sends").glob("*.json"))
+        state_path = _receipt_store_path(context)
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         row = next(iter(raw["sends"].values()))
         row.pop("title", None)
@@ -785,9 +789,7 @@ async def test_keyed_send_with_nested_markdown_title_normalizes_once(
     assert second == first
     assert transport.attempts[1]["content"]["body"] == "1. Deploy"
     assert transport.attempts[1]["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == "1. Deploy"
-    root = context.runtime_paths.control_state_root
-    assert root is not None
-    state_path = next((root / "matrix_message_sends").glob("*.json"))
+    state_path = _receipt_store_path(context)
     stored_row = next(iter(json.loads(state_path.read_text(encoding="utf-8"))["sends"].values()))
     assert stored_row["title"] == "1. Deploy"
     assert thread_summary_baselines.count(context.room_id, first["thread_id"]) == 1
@@ -802,9 +804,7 @@ async def test_untitled_receipts_omit_title_fields_for_v1_rollback_compatibility
     with tool_runtime_context(context):
         pending = json.loads(await MatrixMessageTools().matrix_message(message="plain", idempotency_key="untitled"))
         assert pending["status"] == "error"
-        root = context.runtime_paths.control_state_root
-        assert root is not None
-        state_path = next((root / "matrix_message_sends").glob("*.json"))
+        state_path = _receipt_store_path(context)
         pending_row = next(iter(json.loads(state_path.read_text(encoding="utf-8"))["sends"].values()))
         assert "title" not in pending_row
         assert "title_event_id" not in pending_row
