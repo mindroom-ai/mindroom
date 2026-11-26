@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import itertools
 import json
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -18,7 +18,6 @@ from mindroom.tools.native_helpers import (
     first_sql_statement,
     format_tabular_rows,
     narrow_action_enum,
-    quote_sql_identifier,
     require_enabled_action,
     resolve_bool_toggle,
 )
@@ -150,21 +149,25 @@ class _CsvTools(Toolkit):
                 else duckdb.connect(**(self.duckdb_kwargs or {}))
             )
             with conn_ctx as con:
-                table_ident = quote_sql_identifier(csv_name)
+                table_ident = '"' + csv_name.replace('"', '""') + '"'
                 stmt = (
-                    f"CREATE OR REPLACE TABLE {table_ident} AS "  # noqa: S608 - table_ident quoted via quote_sql_identifier
+                    f"CREATE OR REPLACE TEMP TABLE {table_ident} AS "  # noqa: S608 - single-part quoted identifier
                     "SELECT * FROM read_csv(?, ignore_errors=false, auto_detect=true)"
                 )
                 con.execute(stmt, [str(file_path)])
-                formatted_sql = first_sql_statement(sql_query)
-                query_result = con.sql(formatted_sql)
-                if query_result is None:
-                    return "No output"
                 try:
-                    rows = query_result.fetchall()
-                    return format_tabular_rows(query_result.columns, rows)
-                except AttributeError:
-                    return str(query_result)
+                    formatted_sql = first_sql_statement(sql_query)
+                    query_result = con.sql(formatted_sql)
+                    if query_result is None:
+                        return "No output"
+                    try:
+                        rows = query_result.fetchall()
+                        return format_tabular_rows(query_result.columns, rows)
+                    except AttributeError:
+                        return str(query_result)
+                finally:
+                    with suppress(Exception):
+                        con.execute(f"DROP TABLE IF EXISTS temp.main.{table_ident}")
         except Exception as exc:
             logger.exception("Error querying CSV", csv_name=csv_name)
             return f"Error querying csv: {exc}"

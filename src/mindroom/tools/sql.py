@@ -12,6 +12,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
     narrow_action_enum,
+    reject_ambient_pgservice,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
@@ -23,6 +24,45 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SqlInspectAction = Literal["list_tables", "describe_table"]
+_POSTGRES_BACKENDS = frozenset({"postgresql", "postgres"})
+_LIBPQ_DRIVERS = frozenset({"", "psycopg", "psycopg2", "psycopg2cffi"})
+
+
+def _prepare_engine_target(url: Any) -> tuple[Any, dict[str, Any]]:  # noqa: ANN401 - optional sqlalchemy URL
+    """Enforce scoped PostgreSQL credentials and disable ambient libpq auth fallbacks."""
+    backend = url.get_backend_name().lower()
+    if backend not in _POSTGRES_BACKENDS:
+        return url, {}
+
+    missing = [
+        name
+        for name, value in (
+            ("host", url.host),
+            ("username", url.username),
+            ("password", url.password),
+            ("database", url.database),
+        )
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if missing:
+        msg = f"PostgreSQL connection requires explicit credentials/target in URL or config: {', '.join(missing)}"
+        raise ValueError(msg)
+
+    query_lower = {key.lower(): value for key, value in url.query.items()}
+    if "service" in query_lower:
+        msg = "PostgreSQL connection URL must not use libpq 'service' lookup"
+        raise ValueError(msg)
+    if "passfile" in query_lower and query_lower["passfile"] != "":
+        msg = "PostgreSQL connection URL must not use libpq 'passfile' lookup"
+        raise ValueError(msg)
+
+    driver = url.drivername.partition("+")[2].lower()
+    if driver in _LIBPQ_DRIVERS:
+        reject_ambient_pgservice()
+        if url.port is None:
+            url = url.set(port=5432)
+        return url, {"passfile": ""}
+    return url, {}
 
 
 class _SQLTools(Toolkit):
@@ -45,22 +85,29 @@ class _SQLTools(Toolkit):
         all: bool | None = UNSET,  # noqa: A002 - matches ConfigField name
     ) -> None:
         from sqlalchemy import URL, create_engine
+        from sqlalchemy.engine import make_url
         from sqlalchemy.orm import sessionmaker
 
         engine = db_engine
         if engine is None:
+            target_url: URL | None = None
             if db_url:
-                engine = create_engine(db_url)
+                target_url = make_url(db_url)
             elif user and password and host and port and dialect:
-                engine = create_engine(
-                    URL.create(
-                        drivername=dialect,
-                        username=user,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=schema,
-                    ),
+                target_url = URL.create(
+                    drivername=dialect,
+                    username=user,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=schema,
+                )
+            if target_url is not None:
+                prepared_url, connect_args = _prepare_engine_target(target_url)
+                engine = (
+                    create_engine(prepared_url, connect_args=connect_args)
+                    if connect_args
+                    else create_engine(prepared_url)
                 )
         if engine is None:
             msg = "Could not build the database connection"

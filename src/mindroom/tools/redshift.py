@@ -137,16 +137,26 @@ class _RedshiftTools(Toolkit):
             with suppress(Exception):
                 connection.close()
 
-    def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
+    def _run_db_query(
+        self,
+        query: str,
+        params: tuple[object, ...] | None = None,
+        *,
+        commit: bool = False,
+    ) -> str:
         try:
             with self._connection_scope() as connection:
                 try:
                     with connection.cursor() as cursor:
                         cursor.execute(query, params)
                         if cursor.description is None:
+                            if commit:
+                                connection.commit()
                             return "Query executed successfully."
                         columns = [desc[0] for desc in cursor.description]
                         rows = cursor.fetchall()
+                        if commit:
+                            connection.commit()
                         if not rows:
                             return f"Query returned no results.\nColumns: {', '.join(columns)}"
                         return format_tabular_rows(columns, [tuple(row) for row in rows])
@@ -242,7 +252,7 @@ class _RedshiftTools(Toolkit):
 
     def run_query(self, query: str) -> str:
         """Run a SQL query against Amazon Redshift and return CSV-formatted rows."""
-        return self._run_db_query(query)
+        return self._run_db_query(query, commit=True)
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a Redshift table as a local CSV file at `path`."""

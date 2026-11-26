@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, cast
 
+import duckdb
 import pytest
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -52,6 +53,24 @@ def test_csv_inspect_and_query_end_to_end(tmp_path: Path) -> None:
     assert "not found" in tool.csv_inspect("read", "secret")
     assert "not found" in tool.csv_inspect("read", str(secret))
     assert "not found" in tool.query_csv_file("secret", "SELECT * FROM secret")
+
+
+def test_csv_query_dotted_stem_and_preserves_persistent_duckdb_table(tmp_path: Path) -> None:
+    """Dotted CSV stems quote as one identifier and TEMP TABLE never clobbers a supplied connection's table."""
+    sales = tmp_path / "sales.2025.csv"
+    sales.write_text("id,amount\n1,100\n2,250\n", encoding="utf-8")
+
+    csv_cls = cast("Any", builtin_tool_registry().factory("csv")())
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute('CREATE TABLE "sales.2025" AS SELECT 999 AS persistent_col')
+        tool = csv_cls(csvs=[sales], duckdb_connection=con)
+        queried = tool.query_csv_file("sales.2025", 'SELECT id, amount FROM "sales.2025" ORDER BY id')
+        assert queried == "id,amount\n1,100\n2,250"
+        # Existing persistent table on the supplied connection stays intact and unshadowed.
+        assert con.sql('SELECT persistent_col FROM "sales.2025"').fetchall() == [(999,)]
+    finally:
+        con.close()
 
 
 def test_csv_explicit_none_toggles_never_enable_tools_and_narrow_schema(tmp_path: Path) -> None:

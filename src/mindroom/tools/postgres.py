@@ -11,7 +11,12 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import first_sql_statement, format_tabular_rows, require_non_empty
+from mindroom.tools.native_helpers import (
+    first_sql_statement,
+    format_tabular_rows,
+    reject_ambient_pgservice,
+    require_non_empty,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -73,17 +78,16 @@ class _PostgresTools(Toolkit):
             msg = "table_schema must not contain NUL bytes"
             raise ValueError(msg)
 
+        reject_ambient_pgservice()
         kwargs: dict[str, Any] = {
             "host": self.host,
+            "port": 5432 if self.port is None else self.port,
             "dbname": self.db_name,
             "user": self.user,
             "password": self.password,
             "passfile": "",
-            "service": "",
             "row_factory": dict_row,
         }
-        if self.port is not None:
-            kwargs["port"] = self.port
         connection = psycopg.connect(**kwargs)
         connection.read_only = True
         with connection.cursor() as cursor:

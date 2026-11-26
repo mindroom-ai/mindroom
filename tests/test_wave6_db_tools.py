@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import socket
 import sqlite3
 from contextlib import closing
 from typing import TYPE_CHECKING, Any, cast
 
 import neo4j
 import psycopg
+import psycopg.conninfo
+import psycopg.pq
 import pytest
 import redshift_connector
 
@@ -60,10 +63,14 @@ class _FakeConnection:
         self.cursor_obj = _FakeCursor(responses)
         self.closed = False
         self.read_only = False
+        self.committed = False
         self.rolled_back = False
 
     def cursor(self) -> _FakeCursor:
         return self.cursor_obj
+
+    def commit(self) -> None:
+        self.committed = True
 
     def rollback(self) -> None:
         self.rolled_back = True
@@ -190,9 +197,20 @@ def test_postgres_scoped_credentials_read_only_and_export(
     )
     assert tool.postgres_inspect("show_tables") == "table_name\nevents"
     assert connect_calls[0]["passfile"] == ""
-    assert connect_calls[0]["service"] == ""
+    assert connect_calls[0]["port"] == 5433
+    assert "service" not in connect_calls[0]
+    conninfo_kwargs = {k: v for k, v in connect_calls[0].items() if k != "row_factory"}
+    conninfo_str = psycopg.conninfo.make_conninfo("", **conninfo_kwargs)
+    psycopg.pq.Conninfo.parse(conninfo_str.encode())
     assert fake_conn.read_only is True
     assert fake_conn.closed is True
+
+    # Ambient PGSERVICE fails closed before reaching libpq.
+    monkeypatch.setenv("PGSERVICE", "host_prod")
+    connect_calls.clear()
+    assert "PGSERVICE" in tool.run_query("SELECT 1")
+    assert connect_calls == []
+    monkeypatch.delenv("PGSERVICE")
 
     export_conn = _FakeConnection([([("id",), ("name",)], [{"id": 1, "name": "alice"}])])
     export_tool = pg_cls(connection=export_conn, table_schema="public")
@@ -325,3 +343,151 @@ def test_wave6_batch2_action_scoped_grants_and_fail_closed_migration(tmp_path: P
                 },
                 runtime_paths,
             )
+
+
+def test_postgres_real_conninfo_and_libpq_connect_without_service_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real psycopg/libpq connect attempts TCP instead of failing on invalid service=""."""
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    monkeypatch.delenv("PGSERVICEFILE", raising=False)
+    pg_cls = cast("Any", builtin_tool_registry().factory("postgres")())
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        unused_port = sock.getsockname()[1]
+
+    tool = pg_cls(
+        host="127.0.0.1",
+        port=unused_port,
+        db_name="app",
+        user="u",
+        password=_DUMMY_SECRET,
+    )
+    err = tool.run_query("SELECT 1")
+    assert 'definition of service "" not found' not in err
+    assert "Connection refused" in err or "connection failed" in err
+
+
+def test_sql_postgresql_scoped_credentials_and_libpq_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SQLTools fails closed on PostgreSQL URLs missing credentials or using libpq service/passfile."""
+    import sqlalchemy  # noqa: PLC0415
+
+    monkeypatch.setenv("PGPASSWORD", "ambient-secret")
+    monkeypatch.setenv("PGHOST", "ambient-host")
+    monkeypatch.setenv("PGPORT", "6543")
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    sql_cls = cast("Any", builtin_tool_registry().factory("sql")())
+
+    for bad_url in (
+        "postgresql+psycopg://u@db.local/app",
+        "postgres://u@db.local/app",
+        "postgresql+psycopg://:pw@db.local/app",
+        "postgresql+psycopg://u:pw@db.local/",
+        "postgresql+psycopg://u:pw@db.local/app?service=prod",
+        "postgresql+psycopg://u:pw@db.local/app?passfile=/tmp/pgpass",
+    ):
+        with pytest.raises(ValueError, match="PostgreSQL"):
+            sql_cls(db_url=bad_url)
+
+    monkeypatch.setenv("PGSERVICE", "host_prod")
+    with pytest.raises(ValueError, match="PGSERVICE"):
+        sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@db.local/app")
+    monkeypatch.delenv("PGSERVICE")
+
+    captured: list[tuple[object, dict[str, object]]] = []
+    real_create_engine = sqlalchemy.create_engine
+
+    def spy_create_engine(url: object, **kwargs: object) -> object:
+        captured.append((url, dict(kwargs)))
+        return real_create_engine(url, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", spy_create_engine)
+    tool = sql_cls(db_url=f"postgresql+psycopg://u:{_DUMMY_SECRET}@127.0.0.1/app")
+    try:
+        assert len(captured) == 1
+        url_arg, engine_kwargs = captured[0]
+        assert getattr(url_arg, "port", None) == 5432
+        assert engine_kwargs["connect_args"] == {"passfile": ""}
+    finally:
+        tool.db_engine.dispose()
+
+
+class _StatefulRedshiftCursor:
+    def __init__(self, conn: _StatefulRedshiftConnection) -> None:
+        self._conn = conn
+        self.description: list[tuple[str]] | None = None
+        self._rows: list[tuple[object, ...]] = []
+
+    def __enter__(self) -> _StatefulRedshiftCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, _params: object = None) -> None:
+        if query.startswith("INSERT"):
+            self._conn.staged.append((1, "alpha"))
+            self.description = None
+            self._rows = []
+        elif query.startswith("FAIL"):
+            self._conn.staged.append((2, "should-rollback"))
+            msg = "boom"
+            raise RuntimeError(msg)
+        else:
+            self.description = [("id",), ("name",)]
+            self._rows = list(self._conn.backing_store) + list(self._conn.staged)
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self._rows)
+
+
+class _StatefulRedshiftConnection:
+    def __init__(self, backing_store: list[tuple[int, str]]) -> None:
+        self.backing_store = backing_store
+        self.staged: list[tuple[int, str]] = []
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+
+    def cursor(self) -> _StatefulRedshiftCursor:
+        return _StatefulRedshiftCursor(self)
+
+    def commit(self) -> None:
+        self.backing_store.extend(self.staged)
+        self.staged.clear()
+        self.committed = True
+
+    def rollback(self) -> None:
+        self.staged.clear()
+        self.rolled_back = True
+
+    def close(self) -> None:
+        self.staged.clear()
+        self.closed = True
+
+
+def test_redshift_run_query_commits_dml_and_rolls_back_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redshift run_query commits DML before closing fresh connections and rolls back on failure."""
+    rs_cls = cast("Any", builtin_tool_registry().factory("redshift")())
+    persisted_rows: list[tuple[int, str]] = []
+    connections: list[_StatefulRedshiftConnection] = []
+
+    def fake_connect(**_kwargs: object) -> _StatefulRedshiftConnection:
+        conn = _StatefulRedshiftConnection(persisted_rows)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(redshift_connector, "connect", fake_connect)
+    tool = rs_cls(host="rs.example", database="dev", user="admin", password=_DUMMY_SECRET)
+
+    assert tool.run_query("INSERT INTO items VALUES (1, 'alpha')") == "Query executed successfully."
+    assert connections[0].committed is True
+    assert connections[0].closed is True
+
+    # A second fresh connection observes the committed write.
+    assert tool.run_query("SELECT id, name FROM items") == "id,name\n1,alpha"
+    assert len(connections) == 2
+
+    # Failing DML rolls back and never persists to subsequent connections.
+    assert "Error executing query: boom" in tool.run_query("FAIL AFTER STAGING")
+    assert connections[2].rolled_back is True
+    assert connections[2].committed is False
+    assert tool.run_query("SELECT id, name FROM items") == "id,name\n1,alpha"

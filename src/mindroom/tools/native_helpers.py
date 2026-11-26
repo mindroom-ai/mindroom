@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -100,3 +101,17 @@ def prepare_python_code(code: str) -> str:
     for pattern, replacement in _PYTHON_LITERAL_FIXES:
         code = pattern.sub(replacement, code)
     return code
+
+
+def reject_ambient_pgservice() -> None:
+    """Fail closed when libpq reports an ambient ``PGSERVICE`` default."""
+    with suppress(ImportError):
+        from psycopg import pq
+
+        for option in pq.Conninfo.get_defaults():
+            if option.keyword == b"service" and option.val:
+                msg = (
+                    "Ambient PGSERVICE is set; refusing to connect because libpq applies host service definitions. "
+                    "Unset PGSERVICE before connecting."
+                )
+                raise ValueError(msg)
