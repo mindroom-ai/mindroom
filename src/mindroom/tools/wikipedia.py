@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.wikipedia import WikipediaTools
+    from mindroom.custom_tools.wikipedia import WikipediaTools
 
 
 @register_tool_with_metadata(
@@ -43,6 +43,6 @@ if TYPE_CHECKING:
 )
 def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for searching and retrieving information."""
-    from agno.tools.wikipedia import WikipediaTools
+    from mindroom.custom_tools.wikipedia import WikipediaTools
 
     return WikipediaTools
