@@ -9,8 +9,11 @@ full collections then only walk objects created since the last refreeze, and
 bots a config reload replaced are collected at the next refreeze instead of
 staying frozen. A refreeze touches every object, so it first reads swapped-out
 memory back in on a worker thread; otherwise the whole process would wait on
-swap one page fault at a time while the collector holds the GIL. After the
-first refreeze the primary also raises CPython's full-collection threshold,
+swap one page fault at a time while the collector holds the GIL. After each
+freeze, glibc's ``malloc_trim(0)`` returns freed arena pages to the OS (off the
+event loop during refreezes) so dead free lists stay unmapped instead of
+remaining pinned across arenas. After the first refreeze the primary also
+raises CPython's full-collection threshold,
 because each routine full collection walks the whole unfrozen heap to find
 little garbage; how much rarer they get depends on the workload.
 
@@ -172,6 +175,25 @@ def _malloc_stats() -> dict[str, int] | None:
 
 
 @functools.cache
+def _malloc_trim() -> Callable[[int], int] | None:
+    """Return glibc's ``malloc_trim``, or ``None`` on other C libraries; ctypes releases the GIL for each call."""
+    function = getattr(ctypes.CDLL(None), "malloc_trim", None)
+    if function is None:
+        return None
+    function.argtypes = [ctypes.c_size_t]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _trim_malloc() -> bool | None:
+    """Return freed malloc arena pages to the OS, or ``None`` on non-glibc C libraries."""
+    trim = _malloc_trim()
+    if trim is None:
+        return None
+    return bool(trim(0))
+
+
+@functools.cache
 def _madvise() -> Callable[[int, int, int], int]:
     """Return libc's ``madvise``; ctypes releases the GIL for each call."""
     function = ctypes.CDLL(None, use_errno=True).madvise
@@ -206,7 +228,7 @@ def _read_swapped_memory_back() -> int:
 
 
 def freeze_startup_heap() -> None:
-    """Collect garbage, then exclude every surviving object from later collections.
+    """Collect garbage, exclude surviving objects from later collections, and trim freed malloc pages.
 
     Call audio is pumped on the event loop, and a full collection that walks every
     imported module pauses agent speech for hundreds of milliseconds. Run this
@@ -217,7 +239,13 @@ def freeze_startup_heap() -> None:
     gc.collect()
     collect_seconds = time.perf_counter() - started
     gc.freeze()
-    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_seconds=round(collect_seconds, 3))
+    trimmed = _trim_malloc()
+    logger.info(
+        "startup_heap_frozen",
+        frozen_objects=gc.get_freeze_count(),
+        collect_seconds=round(collect_seconds, 3),
+        malloc_trimmed=trimmed,
+    )
 
 
 def _log_heap_type_probe() -> None:
@@ -252,7 +280,7 @@ async def _run_heap_type_probe(
 
 
 async def _refreeze_runtime_heap() -> None:
-    """Read swapped-out memory back in off the loop, then collect what the frozen heap released and refreeze.
+    """Read swapped-out memory back in off the loop, collect what the frozen heap released, refreeze, and trim.
 
     Unfreezing first makes objects frozen earlier collectable, such as bots a
     config reload replaced; collecting before freezing keeps garbage out of
@@ -260,7 +288,9 @@ async def _refreeze_runtime_heap() -> None:
     such as a reply in flight, wait for the next refreeze together with
     everything they reference. The collection walks the whole heap once,
     including the import-time heap frozen at startup, so it pauses the loop a
-    little longer than a full collection of the unfrozen heap.
+    little longer than a full collection of the unfrozen heap. Trimming
+    glibc's malloc arenas on a worker thread afterwards returns freed pages to
+    the OS without blocking the event loop.
     """
     started = time.perf_counter()
     paged_in_kib = await asyncio.to_thread(_read_swapped_memory_back)
@@ -270,6 +300,7 @@ async def _refreeze_runtime_heap() -> None:
     collected = gc.collect()
     collect_seconds = time.perf_counter() - started
     gc.freeze()
+    trimmed = await asyncio.to_thread(_trim_malloc)
     logger.info(
         "runtime_heap_refrozen",
         frozen_objects=gc.get_freeze_count(),
@@ -277,6 +308,7 @@ async def _refreeze_runtime_heap() -> None:
         collect_seconds=round(collect_seconds, 3),
         paged_in_kib=paged_in_kib,
         page_in_seconds=round(page_in_seconds, 3),
+        malloc_trimmed=trimmed,
     )
 
 
