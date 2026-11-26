@@ -290,6 +290,10 @@ class LoadedPlugin:
                 return nio.RoomGetStateEventError("Not in this room", "M_FORBIDDEN")
             return await self._room_get_state_event(room_id, event_type, state_key)
 
+        async def room_resolve_alias(room_alias: str) -> nio.RoomResolveAliasError:
+            del room_alias
+            return nio.RoomResolveAliasError("Room alias not found", "M_NOT_FOUND")
+
         return cast(
             "nio.AsyncClient",
             _StandIn(
@@ -300,6 +304,7 @@ class LoadedPlugin:
                 joined_members=joined_members,
                 room_get_state=room_get_state,
                 room_get_state_event=room_get_state_event,
+                room_resolve_alias=room_resolve_alias,
             ),
         )
 

@@ -999,6 +999,9 @@ def test_action_dispatched_grant_operation_binds_to_action(
     ops = [grant_operation(config, tool_name, {"action": action}) for action in actions]
     assert all(op is not None for op in ops)
     assert ops[0] == grant_operation(config, tool_name, {"action": f" {actions[0]} "})
+    assert ops[0] == grant_operation(config, tool_name, {"action": actions[0]}, toolkit_name="other_toolkit")
+    assert ops[0] is not None
+    assert ops[0].mcp_server_id == tool_name
     assert len(set(ops)) == 3
     assert len({op.key for op in ops if op is not None}) == 3
     assert grant_operation(config, tool_name, {}) is None
@@ -1202,7 +1205,12 @@ async def test_plugin_action_scoped_grants_scope_timed_approvals_per_action(
         tools=registry,
         toolkit_name="demo_consolidated",
     )
-    assert list_op == grant_operation(config, "demo_action_tool", {"action": "list"}, tools=registry)
+    assert list_op.mcp_server_id == "demo_consolidated"
+    assert list_op.mcp_tool_name == "list"
+    fallback_op = grant_operation(config, "demo_action_tool", {"action": "list"}, tools=registry)
+    assert fallback_op is not None
+    assert fallback_op.mcp_server_id == "demo_action_tool"
+    assert fallback_op.mcp_tool_name == "list"
     assert list_op.key != unlink_op.key
     for bad_args in ({}, {"action": ""}, {"action": "   "}, {"action": 123}):
         assert (
@@ -1314,7 +1322,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     )
     assert plugin_op is not None
     assert plugin_op.tool_name == "search_web"
-    assert plugin_op.mcp_server_id == "search_web"
+    assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
     assert grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
     assert not scheduled_call_offers_any_arguments(
@@ -1361,6 +1369,103 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     )
     assert timed_grant_operation(config, plugin_tool, plugin_call, tools=registry) == plugin_op
     assert timed_grant_operation(config, serper_tool, plugin_call, tools=registry) is None
+
+
+@pytest.mark.asyncio
+async def test_plugin_action_scoped_grants_distinguish_same_named_tools_across_toolkits(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Two plugins declaring action_scoped_grants for the same function name keep distinct grant keys."""
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+
+    issues_root = _write_consolidated_plugin(
+        tmp_path,
+        plugin_name="issues",
+        function_name="dispatch",
+        retired_name=None,
+    )
+    deployments_root = _write_consolidated_plugin(
+        tmp_path,
+        plugin_name="deployments",
+        function_name="dispatch",
+        retired_name=None,
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [{"path": str(issues_root)}, {"path": str(deployments_root)}],
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "tools": ["issues", "deployments"],
+                    "include_default_tools": False,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    registry = refresh_plugins(config, runtime_paths).tools
+
+    issues_op = grant_operation(
+        config,
+        "dispatch",
+        {"action": "create"},
+        tools=registry,
+        toolkit_name="issues",
+    )
+    deployments_op = grant_operation(
+        config,
+        "dispatch",
+        {"action": "create"},
+        tools=registry,
+        toolkit_name="deployments",
+    )
+    assert issues_op is not None
+    assert deployments_op is not None
+    assert issues_op.mcp_server_id == "issues"
+    assert deployments_op.mcp_server_id == "deployments"
+    assert issues_op.mcp_tool_name == "create"
+    assert deployments_op.mcp_tool_name == "create"
+    assert issues_op.key != deployments_op.key
+
+    dispatch_tool = ToolExecution(
+        tool_call_id="call-dispatch",
+        tool_name="dispatch",
+        tool_args={"action": "create"},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    issues_call = ApprovalCall(
+        tool_call_id="call-issues",
+        tool_name="dispatch",
+        invoking_agent="code",
+        expires_at_ns=9_000_000_000_000_000_000,
+        toolkit_name="issues",
+    )
+    deployments_call = ApprovalCall(
+        tool_call_id="call-deployments",
+        tool_name="dispatch",
+        invoking_agent="code",
+        expires_at_ns=9_000_000_000_000_000_000,
+        toolkit_name="deployments",
+    )
+    assert timed_grant_operation(config, dispatch_tool, issues_call, tools=registry) == issues_op
+    assert timed_grant_operation(config, dispatch_tool, deployments_call, tools=registry) == deployments_op
+
+    # Approving issues.dispatch(action="create") auto-approves issues again but leaves deployments gated.
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        first_issues = await _card(journal, manager, "issues-1", tool_name="dispatch", grant_op=issues_op)
+        assert (await _approve(manager, first_issues)).consumed
+        await _card(journal, manager, "issues-2", tool_name="dispatch", grant_op=issues_op)
+        await _card(journal, manager, "deployments-1", tool_name="dispatch", grant_op=deployments_op)
+        assert await _call_row(journal, "issues-2") == ("approved", "@human:test")
+        assert await _call_row(journal, "deployments-1") == (None, None)
+    finally:
+        await manager.shutdown()
 
 
 def test_plugin_retired_functions_fail_closed_in_config_validation(tmp_path: Path) -> None:

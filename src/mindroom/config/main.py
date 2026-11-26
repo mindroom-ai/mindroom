@@ -1619,6 +1619,20 @@ class Config(BaseModel):
         tools, skipped = candidate_tool_registry(self, runtime_paths)
         if skipped and not tolerate_plugin_load_errors:
             raise skipped[0].error
+        self._validate_tool_registry(tools)
+
+    def validate_tool_registry(self, tools: ToolRegistry) -> None:
+        """Validate authored tool references, overrides, and approval rules against one tool registry."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
+
+        try:
+            self._validate_tool_registry(tools)
+        except (ToolConfigOverrideError, ToolMetadataValidationError) as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+
+    def _validate_tool_registry(self, tools: ToolRegistry) -> None:
+        """Validate authored tool references, overrides, and approval rules against ``tools``."""
         entries = [(f"defaults.tools[{index}]", entry) for index, entry in enumerate(self.defaults.tools)] + [
             (f"agents.{agent_name}.tools[{index}]", entry)
             for agent_name, agent_config in self.agents.items()

@@ -113,7 +113,8 @@ def grant_operation(
         action = arguments.get("action")
         if not isinstance(action, str) or not action.strip():
             return None
-        return ApprovalOperation(approval_binding(config), tool_name, tool_name, action.strip())
+        scope_owner = tool_name if tool_name in _ACTION_SCOPED_TOOLS else (toolkit_name or tool_name)
+        return ApprovalOperation(approval_binding(config), tool_name, scope_owner, action.strip())
     return ApprovalOperation(approval_binding(config), tool_name)
 
 

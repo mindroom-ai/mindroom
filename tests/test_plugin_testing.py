@@ -447,10 +447,24 @@ def rooms_probe_tools() -> type[RoomsProbeTools]:
             sender=ALICE,
             room=room_a,
         )
+        unknown_alias = await plugin.call_tool(
+            "rooms_probe",
+            "inspect_rooms",
+            {"target_room": "#unknown:localhost"},
+            agent="helper",
+            sender=ALICE,
+            room=room_a,
+        )
 
     assert result.status == "ok"
     assert json.loads(result.value) == {
         "shared": [room_a],
         "resolved": None,
         "error": "Not authorized to access the target room.",
+    }
+    assert unknown_alias.status == "ok"
+    assert json.loads(unknown_alias.value) == {
+        "shared": [room_a],
+        "resolved": None,
+        "error": "Unknown room '#unknown:localhost'; pass a room ID, alias, or configured room name.",
     }
