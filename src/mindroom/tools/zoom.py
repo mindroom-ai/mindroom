@@ -334,6 +334,7 @@ class _ZoomTools(Toolkit):
     dependencies=[],  # httpx already included in main dependencies
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#zoom",
     function_names=("zoom_manage", "zoom_read"),
+    action_scoped_grants=("zoom_manage", "zoom_read"),
 )
 def zoom_tools() -> type[_ZoomTools]:
     """Return Zoom tools for video conferencing and meeting management."""

@@ -595,6 +595,7 @@ class _WhatsAppTools(Toolkit):
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#whatsapp",
     function_names=("whatsapp_send",),
+    action_scoped_grants=("whatsapp_send",),
 )
 def whatsapp_tools() -> type[_WhatsAppTools]:
     """Return WhatsApp Business API tools for messaging."""

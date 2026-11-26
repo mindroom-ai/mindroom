@@ -551,6 +551,7 @@ class _TelegramTools(Toolkit):
     dependencies=["pytelegrambotapi"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#telegram",
     function_names=("telegram_manage", "telegram_read", "telegram_send"),
+    action_scoped_grants=("telegram_manage", "telegram_read", "telegram_send"),
 )
 def telegram_tools() -> type[_TelegramTools]:
     """Return Telegram tools for sending messages."""

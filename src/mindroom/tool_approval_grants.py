@@ -74,24 +74,7 @@ class ApprovalGrantScope:
     invoking_agent: str
 
 
-_ACTION_SCOPED_TOOLS = frozenset(
-    {
-        "triggers",
-        "memory",
-        "todo",
-        "scheduler",
-        "twilio_read",
-        "discord_read",
-        "telegram_read",
-        "telegram_send",
-        "telegram_manage",
-        "whatsapp_send",
-        "zoom_read",
-        "zoom_manage",
-        "x_read",
-        "x_write",
-    },
-)
+_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler"})
 
 
 def _is_action_scoped_tool(

@@ -308,6 +308,7 @@ class _XTools(Toolkit):
     dependencies=["tweepy"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#x",
     function_names=("x_read", "x_write"),
+    action_scoped_grants=("x_read", "x_write"),
 )
 def x_tools() -> type[_XTools]:
     """Return X (Twitter) tools for posting tweets and social media interaction."""

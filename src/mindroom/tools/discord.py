@@ -273,6 +273,7 @@ class _DiscordTools(Toolkit):
         "discord_read",
         "discord_send",
     ),
+    action_scoped_grants=("discord_read",),
 )
 def discord_tools() -> type[_DiscordTools]:
     """Return Discord tools for interacting with Discord channels and servers."""

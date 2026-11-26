@@ -265,6 +265,7 @@ class _TwilioTools(Toolkit):
     dependencies=["twilio"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
     function_names=("send_sms", "twilio_read"),
+    action_scoped_grants=("twilio_read",),
 )
 def twilio_tools() -> type[_TwilioTools]:
     """Return the native twilio toolkit."""
