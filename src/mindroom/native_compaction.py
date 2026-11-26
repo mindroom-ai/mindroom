@@ -172,7 +172,7 @@ def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Messag
 
 
 @dataclass(frozen=True, slots=True)
-class NativeReplay:
+class _NativeReplay:
     """What a request replays of its messages: the one projection its wire, its size, and its usage anchor read.
 
     ``messages`` are the latest checkpoint with its tail and the system messages, or every message when none stands.
@@ -191,25 +191,25 @@ def native_replay(
     *,
     reset_scope: str | None = None,
     stripped: bool = False,
-) -> NativeReplay:
+) -> _NativeReplay:
     """Project ``messages`` from the latest checkpoint on ``route`` or reset on ``reset_scope``, whichever is later.
 
     A checkpoint stands for what precedes it. A reset keeps every message and sends those before it without encrypted
     state, as a ``stripped`` request sends them all.
     """
     if stripped:
-        return NativeReplay(list(messages), encrypted_from=len(messages), boundary=len(messages))
+        return _NativeReplay(list(messages), encrypted_from=len(messages), boundary=len(messages))
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
         if checkpoint_items(message, route):
-            return NativeReplay(checkpoint_tail(messages, index), boundary=index)
+            return _NativeReplay(checkpoint_tail(messages, index), boundary=index)
         if (
             reset_scope is not None
             and message.role == "assistant"
             and (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
         ):
-            return NativeReplay(list(messages), encrypted_from=index, boundary=index)
-    return NativeReplay(list(messages))
+            return _NativeReplay(list(messages), encrypted_from=index, boundary=index)
+    return _NativeReplay(list(messages))
 
 
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:

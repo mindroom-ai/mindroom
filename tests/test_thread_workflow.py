@@ -14,7 +14,7 @@ from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.thread_workflow import (
-    classify_thread_workflow,
+    _classify_thread_workflow,
     latest_reply_question_ts,
     room_thread_facts,
     thread_workflow,
@@ -29,7 +29,7 @@ _CASES = json.loads(
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case["name"])
 def test_shared_workflow_case(case: dict[str, Any]) -> None:
     """Each shared case classifies as MindRoom Chat classifies it."""
-    assert classify_thread_workflow(case["status"], case["now"]) == case["expected"]
+    assert _classify_thread_workflow(case["status"], case["now"]) == case["expected"]
 
 
 def _ms(year: int, month: int = 1, day: int = 1) -> int:

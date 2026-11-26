@@ -1575,14 +1575,14 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
         runtime_paths,
         credential_overrides={"host": "https://search.example.com"},
         tool_config_overrides={
-            "include_tools": ["search_web", "news_search", "image_search"],
+            "include_tools": ["searxng_search"],
         },
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
 
-    assert set(toolkit_function_names(tool)) == {"search_web", "news_search", "image_search"}
+    assert set(toolkit_function_names(tool)) == {"searxng_search"}
 
 
 def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
@@ -1689,18 +1689,15 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
     tool = get_tool_by_name(
         "scheduler",
         runtime_paths,
-        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        tool_config_overrides={"exclude_tools": ["run_scheduled_call"]},
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
 
     assert set(toolkit_function_names(tool)) == {
-        "schedule",
+        "scheduler",
         "schedule_tool_call",
-        "run_scheduled_call",
-        "edit_schedule",
-        "list_schedules",
     }
 
 

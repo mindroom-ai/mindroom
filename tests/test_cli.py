@@ -831,3 +831,64 @@ def test_run_skips_pairing_with_registration_token(tmp_path: Path) -> None:
         assert not pair_called, "pair_local_install should not have been called when MATRIX_REGISTRATION_TOKEN is set"
         mock_run.assert_called_once()
         assert result.exit_code == 0
+
+
+def test_run_validates_config_once_without_pairing_and_revalidates_after_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping pairing avoids a duplicate config load while preserving api_port; pairing re-validates refreshed state."""
+    monkeypatch.delenv("MINDROOM_PORT", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+
+    # 1. Without pairing: config validated once and api_port already attached to runtime_paths.
+    bot_main = AsyncMock()
+    with (
+        patch.object(
+            main_module,
+            "_load_active_config_or_exit",
+            wraps=main_module._load_active_config_or_exit,
+        ) as load_spy,
+        patch("mindroom.orchestrator.main", bot_main),
+    ):
+        result = runner.invoke(
+            app,
+            ["run", "--no-api", "--config", str(config_path), "--api-port", "9876"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert load_spy.call_count == 1
+    bot_main.assert_awaited_once()
+    passed_paths = bot_main.await_args.kwargs["runtime_paths"]
+    assert passed_paths.env_value("MINDROOM_PORT") == "9876"
+
+    # 2. With pairing: config validated before pairing and re-validated after pairing refreshes .env.
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+
+    def fake_pair(_runtime_paths: object, **_kwargs: object) -> None:
+        with env_path.open("a", encoding="utf-8") as env_file:
+            env_file.write("MINDROOM_LOCAL_CLIENT_ID=paired_id\nMINDROOM_LOCAL_CLIENT_SECRET=paired_secret\n")
+
+    bot_main_paired = AsyncMock()
+    with (
+        patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
+        patch.object(
+            main_module,
+            "_load_active_config_or_exit",
+            wraps=main_module._load_active_config_or_exit,
+        ) as load_spy_paired,
+        patch("mindroom.orchestrator.main", bot_main_paired),
+    ):
+        result = runner.invoke(
+            app,
+            ["run", "--no-api", "--config", str(config_path), "--api-port", "9877"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert load_spy_paired.call_count == 2
+    bot_main_paired.assert_awaited_once()
+    refreshed_paths = bot_main_paired.await_args.kwargs["runtime_paths"]
+    assert refreshed_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") == "paired_id"
+    assert refreshed_paths.env_value("MINDROOM_PORT") == "9877"

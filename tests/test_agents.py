@@ -1363,7 +1363,7 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     )
 
     assert toolkit is not None
-    function = toolkit_offers(toolkit, "list_memories")
+    function = toolkit_offers(toolkit, "memory")
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 
@@ -4904,7 +4904,7 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources_by_cap
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
 
-    assert ("search_memories" in _offered(agent)) is has_memory_tool
+    assert ("memory" in _offered(agent)) is has_memory_tool
     description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert "Search this agent's configured knowledge bases" in description
@@ -4914,7 +4914,9 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources_by_cap
         in description
     )
     assert "This list only describes sources available through search_knowledge_base." in description
-    recommendation = "For resilient memory search, team-visible memory, and memory IDs, use search_memories."
+    recommendation = (
+        'For resilient memory search, team-visible memory, and memory IDs, use memory(action="search", ...).'
+    )
     assert (recommendation in description) is has_memory_tool
 
 
@@ -4952,7 +4954,7 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
         f"- {seen_base_ids[0]}: Configured file memory for this agent. "
         "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
     ) in description
-    assert "use search_memories" not in description
+    assert "use memory(action=" not in description
 
 
 @pytest.mark.parametrize("configured_base", [None, "engineering"])

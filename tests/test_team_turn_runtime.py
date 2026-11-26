@@ -512,13 +512,13 @@ async def test_a_member_s_todo_work_defaults_to_the_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member's ``add_todo`` without an assignee assigns the work to that member, not to the team."""
+    """A member's ``todo(action="add")`` without an assignee assigns the work to that member, not to the team."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
         leader=[delegate("call-team", "writer", "Plan it"), answer("Planned.", usage(50, 5))],
         writer=[
-            calls(tool_call("add_todo", "call-todo", title="Draft the report"), metrics=usage(10, 1)),
+            calls(tool_call("todo", "call-todo", action="add", title="Draft the report"), metrics=usage(10, 1)),
             answer("Done."),
         ],
     )

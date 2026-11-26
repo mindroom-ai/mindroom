@@ -193,6 +193,59 @@ run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
 
+### Linux resource isolation
+
+On Linux, MindRoom starts shell commands at `SCHED_IDLE` CPU priority (`chrt -i 0`, falling back to moving the process tree after spawn) and idle disk I/O priority (`ionice -c 3`, which takes effect when the disk scheduler honors I/O priorities such as BFQ, and fails open when unavailable).
+
+Deployments that route `shell` to Docker or Kubernetes workers already isolate commands in their worker containers.
+When running `shell` directly in the MindRoom process on a Linux systemd host (`defaults.allow_shell_without_worker: true`), spawned commands inherit MindRoom's own service cgroup by default, so heavy builds or test suites can compete with MindRoom for RAM and swap.
+
+To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
+MindRoom probes `systemd-run --user --scope` together with `env` once per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)` and caches the result for the process lifetime, failing open when unavailable (including on older systemd releases without `--expand-environment=no`).
+When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
+
+Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
+
+1. Enable lingering so `user@<uid>.service` starts at boot (`sudo loginctl enable-linger <user>`), and delegate controllers to it (for example in `/etc/systemd/system/user@<uid>.service.d/delegate.conf`):
+
+   ```ini
+   [Service]
+   Delegate=cpu cpuset io memory pids
+   ```
+
+2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with limits sized to the host:
+
+   ```ini
+   [Unit]
+   Description=MindRoom agent shell subprocesses
+
+   [Slice]
+   MemoryHigh=50%
+   MemoryMax=60%
+   MemorySwapMax=4G
+   CPUWeight=1
+   IOWeight=1
+   ```
+
+   You can also set `AllowedCPUs=` to reserve dedicated threads for MindRoom and the host.
+
+3. Point MindRoom's service at the user manager and slice, and tear the slice down on service stop so detached shells do not outlive a restart:
+
+   ```ini
+   [Unit]
+   After=user@<uid>.service
+   Wants=user@<uid>.service
+
+   [Service]
+   Environment=XDG_RUNTIME_DIR=/run/user/<uid>
+   Environment=MINDROOM_SHELL_SYSTEMD_SLICE=mindroom-shells.slice
+   ExecStopPost=-/usr/bin/systemctl --user stop mindroom-shells.slice
+   MemoryMin=4G
+   MemoryLow=6G
+   ```
+
+   In cgroup v2, `MemoryMin` and `MemoryLow` are bounded by ancestor cgroups, so set matching values on `system.slice` (and on the container cgroup when running inside LXC/Incus).
+
 ### Named workers
 
 On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.

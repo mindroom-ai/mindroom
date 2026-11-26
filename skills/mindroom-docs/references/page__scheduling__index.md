@@ -58,12 +58,12 @@ agents:
 
 | Function | Notes |
 | --- | --- |
-| `schedule(message, new_thread, execute_at=None, delay_seconds=None, cron=None, description=None, timezone=None, history_limit=None, silent=False, model=None)` | Provide `new_thread` and exactly one of `execute_at`, `delay_seconds`, or `cron` |
-| `edit_schedule(task_id, message=None, description=None, execute_at=None, delay_seconds=None, cron=None, timezone=None, history_limit=None, clear_history_limit=False, silent=None, model=None)` | Patch semantics: omitted arguments keep current values; schedule type (`once` vs `cron`) cannot change |
-| `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
-| `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
-| `list_schedules()` | Lists pending tasks in the current room or thread |
-| `cancel_schedule(task_id)` | Cancels one pending task by ID |
+| `scheduler(action="create", message, new_thread, execute_at=None, delay_seconds=None, cron=None, description=None, timezone=None, history_limit=None, silent=False, model=None)` | Provide `new_thread` and exactly one of `execute_at`, `delay_seconds`, or `cron` |
+| `scheduler(action="edit", task_id, message=None, description=None, execute_at=None, delay_seconds=None, cron=None, timezone=None, history_limit=None, clear_history_limit=False, silent=None, model=None)` | Patch semantics: omitted arguments keep current values; schedule type (`once` vs `cron`) cannot change |
+| `scheduler(action="list")` | Lists pending tasks in the current room or thread |
+| `scheduler(action="cancel", task_id)` | Cancels one pending task by ID |
+| `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | Offered when the agent has an approval-gated tool (or via `include_tools`); see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
+| `run_scheduled_call(task_id, arguments_json=None)` | Offered alongside `schedule_tool_call`; runs a pre-approved scheduled call when its task asks |
 
 - `message` is the exact trigger message posted when the schedule fires; include `@agent_name` or `@team_name` to choose who answers each run, and MindRoom verifies that every mentioned responder is allowed in the room.
   The task text never runs as a chat command, even when it starts with `!` or `/`.
@@ -78,29 +78,30 @@ agents:
 - `model` picks a model alias (or `name@level`) for each run; see [Model selection](#model-selection).
 
 ```python
-schedule(message="@ops check the deployment", new_thread=False, delay_seconds=900)
-schedule(message="@ops check the deployment", new_thread=False, execute_at="2026-11-25T09:00:00-08:00")
-schedule(message="Post the on-call handoff summary", new_thread=True, cron="0 8 * * 1-5", timezone="America/Los_Angeles")
-schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
-schedule(message="Check the inbox for urgent mail and report only if found", new_thread=False, cron="*/5 * * * *", history_limit=0, silent=True)
-list_schedules()
-edit_schedule("a1b2c3d4", execute_at="2026-11-25T10:00:00-08:00", history_limit=5, silent=False)
-cancel_schedule("a1b2c3d4")
+scheduler(action="create", message="@ops check the deployment", new_thread=False, delay_seconds=900)
+scheduler(action="create", message="@ops check the deployment", new_thread=False, execute_at="2026-11-25T09:00:00-08:00")
+scheduler(action="create", message="Post the on-call handoff summary", new_thread=True, cron="0 8 * * 1-5", timezone="America/Los_Angeles")
+scheduler(action="create", message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+scheduler(action="create", message="Check the inbox for urgent mail and report only if found", new_thread=False, cron="*/5 * * * *", history_limit=0, silent=True)
+scheduler(action="list")
+scheduler(action="edit", task_id="a1b2c3d4", execute_at="2026-11-25T10:00:00-08:00", history_limit=5, silent=False)
+scheduler(action="cancel", task_id="a1b2c3d4")
 ```
 
 ## History Limits
 
 Scheduled runs normally use the responder's configured conversation history.
 Set `history_limit=0` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
-Set a positive integer `history_limit` to cap each run to recent messages, and pass `clear_history_limit=True` to `edit_schedule` to restore unlimited history.
+Set a positive integer `history_limit` to cap each run to recent messages, and pass `clear_history_limit=True` to `scheduler(action="edit", ...)` to restore unlimited history.
 
 ## Silent Delivery
 
 Schedules are visible by default.
-Pass `silent=True` to `schedule()` (or `edit_schedule()`) when the trigger and routine no-report results should stay out of the room timeline.
+Pass `silent=True` to `scheduler(action="create", ...)` (or `action="edit"`) when the trigger and routine no-report results should stay out of the room timeline.
 
 ```python
-schedule(
+scheduler(
+    action="create",
     message="Check the inbox for urgent messages and report only when one arrives",
     new_thread=False,
     cron="*/5 * * * *",
@@ -118,7 +119,7 @@ When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-a
 A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
 After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
-Pass `silent=True` or `silent=False` to `edit_schedule()` or toggle silent delivery in the dashboard to change the mode.
+Pass `silent=True` or `silent=False` to `scheduler(action="edit", ...)` or toggle silent delivery in the dashboard to change the mode.
 
 Silent delivery only hides messages from the room; the task text still travels through Matrix and is subject to homeserver retention.
 
@@ -130,12 +131,12 @@ Workspace knowledge indexing skips these receipts.
 
 ## Model Selection
 
-Pass `model` to `schedule()` to run each scheduled response with a model alias from `models:` in `config.yaml`, for example a cheaper model for simple recurring checks.
+Pass `model` to `scheduler(action="create", ...)` to run each scheduled response with a model alias from `models:` in `config.yaml`, for example a cheaper model for simple recurring checks.
 
 ```python
-schedule(message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
-edit_schedule("task42", model="cheap")
-edit_schedule("task42", model="")
+scheduler(action="create", message="@ops check deployment health", new_thread=False, cron="0 * * * *", history_limit=0, model="cheap")
+scheduler(action="edit", task_id="task42", model="cheap")
+scheduler(action="edit", task_id="task42", model="")
 ```
 
 The model applies to the whole scheduled response, including a team's coordinator and members.
@@ -191,7 +192,7 @@ A schedule keeps the timezone it was created in (defaulting to the creating agen
 New recurring schedules evaluate their 5-field `cron` expression directly in that IANA timezone, so their local clock time stays consistent across daylight-saving transitions.
 A recurring local-time cron scheduled during a fall-back repeated hour (for example `01:30`) fires on both occurrences, matching `croniter`.
 The dashboard's Schedules page shows each recurring schedule's cron timezone (or `UTC (legacy)` for older UTC-based cron tasks) alongside its description, such as `At 09:00 (Europe/Amsterdam)`.
-Existing recurring schedules created before local-time crons keep running in UTC until edited with a new `cron` expression via `edit_schedule`.
+Existing recurring schedules created before local-time crons keep running in UTC until edited with a new `cron` expression via `scheduler(action="edit", ...)`.
 
 ## Permissions and Automatic Cancellation
 

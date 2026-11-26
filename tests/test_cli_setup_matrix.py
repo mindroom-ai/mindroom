@@ -21,13 +21,13 @@ from mindroom.cli import setup_detection, setup_matrix
 from mindroom.cli.main import app
 from mindroom.cli.setup_detection import DetectionSnapshot, KeyCheckResult
 from mindroom.cli.setup_matrix import (
-    PROVISIONING_CONNECTIONS_PATH,
-    PROVISIONING_MISSING_OPENID_DETAIL,
-    MatrixServerProbeResult,
-    ParsedMatrixServerInput,
-    parse_matrix_server_input,
-    probe_matrix_server,
-    probe_provisioning_service,
+    _PROVISIONING_CONNECTIONS_PATH,
+    _PROVISIONING_MISSING_OPENID_DETAIL,
+    _MatrixServerProbeResult,
+    _parse_matrix_server_input,
+    _ParsedMatrixServerInput,
+    _probe_matrix_server,
+    _probe_provisioning_service,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.matrix.provisioning_env import local_pairing_required
@@ -37,8 +37,8 @@ if TYPE_CHECKING:
     from mindroom import constants as constants_module
 
 runner = CliRunner()
-_P = ParsedMatrixServerInput
-_R = MatrixServerProbeResult
+_P = _ParsedMatrixServerInput
+_R = _MatrixServerProbeResult
 _CLEAN_ENV_VARS = (
     "MATRIX_HOMESERVER",
     "MATRIX_SERVER_NAME",
@@ -121,10 +121,10 @@ class TestMatrixServerParsingAndProbing:
     def test_parse_matrix_server_input_accepts_valid_domains_and_urls(
         self,
         raw: str,
-        expected: ParsedMatrixServerInput,
+        expected: _ParsedMatrixServerInput,
     ) -> None:
         """Bare server names default to https:// and preserve explicit ports; full URLs normalize cleanly."""
-        assert parse_matrix_server_input(raw) == expected
+        assert _parse_matrix_server_input(raw) == expected
 
     @pytest.mark.parametrize(
         "raw",
@@ -150,16 +150,16 @@ class TestMatrixServerParsingAndProbing:
     )
     def test_parse_matrix_server_input_rejects_invalid_values(self, raw: str) -> None:
         """Empty, non-http(s), malformed, or `.env`-unsafe inputs return None."""
-        assert parse_matrix_server_input(raw) is None
+        assert _parse_matrix_server_input(raw) is None
 
     @pytest.mark.parametrize(
         ("outcome", "expected"),
         [
-            (_json_resp(401, {"detail": PROVISIONING_MISSING_OPENID_DETAIL}), True),
+            (_json_resp(401, {"detail": _PROVISIONING_MISSING_OPENID_DETAIL}), True),
             (_json_resp(401, {"detail": "Unauthorized"}), False),
             (_json_resp(401, {"errcode": "M_UNKNOWN_TOKEN"}), False),
             (httpx.Response(401, text="<html>Unauthorized</html>"), False),
-            (_json_resp(401, [PROVISIONING_MISSING_OPENID_DETAIL]), False),
+            (_json_resp(401, [_PROVISIONING_MISSING_OPENID_DETAIL]), False),
             (httpx.Response(404), False),
             (httpx.Response(405), False),
             (_json_resp(200, {"connections": []}), False),
@@ -169,15 +169,15 @@ class TestMatrixServerParsingAndProbing:
     )
     def test_probe_provisioning_service_variants(self, outcome: httpx.Response | Exception, expected: bool) -> None:
         """Only HTTP 401 with the exact missing-OpenID detail marks local provisioning as supported."""
-        url = f"https://mindroom.acme.example{PROVISIONING_CONNECTIONS_PATH}"
+        url = f"https://mindroom.acme.example{_PROVISIONING_CONNECTIONS_PATH}"
         ctx, calls = _patch_http({url: outcome})
         with ctx:
-            assert probe_provisioning_service("https://mindroom.acme.example/") is expected
+            assert _probe_provisioning_service("https://mindroom.acme.example/") is expected
         assert calls == [(url, False)]
 
     def test_probe_matrix_server_well_known_resolution_and_port_preservation(self) -> None:
         """Bare domains (including explicit ports) resolve `.well-known/matrix/client` and detect provisioning."""
-        parsed = parse_matrix_server_input("acme.example")
+        parsed = _parse_matrix_server_input("acme.example")
         assert parsed is not None
         ctx, calls = _patch_http(
             {
@@ -186,21 +186,21 @@ class TestMatrixServerParsingAndProbing:
                     {"m.homeserver": {"base_url": "https://mindroom.acme.example/"}},
                 ),
                 "https://mindroom.acme.example/_matrix/client/versions": _json_resp(200, {"versions": ["v1.11"]}),
-                f"https://mindroom.acme.example{PROVISIONING_CONNECTIONS_PATH}": _json_resp(
+                f"https://mindroom.acme.example{_PROVISIONING_CONNECTIONS_PATH}": _json_resp(
                     401,
-                    {"detail": PROVISIONING_MISSING_OPENID_DETAIL},
+                    {"detail": _PROVISIONING_MISSING_OPENID_DETAIL},
                 ),
             },
         )
         with ctx:
-            assert probe_matrix_server(parsed) == _R("https://mindroom.acme.example", True, True, True)
+            assert _probe_matrix_server(parsed) == _R("https://mindroom.acme.example", True, True, True)
         assert calls == [
             ("https://acme.example/.well-known/matrix/client", False),
             ("https://mindroom.acme.example/_matrix/client/versions", False),
-            (f"https://mindroom.acme.example{PROVISIONING_CONNECTIONS_PATH}", False),
+            (f"https://mindroom.acme.example{_PROVISIONING_CONNECTIONS_PATH}", False),
         ]
 
-        parsed_port = parse_matrix_server_input("example.org:8448")
+        parsed_port = _parse_matrix_server_input("example.org:8448")
         assert parsed_port == _P("https://example.org:8448", "example.org:8448", True)
         ctx_port, calls_port = _patch_http(
             {
@@ -209,11 +209,11 @@ class TestMatrixServerParsingAndProbing:
                     {"m.homeserver": {"base_url": "https://matrix.example.org/"}},
                 ),
                 "https://matrix.example.org/_matrix/client/versions": _json_resp(200, {"versions": ["v1.11"]}),
-                f"https://matrix.example.org{PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
+                f"https://matrix.example.org{_PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
             },
         )
         with ctx_port:
-            assert probe_matrix_server(parsed_port) == _R("https://matrix.example.org", True, True, False)
+            assert _probe_matrix_server(parsed_port) == _R("https://matrix.example.org", True, True, False)
         assert calls_port[0] == ("https://example.org:8448/.well-known/matrix/client", False)
 
     def test_probe_matrix_server_blocks_https_to_http_downgrade_in_well_known_and_redirects(self) -> None:
@@ -225,7 +225,7 @@ class TestMatrixServerParsingAndProbing:
                 httpx.Response(302, headers={"Location": "http://evil.example/.well-known/matrix/client"}),
             ),
         ):
-            parsed = parse_matrix_server_input(domain)
+            parsed = _parse_matrix_server_input(domain)
             assert parsed is not None
             ctx, calls = _patch_http(
                 {
@@ -234,7 +234,7 @@ class TestMatrixServerParsingAndProbing:
                 },
             )
             with ctx:
-                res = probe_matrix_server(parsed)
+                res = _probe_matrix_server(parsed)
             assert res.homeserver == f"https://{domain}"
             assert res.discovered_via_well_known is False
             assert all(follow is False for _, follow in calls)
@@ -248,7 +248,7 @@ class TestMatrixServerParsingAndProbing:
                 {
                     "http://localhost:8008/.well-known/matrix/client": httpx.Response(404),
                     "http://localhost:8008/_matrix/client/versions": _json_resp(200, {"versions": ["v1.11"]}),
-                    f"http://localhost:8008{PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
+                    f"http://localhost:8008{_PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
                 },
                 _R("http://localhost:8008", False, True, False),
                 None,
@@ -257,12 +257,12 @@ class TestMatrixServerParsingAndProbing:
                 "https://example.com/matrix",
                 {
                     "https://example.com/matrix/_matrix/client/versions": _json_resp(200, {"versions": ["v1.11"]}),
-                    f"https://example.com/matrix{PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
+                    f"https://example.com/matrix{_PROVISIONING_CONNECTIONS_PATH}": httpx.Response(404),
                 },
                 _R("https://example.com/matrix", False, True, False),
                 [
                     "https://example.com/matrix/_matrix/client/versions",
-                    f"https://example.com/matrix{PROVISIONING_CONNECTIONS_PATH}",
+                    f"https://example.com/matrix{_PROVISIONING_CONNECTIONS_PATH}",
                 ],
             ),
             (
@@ -275,11 +275,11 @@ class TestMatrixServerParsingAndProbing:
                 None,
             ),
         ):
-            parsed = parse_matrix_server_input(raw)
+            parsed = _parse_matrix_server_input(raw)
             assert parsed is not None
             ctx, calls = _patch_http(responses)
             with ctx:
-                assert probe_matrix_server(parsed) == expected
+                assert _probe_matrix_server(parsed) == expected
             if expected_urls is not None:
                 assert [url for url, _ in calls] == expected_urls
 
@@ -357,7 +357,7 @@ class TestInteractiveFirstRunMatrixSetup:
         """Custom server with auto-detected provisioning writes provisioning `.env`, omits `mindroom_user`, and pairs."""
         config_path = tmp_path / "config.yaml"
         probe = _R("https://mindroom.acme.example", True, True, True)
-        with patch.object(setup_matrix, "probe_matrix_server", return_value=probe):
+        with patch.object(setup_matrix, "_probe_matrix_server", return_value=probe):
             result, paired, started = self._invoke_run(config_path, "custom\nacme.example\nopenai\nsk-custom-key\n")
 
         assert result.exit_code == 0, result.output
@@ -425,7 +425,7 @@ class TestInteractiveFirstRunMatrixSetup:
         )
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://matrix.company.com", False, True, False),
         ):
             result, paired, started = self._invoke_run(config_path, answers)
@@ -452,7 +452,7 @@ class TestInteractiveFirstRunMatrixSetup:
         """Entering `mindroom.chat` in the custom server prompt routes cleanly to hosted MindRoom Chat defaults."""
         config_path = tmp_path / "config.yaml"
         probe_mock = Mock(side_effect=AssertionError("hosted mindroom.chat needs no custom probe"))
-        with patch.object(setup_matrix, "probe_matrix_server", probe_mock):
+        with patch.object(setup_matrix, "_probe_matrix_server", probe_mock):
             result, paired, started = self._invoke_run(config_path, "custom\nmindroom.chat\ncodex\n")
         assert result.exit_code == 0, result.output
         probe_mock.assert_not_called()
@@ -548,8 +548,8 @@ class TestInteractiveConfigInitMatrixSetup:
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
         target = tmp_path / "config.yaml"
         with (
-            patch.object(setup_matrix, "probe_matrix_server", return_value=_R("http://localhost:8008")),
-            patch.object(setup_matrix, "probe_provisioning_service", return_value=False),
+            patch.object(setup_matrix, "_probe_matrix_server", return_value=_R("http://localhost:8008")),
+            patch.object(setup_matrix, "_probe_provisioning_service", return_value=False),
         ):
             result = runner.invoke(
                 app,
@@ -580,7 +580,7 @@ class TestInteractiveConfigInitMatrixSetup:
         target = tmp_path / "config.yaml"
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://matrix.example.org", True, True, False),
         ):
             result = runner.invoke(
@@ -637,14 +637,14 @@ class TestInteractiveConfigInitMatrixSetup:
         existing_env: str,
         extra_args: tuple[str, ...],
         answers: str,
-        probe: MatrixServerProbeResult | None,
+        probe: _MatrixServerProbeResult | None,
     ) -> None:
         """Keeping an existing `.env` refuses switching servers in either direction before writing anything."""
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text(existing_env, encoding="utf-8")
-        probe_ctx = patch.object(setup_matrix, "probe_matrix_server", return_value=probe) if probe else nullcontext()
+        probe_ctx = patch.object(setup_matrix, "_probe_matrix_server", return_value=probe) if probe else nullcontext()
         with probe_ctx:
             result = runner.invoke(app, ["config", "init", "--path", str(target), *extra_args], input=answers)
         assert result.exit_code == 1
@@ -807,7 +807,7 @@ class TestInteractiveConfigInitMatrixSetup:
         )
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://matrix.company.com", False, True, False),
         ):
             result = runner.invoke(app, ["config", "init", "--path", str(target)], input=answers)
@@ -836,7 +836,7 @@ class TestInteractiveConfigInitMatrixSetup:
         )
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://mindroom.acme.example", True, True, True),
         ):
             res = runner.invoke(
@@ -876,7 +876,7 @@ class TestInteractiveConfigInitMatrixSetup:
         t_custom = tmp_path / "custom" / "config.yaml"
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://matrix.other.example", False, True, False),
         ):
             res_custom = runner.invoke(
@@ -899,7 +899,7 @@ class TestInteractiveConfigInitMatrixSetup:
         """`--no-input` and `--print` stay non-interactive and probe-free even in a TTY."""
         monkeypatch.setattr(config_cli, "terminal_is_interactive", lambda: True)
         probe_mock = Mock(side_effect=AssertionError("matrix probe must not run"))
-        monkeypatch.setattr(setup_matrix, "probe_matrix_server", probe_mock)
+        monkeypatch.setattr(setup_matrix, "_probe_matrix_server", probe_mock)
 
         t_default = tmp_path / "default" / "config.yaml"
         assert runner.invoke(app, ["config", "init", "--path", str(t_default), "--no-input"]).exit_code == 0
@@ -942,7 +942,7 @@ class TestInteractiveConfigInitMatrixSetup:
         target = tmp_path / "config.yaml"
         with patch.object(
             setup_matrix,
-            "probe_matrix_server",
+            "_probe_matrix_server",
             return_value=_R("https://matrix.prefill.example", False, True, False),
         ):
             result = runner.invoke(
@@ -966,4 +966,4 @@ class TestInteractiveConfigInitMatrixSetup:
         assert service.OPENID_TOKEN_HEADER == "X-Matrix-OpenID-Token"  # noqa: S105
         source = service.__file__
         assert source is not None
-        assert f'detail="{PROVISIONING_MISSING_OPENID_DETAIL}"' in Path(source).read_text(encoding="utf-8")
+        assert f'detail="{_PROVISIONING_MISSING_OPENID_DETAIL}"' in Path(source).read_text(encoding="utf-8")

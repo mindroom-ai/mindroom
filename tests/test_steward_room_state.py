@@ -1417,10 +1417,8 @@ async def test_only_the_steward_republishes_a_changed_thread_mode_setting(room_s
 @pytest.mark.asyncio
 async def test_a_read_that_finds_the_thread_mode_changed_has_the_steward_republish_it(
     room_state: RoomState,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Whoever reads the room, a `thread_mode` change no sync showed is republished for clients by the room's steward."""
-    monkeypatch.setattr("mindroom.steward_duties.cleanup_all_orphaned_bots", AsyncMock())
     _, paths, _, events, client = room_state
     events[SETTING] = {"value": "thread"}
     duties = _router_duties(room_state)
@@ -1428,7 +1426,7 @@ async def test_a_read_that_finds_the_thread_mode_changed_has_the_steward_republi
         agent_name=ROUTER_AGENT_NAME,
         steward_duties=duties,
     )
-    await duties.started(client)
+    duties.started()
 
     await refresh_room_setting(THREAD_MODE, client, paths, ROOM_ID, put_state=None)
     assert not duties._room_state_publishes

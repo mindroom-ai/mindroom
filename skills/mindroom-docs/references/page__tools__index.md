@@ -116,11 +116,11 @@ Tools that do not support filtering reject these fields when the config loads.
 agents:
   research:
     tools:
-      - searxng:
+      - serper:
           include_tools:
             - search_web
-            - news_search
-            - image_search
+            - search_news
+            - scrape_webpage
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.

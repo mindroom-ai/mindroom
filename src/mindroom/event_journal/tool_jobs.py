@@ -139,10 +139,16 @@ def delete(transaction: Transaction, runtime_generation: str, job_id: str) -> No
     transaction.execute("DELETE FROM tool_jobs WHERE job_id = ?", (job_id,))
 
 
+_LOAD_ALL_SQL = "SELECT job_id, job_json FROM tool_jobs"
+
+
 def load_all(transaction: Transaction) -> tuple[SavedToolJob, ...]:
     """Return every saved job in ID order."""
-    rows = transaction.fetchall("SELECT job_id, job_json FROM tool_jobs ORDER BY job_id/*bytes*/")
-    return tuple(SavedToolJob(str(row["job_id"]), str(row["job_json"])) for row in rows)
+    # Scan sequentially and sort in Python instead of forcing secondary-index random seeks on large tables.
+    rows = transaction.fetchall(_LOAD_ALL_SQL)
+    jobs = [SavedToolJob(str(row["job_id"]), str(row["job_json"])) for row in rows]
+    jobs.sort(key=lambda job: job.job_id)
+    return tuple(jobs)
 
 
 def load_payload(transaction: Transaction, job_id: str) -> str | None:

@@ -29,14 +29,7 @@ if TYPE_CHECKING:
     icon_color="text-blue-500",
     requires_room_context=True,
     docs_url="https://docs.mindroom.chat/tools/project-management/#todo",
-    function_names=(
-        "add_todo",
-        "apply_template",
-        "list_templates",
-        "list_todos",
-        "plan",
-        "update_todo",
-    ),
+    function_names=("todo",),
 )
 def todo_tools() -> type[TodoTools]:
     """Return built-in todo tools."""

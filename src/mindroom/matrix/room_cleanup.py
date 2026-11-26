@@ -27,11 +27,20 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _retired_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return persisted bot Matrix user IDs that do not belong to any currently configured entity."""
+    known_bot_user_ids = persisted_bot_user_ids(runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    return frozenset(uid for uid in known_bot_user_ids if registry.current_entity_name_for_user_id(uid) is None)
+
+
 async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    retired_bot_user_ids: frozenset[str] | None = None,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
@@ -42,6 +51,7 @@ async def _cleanup_orphaned_bots_in_room(
         room_id: The room to check
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
+        retired_bot_user_ids: Precomputed retired bot user IDs to avoid reloading state per room
 
     Returns:
         List of bot Matrix user IDs that were removed from the room
@@ -66,19 +76,16 @@ async def _cleanup_orphaned_bots_in_room(
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
         return []
 
-    known_bot_user_ids = persisted_bot_user_ids(runtime_paths)
-    registry = entity_identity_registry(config, runtime_paths)
-
+    retired_ids = _retired_bot_user_ids(config, runtime_paths) if retired_bot_user_ids is None else retired_bot_user_ids
     removed_bots = []
 
     # The sweeping client is the owner account, never a retired identity, so
     # every orphan here is another account it can kick.
     for user_id in member_ids:
-        matrix_id = MatrixID.parse(user_id)
-        agent_name = registry.current_entity_name_for_user_id(user_id)
         # Current bots reconcile their own memberships after startup hooks and
-        # pending invitations. This earlier sweep only owns retired identities.
-        if user_id in known_bot_user_ids and agent_name is None:
+        # pending invitations. This sweep only owns retired identities.
+        if user_id in retired_ids:
+            matrix_id = MatrixID.parse(user_id)
             logger.info(
                 "orphaned_bot_found",
                 agent=matrix_id.username,
@@ -126,6 +133,10 @@ async def cleanup_all_orphaned_bots(
 
     """
     kicked_bots: dict[str, list[str]] = {}
+    retired_bot_user_ids = _retired_bot_user_ids(config, runtime_paths)
+    if not retired_bot_user_ids:
+        logger.info("No orphaned bots found in any room")
+        return kicked_bots
 
     joined_rooms = await get_joined_rooms(client)
     if joined_rooms is None:
@@ -143,6 +154,7 @@ async def cleanup_all_orphaned_bots(
                 room_id,
                 config,
                 runtime_paths,
+                retired_bot_user_ids=retired_bot_user_ids,
             )
             if room_kicked:
                 kicked_bots[room_id] = room_kicked

@@ -213,6 +213,35 @@ class AgentTools:
         )
         return offered_functions(self.tools.entries[entry.name], settings.values, validate_filters=validate_filters)
 
+    def explicit_include_tools(
+        self,
+        entry: EffectiveToolConfig,
+        paths: RuntimePaths,
+        target: ResolvedWorkerTarget,
+    ) -> frozenset[str]:
+        """Return function names explicitly listed in ``entry``'s effective ``include_tools`` (saved + authored)."""
+        from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+
+        allowed = self.config.get_worker_grantable_credentials() if target.worker_scope is not None else None
+        try:
+            settings = resolve_tool_settings(
+                entry.name,
+                paths,
+                tools=self.tools,
+                credentials_manager=get_runtime_credentials_manager(paths),
+                worker_target=target,
+                allowed_shared_services=allowed,
+                tool_config_overrides=entry.tool_config_overrides,
+            )
+            raw = settings.values.get("include_tools")
+        except (OSError, ValueError, TypeError):
+            raw = entry.tool_config_overrides.get("include_tools")
+        if isinstance(raw, str):
+            return frozenset(name.strip() for name in raw.replace("\n", ",").split(",") if name.strip())
+        if isinstance(raw, list | tuple | set | frozenset):
+            return frozenset(name.strip() for name in raw if isinstance(name, str) and name.strip())
+        return frozenset()
+
     def toolkit_names(self, candidates: Iterable[EffectiveToolConfig]) -> list[str]:
         """Return the toolkits ``candidates`` name for the agent CLI and subagent tool lists; a preset has no functions."""
         return [entry.name for entry in candidates if not self.config.is_tool_preset(entry.name)]

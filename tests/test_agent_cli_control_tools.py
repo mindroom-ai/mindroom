@@ -864,10 +864,14 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     await catalog.prepare(
         [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
     )
-    binding = await catalog.bind(ToolKey("memory", "add_memory"))
+    binding = await catalog.bind(ToolKey("memory", "memory"))
     events = [
         event
-        async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
+        async for event in execute_agent_tool_call(
+            binding,
+            "memory-write",
+            {"action": "add", "content": "Canonical hidden memory"},
+        )
     ]
     assert events[-1].call.result == "Memorized: Canonical hidden memory"
     memories = await search_agent_memories("Canonical hidden", "helper", config, paths, limit=5)
