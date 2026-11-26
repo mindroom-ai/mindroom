@@ -921,8 +921,36 @@ async def test_resolve_accessible_room_id_respects_contact_room_ok(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_resolve_accessible_room_id_catches_transport_errors(tmp_path: Path) -> None:
+    """Transport errors during alias resolution or membership checks return an error tuple instead of raising."""
+    ctx = await _room_access_context(
+        tmp_path,
+        room_members={
+            "!current:example.com": ("@member:example.com",),
+            "!timeout:example.com": TimeoutError("slow"),
+            "!client-error:example.com": ClientError("boom"),
+        },
+    )
+    ctx.client.room_resolve_alias = AsyncMock(side_effect=ClientError("alias lookup failed"))
+
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!timeout:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+    assert await plugin_api.resolve_accessible_room_id(ctx, "!client-error:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+    assert await plugin_api.resolve_accessible_room_id(ctx, "#alias:example.com") == (
+        None,
+        "Could not verify access to the target room.",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_shared_room_ids_filters_preserves_order_handles_errors_and_contact_flag(tmp_path: Path) -> None:
-    """shared_room_ids preserves room order, drops denied/errored rooms, and honors contact_room_ok."""
+    """shared_room_ids preserves room order, enforces current membership, drops errored rooms, and honors contact_room_ok."""
     ctx = await _room_access_context(
         tmp_path,
         room_members={
@@ -930,28 +958,35 @@ async def test_shared_room_ids_filters_preserves_order_handles_errors_and_contac
             "!denied:example.com": ("@victim:example.com",),
             "!client-error:example.com": ClientError("boom"),
             "!timeout:example.com": TimeoutError("slow"),
-            "!contact:example.com": ("@member:example.com",),
-            "!current:example.com": ("@member:example.com",),
+            "!contact-joined:example.com": ("@member:example.com",),
+            "!contact-invited:example.com": ("@other:example.com",),
+            "!current:example.com": ("@other:example.com",),
             "!a-room:example.com": ("@member:example.com",),
         },
     )
     record = MagicMock()
     record.party.return_value.owner = "@member:example.com"
+    contact_rooms = {"!contact-joined:example.com", "!contact-invited:example.com"}
 
     with patch(
         "mindroom.custom_tools.attachment_helpers.contact_room",
-        side_effect=lambda _config, _paths, room_id, _agent: (
-            (record, "a") if room_id == "!contact:example.com" else None
-        ),
+        side_effect=lambda _config, _paths, room_id, _agent: (record, "a") if room_id in contact_rooms else None,
     ):
+        # Current room and an invited-but-not-joined contact room are allowed by resolve_accessible_room_id,
+        # while shared_room_ids strictly requires the requester to be joined right now.
+        assert await plugin_api.resolve_accessible_room_id(ctx) == ("!current:example.com", None)
+        assert await plugin_api.resolve_accessible_room_id(
+            ctx,
+            "!contact-invited:example.com",
+            contact_room_ok=True,
+        ) == ("!contact-invited:example.com", None)
+
         assert await plugin_api.shared_room_ids(ctx) == [
             "!z-room:example.com",
-            "!current:example.com",
             "!a-room:example.com",
         ]
         assert await plugin_api.shared_room_ids(ctx, contact_room_ok=True) == [
             "!z-room:example.com",
-            "!contact:example.com",
-            "!current:example.com",
+            "!contact-joined:example.com",
             "!a-room:example.com",
         ]

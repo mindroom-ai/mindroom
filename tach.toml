@@ -3163,6 +3163,7 @@ depends_on = [
     "mindroom.thread_summary",
     "mindroom.thread_workflow",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.plugin_room_access",
 ]
 
 [[modules]]
@@ -6511,7 +6512,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.plugin_room_access"
 depends_on = ["mindroom.custom_tools.attachment_helpers"]
-visibility = ["mindroom.plugin_api"]
+visibility = ["mindroom.custom_tools.matrix_room", "mindroom.plugin_api"]
 
 [[modules]]
 path = "mindroom.tool_system.plugin_identity"

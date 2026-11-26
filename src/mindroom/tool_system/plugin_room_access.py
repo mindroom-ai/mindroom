@@ -20,18 +20,24 @@ async def resolve_accessible_room_id(
     """Resolve ``room_id`` (defaulting to the current room) and verify requester access.
 
     Returns ``(resolved_room_id, None)`` on success, or ``(None, error_message)`` when
-    the target room is invalid, unknown, or not authorized for the requester.
+    the target room is invalid, unknown, unauthorized, or cannot be verified because of
+    a transport failure.
     """
+    from aiohttp import ClientError  # noqa: PLC0415
+
     from mindroom.custom_tools.attachment_helpers import (  # noqa: PLC0415
         resolve_requested_room_id,
         room_access_allowed,
     )
 
-    resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
-    if room_error is not None or resolved_room_id is None:
-        return None, room_error or "Unknown room."
-    if not await room_access_allowed(context, resolved_room_id, contact_room_ok=contact_room_ok):
-        return None, "Not authorized to access the target room."
+    try:
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
+        if room_error is not None or resolved_room_id is None:
+            return None, room_error or "Unknown room."
+        if not await room_access_allowed(context, resolved_room_id, contact_room_ok=contact_room_ok):
+            return None, "Not authorized to access the target room."
+    except (ClientError, TimeoutError):
+        return None, "Could not verify access to the target room."
     return resolved_room_id, None
 
 
@@ -40,7 +46,7 @@ async def shared_room_ids(
     *,
     contact_room_ok: bool = False,
 ) -> list[str]:
-    """Return every joined room the requester is currently authorized to access, preserving room order."""
+    """Return every joined room where a human requester is proven joined and authorized right now, preserving room order."""
     room_ids = list(context.client.rooms)
     if not room_ids:
         return []

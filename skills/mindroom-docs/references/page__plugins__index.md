@@ -684,6 +684,11 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
 
+To resolve a room reference and enforce requester access inside a tool call, call `await resolve_accessible_room_id(context, room_id=None, *, contact_room_ok=False)` from `mindroom.plugin_api`: it defaults to `context.room_id` and returns `(resolved_room_id, None)` on success or `(None, error_message)` when the target room is invalid, unknown, unauthorized, or cannot be verified because of a transport failure.
+To list every room the agent has joined where a human requester is proven joined right now and authorized to access (preserving room order), call `await shared_room_ids(context, *, contact_room_ok=False)`; non-human agent or relayed requesters receive `[]`, current room included.
+Passing `contact_room_ok=True` to either helper permits read-only inspection of contact rooms, not unrestricted posts to active or removed contact rooms.
+A plugin that uses `resolve_accessible_room_id` or `shared_room_ids` states `"mindroom_plugin_api": "1.35"` in its manifest.
+
 ### Redacting credentials
 
 To keep or show text from a tool call, such as a shell command or a search query, without the credentials it may carry, pass it through `redact_sensitive_text` from `mindroom.plugin_api`, which needs plugin API 1.17:

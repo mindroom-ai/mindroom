@@ -31,6 +31,7 @@ from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_summary.state import current_thread_summary
 from mindroom.thread_workflow import latest_reply_question_ts, room_thread_facts, thread_workflow
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.plugin_room_access import shared_room_ids
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -436,18 +437,13 @@ class MatrixRoomTools(Toolkit):
         if message is not None:
             return self._payload("error", action="threads", room_id="all", message=message)
         identities = self._labelling_identities(context) if workflow is not None else None
+        # Privacy boundary: a room is read only once the requester is proven joined to it now.
+        room_ids = await shared_room_ids(context, contact_room_ok=True)
         reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
 
         async def read_room(room_id: str) -> tuple[list[tuple[dict[str, object], nio.Event]], bool, Exception | None]:
             """Return a shared room's rows, whether it has older threads, and why reading it failed."""
             async with reads:
-                # Privacy boundary: a room is read only once the requester is proven joined to it now.
-                try:
-                    shared = await room_access_allowed(context, room_id, contact_room_ok=True, require_membership=True)
-                except (ClientError, TimeoutError):
-                    shared = False
-                if not shared:
-                    return [], False, None
                 try:
                     roots, next_token = await get_room_threads_page(context.client, room_id, limit=limit)
                     labels = await self._thread_labels(context, room_id, roots, identities)
@@ -457,7 +453,6 @@ class MatrixRoomTools(Toolkit):
             rows = self._thread_rows(room_id, roots, labels, workflow)
             return [({"room_id": room_id, **row}, event) for row, event in rows], next_token is not None, None
 
-        room_ids = list(context.client.rooms)
         results = await asyncio.gather(*(read_room(room_id) for room_id in room_ids))
         rows = sorted(
             (row for room_rows, _more, _failed in results for row in room_rows),
@@ -487,12 +482,11 @@ class MatrixRoomTools(Toolkit):
         event_type: str,
         state_key: str,
     ) -> str:
-        normalized_state_key = state_key.strip()
         try:
             response = await context.client.room_get_state_event(
                 room_id,
                 event_type,
-                normalized_state_key,
+                state_key,
             )
         except (ClientError, TimeoutError) as exc:
             return self._payload(
@@ -500,7 +494,7 @@ class MatrixRoomTools(Toolkit):
                 action="state",
                 room_id=room_id,
                 event_type=event_type,
-                state_key=normalized_state_key,
+                state_key=state_key,
                 message=self._transport_error_message(exc),
             )
         if isinstance(response, nio.RoomGetStateEventResponse):
@@ -509,7 +503,7 @@ class MatrixRoomTools(Toolkit):
                 action="state",
                 room_id=room_id,
                 event_type=event_type,
-                state_key=normalized_state_key,
+                state_key=state_key,
                 content=response.content,
             )
         return self._payload(
@@ -517,7 +511,7 @@ class MatrixRoomTools(Toolkit):
             action="state",
             room_id=room_id,
             event_type=event_type,
-            state_key=normalized_state_key,
+            state_key=state_key,
             message=f"Failed to fetch state event: {response}",
         )
 
