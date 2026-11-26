@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
-from agno.tools.function import Function
 from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
@@ -967,12 +966,11 @@ def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
         return json.dumps({"error": "provider-controlled 401 detail"})
 
     tool.functions = {
-        operation_name: Function(name=operation_name, entrypoint=swallowed_resource_401),
+        operation_name: swallowed_resource_401,
     }
     tool._wrap_oauth_function_entrypoints()
 
-    entrypoint = tool.functions[operation_name].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions[operation_name]
     result = entrypoint()
     assert isinstance(result, str)
     payload = json.loads(result)
@@ -1157,8 +1155,8 @@ def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
         return json.dumps({"error": inner_payload["error"]})
 
     tool.functions = {
-        "inner_operation": Function(name="inner_operation", entrypoint=inner_operation),
-        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+        "inner_operation": inner_operation,
+        "outer_operation": outer_operation,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -1221,8 +1219,8 @@ def test_google_wrapper_answers_raised_auth_failure_at_outermost_call(
 
     failing_operation = raise_refresh_rejection if reason == "refresh_rejected" else raise_final_401
     tool.functions = {
-        "failing_operation": Function(name="failing_operation", entrypoint=failing_operation),
-        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+        "failing_operation": failing_operation,
+        "outer_operation": outer_operation,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -1406,7 +1404,7 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
             return f"Unexpected error: {exc}"
         return "unexpected success"
 
-    tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+    tool.functions = {"swallowed_failure": swallowed_failure}
     tool._wrap_oauth_function_entrypoints()
 
     payload = json.loads(tool.swallowed_failure())
@@ -1468,7 +1466,9 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
         _version: str,
         *,
         http: Any,  # noqa: ANN401
+        cache_discovery: bool = False,
     ) -> object:
+        del cache_discovery
         built_http.append(http)
         return object()
 
@@ -2128,7 +2128,7 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         message = "refresh rejected"
         raise RefreshError(message, {"error": "invalid_grant"})
 
-    def swallowed_upload(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def upload_file(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         try:
             self.creds.refresh(object())
         except RefreshError as exc:
@@ -2136,14 +2136,13 @@ def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
         return "unexpected success"
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
-    monkeypatch.setattr(GoogleDriveTools, "_upload_file", swallowed_upload)
+    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions["google_drive_upload_file"]
 
     payload = json.loads(entrypoint("unused"))
 
@@ -2205,8 +2204,8 @@ def test_google_wrapper_keeps_refresh_rejection_state_per_call(
         return "success"
 
     tool.functions = {
-        "swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure),
-        "successful_call": Function(name="successful_call", entrypoint=successful_call),
+        "swallowed_failure": swallowed_failure,
+        "successful_call": successful_call,
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -2271,7 +2270,7 @@ def test_google_wrapper_reports_missing_connection_after_terminal_deletion(
                 return f"Unexpected error: {exc}"
             return "unexpected success"
 
-        tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+        tool.functions = {"swallowed_failure": swallowed_failure}
         tool._wrap_oauth_function_entrypoints()
 
     first_payload = json.loads(tools[0].swallowed_failure())
@@ -2620,8 +2619,8 @@ def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_wo
         creds=_valid_credentials(),
     )
     tool.functions = {
-        "inner": Function(name="inner", entrypoint=lambda: "inner"),
-        "outer": Function(name="outer", entrypoint=lambda: tool.inner()),
+        "inner": lambda: "inner",
+        "outer": lambda: tool.inner(),
     }
     tool._wrap_oauth_function_entrypoints()
 
@@ -2649,7 +2648,7 @@ def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_wo
         active_calls -= 1
         return "done"
 
-    tool.functions = {"serialized": Function(name="serialized", entrypoint=serialized_call)}
+    tool.functions = {"serialized": serialized_call}
     tool._wrap_oauth_function_entrypoints()
 
     def second_call() -> str:
@@ -2682,7 +2681,7 @@ def test_google_wrapper_supplied_credentials_authenticate_other_worker_threads(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
     )
-    tool.functions = {"read_token": Function(name="read_token", entrypoint=lambda: tool.creds.token)}
+    tool.functions = {"read_token": lambda: tool.creds.token}
     tool._wrap_oauth_function_entrypoints()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -2705,7 +2704,7 @@ def test_google_wrapper_keeps_supplied_credentials_final_401_as_tool_error(
         tool._mark_google_authorization_rejected()
         return rejected
 
-    tool.functions = {"rejected_operation": Function(name="rejected_operation", entrypoint=rejected_operation)}
+    tool.functions = {"rejected_operation": rejected_operation}
     tool._wrap_oauth_function_entrypoints()
 
     assert tool.rejected_operation() == rejected
@@ -2733,18 +2732,17 @@ def test_google_drive_supplied_credentials_write_without_scope_upgrade_prompt(
         worker_target=None,
     )
 
-    def upload(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+    def upload_file(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
         return "uploaded"
 
-    monkeypatch.setattr(GoogleDriveTools, "_upload_file", upload)
+    monkeypatch.setattr(GoogleDriveTools, "upload_file", upload_file)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
         creds=_valid_credentials(),
     )
-    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions["google_drive_upload_file"]
 
     assert entrypoint("unused") == "uploaded"
 

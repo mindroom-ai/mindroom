@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -250,8 +251,7 @@ def test_google_drive_missing_credentials_returns_connect_instruction(tmp_path: 
     )
 
     result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
-    model_entrypoint = tool.functions["google_drive_search_files"].entrypoint
-    assert model_entrypoint is not None
+    model_entrypoint = tool.functions["google_drive_search_files"]
     model_result = json.loads(model_entrypoint(query="name contains 'plan'", max_results=1))
 
     assert "Google Drive is not connected for this agent" in result["error"]
@@ -324,7 +324,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
     }
 
     assert write_functions <= enabled_tool.functions.keys()
-    assert not enabled_tool.async_functions
+    assert all(not inspect.iscoroutinefunction(fn) for fn in enabled_tool.functions.values())
     assert write_functions.isdisjoint(disabled_tool.functions)
     assert "google_drive_delete_file" not in enabled_tool.functions
 

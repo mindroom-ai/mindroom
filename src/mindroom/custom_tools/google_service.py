@@ -185,6 +185,8 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         *,
         name: str,
         tools: list[Callable[..., str]],
+        instructions: str | None = None,
+        quota_project_id: str | None = None,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
@@ -212,8 +214,9 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
+            quota_project_id=quota_project_id,
         )
-        super().__init__(name=name, tools=tools)
+        super().__init__(name=name, tools=tools, instructions=instructions)
         self._set_original_auth(_GoogleOAuthToolkit._service_account_auth)
         self._wrap_oauth_function_entrypoints()
 
@@ -248,16 +251,20 @@ class GoogleApiToolkit(_GoogleOAuthToolkit):
     _google_api_name: str
     _google_api_version: str
 
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
+        """Build the authenticated Google API service for creds."""
+        return build(
+            self._google_api_name,
+            self._google_api_version,
+            http=self._google_authorized_http(creds),
+            cache_discovery=False,
+        )
+
     def _google_api_service(self) -> Any:  # noqa: ANN401
         """Return the per-thread authenticated Google API service."""
         self._authenticate()
         if self.service is None:
-            self.service = build(
-                self._google_api_name,
-                self._google_api_version,
-                http=self._google_authorized_http(self.creds),
-                cache_discovery=False,
-            )
+            self.service = self._build_service(self.creds)
         return self.service
 
 
