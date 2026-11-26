@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -789,7 +790,7 @@ async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_f
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """The caller's plain-text progress emits a compact single line while the feed row tracks started_at and ended_at."""
+    """The caller's progress and the feed row agree on when a call started, and the feed row records ended_at."""
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
@@ -805,8 +806,8 @@ async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_f
     assert ended_at is not None
     assert abs(time.time() - started_at) < 60
     assert ended_at >= started_at
-    assert reports[0] == "add\n"
-    assert all("Calling " not in report and "UTC" not in report for report in reports)
+    expected = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+    assert reports[0] == f"\nCalling add (started {expected} UTC)\n"
 
 
 @pytest.mark.asyncio
@@ -845,7 +846,7 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     assert observed_starts == [100.0, 200.0]
     assert observed_ends == [150.0, 250.0]
     assert [(item.started_at, item.ended_at) for item in last.items if item.kind == "tool"] == [(200.0, 250.0)]
-    assert reports[-1] == "add\nadd\nDone"
+    assert reports[-1] == "\nCalling add (started 00:01:40 UTC)\n\nCalling add (started 00:03:20 UTC)\nDone"
 
 
 @pytest.mark.asyncio
@@ -1695,57 +1696,6 @@ async def test_observe_child_event_forwards_tool_progress_without_auditing(
     assert last.items[0].progress is None
     assert last.items[0].ended_at is not None
     assert not any(isinstance(ev, ToolProgress) for ev in audit_events)
-
-
-def test_format_child_tool_activity_extracts_redacts_single_lines_and_clips() -> None:
-    """Plain-text child tool progress extracts the primary string arg, redacts secrets, single-lines, and clips."""
-    cmd = lifecycle._format_child_tool_activity(
-        ReportedCall("c1", "bash", {"command": "  curl -H 'Authorization: Bearer secret123'\n  https://example.com  "}),
-    )
-    assert cmd.startswith("bash: curl -H 'Authorization: Bearer ***redacted***' https://example.com\n")
-    assert "secret123" not in cmd
-
-    priority = lifecycle._format_child_tool_activity(
-        ReportedCall("c2", "search", {"command": "   ", "args": ["ignored"], "path": "src/a.py", "url": "https://x"}),
-    )
-    assert priority == "search: src/a.py\n"
-
-    long_cmd = lifecycle._format_child_tool_activity(ReportedCall("c3", "bash", {"command": "x" * 200}))
-    assert long_cmd == f"bash: {'x' * 119}…\n"
-
-    bare = lifecycle._format_child_tool_activity(ReportedCall("c4", "ping", {"count": 3}))
-    assert bare == "ping\n"
-
-    oauth_query = lifecycle._format_child_tool_activity(
-        ReportedCall("c5", "web_search", {"query": "code=demo-code&state=demo-state"}),
-    )
-    assert oauth_query == "web_search: code=***redacted***&state=***redacted***\n"
-    assert "demo-code" not in oauth_query
-    assert "demo-state" not in oauth_query
-
-
-@pytest.mark.asyncio
-async def test_report_child_activity_redacts_oauth_query_params(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OAuth query params in `{"query": ...}` are masked before entering `_report_child_activity`."""
-    reports: list[str] = []
-    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
-
-    async def noop_record(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(lifecycle, "record_child_event", noop_record)
-    observation = lifecycle.ChildRunObservation(child=_child(), audit=object())  # type: ignore[arg-type]
-    token = lifecycle._CHILD_RUN.set(observation)
-    try:
-        call = ReportedCall("call-oauth", "web_search", {"query": "code=demo-code&state=demo-state"})
-        await lifecycle.observe_child_event(ToolStarted(call=call))
-    finally:
-        lifecycle._CHILD_RUN.reset(token)
-
-    assert reports == ["web_search: code=***redacted***&state=***redacted***\n"]
-    assert observation.activity == "web_search: code=***redacted***&state=***redacted***\n"
-    assert "demo-code" not in observation.activity
-    assert "demo-state" not in observation.activity
 
 
 @pytest.mark.asyncio

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -48,7 +48,7 @@ from mindroom.live_frames import subagents as subagent_frames
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
-from mindroom.redaction import REDACTION_FAILED, redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.shell.background_scope import shell_background_scope
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
@@ -60,7 +60,7 @@ from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 from mindroom.workers.placements import dedicated_worker_placement
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
     from typing import TypeGuard
 
     import nio
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.activity import SubagentSink
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
-    from mindroom.llm.events import ReportedCall, RunEvent
+    from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -526,41 +526,6 @@ def report_child_approval_wait(child: DelegationChild, *, awaiting: bool) -> Non
     _publish(child.delegation_id, lambda feed: feed.status("awaiting_approval" if awaiting else "running"))
 
 
-_PRIMARY_TOOL_ARG_KEYS = ("command", "args", "path", "file_path", "query", "pattern", "url")
-_MAX_CHILD_TOOL_ARG_PREVIEW_CHARS = 120
-
-
-def _primary_tool_arg_preview(tool_args: Mapping[str, object] | None) -> str | None:
-    if not isinstance(tool_args, Mapping):
-        return None
-    max_redacted_chars = _MAX_CHILD_TOOL_ARG_PREVIEW_CHARS * 4
-    for key in _PRIMARY_TOOL_ARG_KEYS:
-        value = tool_args.get(key)
-        if not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if not stripped:
-            continue
-        redacted_mapping = redact_sensitive_data({key: stripped}, max_string_length=max_redacted_chars)
-        raw_redacted = redacted_mapping.get(key) if isinstance(redacted_mapping, Mapping) else None
-        redacted = redact_sensitive_text(
-            raw_redacted if isinstance(raw_redacted, str) else REDACTION_FAILED,
-            max_length=max_redacted_chars,
-        )
-        single_line = " ".join(redacted.split())
-        if not single_line:
-            continue
-        if len(single_line) > _MAX_CHILD_TOOL_ARG_PREVIEW_CHARS:
-            return f"{single_line[: _MAX_CHILD_TOOL_ARG_PREVIEW_CHARS - 1]}…"
-        return single_line
-    return None
-
-
-def _format_child_tool_activity(call: ReportedCall) -> str:
-    arg_preview = _primary_tool_arg_preview(call.tool_args)
-    return f"{call.tool_name}: {arg_preview}\n" if arg_preview else f"{call.tool_name}\n"
-
-
 def _report_child_activity(observation: ChildRunObservation, text: str) -> None:
     if text:
         observation.activity = cap_report(observation.activity + text)
@@ -582,11 +547,11 @@ async def observe_child_event(event: RunEvent) -> None:
         _report_child_activity(observation, event.text)
         _publish(delegation_id, lambda feed: feed.text(event.text))
     elif isinstance(event, ToolStarted):
-        # One start for the feed's row, the first announcement's for a call that resumes after a pause, so a caller can
-        # tell how long the call has run.
+        # One start for the caller's progress and the feed's row, the first announcement's for a call that resumes
+        # after a pause, so a caller can tell how long the call has run.
         started_at = observation.child.tool_started_at.setdefault(event.call.tool_call_id, time.time())
-        prefix = "\n" if observation.activity and not observation.activity.endswith("\n") else ""
-        _report_child_activity(observation, f"{prefix}{_format_child_tool_activity(event.call)}")
+        started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+        _report_child_activity(observation, f"\nCalling {event.call.tool_name} (started {started} UTC)\n")
         _publish(delegation_id, lambda feed: feed.tool_started(event, now=started_at))
     elif isinstance(event, ToolProgress):
         _publish(delegation_id, lambda feed: feed.tool_progress(event.tool_call_id, event.text))
