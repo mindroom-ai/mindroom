@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import subprocess
@@ -57,9 +58,9 @@ from mindroom.llm.tool_search import portable_tool_search_stream
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.pipeline import media as media_stage
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline import webp as webp_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import (
     ANSWERED_AUDIO_MARKER,
@@ -1317,22 +1318,40 @@ def _first_image(message: Message) -> Image:
     return message.images[0]
 
 
-def _webp_bytes(*, rgba: bool = False, animated: bool = False) -> bytes:
+def _webp_bytes(
+    *,
+    rgba: bool = False,
+    animated: bool = False,
+    size: tuple[int, int] = (12, 10),
+    noisy: bool = False,
+) -> bytes:
     from PIL import Image as PILImage  # noqa: PLC0415
 
     buf = io.BytesIO()
     if animated:
-        frame0 = PILImage.new("RGB", (12, 10), (220, 20, 20))
-        frame1 = PILImage.new("RGB", (12, 10), (20, 20, 220))
+        frame0 = PILImage.new("RGB", size, (220, 20, 20))
+        frame1 = PILImage.new("RGB", size, (20, 20, 220))
         frame0.save(buf, format="WEBP", save_all=True, append_images=[frame1], duration=50, loop=0)
+    elif noisy:
+        mode = "RGBA" if rgba else "RGB"
+        channels = 4 if rgba else 3
+        width, height = size
+        noise = hashlib.shake_128(b"webp-test").digest(width * height * channels)
+        pixels = bytes(
+            (x * 2 + (noise[(y * width + x) * channels + ch] & 15)) & 0xFF
+            for y in range(height)
+            for x in range(width)
+            for ch in range(channels)
+        )
+        PILImage.frombytes(mode, size, pixels).save(buf, format="WEBP", lossless=True)
     elif rgba:
-        PILImage.new("RGBA", (12, 10), (20, 40, 220, 128)).save(buf, format="WEBP")
+        PILImage.new("RGBA", size, (20, 40, 220, 128)).save(buf, format="WEBP")
     else:
-        PILImage.new("RGB", (12, 10), (220, 40, 20)).save(buf, format="WEBP")
+        PILImage.new("RGB", size, (220, 40, 20)).save(buf, format="WEBP")
     return buf.getvalue()
 
 
-def test_webp_transcode_handles_opaque_rgba_filepath_animated_and_remote(
+def test_webp_transcode_handles_opaque_rgba_filepath_animated_resize_bounds_and_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1350,14 +1369,15 @@ def test_webp_transcode_handles_opaque_rgba_filepath_animated_and_remote(
         metadata={"k": "v"},
     )
     animated = Image(id="att_anim", content=_webp_bytes(animated=True), mime_type="image/webp")
+    oversized = Image(id="att_big", content=_webp_bytes(size=(2400, 1600)), mime_type="image/webp")
     remote = Image(id="att_url", url="https://media.test/pic.webp")
-    original = _user("Look", images=[opaque, rgba, from_disk, animated, remote])
+    original = _user("Look", images=[opaque, rgba, from_disk, animated, oversized, remote])
 
-    rewritten = media_stage._transcode_webp_messages([original])
+    rewritten = webp_stage.transcode_webp_messages([original])
     assert rewritten is not None
-    assert original.images == [opaque, rgba, from_disk, animated, remote]
-    out_opaque, out_rgba, out_disk, out_anim, out_remote = rewritten[0].images or ()
-    for item in (out_opaque, out_rgba, out_disk, out_anim):
+    assert original.images == [opaque, rgba, from_disk, animated, oversized, remote]
+    out_opaque, out_rgba, out_disk, out_anim, out_big, out_remote = rewritten[0].images or ()
+    for item in (out_opaque, out_rgba, out_disk, out_anim, out_big):
         assert (item.filepath, item.url, item.format, item.mime_type) == (None, None, None, "image/png")
         assert item.content is not None
         assert image_format(item.content) == "png"
@@ -1374,19 +1394,27 @@ def test_webp_transcode_handles_opaque_rgba_filepath_animated_and_remote(
         pixel = cast("tuple[int, int, int]", decoded_anim.convert("RGB").getpixel((0, 0)))
         assert pixel[0] > 180
         assert pixel[2] < 80
+    with PILImage.open(io.BytesIO(out_big.content or b"")) as decoded_big:
+        assert max(decoded_big.size) <= 2048
 
-    monkeypatch.setattr(media_stage, "_MAX_WEBP_PNG_BYTES", 1)
-    large = media_stage._transcode_webp_messages([_user("Large", images=[opaque, rgba])])
-    assert large is not None
-    large_opaque, large_rgba = large[0].images or ()
-    assert (large_opaque.mime_type, image_format(large_opaque.content or b"")) == ("image/jpeg", "jpeg")
-    assert (large_rgba.mime_type, image_format(large_rgba.content or b"")) == ("image/png", "png")
+    noisy_opaque = Image(id="att_noisy", content=_webp_bytes(size=(128, 128), noisy=True), mime_type="image/webp")
+    noisy_rgba = Image(
+        id="att_noisy_rgba",
+        content=_webp_bytes(rgba=True, size=(128, 128), noisy=True),
+        mime_type="image/webp",
+    )
+    monkeypatch.setattr(webp_stage, "_MAX_WEBP_OUTPUT_BYTES", 10_000)
+    bounded = webp_stage.transcode_webp_messages([_user("Bounded", images=[noisy_opaque, noisy_rgba])])
+    assert bounded is not None
+    bounded_opaque, bounded_rgba = bounded[0].images or ()
+    assert (bounded_opaque.mime_type, image_format(bounded_opaque.content or b"")) == ("image/jpeg", "jpeg")
+    assert bounded_rgba is noisy_rgba
 
 
 @pytest.mark.asyncio
-async def test_webp_format_rejection_transcodes_and_learns_proactively_per_route() -> None:
+async def test_webp_format_rejection_transcodes_learns_per_route_and_updates_context_key() -> None:
     webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp", format="webp")
-    rejection = InvalidRequest(
+    rejection = classify_provider_error(
         "Only JPEG and PNG images are supported",
         provider="Scripted",
         status_code=400,
@@ -1396,11 +1424,18 @@ async def test_webp_format_rejection_transcodes_and_learns_proactively_per_route
         [[rejection], [_turn()], [_turn()]],
         identity=replace(_IDENTITY, endpoint="http://webp-one/v1"),
     )
+    first_provider = WrappedProvider(
+        first,
+        partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT),
+        media_fallback_projection(_FALLBACK_PROMPT),
+    )
     other = _ScriptedProvider([[_turn()]], identity=replace(_IDENTITY, endpoint="http://webp-two/v1"))
     request = ModelRequest(messages=[_user(_PROMPT, images=[webp])])
+    key_before = first_provider.context_key(request)
 
-    await drain(_fallback_stage(first), request)
-    await drain(_fallback_stage(first), request)
+    await drain(first_provider, request)
+    assert first_provider.context_key(request) != key_before
+    await drain(first_provider, request)
     await drain(_fallback_stage(other), request)
 
     assert len(first.requests) == 3
@@ -1415,7 +1450,7 @@ async def test_webp_format_rejection_transcodes_and_learns_proactively_per_route
 @pytest.mark.asyncio
 async def test_webp_transcode_is_preserved_across_subsequent_file_rejection() -> None:
     webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp")
-    webp_error = InvalidRequest("Unsupported MIME type: image/webp", provider="Scripted", status_code=400)
+    webp_error = classify_provider_error("Unsupported MIME type: image/webp", provider="Scripted", status_code=400)
     pdf_error = _rejection(_REPORT.id, message="Unsupported file type")
     inner = _ScriptedProvider(
         [[webp_error], [pdf_error], [_turn()]],
@@ -1429,13 +1464,38 @@ async def test_webp_transcode_is_preserved_across_subsequent_file_rejection() ->
     final_msg = inner.requests[2].messages[0]
     assert final_msg.files is None
     assert image_format(_first_image(final_msg).content or b"") == "png"
-    assert media_stage._route(inner) in media_stage._LEARNED_WEBP_UNSUPPORTED
+    assert webp_stage.media_route(inner) in webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_oversized_transparent_webp_skips_transcode_and_preserves_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rgba = Image(id="att_rgba", content=_webp_bytes(rgba=True), mime_type="image/webp")
+    rejection = classify_provider_error(
+        "Unsupported MIME type: image/webp",
+        provider="Scripted",
+        status_code=400,
+    )
+    rejection.rejected_media = frozenset({rgba.id})
+    inner = _ScriptedProvider(
+        [[rejection], [_turn()]],
+        identity=replace(_IDENTITY, endpoint="http://oversized-rgba/v1"),
+    )
+    monkeypatch.setattr(webp_stage, "_MAX_WEBP_OUTPUT_BYTES", 20)
+
+    await drain(_fallback_stage(inner), ModelRequest(messages=[_user(_PROMPT, images=[rgba], files=[_REPORT])]))
+
+    assert len(inner.requests) == 2
+    retried = inner.requests[1].messages[0]
+    assert (retried.images, retried.files) == (None, [_REPORT])
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
 
 
 @pytest.mark.asyncio
 async def test_webp_text_only_model_skips_transcode_and_learns_image_unsupported() -> None:
     webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp")
-    gap = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    gap = classify_provider_error("This model does not support image input", provider="Scripted", status_code=400)
     inner = _ScriptedProvider(
         [[gap], [_turn()], [_turn()]],
         identity=replace(_IDENTITY, endpoint="http://text-only/v1"),
@@ -1448,23 +1508,23 @@ async def test_webp_text_only_model_skips_transcode_and_learns_image_unsupported
     assert len(inner.requests) == 3
     assert inner.requests[1].messages[0].images is None
     assert inner.requests[2].messages[0].images is None
-    assert media_stage._route(inner) not in media_stage._LEARNED_WEBP_UNSUPPORTED
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "second_error",
     [
-        InvalidRequest("Invalid image", provider="Scripted", status_code=400),
-        InvalidRequest("This model does not support images", provider="Scripted", status_code=400),
+        classify_provider_error("Invalid image", provider="Scripted", status_code=400),
+        classify_provider_error("This model does not support images", provider="Scripted", status_code=400),
     ],
     ids=["invalid-image", "capability-gap"],
 )
 async def test_webp_still_rejected_after_transcode_strips_images_without_learning_webp(
-    second_error: InvalidRequest,
+    second_error: ProviderError,
 ) -> None:
     webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp")
-    first_error = InvalidRequest(
+    first_error = classify_provider_error(
         "Invalid image format",
         provider="Scripted",
         status_code=400,
@@ -1480,13 +1540,13 @@ async def test_webp_still_rejected_after_transcode_strips_images_without_learnin
     assert len(inner.requests) == 3
     assert image_format(_first_image(inner.requests[1].messages[0]).content or b"") == "png"
     assert inner.requests[2].messages[0].images is None
-    assert media_stage._route(inner) not in media_stage._LEARNED_WEBP_UNSUPPORTED
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
 
 
 @pytest.mark.asyncio
 async def test_corrupt_webp_falls_back_to_stripping_without_crashing_or_learning_webp() -> None:
     corrupt = Image(id="att_corrupt", content=b"RIFF\x00\x00\x00\x00WEBPcorrupt", mime_type="image/webp")
-    rejection = InvalidRequest(
+    rejection = classify_provider_error(
         "Invalid image format",
         provider="Scripted",
         status_code=400,
@@ -1501,14 +1561,14 @@ async def test_corrupt_webp_falls_back_to_stripping_without_crashing_or_learning
 
     assert len(inner.requests) == 2
     assert inner.requests[1].messages[0].images is None
-    assert media_stage._route(inner) not in media_stage._LEARNED_WEBP_UNSUPPORTED
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("end", ["failed", "cancelled"])
 async def test_unfinished_transcoded_webp_retry_never_learns_route(end: str) -> None:
     webp = Image(id="att_webp", content=_webp_bytes(), mime_type="image/webp")
-    rejection = InvalidRequest("Unsupported MIME type: image/webp", provider="Scripted", status_code=400)
+    rejection = classify_provider_error("Unsupported MIME type: image/webp", provider="Scripted", status_code=400)
     waiting = asyncio.Event()
 
     async def wait_for_cancellation() -> None:
@@ -1537,14 +1597,18 @@ async def test_unfinished_transcoded_webp_retry_never_learns_route(end: str) -> 
         with pytest.raises(ProviderError):
             await drain(provider, request)
 
-    assert media_stage._route(inner) not in media_stage._LEARNED_WEBP_UNSUPPORTED
+    assert webp_stage.media_route(inner) not in webp_stage.LEARNED_WEBP_UNSUPPORTED
     await drain(provider, request)
     assert image_format(_first_image(inner.requests[-1].messages[0]).content or b"") == "webp"
 
 
 def test_importing_media_pipeline_does_not_import_pillow() -> None:
     completed = subprocess.run(
-        [sys.executable, "-c", "import sys; import mindroom.providers.pipeline.media; assert 'PIL' not in sys.modules"],
+        [
+            sys.executable,
+            "-c",
+            "import sys; import mindroom.providers.pipeline.media, mindroom.providers.pipeline.webp; assert 'PIL' not in sys.modules",
+        ],
         check=True,
         capture_output=True,
         text=True,

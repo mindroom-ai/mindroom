@@ -200,7 +200,13 @@ class ChatAdapter:
             failure = provider_error(error, provider=self.identity.provider)
             # OpenRouter's rejections index the body its upstream received, which it rewrote, so they name nothing here.
             if self.wire.route != "openrouter":
-                failure.rejected_media = rejected_media(error, kwargs, request.messages, chat=True)
+                failure.rejected_media = rejected_media(
+                    error,
+                    kwargs,
+                    request.messages,
+                    chat=True,
+                    provider=self.identity.provider,
+                )
             raise failure from error
         parts = accumulator.parts
         stop_reason = self._resolve_terminal_stop(parts)

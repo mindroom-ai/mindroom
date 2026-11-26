@@ -17,6 +17,7 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.pipeline.compose",
     "mindroom.providers.pipeline.guidance_retry",
     "mindroom.providers.pipeline.media",
+    "mindroom.providers.pipeline.webp",
     "mindroom.providers.pipeline.refusal",
     "mindroom.providers.pipeline.remote_media",
     "mindroom.providers.pipeline.request_log",

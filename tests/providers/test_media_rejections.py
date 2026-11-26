@@ -39,6 +39,7 @@ from mindroom.providers.openai.errors import provider_error as openai_provider_e
 from mindroom.providers.openai.errors import rejected_media as openai_rejected_media
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline import webp as webp_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, prompt_text, sends, user_parts
 from tests.providers.golden_support import Wire, hide_provider_environment, pipeline_provider
@@ -324,8 +325,16 @@ def _webp_photo() -> Image:
 
 
 @pytest.mark.asyncio
-async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactively(tmp_path: Path) -> None:
-    """OpenRouter's ``metadata.raw`` upstream MIME rejection triggers WebP transcoding and per-route learning."""
+@pytest.mark.parametrize(
+    "upstream_message",
+    ["Unsupported MIME type: image/webp", "Only JPEG and PNG are supported"],
+    ids=["mime-webp", "format-list-without-image-word"],
+)
+async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactively(
+    upstream_message: str,
+    tmp_path: Path,
+) -> None:
+    """OpenRouter's ``metadata.raw`` upstream format rejection triggers WebP transcoding and per-route learning."""
     spec = replace(
         FAMILIES["openai_chat"],
         config={"provider": "openrouter", "id": "x-ai/grok-4", "api_key": "test-key"},
@@ -336,7 +345,7 @@ async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactiv
             "message": "Provider returned error",
             "code": 400,
             "metadata": {
-                "raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}}),
+                "raw": json.dumps({"error": {"message": upstream_message}}),
                 "provider_name": "xAI",
             },
         },
@@ -358,6 +367,42 @@ async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactiv
 
 
 @pytest.mark.asyncio
+async def test_chat_image_parse_error_code_with_generic_message_transcodes_webp(tmp_path: Path) -> None:
+    """OpenAI wire ``code: image_parse_error`` triggers WebP transcoding via ``error.provider_code``."""
+    webp = _webp_photo()
+    rejection = _rejected(
+        {"message": "Bad request", "type": "invalid_request_error", "param": None, "code": "image_parse_error"},
+    )
+    message = Message(role="user", content=_PROMPT, images=[webp])
+
+    first, retry = await _sent_after("openai_chat", tmp_path, rejection, message)
+
+    assert user_parts(first)[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert prompt_text(retry) == _PROMPT
+    url = user_parts(retry)[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+
+
+@pytest.mark.asyncio
+async def test_chat_image_url_timeout_beside_webp_drops_only_url_and_preserves_webp(tmp_path: Path) -> None:
+    """A URL download timeout beside a local WebP drops only the failed URL without transcoding or learning."""
+    webp = _webp_photo()
+    fetched = Image(id="att_map", url="https://media.test/map.png")
+    message = Message(role="user", content=_PROMPT, images=[webp, fetched])
+
+    _first, retry = await _sent_after("openai_chat", tmp_path, _rejected(_CHAT_IMAGE_URL_TIMEOUT), message)
+
+    assert prompt_text(retry) == _named("image (att_map)")
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url"]
+    assert (
+        user_parts(retry)[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(webp.content or b'').decode()}"
+    )
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
 async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode_webp(tmp_path: Path) -> None:
     """A file-only MIME rejection beside a WebP image drops only the file and leaves the WebP bytes untouched."""
     webp = _webp_photo()
@@ -375,30 +420,61 @@ async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode
 
 
 @pytest.mark.parametrize(
-    ("metadata", "expected"),
+    ("provider", "metadata", "expected"),
     [
         (
+            "OpenRouter",
             {"raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}})},
             "Provider returned error: Unsupported MIME type: image/webp",
         ),
         (
+            "OpenRouter",
             {"raw": json.dumps({"message": "Only JPEG and PNG are supported"})},
             "Provider returned error: Only JPEG and PNG are supported",
         ),
-        ({"raw": "  Upstream rejected image/webp  "}, "Provider returned error: Upstream rejected image/webp"),
-        ({"raw": "x" * 700}, f"Provider returned error: {'x' * 500}"),
-        ({"raw": "   "}, "Provider returned error"),
-        (None, "Provider returned error"),
+        (
+            "OpenRouter",
+            {"raw": "  Upstream rejected image/webp  "},
+            "Provider returned error: Upstream rejected image/webp",
+        ),
+        (
+            "OpenRouter",
+            {"raw": json.dumps({"detail": [{"input": "private prompt"}]})},
+            "Provider returned error",
+        ),
+        (
+            "OpenAI",
+            {"raw": "Upstream rejected image/webp"},
+            "Provider returned error",
+        ),
+        ("OpenRouter", {"raw": "   "}, "Provider returned error"),
+        ("OpenRouter", None, "Provider returned error"),
     ],
-    ids=["json-error-message", "json-message", "plain-text", "capped", "blank", "absent"],
+    ids=["json-error-message", "json-message", "plain-text", "unrecognized-json", "non-openrouter", "blank", "absent"],
 )
-def test_openrouter_upstream_error_detail_is_surfaced(metadata: dict[str, Any] | None, expected: str) -> None:
-    """OpenRouter's ``metadata.raw`` detail augments ``Provider returned error`` without changing absent metadata."""
+def test_openrouter_upstream_error_detail_is_surfaced(
+    provider: str,
+    metadata: dict[str, Any] | None,
+    expected: str,
+) -> None:
+    """Only OpenRouter surfaces recognized ``metadata.raw`` details; unrecognized JSON and other providers stay untouched."""
     body: dict[str, Any] = {"message": "Provider returned error", "code": 400}
     if metadata is not None:
         body["metadata"] = metadata
-    failure = openai_provider_error(_sdk_rejection(body), provider="OpenRouter")
+    failure = openai_provider_error(_sdk_rejection(body), provider=provider)
     assert str(failure) == expected
+
+
+def test_openrouter_upstream_error_detail_redacts_before_truncation() -> None:
+    """Credential-bearing URLs spanning the truncation boundary are redacted before truncating."""
+    credential = "top-example-value-123"
+    raw = f"{'a' * 485} https://user:{credential}@example.com/path"
+    body: dict[str, Any] = {"message": "Provider returned error", "code": 400, "metadata": {"raw": raw}}
+    failure = openai_provider_error(_sdk_rejection(body), provider="OpenRouter")
+    text = str(failure)
+    assert text.startswith("Provider returned error: ")
+    assert credential not in text
+    assert len(text) <= len("Provider returned error: ") + 500
 
 
 # --- OpenAI Responses ---------------------------------------------------------------------------------------------

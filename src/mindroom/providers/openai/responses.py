@@ -241,7 +241,13 @@ class ResponsesAdapter:
             failure = self._marked(provider_error(error, provider=self.identity.provider))
             # A request that continues a stored response sends only the messages after it.
             replay = request_replay(self.wire, request)
-            failure.rejected_media = rejected_media(error, kwargs, replay.history[replay.sent_from :], chat=False)
+            failure.rejected_media = rejected_media(
+                error,
+                kwargs,
+                replay.history[replay.sent_from :],
+                chat=False,
+                provider=self.identity.provider,
+            )
             raise failure from error
         except ProviderError as failure:
             # A response that failed in its stream raises its own error (``ResponsesStream.add``).
