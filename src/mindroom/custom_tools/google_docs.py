@@ -46,6 +46,13 @@ _WRITE_ACTION_FIELDS: dict[str, str] = {
     "replace_text": "document_id find_text replace_text match_case tab_ids",
     "batch_update": "document_id requests required_revision_id",
 }
+_WRITE_PARAM_HINTS: dict[tuple[str, str], str] = {
+    ("create", "text"): "use initial_text instead",
+    ("replace_text", "tab_id"): "use tab_ids=[...] instead",
+    ("insert_text", "tab_ids"): "use tab_id instead",
+    ("batch_update", "tab_id"): "specify tabId inside each request",
+    ("batch_update", "tab_ids"): "specify tabsCriteria inside each request",
+}
 
 
 def _error(message: str) -> str:
@@ -272,27 +279,19 @@ class GoogleDocsTools(GoogleApiToolkit):
             )
             return google_http_error_result("Google Docs", "batch_update", exc, guidance=guidance)
 
-    def _write_guard_error(
-        self,
-        action: str,
-        *,
-        tab_id: str | None,
-        tab_ids: list[str] | None,
-        required_revision_id: str | None,
-    ) -> str | None:
+    def _write_guard_error(self, action: str, **params: object) -> str | None:
         if action not in self._write_actions:
             return f"Google Docs action {action!r} is disabled"
-        if action != "batch_update" and required_revision_id is not None:
-            return "Google Docs required_revision_id is only supported with action='batch_update'"
-        if action == "replace_text" and tab_id is not None:
-            return "Google Docs replace_text does not accept tab_id; use tab_ids=[...] instead"
-        if action == "insert_text" and tab_ids is not None:
-            return "Google Docs insert_text does not accept tab_ids; use tab_id instead"
-        if action == "batch_update" and (tab_id is not None or tab_ids is not None):
-            return (
-                "Google Docs batch_update does not accept top-level tab_id or tab_ids; "
-                "specify tabId or tabsCriteria inside each request"
-            )
+        allowed = set(_WRITE_ACTION_FIELDS.get(action, "").split())
+        for name, value in params.items():
+            if name in allowed or value is None:
+                continue
+            if (name == "initial_text" and value == "") or (name == "match_case" and not value):
+                continue
+            if name == "required_revision_id":
+                return "Google Docs required_revision_id is only supported with action='batch_update'"
+            hint = _WRITE_PARAM_HINTS.get((action, name))
+            return f"Google Docs {action} does not accept {name}{f'; {hint}' if hint else ''}"
         return None
 
     def google_docs_write(
@@ -321,8 +320,17 @@ class GoogleDocsTools(GoogleApiToolkit):
         if (
             guard_error := self._write_guard_error(
                 action,
+                document_id=document_id,
+                title=title,
+                initial_text=initial_text,
+                text=text,
+                index=index,
                 tab_id=tab_id,
+                find_text=find_text,
+                replace_text=replace_text,
+                match_case=match_case,
                 tab_ids=tab_ids,
+                requests=requests,
                 required_revision_id=required_revision_id,
             )
         ) is not None:

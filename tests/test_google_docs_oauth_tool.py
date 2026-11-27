@@ -567,85 +567,56 @@ def test_google_docs_batch_update_non_400_http_error_with_required_revision_id_k
     assert result == {"error": "Google Docs request failed (HTTP 500)"}
 
 
-def test_google_docs_replace_text_rejects_tab_id_without_api_call(tmp_path: Path) -> None:
-    tool, service = _connected_tool(tmp_path)
-
-    result = json.loads(
-        tool.google_docs_write(
-            action="replace_text",
-            document_id="document-id",
-            find_text="DRAFT",
-            replace_text="Final",
-            tab_id="tab-2",
-        ),
-    )
-
-    assert "tab_ids" in result["error"]
-    assert "tab_id" in result["error"]
-    assert service.documents_resource.batch_update_calls == []
-
-
-def test_google_docs_insert_text_rejects_tab_ids_without_api_call(tmp_path: Path) -> None:
-    tool, service = _connected_tool(tmp_path)
-
-    result = json.loads(
-        tool.google_docs_write(
-            action="insert_text",
-            document_id="document-id",
-            text="hello",
-            tab_ids=["tab-2"],
-        ),
-    )
-
-    assert "tab_id" in result["error"]
-    assert "tab_ids" in result["error"]
-    assert service.documents_resource.batch_update_calls == []
-
-
-@pytest.mark.parametrize("extra_kwargs", [{"tab_id": "tab-2"}, {"tab_ids": ["tab-2"]}])
-def test_google_docs_batch_update_rejects_top_level_tab_args_without_api_call(
-    tmp_path: Path,
-    extra_kwargs: dict[str, object],
-) -> None:
-    tool, service = _connected_tool(tmp_path)
-
-    result = json.loads(
-        tool.google_docs_write(
-            action="batch_update",
-            document_id="document-id",
-            requests=_RICH_REQUESTS,
-            **extra_kwargs,
-        ),
-    )
-
-    assert "tabId" in result["error"]
-    assert service.documents_resource.batch_update_calls == []
-
-
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "expected_hint"),
     [
-        {"action": "create", "title": "Plan", "required_revision_id": "rev-1"},
-        {"action": "insert_text", "document_id": "document-id", "text": "hello", "required_revision_id": "rev-1"},
-        {
-            "action": "replace_text",
-            "document_id": "document-id",
-            "find_text": "DRAFT",
-            "replace_text": "Final",
-            "required_revision_id": "rev-1",
-        },
+        ({"action": "create", "title": "Minutes", "text": "Keep this text"}, "initial_text"),
+        (
+            {
+                "action": "replace_text",
+                "document_id": "document-id",
+                "find_text": "DRAFT",
+                "replace_text": "Final",
+                "tab_id": "tab-2",
+            },
+            "tab_ids",
+        ),
+        ({"action": "insert_text", "document_id": "document-id", "text": "hello", "tab_ids": ["tab-2"]}, "tab_id"),
+        (
+            {"action": "batch_update", "document_id": "document-id", "requests": _RICH_REQUESTS, "tab_id": "tab-2"},
+            "tabId",
+        ),
+        (
+            {"action": "batch_update", "document_id": "document-id", "requests": _RICH_REQUESTS, "tab_ids": ["tab-2"]},
+            "tabsCriteria",
+        ),
+        ({"action": "create", "title": "Plan", "required_revision_id": "rev-1"}, "batch_update"),
+        (
+            {"action": "insert_text", "document_id": "document-id", "text": "hello", "required_revision_id": "rev-1"},
+            "batch_update",
+        ),
+        (
+            {
+                "action": "replace_text",
+                "document_id": "document-id",
+                "find_text": "DRAFT",
+                "replace_text": "Final",
+                "required_revision_id": "rev-1",
+            },
+            "batch_update",
+        ),
     ],
 )
-def test_google_docs_rejects_required_revision_id_outside_batch_update(
+def test_google_docs_write_rejects_mismatched_action_params_without_api_call(
     tmp_path: Path,
     kwargs: dict[str, object],
+    expected_hint: str,
 ) -> None:
     tool, service = _connected_tool(tmp_path)
 
     result = json.loads(tool.google_docs_write(**kwargs))
 
-    assert "required_revision_id" in result["error"]
-    assert "batch_update" in result["error"]
+    assert expected_hint in result["error"]
     assert service.documents_resource.create_bodies == []
     assert service.documents_resource.batch_update_calls == []
 

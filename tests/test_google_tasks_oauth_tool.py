@@ -326,6 +326,19 @@ def test_google_tasks_create_task_rejects_invalid_input(
     assert service.tasks_resource.insert_calls == []
 
 
+@pytest.mark.parametrize("extra_kwargs", [{"completed": True}, {"completed": False}, {"task_id": "task-1"}])
+def test_google_tasks_create_rejects_update_only_fields_without_api_call(
+    tmp_path: Path,
+    extra_kwargs: dict[str, object],
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(tool.google_tasks_write(action="create", title="Buy milk", **extra_kwargs))
+
+    assert "update" in result["error"]
+    assert service.tasks_resource.insert_calls == []
+
+
 def test_google_tasks_update_task_patches_only_supplied_fields(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 

@@ -255,6 +255,12 @@ class GoogleTasksTools(GoogleApiToolkit):
         - `delete`: delete `task_id` (deleting a Docs/Chat-assigned task also deletes the original assignment)
         """
         if action == "create":
+            if completed is not None:
+                return _error_result(
+                    "Google Tasks create cannot set completed; call action='update' after creating the task",
+                )
+            if task_id is not None:
+                return _error_result("Google Tasks create does not accept task_id; use action='update' instead")
             return self._create_task(title, notes, due, task_list_id, parent_task_id)
         if action == "update":
             return self._update_task(task_id, task_list_id, title, notes, due, completed)
