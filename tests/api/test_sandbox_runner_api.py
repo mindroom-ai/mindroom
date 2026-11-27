@@ -42,6 +42,7 @@ import mindroom.constants as constants_module
 import mindroom.shell.execution as shell_execution_module
 import mindroom.shell.supervisor as shell_supervisor_module
 import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.output_files as output_files_module
 import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
@@ -8667,3 +8668,82 @@ def test_shell_direct_supervised_dispatch_resolves_off_loop_and_expands_worker_h
     assert resolve_threads
     assert invoke_threads
     assert set(resolve_threads).isdisjoint(invoke_threads)
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_output_files_run_off_loop(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch runs large-output auto-save and explicit path prep off the event loop."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def track_thread[**P, R](fn: Callable[P, R], threads: list[int]) -> Callable[P, R]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            threads.append(threading.get_ident())
+            return fn(*args, **kwargs)
+
+        return wrapped
+
+    invoke_threads: list[int] = []
+    prepare_threads: list[int] = []
+    write_threads: list[int] = []
+    atomic_threads: list[int] = []
+    orig_invoke = sandbox_runner_module._invoke_resolved_entrypoint
+
+    async def tracking_invoke(*args: object, **kwargs: object) -> object:
+        invoke_threads.append(threading.get_ident())
+        return await orig_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_runner_module, "_invoke_resolved_entrypoint", tracking_invoke)
+    monkeypatch.setattr(
+        output_files_module,
+        "prepare_tool_output_file",
+        track_thread(output_files_module.prepare_tool_output_file, prepare_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_auto_saved_result",
+        track_thread(output_files_module._write_auto_saved_result, write_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_atomic",
+        track_thread(output_files_module._write_atomic, atomic_threads),
+    )
+
+    payload_size = output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 1024
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        auto_saved = post_shell(
+            rf"head -c {payload_size} /dev/zero | tr '\0' 'x'",
+            base_dir=str(workspace),
+        )
+        explicit = post_shell(
+            'printf "%s" "explicit-shell-output"',
+            kwargs={"mindroom_output_path": "explicit.txt"},
+            base_dir=str(workspace),
+        )
+
+    assert auto_saved["ok"] is True, auto_saved
+    assert isinstance(auto_saved["result"], dict)
+    receipt = cast("dict[str, object]", auto_saved["result"])["mindroom_tool_output"]
+    assert isinstance(receipt, dict)
+    assert receipt["status"] == "saved_to_file"
+    assert receipt["auto_saved"] is True
+    saved_text = (workspace / cast("str", receipt["path"])).read_text(encoding="utf-8")
+    assert saved_text.endswith("x" * output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES)
+    assert len(saved_text.encode("utf-8")) > output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+
+    assert explicit["ok"] is True, explicit
+    assert (workspace / "explicit.txt").read_text(encoding="utf-8") == "explicit-shell-output"
+
+    assert invoke_threads
+    assert write_threads
+    assert atomic_threads
+    assert prepare_threads
+    assert set(write_threads).isdisjoint(invoke_threads)
+    assert set(atomic_threads).isdisjoint(invoke_threads)
+    assert set(prepare_threads).isdisjoint(invoke_threads)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import functools
 import os
 import stat
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -15,6 +16,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
+import mindroom.tool_system.output_files as output_files_module
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.filesystem import FilesystemTools
@@ -34,12 +36,14 @@ from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
+    ToolOutputFileHandled,
     ToolOutputFilePolicy,
     saved_tool_output_receipt,
     validate_output_path_syntax,
     with_optional_output_path,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome, ToolValue
 from mindroom.tool_system.toolkits import adapt_toolkit, configure_toolkit_functions
 from tests.agent_tool_helpers import detached_policy
@@ -1191,3 +1195,144 @@ def test_offer_output_path_false_serializes_strict_false_on_openai_responses_wir
     assert wire_tool["name"] == "ls"
     assert wire_tool["strict"] is False
     assert OUTPUT_PATH_ARGUMENT not in wire_tool["parameters"]["properties"]
+
+
+def _track_thread[**P, R](fn: Callable[P, R], threads: list[int]) -> Callable[P, R]:
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        threads.append(threading.get_ident())
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
+@pytest.mark.asyncio
+async def test_async_tool_large_result_auto_saves_off_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = "x" * 200
+
+    async def produce() -> str:
+        return payload
+
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=50)
+    function = _with_output_files(produce, policy)
+
+    write_threads: list[int] = []
+    atomic_threads: list[int] = []
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_auto_saved_result",
+        _track_thread(output_files_module._write_auto_saved_result, write_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_atomic",
+        _track_thread(output_files_module._write_atomic, atomic_threads),
+    )
+
+    loop_thread_id = threading.get_ident()
+    result = await function.entrypoint()
+
+    receipt = _receipt(result)
+    assert receipt["status"] == "saved_to_file"
+    assert receipt["auto_saved"] is True
+    assert (tmp_path / cast("str", receipt["path"])).read_text(encoding="utf-8") == payload
+    assert write_threads
+    assert atomic_threads
+    assert all(thread_id != loop_thread_id for thread_id in write_threads)
+    assert all(thread_id != loop_thread_id for thread_id in atomic_threads)
+
+    with (
+        patch("mindroom.tool_system.output_files._write_auto_saved_result", side_effect=RuntimeError("boom")),
+        capture_logs() as logs,
+    ):
+        fallback = await function.entrypoint()
+
+    assert fallback == payload
+    assert any(entry.get("event") == "tool_output_auto_save_write_failed" for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_async_tool_small_result_without_output_path_has_zero_thread_hops(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def produce(value: object) -> object:
+        return value
+
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=50)
+    function = _with_output_files(produce, policy)
+
+    async def fail_to_thread(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("asyncio.to_thread must not be called on the async fast path")
+
+    monkeypatch.setattr(output_files_module.asyncio, "to_thread", fail_to_thread)
+
+    assert await function.entrypoint("small") == "small"
+    assert await function.entrypoint("small", mindroom_output_path="   ") == "small"
+    assert await function.entrypoint(ToolOutputFileHandled("handled")) == "handled"
+    with structured_tool_result():
+        assert await function.entrypoint("y" * 200) == "y" * 200
+
+
+@pytest.mark.asyncio
+async def test_async_tool_explicit_output_path_prepares_and_redirects_off_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[object] = []
+
+    async def produce(value: object) -> object:
+        calls.append(value)
+        return value
+
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=50)
+    function = _with_output_files(produce, policy)
+
+    prepare_threads: list[int] = []
+    redirect_threads: list[int] = []
+    atomic_threads: list[int] = []
+    monkeypatch.setattr(
+        output_files_module,
+        "prepare_tool_output_file",
+        _track_thread(output_files_module.prepare_tool_output_file, prepare_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_redirect_result_to_file",
+        _track_thread(output_files_module._redirect_result_to_file, redirect_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_atomic",
+        _track_thread(output_files_module._write_atomic, atomic_threads),
+    )
+
+    loop_thread_id = threading.get_ident()
+
+    redirected = await function.entrypoint("redirected payload", mindroom_output_path="explicit.txt")
+    assert _receipt(redirected)["path"] == "explicit.txt"
+    assert (tmp_path / "explicit.txt").read_text(encoding="utf-8") == "redirected payload"
+    assert len(prepare_threads) == 1
+    assert len(redirect_threads) == 1
+    assert len(atomic_threads) == 1
+    assert prepare_threads[0] != loop_thread_id
+    assert redirect_threads[0] != loop_thread_id
+    assert atomic_threads[0] != loop_thread_id
+
+    handled_receipt = {
+        "mindroom_tool_output": saved_tool_output_receipt(path="handled.txt", byte_count=2, output_format="text"),
+    }
+    handled = await function.entrypoint(ToolOutputFileHandled(handled_receipt), mindroom_output_path="handled.txt")
+    assert handled == handled_receipt
+    assert len(prepare_threads) == 2
+    assert prepare_threads[1] != loop_thread_id
+    assert len(redirect_threads) == 1
+
+    calls.clear()
+    invalid = await function.entrypoint("never runs", mindroom_output_path="/abs.txt")
+    assert _receipt(invalid)["status"] == "error"
+    assert calls == []
+    assert len(prepare_threads) == 3
+    assert prepare_threads[2] != loop_thread_id
