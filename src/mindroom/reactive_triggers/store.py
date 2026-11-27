@@ -430,14 +430,17 @@ class ReactiveTriggerStore:
             if enabled and ex["disabled_reason"] == "pr_closed":
                 _check_owner_quota(conn, owner, max_per_owner, trigger_id)
             unexp = ex["expires_at"] is None or float(ex["expires_at"]) > now
-            if enabled and not bool(ex["enabled"]) and str(ex["source_type"]) == "github_pr" and unexp:
+            reenabling = enabled and not bool(ex["enabled"])
+            if reenabling and str(ex["source_type"]) == "github_pr" and unexp:
                 _check_pr_quota(conn, owner, max_github_pr_per_owner, now, trigger_id)
-            if enabled and not bool(ex["enabled"]) and str(ex["source_type"]) == "script_check" and unexp:
+            if reenabling and str(ex["source_type"]) == "script_check" and unexp:
                 _check_script_check_quota(conn, owner, max_script_check_per_owner, now, trigger_id)
             u_q = "UPDATE reactive_triggers SET enabled=?,disabled_reason=?,updated_at=? WHERE trigger_id=? AND rule_uid=?"
             cursor = conn.execute(u_q, (int(enabled), reason, now, trigger_id, str(ex["rule_uid"])))
             if cursor.rowcount == 0:
                 return None
+            if reenabling and str(ex["source_type"]) == "script_check":
+                _reset_script_check_checkpoint_on_reenable(conn, trigger_id=trigger_id, now=now)
             row = conn.execute(
                 "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (trigger_id,),
@@ -1651,6 +1654,29 @@ def _check_script_check_quota(
         raise ReactiveTriggerLimitError(msg)
 
 
+def _reset_script_check_checkpoint_on_reenable(
+    conn: sqlite3.Connection,
+    *,
+    trigger_id: str,
+    now: float,
+) -> None:
+    cp_row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
+    if cp_row is None:
+        msg = f"Script check checkpoint not found: {trigger_id}"
+        raise ReactiveTriggerStoreError(msg)
+    live_cp = _script_check_checkpoint_from_row(cp_row)
+    updated_cp = live_cp.model_copy(
+        update={
+            "revision": live_cp.revision + 1,
+            "consecutive_errors": 0,
+            "last_error_code": None,
+            "next_poll_at": now,
+            "updated_at": now,
+        },
+    )
+    _upsert_script_check_checkpoint(conn, trigger_id, updated_cp)
+
+
 def _sync_script_check_checkpoint_on_update(
     conn: sqlite3.Connection,
     *,
@@ -1660,37 +1686,29 @@ def _sync_script_check_checkpoint_on_update(
     reenabling: bool,
     now: float,
 ) -> None:
+    if reenabling:
+        _reset_script_check_checkpoint_on_reenable(conn, trigger_id=trigger_id, now=now)
+        return
     old_poll = int(json.loads(existing_spec_json)["source"]["poll_interval_seconds"])
-    if not reenabling and new_poll_interval_seconds == old_poll:
+    if new_poll_interval_seconds == old_poll:
         return
     cp_row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
     if cp_row is None:
         msg = f"Script check checkpoint not found: {trigger_id}"
         raise ReactiveTriggerStoreError(msg)
     live_cp = _script_check_checkpoint_from_row(cp_row)
-    if reenabling:
-        updated_cp = live_cp.model_copy(
-            update={
-                "revision": live_cp.revision + 1,
-                "consecutive_errors": 0,
-                "last_error_code": None,
-                "next_poll_at": now,
-                "updated_at": now,
-            },
-        )
-    else:
-        interval = float(new_poll_interval_seconds)
-        next_poll_at = max(
-            now,
-            (live_cp.last_run_at + interval) if live_cp.last_run_at is not None else (now + interval),
-        )
-        updated_cp = live_cp.model_copy(
-            update={
-                "revision": live_cp.revision + 1,
-                "next_poll_at": next_poll_at,
-                "updated_at": now,
-            },
-        )
+    interval = float(new_poll_interval_seconds)
+    next_poll_at = max(
+        now,
+        (live_cp.last_run_at + interval) if live_cp.last_run_at is not None else (now + interval),
+    )
+    updated_cp = live_cp.model_copy(
+        update={
+            "revision": live_cp.revision + 1,
+            "next_poll_at": next_poll_at,
+            "updated_at": now,
+        },
+    )
     _upsert_script_check_checkpoint(conn, trigger_id, updated_cp)
 
 

@@ -206,7 +206,6 @@ class ReactiveTriggerService:
         self._reconcile_task: asyncio.Task[None] | None = None
         self._github_pr_poll_task: asyncio.Task[None] | None = None
         self._pr_poll_requested = False
-        self._script_check_poll_task: asyncio.Task[None] | None = None
         self._script_check_poll_requested = False
         self._script_checks_stopped = False
         self._github_pr_poller = (
@@ -228,6 +227,7 @@ class ReactiveTriggerService:
                 runtime_paths=self.runtime_paths,
                 tick_runner=script_check_runner,
                 on_enqueued=lambda: self.notify_work(poll_github_prs=False, poll_script_checks=False),
+                on_slot_freed=lambda: self.notify_work(poll_github_prs=False, poll_script_checks=True),
             )
         )
         self._live_during_restore: dict[str, set[tuple[str, str]]] = {}
@@ -263,22 +263,22 @@ class ReactiveTriggerService:
             self._script_check_poller.set_tick_runner(runner)
         if runner is not None:
             self._script_checks_stopped = False
+            if self._script_check_poller is not None:
+                self._script_check_poller.resume()
 
     def start(self) -> None:
         """Start the supervised background loop unless it is already running."""
         if self._store is None:
             return
         self._script_checks_stopped = False
+        if self._script_check_poller is not None:
+            self._script_check_poller.resume()
         self._loop.start()
 
     async def stop_script_checks(self) -> None:
-        """Stop scheduling new script_check ticks and cancel any active script_check poll task."""
+        """Stop scheduling new script_check ticks, cancel active poller tasks, and drain runner cleanup."""
         self._script_checks_stopped = True
         self._script_check_poll_requested = False
-        if (poll_task := self._script_check_poll_task) is not None:
-            self._script_check_poll_task = None
-            poll_task.cancel()
-            await asyncio.gather(poll_task, return_exceptions=True)
         if self._script_check_poller is not None:
             await self._script_check_poller.stop()
 
@@ -467,23 +467,10 @@ class ReactiveTriggerService:
             return 0
         return await self._script_check_poller.poll_due_once()
 
-    def _schedule_script_check_poll(self) -> None:
+    async def _schedule_script_check_poll(self) -> None:
         if self._script_check_poller is None or self._script_checks_stopped:
             return
-        if self._script_check_poll_task is not None and not self._script_check_poll_task.done():
-            self._script_check_poll_requested = True
-            return
-
-        async def _poll() -> None:
-            try:
-                await self._run_guarded(self.poll_script_checks_once, "Reactive trigger script_check poll failed")
-            finally:
-                if self._script_check_poll_task is asyncio.current_task():
-                    self._script_check_poll_task = None
-                    if self._script_check_poll_requested and not self._script_checks_stopped:
-                        self.notify_work(poll_github_prs=False, poll_script_checks=True)
-
-        self._script_check_poll_task = asyncio.create_task(_poll())
+        await self._run_guarded(self._script_check_poller.admit_due, "Reactive trigger script_check poll failed")
 
     async def _run_guarded(self, coro: Callable[[], Awaitable[object]], error_message: str) -> None:
         try:
@@ -515,7 +502,7 @@ class ReactiveTriggerService:
                     self._script_check_poll_requested or now_mono >= next_script_check_poll_at
                 ):
                     self._script_check_poll_requested = False
-                    self._schedule_script_check_poll()
+                    await self._schedule_script_check_poll()
                     next_script_check_poll_at = time.monotonic() + self._script_check_poll_interval_seconds
 
                 await self._run_guarded(self.drain_due_firings_once, "Reactive trigger firing drain failed")
@@ -525,12 +512,14 @@ class ReactiveTriggerService:
                     await self._run_guarded(self._prune_old_firings, "Reactive trigger firing prune failed")
                     next_prune_at = now_mono + _PRUNE_INTERVAL_SECONDS
 
-                due = min(
+                deadlines = [
                     self._poll_interval_seconds,
                     next_poll_at - now_mono,
                     next_github_pr_poll_at - now_mono,
-                    next_script_check_poll_at - now_mono,
-                )
+                ]
+                if not self._script_checks_stopped:
+                    deadlines.append(next_script_check_poll_at - now_mono)
+                due = min(deadlines)
                 wait_seconds = max(0.0, due)
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(wait_seconds):

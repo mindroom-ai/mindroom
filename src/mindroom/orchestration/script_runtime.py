@@ -84,6 +84,7 @@ logger = get_logger(__name__)
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_SCRIPT_CHECK_LAUNCH_GRACE_SECONDS = 60.0
 
 
 class _ScriptRuntimeUnavailableError(RuntimeError):
@@ -921,9 +922,24 @@ class ScriptRuntimeLifecycle:
                         exc_info=True,
                     )
 
-        await asyncio.gather(*(reconcile_run(run) for run in runs))
+        reconcile_targets = [run for run in runs if not self._runner_owns_script_check(run)]
+        await asyncio.gather(*(reconcile_run(run) for run in reconcile_targets))
         if self.after_reconcile is not None:
             await self.after_reconcile()
+
+    def _runner_owns_script_check(self, run: ScriptRunRecord) -> bool:
+        """Return whether an active script_check tick runner currently owns exit observation for *run*."""
+        if (
+            not run.is_script_check
+            or run.finished_at is not None
+            or run.cancel_requested_at is not None
+            or not self.broker.has_active_check_tick(run.run_id)
+        ):
+            return False
+        started = datetime.fromisoformat(run.started_at or run.created_at)
+        return (self.manager.clock() - started).total_seconds() < (
+            run.max_runtime_seconds + _SCRIPT_CHECK_LAUNCH_GRACE_SECONDS
+        )
 
     async def _startup_cleanup_pass(self) -> None:
         """Adopt compatible surviving workers and retire other inherited ownership."""

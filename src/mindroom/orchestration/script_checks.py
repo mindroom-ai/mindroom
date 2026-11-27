@@ -107,6 +107,8 @@ def _evaluate_outcome(
     error_code = (
         "approval_required"
         if slot.approval_denied
+        else "tool_denied"
+        if slot.tool_denied
         else "timeout"
         if timed_out or (final is not None and final.cancellation_reason == MAX_RUNTIME_EXCEEDED)
         else "process_exited_without_result"

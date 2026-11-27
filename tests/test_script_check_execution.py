@@ -9,6 +9,7 @@ import socket
 import time
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -45,7 +46,7 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.reactive_triggers.triage import TriageOutcome
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
-from mindroom.script_runs.models import ScriptRunRecord, ScriptToolGrant
+from mindroom.script_runs.models import ScriptRunRecord, ScriptToolGrant, utc_timestamp
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
@@ -565,13 +566,15 @@ async def test_cold_launch_timeout_releases_slot_immediately_and_execution_timeo
                 max_concurrency=1,
             )
             t0 = time.monotonic()
-            enqueued = await poller.poll_due_once(now=1000.0)
-            assert enqueued == 1
-            assert time.monotonic() - t0 < 3.0
+            assert await poller.poll_due_once(now=1000.0) == 0
             assert len(cancelled_runs) >= 1
             cp1 = h.trig_store.get_script_check_checkpoint(r1.trigger_id)
             assert cp1 is not None
             assert cp1.last_error_code == "launch_timeout"
+            assert not shielded_done.is_set()
+            # The freed slot admits sc_second immediately without waiting for shielded launch cleanup.
+            assert await poller.poll_due_once(now=1000.0) == 1
+            assert time.monotonic() - t0 < 3.0
             assert not shielded_done.is_set()
             release_shielded.set()
             await poller.stop()
@@ -684,3 +687,186 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path) -> No
             known_room_states=_state(membership),  # type: ignore[arg-type]
         )
         assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reconcile_durable_lock_does_not_block_observe_process_exit(tmp_path: Path) -> None:
+    """Astra follow-up #2: observe_process_exit reads durable exit_code==0 without blocking on reconcile_durable lock."""
+    async with _live_harness(tmp_path / "live", tools=["triggers", "script"]) as h:
+        src = "def check():\n    state.set('done', 1)\n    return {'title': 'Observed', 'data': {'ok': True}}\n"
+        _create_live_rule(h, "sc_race", src)
+
+        orig_observe = ScriptRunManager.observe_process_exit
+        orig_finalize = ScriptRunManager._finalize_observed_exit
+        retire_started, release_retire = asyncio.Event(), asyncio.Event()
+        reconcile_task: asyncio.Task[ScriptRunRecord] | None = None
+        captured_run_id: str | None = None
+
+        async def slow_finalize(
+            self_mgr: ScriptRunManager,
+            run: ScriptRunRecord,
+            *,
+            broker_revoked: bool = False,
+        ) -> ScriptRunRecord:
+            if run.run_id == captured_run_id:
+                retire_started.set()
+                await release_retire.wait()
+            return await orig_finalize(self_mgr, run, broker_revoked=broker_revoked)
+
+        async def observe_while_reconciling(self_mgr: ScriptRunManager, run_id: str) -> ScriptRunRecord | None:
+            nonlocal reconcile_task, captured_run_id
+            slot = h.broker._check_ticks.get(run_id)
+            if reconcile_task is None and slot is not None and slot.done.is_set():
+                captured_run_id = run_id
+                while True:
+                    st = await self_mgr._process_status(self_mgr.store.get_run(run_id))
+                    if st.state != "running":
+                        break
+                    await asyncio.sleep(0.02)
+                reconcile_task = asyncio.create_task(self_mgr.reconcile_durable(run_id=run_id))
+                await asyncio.wait_for(retire_started.wait(), timeout=2.0)
+                assert self_mgr._run_lock(run_id).locked()
+            return await orig_observe(self_mgr, run_id)
+
+        with (
+            patch.object(ScriptRunManager, "_finalize_observed_exit", slow_finalize),
+            patch.object(ScriptRunManager, "observe_process_exit", observe_while_reconciling),
+        ):
+            t0 = time.monotonic()
+            enqueued = await h.service.poll_script_checks_once()
+            assert enqueued == 1
+            assert time.monotonic() - t0 < 3.0
+            assert reconcile_task is not None
+            assert not reconcile_task.done()
+            cp = h.trig_store.get_script_check_checkpoint("sc_race")
+            assert cp is not None
+            assert (cp.state, cp.last_error_code) == ({"done": 1}, None)
+            assert len(h.trig_store.list_firings(trigger_id="sc_race")) == 1
+            release_retire.set()
+            await reconcile_task
+            await h.service.stop_script_checks()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pass_skips_active_runner_owned_script_check_runs(tmp_path: Path) -> None:
+    """Astra follow-up #2: _reconcile_pass skips active runner-owned script_check ticks while reconciling orphans/finished/expired."""
+    ctx = _script_ctx(tmp_path / "pass", tools=["triggers", "script"], allow_local=True)
+    store, bot = ScriptRunStore(ctx.runtime_paths), _FakeBot(ctx, send_log=[])
+    bot.orchestrator = SimpleNamespace(agent_reply_memberships=AgentReplyMembershipIndex())
+    now = datetime(2026, 11, 27, 12, 0, 0, tzinfo=UTC)
+    resolver = _LiveScriptRuntimeResolver(
+        runtime_paths=ctx.runtime_paths,
+        bot_provider=lambda name: bot if name == "coder" else None,  # type: ignore[arg-type,return-value]
+        worker_backend_provider=lambda _run: None,
+    )
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=ScriptWorkerClient(),
+        worker_backend=None,
+        gateway_url="http://127.0.0.1:8765",
+        clock=lambda: now,
+    )
+    lifecycle = ScriptRuntimeLifecycle(
+        runtime_paths=ctx.runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=resolver,
+        config_provider=lambda: ctx.config,
+        worker_lease_provider=lambda _loc: None,
+        api_enabled=False,
+    )
+    _, tok_hash = mint_script_capability()
+    base_kw: dict[str, Any] = {
+        "agent_name": "coder",
+        "owner_user_id": _OWNER,
+        "room_id": _ROOM,
+        "thread_root_event_id": ctx.execution_identity.resolved_thread_id,
+        "execution_identity": dict(serialize_tool_execution_identity(ctx.execution_identity)),
+        "source_digest": _DIGEST,
+        "grants": (),
+        "token_hash": tok_hash,
+        "local_unsafe": True,
+        "max_runtime_seconds": 30,
+    }
+    r_active = store.create_run(
+        ScriptRunRecord(
+            run_id=f"script-{'a' * 32}",
+            script_check_rule_uid="u-active",
+            created_at=utc_timestamp(now - timedelta(seconds=10)),
+            **base_kw,
+        ),
+    )
+    r_orphan = store.create_run(
+        ScriptRunRecord(
+            run_id=f"script-{'b' * 32}",
+            script_check_rule_uid="u-orphan",
+            created_at=utc_timestamp(now - timedelta(seconds=10)),
+            **base_kw,
+        ),
+    )
+    r_finished = store.create_run(
+        ScriptRunRecord(
+            run_id=f"script-{'c' * 32}",
+            script_check_rule_uid="u-finished",
+            created_at=utc_timestamp(now - timedelta(seconds=10)),
+            **base_kw,
+        ),
+    )
+    store.record_process_exit(
+        r_finished.run_id,
+        exit_code=0,
+        error=None,
+        output="",
+        cancellation_reason=PROCESS_EXIT_OBSERVED,
+    )
+    r_expired = store.create_run(
+        ScriptRunRecord(
+            run_id=f"script-{'d' * 32}",
+            script_check_rule_uid="u-expired",
+            created_at=utc_timestamp(now - timedelta(seconds=120)),
+            **base_kw,
+        ),
+    )
+    with (
+        broker.check_tick(r_active.run_id, source=_SRC, source_digest=_DIGEST, initial_state={}),
+        broker.check_tick(r_finished.run_id, source=_SRC, source_digest=_DIGEST, initial_state={}),
+        broker.check_tick(r_expired.run_id, source=_SRC, source_digest=_DIGEST, initial_state={}),
+        patch.object(ScriptRunManager, "reconcile_durable", AsyncMock()) as reconcile_m,
+    ):
+        await lifecycle._reconcile_pass()
+        reconciled_ids = {call.kwargs["run_id"] for call in reconcile_m.await_args_list}
+    assert reconciled_ids == {r_orphan.run_id, r_finished.run_id, r_expired.run_id}
+
+
+@pytest.mark.asyncio
+async def test_script_check_denied_tool_call_cannot_commit_state_or_fire(tmp_path: Path) -> None:
+    """Astra fresh #1: catching a policy-denied tool() error cannot persist state mutations or fire an event."""
+    with registered_toolkit("feed", lambda: _FeedToolkit(["a", "b"])):
+        async with _live_harness(
+            tmp_path,
+            tools=["triggers", "script", "feed", "calculator"],
+            policy={"script_check_allowed_tools": ["calculator"]},
+        ) as h:
+            for tid, denied_call in (
+                ("sc_excluded", "tool('feed', 'fetch_items')"),
+                ("sc_restricted", "tool('triggers', 'triggers', action='list')"),
+            ):
+                src = (
+                    "def check():\n"
+                    "    try:\n"
+                    f"        {denied_call}\n"
+                    "    except Exception:\n"
+                    "        pass\n"
+                    "    state.set('dirty', 1)\n"
+                    "    return {'title': 'Bypass attempt', 'data': {'dirty': True}}\n"
+                )
+                _create_live_rule(h, tid, src)
+                assert await h.service.poll_script_checks_once() == 0
+                cp = h.trig_store.get_script_check_checkpoint(tid)
+                assert cp is not None
+                assert (cp.state, cp.last_error_code, cp.consecutive_errors) == ({}, "tool_denied", 1)
+                assert h.trig_store.list_firings(trigger_id=tid) == []
+                h.trig_store.delete_trigger(tid)

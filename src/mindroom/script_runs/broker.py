@@ -216,6 +216,10 @@ class _CurrentGrantRevokedError(ValueError):
     """Raised when a launch grant is absent from the current live surface."""
 
 
+class _AuthorityMismatchError(ValueError):
+    """Raised when live script runtime authority disagrees with the durable run owner."""
+
+
 class _InvalidToolResultError(ValueError):
     """Raised when a successful tool result is not strict JSON data."""
 
@@ -235,6 +239,7 @@ class ScriptCheckTickSlot:
     state_changed: bool = False
     error: str | None = None
     approval_denied: bool = False
+    tool_denied: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,6 +548,17 @@ class ScriptToolBroker:
         finally:
             self._check_ticks.pop(run_id, None)
 
+    def has_active_check_tick(self, run_id: str) -> bool:
+        """Return whether an active script_check tick runner currently owns *run_id*."""
+        return run_id in self._check_ticks
+
+    def _mark_script_check_tool_denied(self, run_id: str, *, when: bool = True) -> None:
+        if not when:
+            return
+        slot = self._check_ticks.get(run_id)
+        if slot is not None and not slot.approval_denied:
+            slot.tool_denied = True
+
     def _authenticate_script_check(self, run_id: str, authorization: str | None) -> ScriptCheckTickSlot:
         run = self.authenticate(run_id, authorization)
         if not run.is_script_check:
@@ -616,6 +632,7 @@ class ScriptToolBroker:
             try:
                 durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
             except ScriptCapabilityError:
+                self._mark_script_check_tool_denied(call.run_id)
                 return await self._publish_async(
                     call,
                     state=ScriptCallState.FAILED,
@@ -656,6 +673,7 @@ class ScriptToolBroker:
                 # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
                 await hold("before_receipt")
             if not result.succeeded and not _shell_exit_completes(run, call, result, metadata):
+                self._mark_script_check_tool_denied(run.run_id, when=result.status == "denied")
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
                     "message": sanitize_failure_text(result.failure_text),
@@ -679,10 +697,12 @@ class ScriptToolBroker:
         except asyncio.CancelledError:
             raise
         except _CurrentGrantRevokedError:
+            self._mark_script_check_tool_denied(run.run_id)
             return await self._publish_async(call, state=ScriptCallState.FAILED, error=_REVOKED_GRANT_ERROR)
         except _InvalidToolResultError:
             return await self._publish_async(call, state=ScriptCallState.FAILED, error=_INVALID_RESULT_ERROR)
         except (TypeError, ValueError) as exc:
+            self._mark_script_check_tool_denied(run.run_id, when=isinstance(exc, _AuthorityMismatchError))
             return await self._publish_async(
                 call,
                 state=ScriptCallState.FAILED,
@@ -833,7 +853,10 @@ class ScriptToolBroker:
         if resolved is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
-        _validate_resolved_authority(run, context, worker_authority)
+        try:
+            _validate_resolved_authority(run, context, worker_authority)
+        except ValueError as exc:
+            raise _AuthorityMismatchError(str(exc)) from exc
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,

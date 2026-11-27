@@ -719,8 +719,19 @@ class ScriptRunManager:
     async def observe_process_exit(self, run_id: str) -> ScriptRunRecord | None:
         """Query process status and durably record exit without waiting for worker retirement."""
         try:
+            # Read durable state first so a concurrent reconcile_durable holding the run lock
+            # through slow worker retirement cannot block observing an already-recorded exit.
+            try:
+                existing = await asyncio.to_thread(self.store.get_run, run_id)
+            except ScriptRunNotFoundError:
+                return None
+            if existing.state in TERMINAL_SCRIPT_RUN_STATES or existing.finished_at is not None:
+                return existing
             async with self._run_lock(run_id):
-                run = await asyncio.to_thread(self.store.get_run, run_id)
+                try:
+                    run = await asyncio.to_thread(self.store.get_run, run_id)
+                except ScriptRunNotFoundError:
+                    return None
                 if run.state in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is not None:
                     return run
                 status = await self._process_status(run)

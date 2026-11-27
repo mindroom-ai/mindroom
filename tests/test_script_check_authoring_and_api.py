@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     AUTOMATION_ORIGIN_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_primary_runtime_paths,
@@ -31,6 +32,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_sources import event_source_hook_source
 from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.ingress_validation import IngressValidator
+from mindroom.journal_dispatch import _route_as_message
 from mindroom.matrix_rtc.call_tools import _TEXT_CHAT_REQUIRED_MESSAGE, _refuse_text_chat_functions
 from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers.models import TriggerEvent
@@ -55,6 +57,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_matrix_client_mock,
     make_relation_lookup,
+    parsed_route,
     runtime_paths_for,
 )
 
@@ -290,7 +293,20 @@ async def test_automation_router_relay_and_event_source_watch_turn_guards(tmp_pa
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
     )
-    sched_facts = ingress.classify_source(router_uid, {"content": routed_sched}, room_id=_ROOM)
+    coder_uid = ids.current_id("coder").full_id
+    sched_route_msg = _route_as_message(
+        parsed_route(
+            {
+                **routed_sched,
+                ROUTE_EVENT_TYPE: {"entity": coder_uid, "event_ids": ["$sched_ev"], "thread_id": "$sched_root"},
+                "body": "Run scheduled",
+            },
+            sender=router_uid,
+            event_id="$route_sched",
+        ),
+    )
+    assert sched_route_msg.source["content"][AUTOMATION_ORIGIN_KEY] == SCHEDULED_SOURCE_KIND
+    sched_facts = ingress.classify(sched_route_msg, room_id=_ROOM)
     assert (sched_facts.source_kind, sched_facts.origin.automation_origin) == (
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
@@ -305,7 +321,7 @@ async def test_automation_router_relay_and_event_source_watch_turn_guards(tmp_pa
     assert err_sched["status"] == "error"
     assert "unattended automation" in err_sched["message"]
 
-    # Ordinary routed human turn strips spoofed AUTOMATION_ORIGIN_KEY and SUCCEEDS
+    # Ordinary routed human turn strips spoofed AUTOMATION_ORIGIN_KEY through _route_as_message and SUCCEEDS
     human_event = SimpleNamespace(
         sender=_OWNER,
         source={"content": {"body": "Monitor", AUTOMATION_ORIGIN_KEY: SCHEDULED_SOURCE_KIND}},
@@ -319,7 +335,19 @@ async def test_automation_router_relay_and_event_source_watch_turn_guards(tmp_pa
     )
     assert routed_human[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert AUTOMATION_ORIGIN_KEY not in routed_human
-    human_facts = ingress.classify_source(router_uid, {"content": routed_human}, room_id=_ROOM)
+    human_route_msg = _route_as_message(
+        parsed_route(
+            {
+                **routed_human,
+                ROUTE_EVENT_TYPE: {"entity": coder_uid, "event_ids": ["$human_ev"], "thread_id": "$human_root"},
+                "body": "Monitor",
+            },
+            sender=router_uid,
+            event_id="$route_human",
+        ),
+    )
+    assert AUTOMATION_ORIGIN_KEY not in human_route_msg.source["content"]
+    human_facts = ingress.classify(human_route_msg, room_id=_ROOM)
     assert human_facts.origin.automation_origin is None
     ok_human = await _call(
         tool,

@@ -1009,7 +1009,15 @@ def _refuse_text_chat_functions(
             and function.gate in {ToolGate.POLICY, ToolGate.JOB}
             and function.name not in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
             and not tool_may_require_approval(config, function.name)
-            and (alias := toolkit_approval_alias(config, tools, function.toolkit, function.name)) is not None
+            and (
+                alias := toolkit_approval_alias(
+                    config,
+                    tools,
+                    function.registered_toolkit or function.toolkit,
+                    function.name,
+                )
+            )
+            is not None
             and alias.allow_non_resumable_passthrough
         ):
             passthrough_aliases[function.name] = alias

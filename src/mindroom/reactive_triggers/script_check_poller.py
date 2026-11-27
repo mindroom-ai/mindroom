@@ -6,8 +6,8 @@ import asyncio
 import inspect
 import random
 import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
@@ -20,7 +20,7 @@ from mindroom.reactive_triggers.script_check import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -70,6 +70,7 @@ class ScriptCheckPoller:
         runtime_paths: RuntimePaths,
         tick_runner: ScriptCheckTickRunner | None = None,
         on_enqueued: Callable[[], None] | None = None,
+        on_slot_freed: Callable[[], None] | None = None,
         max_concurrency: int = 4,
     ) -> None:
         self._store = store
@@ -77,64 +78,106 @@ class ScriptCheckPoller:
         self._runtime_paths = runtime_paths
         self._tick_runner = tick_runner
         self._on_enqueued = on_enqueued
-        self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
-        self._owner_locks: dict[str, asyncio.Lock] = {}
-        self._owner_waiters: dict[str, int] = {}
+        self._on_slot_freed = on_slot_freed
+        self._max_concurrency = max(1, max_concurrency)
+        self._active_tasks: set[asyncio.Task[bool]] = set()
+        self._active_owners: set[str] = set()
         self._in_flight_trigger_ids: set[str] = set()
+        self._stopped = False
 
     def set_tick_runner(self, tick_runner: ScriptCheckTickRunner | None) -> None:
         """Bind or replace the tick runner callable."""
         self._tick_runner = tick_runner
 
+    def resume(self) -> None:
+        """Allow new script_check admissions after a previous stop."""
+        self._stopped = False
+
     async def stop(self) -> None:
-        """Drain any tracked background cleanup tasks on the bound tick runner."""
+        """Cancel active poller tasks and drain tracked runner cleanup tasks."""
+        self._stopped = True
+        while tasks := list(self._active_tasks):
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         stop_fn = getattr(self._tick_runner, "stop", None)
         if callable(stop_fn):
             result = stop_fn()
             if inspect.isawaitable(result):
                 await result
 
-    @asynccontextmanager
-    async def _owner_slot(self, owner_user_id: str) -> AsyncIterator[None]:
-        lock = self._owner_locks.setdefault(owner_user_id, asyncio.Lock())
-        self._owner_waiters[owner_user_id] = self._owner_waiters.get(owner_user_id, 0) + 1
-        try:
-            async with lock:
-                yield
-        finally:
-            remaining = self._owner_waiters.get(owner_user_id, 1) - 1
-            if remaining <= 0:
-                self._owner_waiters.pop(owner_user_id, None)
-                if self._owner_locks.get(owner_user_id) is lock:
-                    self._owner_locks.pop(owner_user_id, None)
-            else:
-                self._owner_waiters[owner_user_id] = remaining
-
-    async def poll_due_once(self, *, now: float | None = None) -> int:
-        """Poll due script_check triggers once and return newly enqueued firing count."""
+    async def admit_due(self, *, now: float | None = None) -> list[asyncio.Task[bool]]:
+        """Admit due script_check triggers into available slots without blocking; return spawned tasks."""
         pol = self._config_provider().external_trigger_policy
-        if self._tick_runner is None or not (pol.is_reactive_active and pol.script_check_enabled):
-            return 0
+        if (
+            self._stopped
+            or self._tick_runner is None
+            or not (pol.is_reactive_active and pol.script_check_enabled)
+            or len(self._active_tasks) >= self._max_concurrency
+        ):
+            return []
         fixed_now = now is not None
         current_time = time.time() if now is None else now
-        due = await asyncio.to_thread(self._store.list_due_script_check_triggers, now=current_time, limit=20)
-        selected = [(r, cp) for r, cp in due if r.trigger_id not in self._in_flight_trigger_ids]
-        if not selected:
-            return 0
-        self._in_flight_trigger_ids.update(r.trigger_id for r, _ in selected)
-        outcomes = await asyncio.gather(
-            *(self._poll_rule(r, cp, current_time, fixed_now=fixed_now) for r, cp in selected),
-            return_exceptions=True,
+        scan_limit = max(20, self._max_concurrency * 5)
+        due = await asyncio.to_thread(
+            self._store.list_due_script_check_triggers,
+            now=current_time,
+            limit=scan_limit,
         )
-        for (rule, _), outcome in zip(selected, outcomes, strict=True):
-            if isinstance(outcome, Exception):
-                logger.warning("Unexpected script_check poll error", trigger_id=rule.trigger_id, error=str(outcome))
-            elif isinstance(outcome, BaseException):
-                raise outcome
-        enqueued = sum(outcome is True for outcome in outcomes)
+        if self._stopped or self._tick_runner is None:
+            return []
+        spawned: list[asyncio.Task[bool]] = []
+        for rule, cp in due:
+            if len(self._active_tasks) >= self._max_concurrency:
+                break
+            if rule.trigger_id in self._in_flight_trigger_ids or rule.owner_user_id in self._active_owners:
+                continue
+            self._in_flight_trigger_ids.add(rule.trigger_id)
+            self._active_owners.add(rule.owner_user_id)
+            task = asyncio.create_task(
+                self._run_admitted(rule, cp, current_time, fixed_now=fixed_now),
+                name=f"script_check_poll_{rule.trigger_id}",
+            )
+            self._active_tasks.add(task)
+            task.add_done_callback(
+                partial(
+                    self._release_slot,
+                    trigger_id=rule.trigger_id,
+                    owner_user_id=rule.owner_user_id,
+                    enqueued=False,
+                ),
+            )
+            spawned.append(task)
+        return spawned
+
+    def _release_slot(
+        self,
+        task: asyncio.Task[bool],
+        *,
+        trigger_id: str,
+        owner_user_id: str,
+        enqueued: bool,
+    ) -> None:
+        if task not in self._active_tasks:
+            return
+        self._active_tasks.discard(task)
+        self._in_flight_trigger_ids.discard(trigger_id)
+        self._active_owners.discard(owner_user_id)
         if enqueued and self._on_enqueued is not None:
             self._on_enqueued()
-        return enqueued
+        if not self._stopped and self._on_slot_freed is not None:
+            self._on_slot_freed()
+
+    async def poll_due_once(self, *, now: float | None = None) -> int:
+        """Admit due script_check triggers once, await the admitted tasks, and return newly enqueued firing count."""
+        tasks = await self.admit_due(now=now)
+        if not tasks:
+            return 0
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
+        return sum(outcome is True for outcome in outcomes)
 
     def _load_live_rule_and_checkpoint(
         self,
@@ -158,7 +201,7 @@ class ScriptCheckPoller:
             return None
         return fresh_rule, fresh_cp
 
-    async def _poll_rule(
+    async def _run_admitted(
         self,
         rule: ReactiveTriggerRecord,
         cp: ScriptCheckCheckpoint,
@@ -166,16 +209,25 @@ class ScriptCheckPoller:
         *,
         fixed_now: bool,
     ) -> bool:
+        enqueued = False
         try:
-            async with self._owner_slot(rule.owner_user_id), self._semaphore:
-                check_now = now if fixed_now else time.time()
-                live = await asyncio.to_thread(self._load_live_rule_and_checkpoint, rule, cp, check_now)
-                if live is None:
-                    return False
+            check_now = now if fixed_now else time.time()
+            live = await asyncio.to_thread(self._load_live_rule_and_checkpoint, rule, cp, check_now)
+            if live is not None:
                 fresh_rule, fresh_cp = live
-                return await self._execute_rule(fresh_rule, fresh_cp, check_now, fixed_now=fixed_now)
+                enqueued = await self._execute_rule(fresh_rule, fresh_cp, check_now, fixed_now=fixed_now)
+        except Exception as exc:
+            logger.warning("Unexpected script_check poll error", trigger_id=rule.trigger_id, error=str(exc))
         finally:
-            self._in_flight_trigger_ids.discard(rule.trigger_id)
+            current = asyncio.current_task()
+            if current is not None:
+                self._release_slot(
+                    current,
+                    trigger_id=rule.trigger_id,
+                    owner_user_id=rule.owner_user_id,
+                    enqueued=enqueued,
+                )
+        return enqueued
 
     async def _execute_rule(
         self,

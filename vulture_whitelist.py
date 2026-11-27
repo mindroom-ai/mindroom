@@ -509,3 +509,4 @@ _._toolbox_api_client  # Daytona SDK toolbox client rebuilt for per-instance ver
 _.register_event_source  # PluginLifecycle method called by plugins (src/mindroom/plugin_lifecycle.py)
 _.revised_prompt  # Media dataclass field serialized via fields(self) (src/mindroom/llm/media.py)
 _.alt_text  # Image dataclass field serialized via fields(self) (src/mindroom/llm/media.py)
+_.poll_script_checks_once  # Public single-batch poll method exercised by direct callers and tests (src/mindroom/reactive_triggers/service.py)

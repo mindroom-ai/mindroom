@@ -13,7 +13,6 @@ from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
-    ScriptCheckSourceSpec,
     ThreadTagSourceSpec,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
@@ -108,24 +107,6 @@ def refresh_reactive_state_on_reenable(
     elif isinstance(record.source, GitHubPRSourceSpec):
         refreshed = GitHubPRCheckpoint(next_poll_at=now, updated_at=now)
         reactive_store.upsert_github_pr_checkpoint(record.trigger_id, refreshed, expected_rule_uid=record.rule_uid)
-    elif isinstance(record.source, ScriptCheckSourceSpec):
-        existing = reactive_store.get_script_check_checkpoint(record.trigger_id)
-        if existing is not None:
-            refreshed_sc = existing.model_copy(
-                update={
-                    "revision": existing.revision + 1,
-                    "consecutive_errors": 0,
-                    "last_error_code": None,
-                    "next_poll_at": now,
-                    "updated_at": now,
-                },
-            )
-            reactive_store.upsert_script_check_checkpoint(
-                record.trigger_id,
-                refreshed_sc,
-                expected_rule_uid=record.rule_uid,
-                expected_revision=existing.revision,
-            )
 
 
 def _not_found(trigger_id: str) -> ExternalTriggerStoreError:

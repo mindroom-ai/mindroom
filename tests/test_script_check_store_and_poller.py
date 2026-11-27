@@ -12,11 +12,11 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-from mindroom.reactive_triggers.management import refresh_reactive_state_on_reenable
 from mindroom.reactive_triggers.models import (
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
@@ -40,6 +40,7 @@ from mindroom.reactive_triggers.script_check import (
     validate_script_check_state,
 )
 from mindroom.reactive_triggers.script_check_poller import ScriptCheckPoller, ScriptCheckTickOutcome
+from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.store import (
     ReactiveTriggerLimitError,
     ReactiveTriggerStore,
@@ -391,7 +392,7 @@ def test_store_script_check_quotas_atomic_revision_and_interval_race(tmp_path: P
     )
     assert (_req_cp(store, "sc_1").state, len(store.list_firings(trigger_id="sc_1"))) == ({"cursor": 10}, 1)
 
-    # Re-enable via update_trigger and refresh_reactive_state_on_reenable both bump revision and clear errors
+    # Re-enable via update_trigger and set_enabled both bump revision and clear errors inside the write transaction
     store.set_enabled("sc_1", False)
     store.upsert_script_check_checkpoint(
         "sc_1",
@@ -407,17 +408,33 @@ def test_store_script_check_quotas_atomic_revision_and_interval_race(tmp_path: P
     cp_re = _req_cp(store, "sc_1")
     assert (cp_re.revision, cp_re.consecutive_errors, cp_re.last_error_code, cp_re.next_poll_at) == (4, 0, None, 1200.0)
 
+    store.set_enabled("sc_1", False)
     store.upsert_script_check_checkpoint(
         "sc_1",
-        cp_re.model_copy(update={"consecutive_errors": 2, "last_error_code": "script_error"}),
+        cp_re.model_copy(update={"consecutive_errors": 2, "last_error_code": "script_error", "next_poll_at": 9999.0}),
     )
-    refresh_reactive_state_on_reenable(store, reenabled, now=1300.0, refreshed_tag_present=None)
+    with pytest.raises(ReactiveTriggerLimitError):
+        store.set_enabled("sc_1", True, max_script_check_per_owner=0)
+    cp_rejected = _req_cp(store, "sc_1")
+    assert (
+        cp_rejected.revision,
+        cp_rejected.consecutive_errors,
+        cp_rejected.last_error_code,
+        cp_rejected.next_poll_at,
+    ) == (
+        4,
+        2,
+        "script_error",
+        9999.0,
+    )
+    reenabled_2 = store.set_enabled("sc_1", True, max_script_check_per_owner=5)
+    assert reenabled_2 is not None
     cp_ref = _req_cp(store, "sc_1")
     assert (cp_ref.revision, cp_ref.consecutive_errors, cp_ref.last_error_code, cp_ref.next_poll_at) == (
         5,
         0,
         None,
-        1300.0,
+        reenabled_2.updated_at,
     )
     assert (store.delete_trigger("sc_1"), store.get_script_check_checkpoint("sc_1")) == (True, None)
 
@@ -571,3 +588,129 @@ def test_script_runs_store_migrates_script_check_rule_uid(tmp_path: Path) -> Non
     assert (sc.is_script_check, sc.is_plain_script) == (True, False)
     with pytest.raises(ValueError, match="workflow_run_id and script_check_rule_uid"):
         ScriptRunRecord(run_id=f"script-{'3' * 32}", workflow_run_id="wf-1", script_check_rule_uid="uid-3", **base)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_script_check_poller_two_owners_non_blocking_admission(tmp_path: Path) -> None:
+    """Astra fresh #2: Owner A's slow queued checks never block Owner B's check from running repeatedly."""
+    paths = _paths(tmp_path / "poller", allow_local=True)
+    store = ReactiveTriggerStore(paths)
+    cfg = _cfg(paths, allow_local=True)
+    store.create_trigger(_sc_rule("a1", owner=_OWNER), initial_script_check_checkpoint=_sc_cp(next_poll_at=100.0))
+    store.create_trigger(_sc_rule("a2", owner=_OWNER), initial_script_check_checkpoint=_sc_cp(next_poll_at=101.0))
+    store.create_trigger(
+        _sc_rule("b1", owner="@bob:example.org", poll_s=60),
+        initial_script_check_checkpoint=_sc_cp(next_poll_at=102.0),
+    )
+
+    a1_started, a2_started = asyncio.Event(), asyncio.Event()
+    release_a1, release_a2 = asyncio.Event(), asyncio.Event()
+    b_runs: list[float] = []
+    freed_count = 0
+
+    async def runner(
+        rule: ReactiveTriggerRecord,
+        _cp: ScriptCheckCheckpoint,
+        _cfg: Config,
+        now: float,
+    ) -> ScriptCheckTickOutcome:
+        if rule.trigger_id == "a1":
+            a1_started.set()
+            await release_a1.wait()
+        elif rule.trigger_id == "a2":
+            a2_started.set()
+            await release_a2.wait()
+        elif rule.trigger_id == "b1":
+            b_runs.append(now)
+        return ScriptCheckTickOutcome(status="ok", run_id=f"run-{rule.trigger_id}-{len(b_runs)}")
+
+    def on_slot_freed() -> None:
+        nonlocal freed_count
+        freed_count += 1
+
+    poller = ScriptCheckPoller(
+        store=store,
+        config_provider=lambda: cfg,
+        runtime_paths=paths,
+        tick_runner=runner,
+        on_slot_freed=on_slot_freed,
+        max_concurrency=2,
+    )
+    tasks_1 = await poller.admit_due(now=200.0)
+    assert len(tasks_1) == 2
+    await asyncio.wait_for(a1_started.wait(), timeout=2.0)
+    # Wait for b1's first run while a1 is still blocked and a2 is still queued.
+    await asyncio.wait_for(tasks_1[1], timeout=2.0)
+    assert len(b_runs) == 1
+    assert not a2_started.is_set()
+    assert await poller.admit_due(now=200.0) == []
+
+    # Advance time so b1 is due again; Owner B runs a second time while Owner A's a1 is STILL running!
+    tasks_2 = await poller.admit_due(now=400.0)
+    assert len(tasks_2) == 1
+    await asyncio.wait_for(tasks_2[0], timeout=2.0)
+    assert len(b_runs) == 2
+    assert not a2_started.is_set()
+
+    # Releasing a1 frees Owner A's slot so a2 is admitted next.
+    release_a1.set()
+    await asyncio.wait_for(tasks_1[0], timeout=2.0)
+    assert freed_count >= 3
+    tasks_3 = await poller.admit_due(now=400.0)
+    assert len(tasks_3) == 1
+    await asyncio.wait_for(a2_started.wait(), timeout=2.0)
+    release_a2.set()
+    await asyncio.wait_for(tasks_3[0], timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_script_check_service_slot_freed_wakeup_and_stop_cancels_active_tasks(tmp_path: Path) -> None:
+    """Astra fresh #2: service wires on_slot_freed -> notify_work and stop_script_checks cancels active poller tasks."""
+    svc_paths = _paths(tmp_path / "svc", allow_local=True)
+    svc_store = ReactiveTriggerStore(svc_paths)
+    svc_cfg = _cfg(svc_paths, allow_local=True)
+    svc_store.create_trigger(_sc_rule("sa1", owner=_OWNER), initial_script_check_checkpoint=_sc_cp(next_poll_at=0.0))
+    svc_store.create_trigger(_sc_rule("sa2", owner=_OWNER), initial_script_check_checkpoint=_sc_cp(next_poll_at=0.0))
+    sa1_started, sa2_started, sa2_cancelled, release_sa1 = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+
+    async def svc_runner(
+        rule: ReactiveTriggerRecord,
+        _cp: ScriptCheckCheckpoint,
+        _cfg: Config,
+        _now: float,
+    ) -> ScriptCheckTickOutcome:
+        if rule.trigger_id == "sa1":
+            sa1_started.set()
+            await release_sa1.wait()
+            return ScriptCheckTickOutcome(status="ok", run_id="r-sa1")
+        sa2_started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            sa2_cancelled.set()
+            raise
+        return ScriptCheckTickOutcome(status="ok", run_id="r-sa2")
+
+    service = ReactiveTriggerService(
+        runtime_paths=svc_paths,
+        config_provider=lambda: svc_cfg,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=svc_store,
+        script_check_runner=svc_runner,
+    )
+    service.start()
+    try:
+        await asyncio.wait_for(sa1_started.wait(), timeout=2.0)
+        assert not sa2_started.is_set()
+        release_sa1.set()
+        await asyncio.wait_for(sa2_started.wait(), timeout=2.0)
+        await service.stop_script_checks()
+        assert sa2_cancelled.is_set()
+    finally:
+        await service.stop()
