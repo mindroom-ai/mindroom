@@ -1107,6 +1107,52 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "slack_edit": "slack_manage",
         "slack_delete": "slack_manage",
     },
+    # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
+    # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
+    #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
+    #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
+    #   and list_email_invites).
+    # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
+    #   functions with ToolMetadata.action_scoped_grants.
+    # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
+    #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
+    #   in include_tools/exclude_tools at config load.
+    # Coverage: tests/test_tool_approval_grants.py::test_identity_access_graph_action_scoped_grants_and_fail_closed_migration,
+    #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
+    #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
+    "shared_directories": {
+        "create_shared_directory": "shared_directories_write",
+        "invite_to_shared_directory": "shared_directories_write",
+        "remove_from_shared_directory": "shared_directories_write",
+        "delete_shared_directory": "shared_directories_write",
+        "accept_shared_directory": "shared_directories_write",
+        "decline_shared_directory": "shared_directories_write",
+    },
+    "contacts": {
+        "request_contact": "contacts_write",
+        "accept_contact": "contacts_write",
+        "decline_contact": "contacts_write",
+        "update_contact": "contacts_write",
+        "remove_contact": "contacts_write",
+    },
+    "knowledge_graph": {
+        "search_graph": "knowledge_graph_read",
+        "graph_entity": "knowledge_graph_read",
+        "delete_graph_fact": "knowledge_graph_write",
+        "delete_graph_entity": "knowledge_graph_write",
+        "merge_graph_entities": "knowledge_graph_write",
+        "update_graph_entity_summary": "knowledge_graph_write",
+    },
+    "agent_manager": {
+        "create_agent": "agent_manager_write",
+        "update_agent": "agent_manager_write",
+        "set_avatar": "agent_manager_write",
+        "delete_agent": "agent_manager_write",
+    },
+    "email_invite": {
+        "invite_by_email": "email_invite_write",
+        "revoke_email_invite": "email_invite_write",
+    },
     "script": {
         "start_script": "script_write",
         "cancel_script": "script_write",
@@ -1145,6 +1191,11 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
         "attachments",
         "atlassian",
         "slack",
+        "shared_directories",
+        "contacts",
+        "knowledge_graph",
+        "agent_manager",
+        "email_invite",
         "calculator",
         "duckduckgo",
         "googlesearch",
@@ -1454,7 +1505,17 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
     "slack": _retired_slack_setting,
     **{
         name: _retired_consolidated_filter_checker(name)
-        for name in ("terminal", "claude_agent", "thread_model", "usage_stats")
+        for name in (
+            "shared_directories",
+            "contacts",
+            "knowledge_graph",
+            "agent_manager",
+            "email_invite",
+            "terminal",
+            "claude_agent",
+            "thread_model",
+            "usage_stats",
+        )
     },
 }
 

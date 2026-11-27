@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_CONFIRMED = {"create_agent", "update_agent", "set_avatar", "delete_agent"}
-_MANAGED = {"agent_settings", "update_agent", "set_avatar"}
+_CREATE_PROPS = {"action", "name", "display_name", "role", "instructions", "tools"}
+_MANAGED_PROPS = {"action", "changes", "attachment_id"}
 
 
 @contextmanager
@@ -67,12 +67,35 @@ def _created_agent_tool() -> AgentManagerTools:
 
 
 @pytest.mark.parametrize(
-    ("can_create", "generated", "created", "offered"),
+    ("can_create", "generated", "created", "offered", "expected_actions", "expected_props"),
     [
-        (True, False, False, {"create_agent"}),
-        (False, True, False, _MANAGED),
-        (False, True, True, _MANAGED | {"delete_agent"}),
-        (True, True, False, _MANAGED | {"create_agent"}),
+        (False, False, False, set(), (), set()),
+        (True, False, False, {"agent_manager_write"}, ("create",), _CREATE_PROPS),
+        (False, True, False, {"agent_settings", "agent_manager_write"}, ("update", "set_avatar"), _MANAGED_PROPS),
+        (
+            False,
+            True,
+            True,
+            {"agent_settings", "agent_manager_write"},
+            ("update", "set_avatar", "delete"),
+            _MANAGED_PROPS,
+        ),
+        (
+            True,
+            True,
+            False,
+            {"agent_settings", "agent_manager_write"},
+            ("create", "update", "set_avatar"),
+            _CREATE_PROPS | _MANAGED_PROPS,
+        ),
+        (
+            True,
+            True,
+            True,
+            {"agent_settings", "agent_manager_write"},
+            ("create", "update", "set_avatar", "delete"),
+            _CREATE_PROPS | _MANAGED_PROPS,
+        ),
     ],
 )
 def test_functions_follow_the_flags_and_changes_need_confirmation(
@@ -80,23 +103,37 @@ def test_functions_follow_the_flags_and_changes_need_confirmation(
     generated: bool,
     created: bool,
     offered: set[str],
+    expected_actions: tuple[str, ...],
+    expected_props: set[str],
 ) -> None:
-    """A creator is offered create_agent, a generated agent its settings and update, and a created agent delete too."""
+    """Capabilities narrow offered functions, action enum, schema fields, and docstring bullets, with writes confirmed."""
     tool = AgentManagerTools("agent", can_create=can_create, generated=generated, created=created)
-    functions = adapt_toolkit(tool).functions
+    by_name = {function.name: function for function in adapt_toolkit(tool).functions}
 
-    assert {function.name for function in functions} == offered
-    assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == offered & _CONFIRMED
+    assert set(by_name) == offered
+    assert {name for name, fn in by_name.items() if fn.gate is ToolGate.CONFIRM} == (offered & {"agent_manager_write"})
+    if "agent_manager_write" in by_name:
+        write_fn = by_name["agent_manager_write"]
+        props = write_fn.parameters["properties"]
+        assert tuple(props["action"]["enum"]) == expected_actions
+        assert set(props) == expected_props
+        desc = write_fn.description or ""
+        for action in ("create", "update", "set_avatar", "delete"):
+            assert (f"- `{action}`:" in desc) is (action in expected_actions)
 
 
 def test_update_agent_schema_lets_a_model_send_text_and_name_lists() -> None:
     """The offered schema types each change value, so a model is not led to send empty objects for text or lists."""
     function = next(
-        function for function in adapt_toolkit(_created_agent_tool()).functions if function.name == "update_agent"
+        function
+        for function in adapt_toolkit(_created_agent_tool()).functions
+        if function.name == "agent_manager_write"
     )
 
-    assert function.parameters["required"] == ["changes"]
-    value_types = function.parameters["properties"]["changes"]["additionalProperties"]["anyOf"]
+    assert function.parameters["required"] == ["action"]
+    changes_schema = function.parameters["properties"]["changes"]
+    object_branch = next(branch for branch in changes_schema["anyOf"] if branch.get("type") == "object")
+    value_types = object_branch["additionalProperties"]["anyOf"]
     assert {"type": "string"} in value_types
     assert {"type": "array", "items": {"type": "string"}} in value_types
     assert {"type": "null"} in value_types
@@ -117,7 +154,13 @@ async def test_create_agent_registers_it_for_the_owner_and_requests_a_reload(tmp
             new=_register(),
         ),
     ):
-        result = await tool.create_agent("Research", "Research", "Finds things", tools=["shell"])
+        result = await tool.agent_manager_write(
+            "create",
+            name="Research",
+            display_name="Research",
+            role="Finds things",
+            tools=["shell"],
+        )
 
     user_id = "@mindroom_creator_research:localhost"
     assert user_id in result
@@ -136,7 +179,13 @@ async def test_create_agent_refusals_come_back_as_errors_without_a_reload(tmp_pa
     orchestrator = MagicMock()
 
     with _as_requester(tool, config, paths, orchestrator=orchestrator):
-        result = await tool.create_agent("Research", "Research", "Finds things", tools=["browser"])
+        result = await tool.agent_manager_write(
+            "create",
+            name="Research",
+            display_name="Research",
+            role="Finds things",
+            tools=["browser"],
+        )
 
     assert result == "Error: Not among the tools this agent may use: browser; allowed: calculator, shell"
     assert read_personal_agent_roster_file(paths).created == []
@@ -153,9 +202,9 @@ async def test_an_owner_reads_updates_and_deletes_a_created_agent(tmp_path: Path
 
     with _as_requester(tool, config, paths, orchestrator=orchestrator):
         settings = yaml.safe_load(await tool.agent_settings())
-        updated = await tool.update_agent({"role": "Mine", "tools": ["calculator"]})
+        updated = await tool.agent_manager_write("update", changes={"role": "Mine", "tools": ["calculator"]})
         edits = read_personal_agent_roster_file(paths).created[0].edits
-        deleted = await tool.delete_agent()
+        deleted = await tool.agent_manager_write("delete")
 
     assert (settings["agent_name"], settings["allowed_tools"]) == ("creator_research", ["calculator", "shell"])
     assert updated == "Updated creator_research: role, tools."
@@ -173,7 +222,7 @@ async def test_a_change_without_an_orchestrator_is_still_stored(tmp_path: Path) 
     tool = _created_agent_tool()
 
     with _as_requester(tool, config, paths):
-        result = await tool.update_agent({"role": "Mine"})
+        result = await tool.agent_manager_write("update", changes={"role": "Mine"})
 
     assert result == "Updated creator_research: role."
     assert read_personal_agent_roster_file(paths).created[0].edits.role == "Mine"
@@ -188,7 +237,7 @@ async def test_an_empty_change_is_an_error_and_requests_no_reload(tmp_path: Path
     orchestrator = MagicMock()
 
     with _as_requester(tool, config, paths, orchestrator=orchestrator):
-        result = await tool.update_agent({})
+        result = await tool.agent_manager_write("update", changes={})
 
     assert result == "Error: no changes given"
     orchestrator.config_reload.request_reload.assert_not_called()
@@ -204,10 +253,17 @@ async def test_refused_and_invalid_changes_come_back_as_errors_without_a_reload(
     stored = read_personal_agent_roster_file(paths)
 
     with _as_requester(tool, config, paths, requester_id=STRANGER, orchestrator=orchestrator):
-        results = [await tool.agent_settings(), await tool.update_agent({"role": "Spy"}), await tool.delete_agent()]
+        results = [
+            await tool.agent_settings(),
+            await tool.agent_manager_write("update", changes={"role": "Spy"}),
+            await tool.agent_manager_write("delete"),
+        ]
     with _as_requester(tool, config, paths, requester_id=CO_OWNER, orchestrator=orchestrator):
-        results += [await tool.delete_agent(), await tool.update_agent({"model": "opus"})]
-        results.append(await tool.update_agent({"display_name": ["not", "text"]}))
+        results += [
+            await tool.agent_manager_write("delete"),
+            await tool.agent_manager_write("update", changes={"model": "opus"}),
+        ]
+        results.append(await tool.agent_manager_write("update", changes={"display_name": ["not", "text"]}))
 
     assert all(result.startswith("Error: ") for result in results)
     assert results[3] == f"Error: Only {OWNER} may delete creator_research"
@@ -226,9 +282,9 @@ async def test_calls_without_a_runtime_context_fail_closed(tmp_path: Path) -> No
 
     results = [
         await tool.agent_settings(),
-        await tool.update_agent({"role": "Mine"}),
-        await tool.delete_agent(),
-        await tool.create_agent("Research", "Research", "Finds things"),
+        await tool.agent_manager_write("update", changes={"role": "Mine"}),
+        await tool.agent_manager_write("delete"),
+        await tool.agent_manager_write("create", name="Research", display_name="Research", role="Finds things"),
     ]
 
     assert all(result.startswith("Error: ") for result in results)
@@ -293,7 +349,7 @@ async def test_an_owner_sets_the_avatar_from_an_attached_image(tmp_path: Path) -
         storage_path=paths.storage_root,
         attachment_ids=(attachment_id,),
     ):
-        result = await tool.set_avatar(attachment_id)
+        result = await tool.agent_manager_write("set_avatar", attachment_id=attachment_id)
 
     assert result == "Set the avatar of creator_research."
     client.set_avatar.assert_awaited_once_with("mxc://localhost/avatar")
@@ -315,12 +371,12 @@ async def test_refused_avatar_changes_come_back_as_errors_and_leave_the_profile_
     context = {"client": client, "storage_path": paths.storage_root, "attachment_ids": (photo, text)}
 
     with _as_requester(tool, config, paths, requester_id=STRANGER, **context):
-        stranger = await tool.set_avatar(photo)
+        stranger = await tool.agent_manager_write("set_avatar", attachment_id=photo)
     with _as_requester(tool, config, paths, **context):
-        outside = await tool.set_avatar("att_elsewhere")
-        not_an_image = await tool.set_avatar(text)
+        outside = await tool.agent_manager_write("set_avatar", attachment_id="att_elsewhere")
+        not_an_image = await tool.agent_manager_write("set_avatar", attachment_id=text)
     with _as_requester(tool, config, paths, transport_agent_name="team", **context):
-        team = await tool.set_avatar(photo)
+        team = await tool.agent_manager_write("set_avatar", attachment_id=photo)
 
     assert stranger == f"Error: Only {OWNER} or {CO_OWNER} may change creator_research"
     assert outside == "Error: Attachment ID is not available in this context: att_elsewhere"
@@ -328,3 +384,40 @@ async def test_refused_avatar_changes_come_back_as_errors_and_leave_the_profile_
     assert team == "Error: creator_research can change its avatar only when it answers as itself, not through team"
     client.upload.assert_not_awaited()
     client.set_avatar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_write_enforces_enabled_actions_and_parameter_validation(tmp_path: Path) -> None:
+    """Disabled actions, missing/cross-action fields fail cleanly, and tri-state null changes restore base values."""
+    creator_only = AgentManagerTools("creator", can_create=True, generated=False, created=False)
+    assert "disabled" in await creator_only.agent_manager_write("delete")
+    assert "disabled" in await creator_only.agent_manager_write("bogus")  # type: ignore[arg-type]
+    assert "required" in await creator_only.agent_manager_write("create", name="Research")
+    assert "cannot be used" in await creator_only.agent_manager_write(
+        "create",
+        name="Research",
+        display_name="Research",
+        role="Finds things",
+        changes={"role": "x"},
+    )
+
+    full = AgentManagerTools("creator_research", can_create=True, generated=True, created=True)
+    assert await full.agent_manager_write("update") == "Error: no changes given"
+    assert "cannot be used" in await full.agent_manager_write("update", changes={"role": "x"}, name="Research")
+    assert "required" in await full.agent_manager_write("set_avatar")
+    assert "cannot be used" in await full.agent_manager_write("set_avatar", attachment_id="att_1", role="x")
+    assert "cannot be used" in await full.agent_manager_write("delete", attachment_id="att_1")
+
+    # Tri-state null in `changes` clears an override back to the base agent's value.
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    tool = _created_agent_tool()
+    with _as_requester(tool, config, paths):
+        assert await tool.agent_manager_write("update", changes={"instructions": ["Custom"]}) == (
+            "Updated creator_research: instructions."
+        )
+        assert read_personal_agent_roster_file(paths).created[0].edits.instructions == ["Custom"]
+        assert await tool.agent_manager_write("update", changes={"instructions": None}) == (
+            "Updated creator_research: instructions."
+        )
+        assert read_personal_agent_roster_file(paths).created[0].edits.instructions is None

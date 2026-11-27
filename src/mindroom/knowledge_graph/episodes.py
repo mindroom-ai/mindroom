@@ -39,8 +39,18 @@ type _Progress = tuple[int, int]
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
 
+# LEGACY_COMPAT: Historical knowledge_graph function names retained so pre-upgrade journal runs and
+# shell invocations never pass is_evidence() as circular graph evidence.
+_RETIRED_GRAPH_FUNCTIONS = (
+    "search_graph",
+    "graph_entity",
+    "delete_graph_fact",
+    "delete_graph_entity",
+    "merge_graph_entities",
+    "update_graph_entity_summary",
+)
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
+_GRAPH_FUNCTIONS = ("knowledge_graph_read", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS, *_RETIRED_GRAPH_FUNCTIONS)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.

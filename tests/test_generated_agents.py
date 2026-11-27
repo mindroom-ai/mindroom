@@ -558,7 +558,10 @@ def test_saving_an_in_place_change_to_a_created_agent_is_refused(tmp_path: Path,
         config.agents["creator_research"].display_name = "Edited"
     else:
         del config.agents["creator_research"]
-    with pytest.raises(ConfigRuntimeValidationError, match="its owners change it with update_agent"):
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r'its owners change it with agent_manager_write\(action="update", \.\.\.\)',
+    ):
         config.authored_model_dump()
 
 

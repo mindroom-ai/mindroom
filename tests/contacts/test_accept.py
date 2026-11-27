@@ -766,8 +766,8 @@ async def test_toolkit_accept_contact_names_the_room(tmp_path: Path) -> None:
     tool = ContactsTools("mind_bob")
 
     with tool_runtime_context(_context(config, paths, "mind_bob", CO_OWNER, runtime)), _matrix():
-        refused = await tool.accept_contact(record.id, tools=["browser"])
-        accepted = await tool.accept_contact(record.id)
+        refused = await tool.contacts_write("accept", contact_id=record.id, tools=["browser"])
+        accepted = await tool.contacts_write("accept", contact_id=record.id)
 
     assert refused.startswith("Error: Not among the tools a contact may use: browser")
     assert accepted == f"Accepted. Contact room: {CONTACT_ROOM}." + _terms(

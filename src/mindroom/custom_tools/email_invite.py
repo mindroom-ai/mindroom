@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.email_invites import store
@@ -65,19 +65,50 @@ class EmailInviteTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="email_invite",
-            tools=[self.invite_by_email, self.list_email_invites, self.revoke_email_invite],
+            tools=[self.list_email_invites, self.email_invite_write],
         )
 
-    async def invite_by_email(self, email: str) -> str:
-        """Invite one email address to this room.
+    async def list_email_invites(self) -> str:
+        """List the open email invites of this room with their state, asker, approver and expiry.
 
-        If the person asking may invite, a single-use link is mailed (or returned to forward by hand when no mail
-        server is configured). Otherwise the request waits until someone who may invite asks for the same address.
+        Takes no arguments.
+        """
+        context = get_tool_runtime_context()
+        if context is None:
+            return "Error: Matrix room context unavailable."
+        invites = store.open_invites(context.runtime_paths, context.room_id)
+        lines = [
+            f"- {invite.email}: {'sent' if invite.inviter_id else 'waiting'}, asked by {invite.requested_by}, "
+            f"approved by {invite.inviter_id or 'nobody yet'}, expires {_date(invite.expires_at)}"
+            for invite in invites
+        ]
+        return (
+            "\n".join(["Open email invites in this room:", *lines]) if lines else "No open email invites in this room."
+        )
+
+    async def email_invite_write(
+        self,
+        action: Literal["invite", "revoke"],
+        email: str,
+    ) -> str:
+        """Invite an email address to this room or revoke an open email invite.
+
+        Actions:
+        - `invite`: Invite one plain email address to this room; mails a single-use link (or returns it to forward by hand when no mail server is configured) when the asker may invite, otherwise stores a waiting request until someone who may invite approves.
+        - `revoke`: Revoke the open email invite for one address in this room.
 
         Args:
+            action: Operation to perform (`invite` or `revoke`).
             email: One plain email address, such as alice@example.com.
 
         """
+        if action == "invite":
+            return await self._invite(email)
+        if action == "revoke":
+            return await self._revoke(email)
+        return f"Error: Unsupported action {action!r}. Expected 'invite' or 'revoke'."
+
+    async def _invite(self, email: str) -> str:
         caller = _caller(get_tool_runtime_context())
         if isinstance(caller, str):
             return caller
@@ -94,28 +125,7 @@ class EmailInviteTools(Toolkit):
             return _UNREADABLE
         return await _request(context, approver, address, rights=rights)
 
-    async def list_email_invites(self) -> str:
-        """List the open email invites of this room with their state, asker, approver and expiry."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return "Error: Matrix room context unavailable."
-        invites = store.open_invites(context.runtime_paths, context.room_id)
-        lines = [
-            f"- {invite.email}: {'sent' if invite.inviter_id else 'waiting'}, asked by {invite.requested_by}, "
-            f"approved by {invite.inviter_id or 'nobody yet'}, expires {_date(invite.expires_at)}"
-            for invite in invites
-        ]
-        return (
-            "\n".join(["Open email invites in this room:", *lines]) if lines else "No open email invites in this room."
-        )
-
-    async def revoke_email_invite(self, email: str) -> str:
-        """Revoke the open email invite for one address in this room.
-
-        Args:
-            email: The invited email address.
-
-        """
+    async def _revoke(self, email: str) -> str:
         caller = _caller(get_tool_runtime_context())
         if isinstance(caller, str):
             return caller

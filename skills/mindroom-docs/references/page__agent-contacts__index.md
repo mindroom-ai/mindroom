@@ -49,9 +49,9 @@ Agents of other templates can be contacts as well when their template sets `cont
 
 ## How a Contact Works
 
-1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `request_contact`, which shows Alice an approval card.
+1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `contacts_write(action="request", ...)`, which shows Alice an approval card.
 2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
-3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card, or declines with `decline_contact`.
+3. Bob replies in that thread, and his personal-room agent accepts with `contacts_write(action="accept", ...)` or declines with `contacts_write(action="decline", ...)`, each showing Bob an approval card.
    Bob can also accept or decline on the [Contacts page](#contacts-page).
 4. On acceptance, an invite-only contact room is created holding both agents, without MindRoom's owner account.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
@@ -66,9 +66,9 @@ A request to a person reaches that person's own personal room, where their perso
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
 
-Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
+Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `contacts_write(action="update", ...)`.
 If the first request's notice never reached the other owner, asking again posts it with the new reason, and the answer comes to the conversation that asked again.
-After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
+After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `contacts_write(action="remove", ...)`.
 Removing a contact makes its agents leave the contact room and withdraws the invitation of an owner who never joined it; owners who joined keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
 
@@ -91,12 +91,12 @@ The steps are the same as within one deployment, with these differences:
 
 - Your agent creates the contact room when it asks and invites the other agent, and the other owner sees the request in their personal room or on their Contacts page.
 - When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
-- After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
+- After a decline, you can remove the declined request with `contacts_write(action="remove", ...)` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
   Your side cannot make the other agent leave: it leaves when its deployment sees yours go, so while that deployment is unreachable it can still read what is posted there.
 - If the other agent asked yours before your deployment listed it, its request still waits on its side, which refuses your request back as a decline until its owner withdraws theirs.
 - A decline made while your homeserver cannot be reached never reaches you, so a request that waits long may have been declined; withdraw it and ask again, and a decline that stands then arrives.
-- A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `remove_contact` clears it, while declining it also refuses that agent's next requests until you remove the decline.
+- A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `contacts_write(action="remove", ...)` clears it, while declining it also refuses that agent's next requests until you remove the decline.
 - Removing an agent from `remote_agents` stops you from accepting its waiting requests; your own waiting request to it can still be accepted, so withdraw it, and contacts already active with it continue until an owner removes them.
 - Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
@@ -121,25 +121,22 @@ It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `confi
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
-Only personal agents built from a `personal_agents` template can be contacts; agents authored under `agents:` and agents created with `create_agent` cannot.
+Only personal agents built from a `personal_agents` template can be contacts; agents authored under `agents:` and agents created with `agent_manager_write(action="create", ...)` cannot.
 
 ## Tools
 
 | Function | Approval card | What it does |
 | --- | --- | --- |
 | `list_contacts()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
-| `request_contact(target, reason, rules=None, tools=None, party="agent")` | Yes | Asks the target's owner for a contact; `rules` and `tools` set your agent's side, and with `party="me"` you ask as yourself and set neither |
-| `accept_contact(contact_id, rules=None, tools=None)` | Yes | Accepts a pending request to you and opens the contact room; `rules` and `tools` set the side of your agent that was asked |
-| `decline_contact(contact_id)` | No | Declines a pending request to you; a requesting agent is told in the thread it asked from, a person who asked is not told |
-| `update_contact(contact_id, rules=None, tools=None)` | Yes | Changes your side's rules or tools from the next turn in that contact; blank `rules` clear them |
-| `remove_contact(contact_id)` | No | Ends a contact; its agents leave the contact room |
+| `contacts_write(action, contact_id=None, target=None, reason=None, rules=None, tools=None, party=None)` | Yes | Runs one contact write: `request` (asks `target` with `reason`, optional `rules`, `tools`, and `party="agent"\|"me"`), `accept` (accepts `contact_id` with optional `rules` and `tools` and opens the contact room), `decline` (declines `contact_id`), `update` (changes your side's `rules` or `tools` on `contact_id`; blank `rules` clear them), or `remove` (ends `contact_id` and leaves its room) |
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
-`request_contact`, `accept_contact`, and `update_contact` always show the owner an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) with the values the call passes, even when `tool_approval.default` is `auto_approve` (see [Auto-Approve Everything](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) for the exception).
+`contacts_write` always shows the owner an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) with the values the call passes, even when `tool_approval.default` is `auto_approve` (see [Auto-Approve Everything](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) for the exception).
 A field the call leaves out keeps its configured default, which the request notice and these tools' results name: the results state the rules and tools your agent then has in that contact, before any contact turn uses them.
 
 ```python
-request_contact(
+contacts_write(
+    action="request",
     target="bob_mind",
     reason="Find a 30-minute slot for the project review next week.",
     rules="Share only free and busy times.",
@@ -219,7 +216,7 @@ The judge is never given a message that looks like it contains a secret such as 
 - A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `list_contacts`.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
-- Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `remove_contact`.
+- Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `contacts_write(action="remove", ...)`.
 
 ## Troubleshooting
 
@@ -235,8 +232,8 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<owner> has no personal agent here, so a request cannot reach them; ...` | The target person is not onboarded on this deployment, or the target is another deployment's agent that `remote_agents` does not name; onboard the person, or add the agent's Matrix ID to `remote_agents` |
 | `Only your agent can contact an agent of another MindRoom deployment, so ask with party=agent` | `party="me"` reaches only this deployment |
 | `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
-| `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
-| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; the request stays pending, so accept again once it is reachable, or remove a withdrawn request with `remove_contact`, since declining refuses that agent's next requests |
+| `<agent> declined contact <id>; remove it with contacts_write(action="remove", ...) to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
+| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; the request stays pending, so accept again once it is reachable, or remove a withdrawn request with `contacts_write(action="remove", ...)`, since declining refuses that agent's next requests |
 | `The invite from <agent> could not be rejected, so the request still waits; decline again later` (or `remove it again later`) | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you try again |
 | A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent; a request sent before it did is not picked up, so the asking owner removes it and asks again |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
