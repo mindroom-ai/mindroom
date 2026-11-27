@@ -306,7 +306,7 @@ async def test_approval_gated_tools_stay_native_only(
 
 def test_the_model_switch_is_not_offered_to_the_cli() -> None:
     """A switch for the current response stops the run, which a call a shell command makes cannot do."""
-    assert not _cli_callable(toolkit_offers(ThreadModelTools(), "switch_thread_model"))
+    assert not _cli_callable(toolkit_offers(ThreadModelTools(), "thread_model_write"))
 
 
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:

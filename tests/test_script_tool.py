@@ -143,13 +143,7 @@ def test_script_tool_interface_exists() -> None:
     """The registered toolkit exposes exactly the five script controls."""
     toolkit = ScriptTools()
 
-    assert set(toolkit.functions) == {
-        "cancel_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "list_scripts",
-        "start_script",
-    }
+    assert set(toolkit.functions) == {"script_read", "script_write"}
 
 
 def test_script_tool_discards_blank_allowed_tool_names() -> None:
@@ -167,7 +161,7 @@ def _serving(context: ToolRuntimeContext, manager: _Manager | None) -> ToolRunti
 @pytest.mark.asyncio
 async def test_script_tool_requires_live_room_context() -> None:
     """Detached construction cannot bypass requester and room ownership."""
-    payload = json.loads(await ScriptTools().start_script(source="print('ok')"))
+    payload = json.loads(await ScriptTools().script_write(action="start", source="print('ok')"))
 
     assert payload == {
         "message": "Background script controls require an active room context.",
@@ -185,7 +179,7 @@ async def test_script_tool_waits_for_the_runtime_to_serve_tools(
     """Controls answer only while the primary's script runtime serves tools."""
     context = _serving(script_context, None) if has_script_runtime else script_context
     with tool_runtime_context(context):
-        payload = json.loads(await ScriptTools().list_scripts())
+        payload = json.loads(await ScriptTools().script_read(action="list"))
 
     assert payload == {
         "message": "Background script runtime is not ready.",
@@ -200,7 +194,7 @@ async def test_script_tool_shows_exact_resources_before_launch(
 ) -> None:
     """The model can compare every bounded profile before reserving a worker."""
     with tool_runtime_context(_serving(script_context, _Manager())):
-        payload = json.loads(await ScriptTools().get_script_resource_profiles())
+        payload = json.loads(await ScriptTools().script_read(action="resource_profiles"))
 
     assert payload == {
         **_Manager().resource_profiles(),
@@ -222,7 +216,7 @@ async def test_script_tool_launch_applies_toolkit_limits_and_reports_only_public
         max_runtime_hours=3,
     )
     with tool_runtime_context(_serving(script_context, manager)):
-        payload = json.loads(await toolkit.start_script(source="print('ok')", name="watcher"))
+        payload = json.loads(await toolkit.script_write(action="start", source="print('ok')", name="watcher"))
 
     assert payload["status"] == "ok"
     assert set(payload["run"]) == {
@@ -270,7 +264,8 @@ async def test_script_tool_selects_and_reports_exact_resource_profile(
     manager = _Manager(run_record=run)
     with tool_runtime_context(_serving(script_context, manager)):
         payload = json.loads(
-            await ScriptTools().start_script(
+            await ScriptTools().script_write(
+                action="start",
                 source="print('ok')",
                 resource_profile="large",
             ),
@@ -296,7 +291,7 @@ async def test_script_tool_keeps_worker_mode_after_terminal_cleanup(
     )
     manager = _Manager(run_record=terminal)
     with tool_runtime_context(_serving(script_context, manager)):
-        payload = json.loads(await ScriptTools().get_script(run_id=terminal.run_id))
+        payload = json.loads(await ScriptTools().script_read(action="get", run_id=terminal.run_id))
 
     assert payload["run"]["execution_mode"] == "worker"
 
@@ -307,11 +302,46 @@ async def test_script_tool_controls_use_bound_manager(script_context: ToolRuntim
     manager = _Manager()
     toolkit = ScriptTools()
     with tool_runtime_context(_serving(script_context, manager)):
-        status = json.loads(await toolkit.get_script(run_id="script-1"))
-        cancelled = json.loads(await toolkit.cancel_script(run_id="script-1", force=True))
-        listed = json.loads(await toolkit.list_scripts(include_finished=False))
+        status = json.loads(await toolkit.script_read(action="get", run_id="script-1"))
+        cancelled = json.loads(await toolkit.script_write(action="cancel", run_id="script-1", force=True))
+        listed = json.loads(await toolkit.script_read(action="list", include_finished=False))
 
     assert status["output"] == "watching"
     assert cancelled["run"]["state"] == "cancelled"
     assert len(listed["runs"]) == 1
     assert manager.calls == ["status", "cancel", "list"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "kwargs", "message_part"),
+    [
+        ("script_read", {"action": "nope"}, "Unsupported script_read action"),
+        ("script_read", {"action": "list", "run_id": "s1"}, "'run_id'"),
+        ("script_read", {"action": "get"}, "run_id is required"),
+        ("script_read", {"action": "get", "run_id": "   "}, "run_id is required"),
+        ("script_read", {"action": "get", "run_id": "s1", "include_finished": False}, "'include_finished'"),
+        ("script_read", {"action": "resource_profiles", "include_finished": True}, "'include_finished'"),
+        ("script_write", {"action": "nope"}, "Unsupported script_write action"),
+        ("script_write", {"action": "start", "run_id": "s1"}, "'run_id'"),
+        ("script_write", {"action": "start", "force": False}, "'force'"),
+        ("script_write", {"action": "cancel"}, "run_id is required"),
+        ("script_write", {"action": "cancel", "run_id": " "}, "run_id is required"),
+        ("script_write", {"action": "cancel", "run_id": "s1", "source": "print(1)"}, "'source'"),
+    ],
+)
+async def test_script_tool_validates_action_and_cross_action_params_before_side_effects(
+    script_context: ToolRuntimeContext,
+    method: str,
+    kwargs: dict[str, object],
+    message_part: str,
+) -> None:
+    """Invalid actions, missing required args, and unexpected cross-action params fail before touching the manager."""
+    manager = _Manager()
+    toolkit = ScriptTools()
+    with tool_runtime_context(_serving(script_context, manager)):
+        payload = json.loads(await getattr(toolkit, method)(**kwargs))
+
+    assert payload["status"] == "error"
+    assert message_part in payload["message"]
+    assert manager.calls == []

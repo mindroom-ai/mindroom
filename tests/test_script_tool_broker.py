@@ -755,7 +755,7 @@ async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
     class SessionKeyedCalculator(_Calculator):
         async def add(self, a: int, b: int) -> str:
             del a, b
-            return await claude.claude_session_status()
+            return await claude.claude_agent_status()
 
     _replace_calculator_toolkit(monkeypatch, SessionKeyedCalculator)
     broker, token = _broker(tmp_path, events=[])

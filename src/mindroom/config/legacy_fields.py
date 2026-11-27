@@ -360,22 +360,26 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
 #   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
-#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   mem0, zep), skills, attachments, and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model,
+#   usage_stats) previously exposed individual per-operation function names that could appear in
+#   tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657;
+#   runtime/session/thread CRUD: v2026.11.659); replacement: unreleased; consolidated into action-dispatched and
+#   risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
-#   retired function's effective decision differs from the replacement's effective decision (regardless of other
-#   toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments entry,
-#   directing operators to `attachment` / `view_file` and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired function of a strict-wildcard toolkit (skills, attachments, script,
+#   terminal, claude_agent, thread_model, usage_stats) is decided by an approval script or any retired function's
+#   effective decision differs from the replacement's effective decision (regardless of other toolkits); also reject
+#   include_tools or exclude_tools naming retired functions on attachments, terminal, claude_agent, thread_model, or
+#   usage_stats entries, directing operators to the consolidated function names and `tool_approval.rules`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
+#   tests/test_tool_approval_grants.py::test_runtime_crud_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
@@ -893,8 +897,41 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "register_attachment": "attachment",
         "inline_image": "attachment",
     },
+    "script": {
+        "start_script": "script_write",
+        "cancel_script": "script_write",
+        "get_script": "script_read",
+        "list_scripts": "script_read",
+        "get_script_resource_profiles": "script_read",
+    },
+    "terminal": {
+        "terminal_open": "terminal_write",
+        "terminal_run": "terminal_write",
+        "terminal_send": "terminal_write",
+        "terminal_list": "terminal_read",
+    },
+    "claude_agent": {
+        "claude_session_status": "claude_agent_status",
+        "claude_start_session": "claude_agent_write",
+        "claude_send": "claude_agent_write",
+        "claude_interrupt": "claude_agent_write",
+        "claude_end_session": "claude_agent_write",
+    },
+    "thread_model": {
+        "list_models": "thread_model_read",
+        "get_thread_model": "thread_model_read",
+        "switch_thread_model": "thread_model_write",
+        "reset_thread_model": "thread_model_write",
+    },
+    "usage_stats": {
+        "get_my_usage": "usage_stats",
+        "get_my_private_usage": "usage_stats",
+        "get_all_usage": "usage_stats",
+    },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
+    {"skills", "attachments", "script", "terminal", "claude_agent", "thread_model", "usage_stats"},
+)
 
 
 def _effective_approval_decision(
@@ -1109,11 +1146,34 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
     )
 
 
+def _retired_consolidated_filter_checker(
+    toolkit_name: str,
+) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
+    """Build a setting checker rejecting retired consolidated function filters for ``toolkit_name``."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
+
+    def _check(settings: Mapping[str, object]) -> tuple[str, str] | None:
+        return _retired_function_filter(
+            settings,
+            renames,
+            guidance_for=lambda key, new: (
+                f"use `{toolkit_name}: {{{key}: [{new}]}}` or remove the per-function filter and use "
+                f"`tool_approval.rules` matching `{new}` if per-action gating is needed"
+            ),
+        )
+
+    return _check
+
+
 _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
     "filesystem": retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
     "slack": _retired_slack_setting,
+    **{
+        name: _retired_consolidated_filter_checker(name)
+        for name in ("terminal", "claude_agent", "thread_model", "usage_stats")
+    },
 }
 
 

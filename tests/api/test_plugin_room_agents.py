@@ -61,9 +61,9 @@ READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file"),
-    "script": ("start_script",),
+    "script": ("script_write",),
     "workflow": ("start_workflow", "resume_workflow", "save_workflow"),
-    "claude_agent": ("claude_start_session", "claude_send"),
+    "claude_agent": ("claude_agent_write",),
     "docker": ("docker_container", "docker_resource"),
 }
 

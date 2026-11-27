@@ -33,7 +33,8 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     icon="FaChartBar",
     icon_color="text-cyan-500",
-    function_names=("get_my_usage", "get_my_private_usage", "get_all_usage"),
+    function_names=("usage_stats",),
+    action_scoped_grants=("usage_stats",),
     managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     agent_override_fields=[
         bool_config_field("admin_scope", "Enable Admin Scope", default=False),

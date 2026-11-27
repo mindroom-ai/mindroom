@@ -321,9 +321,9 @@ def test_launch_grants_leave_out_a_function_that_can_stop_the_run(tmp_path: Path
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("thread_model", "get_thread_model") in grants
-    assert ScriptToolGrant("thread_model", "switch_thread_model") not in grants
-    assert resolve_current_script_tool(context, ScriptToolGrant("thread_model", "switch_thread_model")) is None
+    assert ScriptToolGrant("thread_model", "thread_model_read") in grants
+    assert ScriptToolGrant("thread_model", "thread_model_write") not in grants
+    assert resolve_current_script_tool(context, ScriptToolGrant("thread_model", "thread_model_write")) is None
 
 
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:

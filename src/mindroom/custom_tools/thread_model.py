@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
+_ReadAction = Literal["list", "get"]
+_WriteAction = Literal["switch", "reset"]
+_SwitchWhen = Literal["after-toolcall", "next-turn"]
+
 
 class ThreadModelTools(Toolkit):
     """Tools for switching the model used by the requester's agents and teams in the current Matrix thread."""
@@ -32,14 +36,14 @@ class ThreadModelTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="thread_model",
-            tools=[self.list_models, self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
+            tools=[self.thread_model_read, self.thread_model_write],
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Mark the model switch as able to stop the run, and allow redirecting the model catalog."""
-        if function.name == "switch_thread_model":
+        """Mark `thread_model_write` as able to stop the run, and allow redirecting `thread_model_read` output."""
+        if function.name == "thread_model_write":
             return replace(function, may_stop_run=True)
-        if function.name == "list_models":
+        if function.name == "thread_model_read":
             return replace(function, offer_output_path=True)
         return function
 
@@ -65,8 +69,69 @@ class ThreadModelTools(Toolkit):
             context.require_agent_reply_memberships(),
         )
 
-    async def list_models(self) -> str:
-        """List the configured model aliases available for selection."""
+    async def thread_model_read(self, action: _ReadAction) -> str:
+        """List configured models or inspect the current thread's model override.
+
+        - `list`: List the configured model aliases available for selection.
+        - `get`: Return the current thread's model override for each entity it applies to and the available model names.
+
+        Args:
+            action: Read operation to perform (`list` or `get`).
+
+        """
+        if action == "list":
+            return await self._list_models()
+        if action == "get":
+            return await self._get_thread_model()
+        return self._payload(
+            "error",
+            message=f"Unsupported thread_model_read action {action!r}. Expected one of: list, get.",
+        )
+
+    async def thread_model_write(
+        self,
+        action: _WriteAction,
+        model_name: str | None = None,
+        when: _SwitchWhen | None = None,
+    ) -> str | ToolOutcome:
+        """Switch or clear the model override for the current Matrix thread.
+
+        - `switch`: Switch the model that the requester's addressable agents and teams use in the current thread until reset, taking effect after this tool call or from the next turn.
+        - `reset`: Remove the thread override of the requester's agents and teams, restoring room-level model selection.
+
+        Args:
+            action: Write operation to perform (`switch` or `reset`).
+            model_name: Configured model name from `models:` in config.yaml (for example "default" or "opus"), or `name@level` for one of the reasoning levels `thread_model_read(action="list")` shows (required for `switch`).
+            when: Whether the current response continues with the new model (`after-toolcall`) or the change starts on the next turn (`next-turn`, default) (`switch` only).
+
+        """
+        if action == "switch":
+            if not isinstance(model_name, str) or not model_name.strip():
+                return self._payload("error", action="switch", message="model_name is required for action='switch'.")
+            resolved_when: _SwitchWhen = "next-turn" if when is None else when
+            if resolved_when not in ("after-toolcall", "next-turn"):
+                return self._payload(
+                    "error",
+                    action="switch",
+                    message=f"Unsupported when value {resolved_when!r}. Expected 'after-toolcall' or 'next-turn'.",
+                )
+            return await self._switch_thread_model(model_name.strip(), when=resolved_when)
+        if action == "reset":
+            unexpected = [name for name, value in (("model_name", model_name), ("when", when)) if value is not None]
+            if unexpected:
+                names = ", ".join(f"'{name}'" for name in unexpected)
+                return self._payload(
+                    "error",
+                    action="reset",
+                    message=f"Parameter(s) {names} cannot be used with action='reset'.",
+                )
+            return await self._reset_thread_model()
+        return self._payload(
+            "error",
+            message=f"Unsupported thread_model_write action {action!r}. Expected one of: switch, reset.",
+        )
+
+    async def _list_models(self) -> str:
         if isinstance(context := tool_context_or_error(self._payload, "Thread model"), str):
             return context
         return self._payload(
@@ -83,8 +148,7 @@ class ThreadModelTools(Toolkit):
             ],
         )
 
-    async def get_thread_model(self) -> str:
-        """Return the current thread's model override for each entity it applies to and the available model names."""
+    async def _get_thread_model(self) -> str:
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved
@@ -106,24 +170,12 @@ class ThreadModelTools(Toolkit):
             **stale_fields,
         )
 
-    async def switch_thread_model(
+    async def _switch_thread_model(
         self,
         model_name: str,
-        when: Literal["after-toolcall", "next-turn"] = "next-turn",
+        *,
+        when: _SwitchWhen = "next-turn",
     ) -> str | ToolOutcome:
-        """Switch the model that the agents and teams the requester may address use in the current thread.
-
-        The override persists for this thread until reset. It can take effect
-        after this tool call or from the next message in the thread.
-
-        Args:
-            model_name: Configured model name from the `models:` section of
-                config.yaml (for example "default" or "opus"), or `name@level`
-                for one of the reasoning levels `list_models` shows (for example "sol@high").
-            when: Whether the current response continues with the new model or
-                the change starts on the next turn.
-
-        """
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved
@@ -211,8 +263,7 @@ class ThreadModelTools(Toolkit):
             note=note,
         )
 
-    async def reset_thread_model(self) -> str:
-        """Remove the thread override of the requester's agents and teams, restoring room-level model selection."""
+    async def _reset_thread_model(self) -> str:
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved

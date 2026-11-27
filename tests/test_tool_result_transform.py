@@ -444,12 +444,12 @@ async def test_a_model_switch_keeps_its_result_and_continuation_when_a_hook_rewr
     )
     switch = ToolOutcome(content=payload, stop_after_call=True)
 
-    outcome = await _model_reads(_registry(_prefix), switch, name="switch_thread_model")
+    outcome = await _model_reads(_registry(_prefix), switch, name="thread_model_write")
 
     assert outcome.content == payload
     assert outcome.stop_after_call
     decision = continuation_decision_from_tools(
-        [ReportedCall(tool_call_id="c1", tool_name="switch_thread_model", tool_args={}, result=outcome.content)],
+        [ReportedCall(tool_call_id="c1", tool_name="thread_model_write", tool_args={}, result=outcome.content)],
         original_prompt="hi",
         continuation_count=0,
     )

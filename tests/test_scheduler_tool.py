@@ -640,7 +640,7 @@ def test_scheduled_call_helpers_hidden_without_gated_tools(monkeypatch: pytest.M
             models={"default": ModelConfig(provider="openai", id="test-model")},
             # Even an approval rule on a controls_run function or delegation does not enable scheduled-call helpers.
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="switch_thread_model", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="thread_model_write", action="require_approval")],
             ),
         ),
     )

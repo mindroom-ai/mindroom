@@ -12,7 +12,7 @@ from urllib.parse import quote
 import httpx
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -164,6 +164,24 @@ def require_non_blank_text(value: str | None, label: str) -> str:
         msg = f"{label} is required."
         raise ValueError(msg)
     return value
+
+
+def validate_action_params(
+    function_name: str,
+    action: str,
+    allowed_by_action: Mapping[str, Collection[str]],
+    params: Mapping[str, object],
+) -> str | None:
+    """Validate ``action`` and reject non-``None`` parameters not allowed for that action."""
+    allowed = allowed_by_action.get(action)
+    if allowed is None:
+        expected = ", ".join(allowed_by_action)
+        return f"Unsupported {function_name} action {action!r}. Expected one of: {expected}."
+    unexpected = [name for name, value in params.items() if value is not None and name not in allowed]
+    if unexpected:
+        names = ", ".join(f"'{name}'" for name in unexpected)
+        return f"Parameter(s) {names} cannot be used with action={action!r}."
+    return None
 
 
 def require_enabled_action(action: str, enabled: Iterable[str]) -> str | None:

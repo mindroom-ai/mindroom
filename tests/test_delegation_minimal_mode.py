@@ -488,7 +488,7 @@ _RELOAD_STOPPED = "MindRoom's configuration was reloaded while this turn ran, so
 _CALL_REFUSED = "This MindRoom call did not run: the configuration was reloaded"
 # The control call a completed `switch_thread_model` call for the current response reports.
 _SWITCHED = {"tool": "thread_model", "action": "switch", "status": "ok", "when": "after-toolcall", "model": "default"}
-_SWITCH_CALL = ReportedCall("switch", "switch_thread_model", None, json.dumps(_SWITCHED))
+_SWITCH_CALL = ReportedCall("switch", "thread_model_write", None, json.dumps(_SWITCHED))
 
 
 @dataclass

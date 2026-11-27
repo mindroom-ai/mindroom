@@ -233,8 +233,14 @@ async def test_a_child_resumed_after_approval_keeps_its_turn_id_when_a_model_swi
     leader = ScriptedModel(
         [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
     )
-    switch = tool_call("switch_thread_model", "call-switch", model_name="alternate", when="after-toolcall")
-    later = tool_call("switch_thread_model", "call-later", model_name="default", when="next-turn")
+    switch = tool_call(
+        "thread_model_write",
+        "call-switch",
+        action="switch",
+        model_name="alternate",
+        when="after-toolcall",
+    )
+    later = tool_call("thread_model_write", "call-later", action="switch", model_name="default", when="next-turn")
     code = ScriptedModel([calls(tool_call("write_report", "same-call")), calls(switch), calls(later), answer("Done")])
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
     registry = HookRegistry.from_plugins([_plugin("turn-ids", [before])])
@@ -256,7 +262,7 @@ async def test_a_child_resumed_after_approval_keeps_its_turn_id_when_a_model_swi
         )
 
     assert isinstance(result, CompletedApprovalRun)
-    assert [name for name, _turn in seen] == ["write_report", "switch_thread_model", "switch_thread_model"]
+    assert [name for name, _turn in seen] == ["write_report", "thread_model_write", "thread_model_write"]
     [turn] = {turn for _name, turn in seen}
     assert turn is not None
 

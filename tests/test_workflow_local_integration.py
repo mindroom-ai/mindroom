@@ -332,7 +332,7 @@ async def test_the_plain_script_controls_neither_list_nor_stop_a_workflow_attemp
     local_stack: LocalWorkflowStack,
     tmp_path: Path,
 ) -> None:
-    """`list_scripts`, `get_script` and `cancel_script` are for plain scripts: an attempt answers to its run alone."""
+    """`script_read` and `script_write(action="cancel")` are for plain scripts: an attempt answers to its run alone."""
     marker = tmp_path / "slept"
     run = await local_stack.start(_SLEEP_ONCE, args={"marker": str(marker)})
     await local_stack.until(marker.exists)

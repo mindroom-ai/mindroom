@@ -5865,11 +5865,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_my_usage",
-        "description": "Return retained usage for the current agent and canonical requester.",
+        "name": "usage_stats",
+        "description": "Return retained token usage summaries.\n- `self`: retained usage for the current agent and canonical requester.\n- `private`: usage for all of the current requester's private agents.\n- `all`: retained usage across all sources (requires admin scope and platform administrator).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "self",
+                "private",
+                "all"
+              ],
+              "description": "Usage scope to inspect."
+            },
             "include_daily": {
               "type": "boolean",
               "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
@@ -5885,61 +5894,9 @@
               ]
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_my_private_usage",
-        "description": "Return usage for all of the current requester's private agents.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_daily": {
-              "type": "boolean",
-              "description": "Include retained token totals and per-model breakdowns by UTC date."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_all_usage",
-        "description": "Return retained usage for all sources when both admin gates grant access.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_daily": {
-              "type": "boolean",
-              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,

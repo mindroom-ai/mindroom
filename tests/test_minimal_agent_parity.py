@@ -922,7 +922,12 @@ async def test_model_switch_timing_actual_minimal_requests(response_harness, mon
         for name, model_id in (("default", "test-model"), ("other", "other-model"))
     }
     install_model_providers(monkeypatch, models)
-    steps.extend([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
+    steps.extend(
+        [
+            _bash_call("thread_model", "thread_model_write", {"action": "switch", "model_name": "other", "when": when}),
+            "done",
+        ],
+    )
     await h.respond([])
     assert log == ["test-model", "other-model" if when == "after-toolcall" else "test-model"]
     assert len(h.shell.tokens) == 1

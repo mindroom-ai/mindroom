@@ -51,6 +51,7 @@ _PROSE_FUNCTIONS = (
     "run_workflow",
     "get_workflow_run",
     "claude_send",
+    "claude_agent_write",
     "job",
 )
 _MAX_LISTED_CALLS = 20

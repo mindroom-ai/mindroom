@@ -591,11 +591,8 @@ def test_claude_agent_tool_registered_in_metadata() -> None:
 @pytest.mark.parametrize(
     ("method_name", "expected_params"),
     [
-        ("claude_start_session", ("session_label", "resume", "fork_session")),
-        ("claude_send", ("prompt", "session_label", "resume", "fork_session")),
-        ("claude_session_status", ("session_label",)),
-        ("claude_interrupt", ("session_label",)),
-        ("claude_end_session", ("session_label",)),
+        ("claude_agent_status", ("session_label",)),
+        ("claude_agent_write", ("action", "prompt", "session_label", "resume", "fork_session")),
     ],
 )
 def test_claude_tool_type_hints_resolve_at_runtime(
@@ -615,8 +612,8 @@ async def test_claude_send_reuses_session(fake_manager: claude_agent_module._Cla
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    first = await _in_call(run_context, tools.claude_send("hello"))
-    second = await _in_call(run_context, tools.claude_send("again"))
+    first = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
+    second = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="again"))
 
     assert "Echo: hello" in first
     assert "Echo: again" in second
@@ -635,7 +632,7 @@ async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_modu
     )
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    await _in_call(run_context, tools.claude_send("hello"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
 
     options = _FakeClaudeSDKClient.instances[0].options
     assert options.env == {
@@ -659,8 +656,9 @@ async def test_claude_send_sets_session_control_options(
 
     await _in_call(
         run_context,
-        tools.claude_send(
-            "hello",
+        tools.claude_agent_write(
+            action="send",
+            prompt="hello",
             resume=" session_resume_123 ",
             fork_session=True,
         ),
@@ -681,7 +679,7 @@ async def test_claude_send_uses_agent_model_when_tool_model_unset(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-sonnet-5"):
-        await _in_call(run_context, tools.claude_send("hello"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
 
     options = _FakeClaudeSDKClient.instances[0].options
     assert options.model == "claude-sonnet-5"
@@ -697,7 +695,7 @@ async def test_claude_send_switches_a_reused_session_to_each_reply_model(
 
     for model_id in ["claude-opus-5-5", "claude-haiku-5-5", "claude-haiku-5-5", "claude-opus-5-5"]:
         with _as_agent("general", model_id=model_id):
-            await _in_call(run_context, tools.claude_send("hello"))
+            await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
 
     [client] = _FakeClaudeSDKClient.instances
     assert client.options.model == "claude-opus-5-5"
@@ -715,13 +713,16 @@ async def test_claude_send_switches_models_after_claude_code_sends_many_messages
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-opus-5-5"):
-        await _in_call(run_context, tools.claude_send("Run the tests in the background"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="Run the tests in the background"))
     [client] = cast("list[_BufferedFakeClaudeSDKClient]", _FakeClaudeSDKClient.instances)
     steps = [_claude_response("claude-opus-5-5", f"msg-{step}", 10, text=f"Step {step}.") for step in range(150)]
     client.send_on_its_own([*steps, _self_started_result(30)])
 
     with _as_agent("general", model_id="claude-haiku-5-5"):
-        reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("What now?")), timeout=10)
+        reply = await asyncio.wait_for(
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="What now?")),
+            timeout=10,
+        )
 
     assert client.set_models == ["claude-haiku-5-5"]
     assert reply.startswith("Step 0.\nStep 1.\n")
@@ -744,10 +745,10 @@ async def test_claude_send_replaces_a_session_whose_control_request_failed(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-opus-5-5"):
-        await _in_call(run_context, tools.claude_send("Start"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="Start"))
     with _as_agent("general", model_id="claude-haiku-5-5"):
-        failed = await _in_call(run_context, tools.claude_send("Next"))
-        retried = await _in_call(run_context, tools.claude_send("Next"))
+        failed = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="Next"))
+        retried = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="Next"))
 
     assert "Claude session error: Control request timeout: set_model" in failed
     assert "Echo: Next" in retried
@@ -764,7 +765,7 @@ async def test_claude_send_tool_model_overrides_agent_model(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-5")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("general", model_id="claude-sonnet-5"):
-        await _in_call(run_context, tools.claude_send("hello"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
 
     options = _FakeClaudeSDKClient.instances[0].options
     assert options.model == "claude-opus-5"
@@ -778,8 +779,8 @@ async def test_claude_send_with_different_session_labels_creates_multiple_sessio
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    await _in_call(run_context, tools.claude_send("first", session_label="a"))
-    await _in_call(run_context, tools.claude_send("second", session_label="b"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="first", session_label="a"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="second", session_label="b"))
 
     assert len(_FakeClaudeSDKClient.instances) == 2
 
@@ -793,9 +794,9 @@ async def test_claude_send_namespaces_sessions_by_agent_id(
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     with _as_agent("alpha"):
-        await _in_call(run_context, tools.claude_send("alpha"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="alpha"))
     with _as_agent("beta"):
-        await _in_call(run_context, tools.claude_send("beta"))
+        await _in_call(run_context, tools.claude_agent_write(action="send", prompt="beta"))
 
     assert len(_FakeClaudeSDKClient.instances) == 2
     assert "alpha:session-1" in fake_manager._sessions
@@ -832,7 +833,7 @@ async def test_idle_sweep_skips_a_session_whose_call_runs_past_its_ttl(
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     first_send = asyncio.create_task(
-        _in_call(run_context, tools.claude_send("hold", session_label="a")),
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hold", session_label="a")),
     )
     try:
         await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=1)
@@ -842,7 +843,7 @@ async def test_idle_sweep_skips_a_session_whose_call_runs_past_its_ttl(
 
         # The sweep runs between the steps of this call, which opens another session.
         second_result = await asyncio.wait_for(
-            _in_call(run_context, tools.claude_send("quick", session_label="b")),
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="quick", session_label="b")),
             timeout=1,
         )
         assert "Echo: quick" in second_result
@@ -865,7 +866,9 @@ async def test_a_stopped_call_starts_its_sessions_idle_time_when_it_stops(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    stopped = asyncio.create_task(_in_call(run_context, tools.claude_send("hold", session_label="long")))
+    stopped = asyncio.create_task(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hold", session_label="long")),
+    )
     try:
         await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
         clock["now"] = 61.0
@@ -876,7 +879,7 @@ async def test_a_stopped_call_starts_its_sessions_idle_time_when_it_stops(
         _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
 
     # Once the sweep has closed another session idle past its TTL, it has also seen the stopped call's session.
-    await _in_call(run_context, tools.claude_send("quick", session_label="probe"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="quick", session_label="probe"))
     probe = fake_manager._sessions["mindroom:session-1:probe"]
     probe.last_used_at -= probe.ttl_seconds + 1
     await _until(lambda: probe.key not in fake_manager._sessions)
@@ -899,8 +902,8 @@ async def test_claude_send_same_session_is_serialized_by_lock(
 
     first, second = await asyncio.wait_for(
         asyncio.gather(
-            _in_call(run_context, tools.claude_send("one")),
-            _in_call(run_context, tools.claude_send("two")),
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="one")),
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="two")),
         ),
         timeout=3,
     )
@@ -924,14 +927,14 @@ async def test_claude_interrupt_does_not_block_while_send_is_running(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    send_task = asyncio.create_task(_in_call(run_context, tools.claude_send("blocking")))
+    send_task = asyncio.create_task(_in_call(run_context, tools.claude_agent_write(action="send", prompt="blocking")))
     try:
         await asyncio.wait_for(_InterruptibleFakeClaudeSDKClient.created_event.wait(), timeout=1)
         client = _InterruptibleFakeClaudeSDKClient.instances[0]
         await asyncio.wait_for(client.query_started.wait(), timeout=1)
 
         interrupt_result = await asyncio.wait_for(
-            _in_call(run_context, tools.claude_interrupt()),
+            _in_call(run_context, tools.claude_agent_write(action="interrupt")),
             timeout=1,
         )
         send_result = await asyncio.wait_for(send_task, timeout=1)
@@ -969,15 +972,15 @@ async def test_claude_send_refreshes_last_used_after_long_query(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    await _in_call(run_context, tools.claude_send("short"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="short"))
 
     _TimeJumpFakeClaudeSDKClient.jump_seconds = 70.0
-    await _in_call(run_context, tools.claude_send("long"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="long"))
 
     _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
     # The sweep runs a pass before the next call reuses the session.
     await asyncio.sleep(0)
-    result = await _in_call(run_context, tools.claude_send("after-long"))
+    result = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="after-long"))
 
     assert "Echo: after-long" in result
     assert len(_TimeJumpFakeClaudeSDKClient.instances) == 1
@@ -990,10 +993,10 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    await _in_call(run_context, tools.claude_send("status check"))
-    status = await _in_call(run_context, tools.claude_session_status())
-    interrupt = await _in_call(run_context, tools.claude_interrupt())
-    end = await _in_call(run_context, tools.claude_end_session())
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="status check"))
+    status = await _in_call(run_context, tools.claude_agent_status())
+    interrupt = await _in_call(run_context, tools.claude_agent_write(action="interrupt"))
+    end = await _in_call(run_context, tools.claude_agent_write(action="end"))
 
     assert "claude_session_id: claude-session-123" in status
     assert "Interrupt sent" in interrupt
@@ -1017,7 +1020,7 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
 
     token = _TURN_OWNER.set(object())
     try:
-        await _in_call(run_context, tools.claude_start_session())
+        await _in_call(run_context, tools.claude_agent_write(action="start"))
     finally:
         _TURN_OWNER.reset(token)
 
@@ -1030,7 +1033,7 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     assert _TURN_OWNER not in fake_manager._sweep.get_context()
 
     # A later turn ends the session; the task that connected the client still disconnects it.
-    await asyncio.create_task(_in_call(run_context, tools.claude_end_session()))
+    await asyncio.create_task(_in_call(run_context, tools.claude_agent_write(action="end")))
     assert client.disconnect_task is client.connect_task
     assert client.reader.cancelled()
     assert client.receiver.cancelled()
@@ -1047,7 +1050,10 @@ async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
     monkeypatch.setattr(process_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     start = asyncio.create_task(
-        _in_call(ToolCallContext(run_id="run-1", session_id="session-1", user_id=None), tools.claude_start_session()),
+        _in_call(
+            ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
+            tools.claude_agent_write(action="start"),
+        ),
     )
     await _SlowCleanupFakeClaudeSDKClient.connect_started.wait()
     client = _SlowCleanupFakeClaudeSDKClient.instances[0]
@@ -1079,7 +1085,10 @@ async def test_cancelled_start_stays_cancelled_when_its_cleanup_fails(
     """A disconnect that raises while draining a cancelled start must not replace the cancellation."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     start = asyncio.create_task(
-        _in_call(ToolCallContext(run_id="run-1", session_id="session-1", user_id=None), tools.claude_start_session()),
+        _in_call(
+            ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
+            tools.claude_agent_write(action="start"),
+        ),
     )
     cancelled_start_client.on_connected.append(start.cancel)
 
@@ -1099,7 +1108,7 @@ async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
     cancelled_start_client.stuck_cleanup = stuck_cleanup
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
-    start = asyncio.create_task(_in_call(run_context, tools.claude_start_session(session_label="first")))
+    start = asyncio.create_task(_in_call(run_context, tools.claude_agent_write(action="start", session_label="first")))
     cancelled_start_client.on_connected.append(start.cancel)
 
     try:
@@ -1107,7 +1116,7 @@ async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
         assert start in done
         assert start.cancelled()
         second = await asyncio.wait_for(
-            _in_call(run_context, tools.claude_start_session(session_label="second")),
+            _in_call(run_context, tools.claude_agent_write(action="start", session_label="second")),
             timeout=1,
         )
         assert second.startswith("Started")
@@ -1127,7 +1136,7 @@ async def test_idle_session_closes_on_its_own_after_its_ttl(
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     for prompt in ["hello", "again"]:
-        assert f"Echo: {prompt}" in await _in_call(run_context, tools.claude_send(prompt))
+        assert f"Echo: {prompt}" in await _in_call(run_context, tools.claude_agent_write(action="send", prompt=prompt))
         [session] = fake_manager._sessions.values()
         session.last_used_at -= session.ttl_seconds + 1
 
@@ -1148,11 +1157,11 @@ async def test_session_limits_are_namespace_scoped(
     tools_beta = claude_agent_module.ClaudeAgentTools(api_key="sk-test", max_sessions=3)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     with _as_agent("alpha"):
-        await _in_call(run_context, tools_alpha.claude_send("one", session_label="a"))
-        await _in_call(run_context, tools_alpha.claude_send("two", session_label="b"))
+        await _in_call(run_context, tools_alpha.claude_agent_write(action="send", prompt="one", session_label="a"))
+        await _in_call(run_context, tools_alpha.claude_agent_write(action="send", prompt="two", session_label="b"))
     with _as_agent("beta"):
-        await _in_call(run_context, tools_beta.claude_send("three", session_label="a"))
-        await _in_call(run_context, tools_beta.claude_send("four", session_label="b"))
+        await _in_call(run_context, tools_beta.claude_agent_write(action="send", prompt="three", session_label="a"))
+        await _in_call(run_context, tools_beta.claude_agent_write(action="send", prompt="four", session_label="b"))
 
     alpha_sessions = [s for s in fake_manager._sessions.values() if s.namespace == "alpha"]
     beta_sessions = [s for s in fake_manager._sessions.values() if s.namespace == "beta"]
@@ -1179,8 +1188,8 @@ async def test_gateway_probe_posts_to_v1_messages_and_reuses_sdk_session(
     )
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    first = await _in_call(run_context, tools.claude_send("hello"))
-    second = await _in_call(run_context, tools.claude_send("again"))
+    first = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
+    second = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="again"))
 
     assert "gateway:hello" in first
     assert "gateway:again" in second
@@ -1214,7 +1223,7 @@ async def test_gateway_probe_can_include_anthropic_beta_header_when_not_disabled
     )
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    result = await _in_call(run_context, tools.claude_send("hello"))
+    result = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
 
     assert "gateway:hello" in result
     assert fake_anthropic_gateway["requests"][-1]["headers"]["anthropic-beta"] == "tools-2024-04-04"
@@ -1240,7 +1249,7 @@ async def test_gateway_probe_error_is_propagated_and_session_is_closed(
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     fake_anthropic_gateway["state"]["fail_next"] = True
-    result = await _in_call(run_context, tools.claude_send("boom"))
+    result = await _in_call(run_context, tools.claude_agent_write(action="send", prompt="boom"))
 
     assert "Claude session error:" in result
     assert "500" in result
@@ -1257,7 +1266,10 @@ async def test_claude_send_error_does_not_deadlock(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    result = await asyncio.wait_for(_in_call(run_context, tools.claude_send("hello")), timeout=1)
+    result = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello")),
+        timeout=1,
+    )
 
     assert "Claude session error: boom" in result
     assert "Session context:" in result
@@ -1297,7 +1309,10 @@ async def test_claude_cli_exit_while_reading_response_closes_session(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    result = await asyncio.wait_for(_in_call(run_context, tools.claude_send("hello")), timeout=1)
+    result = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello")),
+        timeout=1,
+    )
 
     assert f"Claude session error: {reported}" in result
     assert "Session context:" in result
@@ -1321,8 +1336,9 @@ async def test_claude_send_error_includes_runtime_session_hints(
     result = await asyncio.wait_for(
         _in_call(
             run_context,
-            tools.claude_send(
-                "hello",
+            tools.claude_agent_write(
+                action="send",
+                prompt="hello",
                 resume=" resume-xyz ",
                 fork_session=True,
             ),
@@ -1362,7 +1378,8 @@ async def test_claude_start_session_error_includes_context(
 
     result = await _in_call(
         run_context,
-        tools.claude_start_session(
+        tools.claude_agent_write(
+            action="start",
             resume="resume-xyz",
             fork_session=False,
         ),
@@ -1394,8 +1411,8 @@ async def test_a_call_waiting_on_a_session_whose_message_stream_broke_still_retu
 
     replies = await asyncio.wait_for(
         asyncio.gather(
-            _in_call(run_context, tools.claude_send("one")),
-            _in_call(run_context, tools.claude_send("two")),
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="one")),
+            _in_call(run_context, tools.claude_agent_write(action="send", prompt="two")),
         ),
         timeout=1,
     )
@@ -1430,12 +1447,15 @@ async def test_a_failed_call_closes_only_the_session_it_used(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    one = asyncio.create_task(_in_call(run_context, tools.claude_send("one")))
-    two = asyncio.create_task(_in_call(run_context, tools.claude_send("two")))
+    one = asyncio.create_task(_in_call(run_context, tools.claude_agent_write(action="send", prompt="one")))
+    two = asyncio.create_task(_in_call(run_context, tools.claude_agent_write(action="send", prompt="two")))
     # "one" fails and removes the first session, while "two" holds that session waiting to send its prompt.
     instances = _FakeClaudeSDKClient.instances
     await _until(lambda: bool(instances) and len(instances[0].queries) == 2 and not fake_manager._sessions)
-    three = await asyncio.wait_for(_in_call(run_context, tools.claude_send("three")), timeout=1)
+    three = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="three")),
+        timeout=1,
+    )
     release_two.set()
     failed = await asyncio.wait_for(asyncio.gather(one, two), timeout=1)
 
@@ -1510,7 +1530,7 @@ async def _send_metered_turns(
         with helper_usage_context(load_scope()), requester_context:
             call = _in_call(
                 ToolCallContext(run_id="run-1", session_id="session", user_id=None),
-                tools.claude_send("Fix"),
+                tools.claude_agent_write(action="send", prompt="Fix"),
             )
             if not (stop_last and index == len(requesters)):
                 replies.append(await call)
@@ -1650,7 +1670,10 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("/status")), timeout=10)
+    reply = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="/status")),
+        timeout=10,
+    )
 
     assert reply.startswith("The background tests passed.\n/status isn't available in this environment.\n\n")
 
@@ -1685,8 +1708,14 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    blocked = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
-    following = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Next step")), timeout=10)
+    blocked = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="Deploy it")),
+        timeout=10,
+    )
+    following = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="Next step")),
+        timeout=10,
+    )
 
     assert blocked.startswith(f"{blocked_reply}\n\n")
     assert following.startswith("Next.\n\n")
@@ -1728,7 +1757,10 @@ async def test_claude_send_reads_claude_code_messages_that_leave_fields_out(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    result = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
+    result = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="Deploy it")),
+        timeout=10,
+    )
 
     assert result.startswith(f"{reply}\n\n")
 
@@ -1778,9 +1810,12 @@ async def test_claude_send_after_a_stopped_call_returns(
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    await _in_call(run_context, tools.claude_start_session())
-    await _stop_when_waiting(_in_call(run_context, tools.claude_send("first")))
-    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
+    await _in_call(run_context, tools.claude_agent_write(action="start"))
+    await _stop_when_waiting(_in_call(run_context, tools.claude_agent_write(action="send", prompt="first")))
+    second = await asyncio.wait_for(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="Deploy it")),
+        timeout=10,
+    )
 
     assert second.startswith(f"{second_reply}\n\n")
 
@@ -1889,10 +1924,12 @@ async def test_shutdown_leaves_a_session_that_a_call_still_uses(
     """Shutdown closes the idle sessions without waiting for a call it leaves running, such as an API request's."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
-    await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="quick", session_label="idle"))
     [idle_client] = _FakeClaudeSDKClient.instances
 
-    running = asyncio.create_task(_in_call(run_context, tools.claude_send("hold", session_label="busy")))
+    running = asyncio.create_task(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hold", session_label="busy")),
+    )
     try:
         await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
         [_, busy_client] = _FakeClaudeSDKClient.instances
@@ -1915,7 +1952,7 @@ async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
     """Shutdown closes the idle sessions while a call it leaves running, such as an API request's, still opens one."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", max_sessions=max_sessions)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
-    await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="quick", session_label="idle"))
     [idle_client] = _FakeClaudeSDKClient.instances
     connecting = asyncio.Event()
     release = asyncio.Event()
@@ -1926,7 +1963,9 @@ async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
         client.connected = True
 
     monkeypatch.setattr(_FakeClaudeSDKClient, "connect", connect_slowly)
-    opening = asyncio.create_task(_in_call(run_context, tools.claude_send("hello", session_label="new")))
+    opening = asyncio.create_task(
+        _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello", session_label="new")),
+    )
     try:
         await asyncio.wait_for(connecting.wait(), timeout=5)
         await asyncio.wait_for(run_process_shutdown_closers(), timeout=5)
@@ -1945,7 +1984,7 @@ async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
     monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
-    await _in_call(run_context, tools.claude_send("hello"))
+    await _in_call(run_context, tools.claude_agent_write(action="send", prompt="hello"))
     [session] = fake_manager._sessions.values()
     client = cast("_FakeClaudeSDKClient", session.process.client)
     release = asyncio.Event()
@@ -2113,3 +2152,29 @@ async def test_claude_turn_ending_in_an_api_error_keeps_its_model(
     _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
 
     assert rows == [("@user:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_write_validates_action_and_params_before_side_effects(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+) -> None:
+    """Invalid actions, missing prompt, and cross-action params are rejected without creating sessions."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    assert "Unsupported claude_agent_write action" in await _in_call(
+        run_context,
+        tools.claude_agent_write(action="nope"),  # type: ignore[arg-type]
+    )
+    assert await _in_call(run_context, tools.claude_agent_write(action="send")) == "Prompt is required."
+    assert await _in_call(run_context, tools.claude_agent_write(action="send", prompt="   ")) == "Prompt is required."
+    assert "'prompt'" in await _in_call(run_context, tools.claude_agent_write(action="start", prompt="hi"))
+    assert "'prompt'" in await _in_call(run_context, tools.claude_agent_write(action="interrupt", prompt="hi"))
+    assert "'resume'" in await _in_call(run_context, tools.claude_agent_write(action="interrupt", resume="r1"))
+    assert "'fork_session'" in await _in_call(run_context, tools.claude_agent_write(action="end", fork_session=False))
+    assert not fake_manager._sessions
+
+    # Existing session with resume/fork_session guides callers to claude_agent_write(action="end").
+    await _in_call(run_context, tools.claude_agent_write(action="start"))
+    conflict = await _in_call(run_context, tools.claude_agent_write(action="start", resume="r1"))
+    assert 'claude_agent_write(action="end")' in conflict

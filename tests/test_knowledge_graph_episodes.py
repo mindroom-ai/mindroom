@@ -342,6 +342,7 @@ def test_automation_thread_renders_nothing() -> None:
             [
                 _tool("job", "Job `j2` (run_subagent subagent) succeeded:\nI think Bob owns Atlas.", action="collect"),
                 _tool("claude_send", "Bob owns it", prompt="who"),
+                _tool("claude_agent_write", "Bob owns it", action="send", prompt="who"),
             ],
             id="jobs-and-claude",
         ),
@@ -360,6 +361,13 @@ def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecut
     run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_claude_agent_status_remains_evidence_while_claude_prose_tools_are_excluded() -> None:
+    """Historical claude_send and new claude_agent_write are excluded, while claude_agent_status is evidence."""
+    assert not is_evidence(_tool("claude_send", "Bob owns it", prompt="who"))
+    assert not is_evidence(_tool("claude_agent_write", "Bob owns it", action="send", prompt="who"))
+    assert is_evidence(_tool("claude_agent_status", "Claude session `s1` is active."))
 
 
 class _Index:
