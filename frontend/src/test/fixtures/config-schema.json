@@ -1996,8 +1996,8 @@
           "type": "integer"
         },
         "thread_summary_subsequent_interval": {
-          "default": 10,
-          "description": "Additional message count required between automatic thread summaries after the first one.",
+          "default": 4,
+          "description": "Additional messages required after the first automatic thread summary before the final automatic title check and initial tagging pass.",
           "minimum": 1,
           "title": "Thread Summary Subsequent Interval",
           "type": "integer"
@@ -6706,7 +6706,7 @@
         "thread_summary_model": null,
         "thread_summary_temperature": 0.2,
         "thread_summary_first_threshold": 1,
-        "thread_summary_subsequent_interval": 10
+        "thread_summary_subsequent_interval": 4
       },
       "description": "Default values"
     },

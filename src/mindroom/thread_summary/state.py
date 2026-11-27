@@ -11,7 +11,7 @@ from mindroom.authorization import (
     classify_responder_candidates_from_cached_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
+from mindroom.constants import NON_TURN_META_NOTICE_CONTENT_KEYS, THREAD_SUMMARY_CONTENT_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.requester_identity import is_human_requester_id
@@ -61,7 +61,7 @@ class SummaryState:
 
     @property
     def message_count(self) -> int:
-        """Return how many messages the thread holds, without its summaries."""
+        """Return how many ordinary messages the thread holds, excluding summaries and trusted meta notices."""
         return len(self.ordinary_messages)
 
     @classmethod
@@ -103,11 +103,12 @@ class SummaryState:
         for position, message in enumerate(history):
             metadata = trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
             if metadata is not None:
-                count = metadata.get("message_count")
-                if isinstance(count, int) and not isinstance(count, bool):
-                    last_summary_count = max(last_summary_count, count)
-                if metadata.get("initial_enrichment_complete") is True:
-                    initial_enrichment_complete = True
+                last_summary_count = max(last_summary_count, _trusted_summary_count(metadata))
+                initial_enrichment_complete = (
+                    initial_enrichment_complete or metadata.get("initial_enrichment_complete") is True
+                )
+            elif is_trusted_meta_notice(message, trusted_sender_ids=trusted_sender_ids):
+                continue
             else:
                 metadata = _authorized_human_pin(message, thread_id=thread_id, authorize_human=authorize_human)
                 if metadata is None:
@@ -160,6 +161,12 @@ def summary_state(
         return None
 
 
+def _trusted_summary_count(metadata: dict[str, object]) -> int:
+    """Return a trusted summary notice's integer ``message_count``, or 0 when absent/invalid."""
+    count = metadata.get("message_count")
+    return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
 def trusted_summary_metadata(
     message: ResolvedVisibleMessage,
     *,
@@ -170,6 +177,17 @@ def trusted_summary_metadata(
         return None
     metadata = message.content.get(THREAD_SUMMARY_CONTENT_KEY)
     return metadata if isinstance(metadata, dict) else None
+
+
+def is_trusted_meta_notice(
+    message: ResolvedVisibleMessage,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return whether a notice carries MindRoom meta-notice metadata from a current runtime-owned sender."""
+    return message.sender in trusted_sender_ids and any(
+        key in message.content for key in NON_TURN_META_NOTICE_CONTENT_KEYS
+    )
 
 
 def _parse_generated_at(metadata: dict[str, object]) -> datetime | None:
